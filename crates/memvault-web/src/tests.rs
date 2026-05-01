@@ -207,6 +207,7 @@ fn make_app() -> axum::Router {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
         auth_token: TEST_TOKEN.to_string(),
+        metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     build_router(state)
 }
@@ -249,6 +250,7 @@ async fn test_create_and_list_docs() {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
         auth_token: TEST_TOKEN.to_string(),
+        metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
 
@@ -303,6 +305,7 @@ async fn test_get_doc() {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
         auth_token: TEST_TOKEN.to_string(),
+        metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
 

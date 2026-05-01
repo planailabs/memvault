@@ -17,3 +17,6 @@ thiserror = "2"
 glob = "0.3"
 rand = "0.8"
 bs58 = "0.5"
+
+[dev-dependencies]
+serde_json = "1"

@@ -7,6 +7,7 @@ pub mod auth;
 pub mod docs;
 pub mod events;
 pub mod graph;
+pub mod ops;
 pub mod search;
 
 use std::sync::Arc;
@@ -65,6 +66,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/admin/rotations", get(admin::list_rotations))
         // Events
         .route("/events", get(events::events_stream))
+        // Ops (metrics + health)
+        .route("/metrics", get(ops::metrics))
+        .route("/health", get(ops::health))
         .with_state(state)
 }
 

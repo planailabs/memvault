@@ -1,5 +1,6 @@
 pub mod classification;
 pub mod cleaner;
+pub mod config;
 pub mod egress;
 pub mod error;
 pub mod pii;

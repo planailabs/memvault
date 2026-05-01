@@ -7,6 +7,7 @@ use std::path::Path;
 pub mod audit_index;
 pub mod blockstore;
 pub mod consumed_tokens;
+pub mod encryption;
 pub mod error;
 pub mod heads;
 pub mod insert;

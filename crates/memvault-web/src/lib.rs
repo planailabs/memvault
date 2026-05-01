@@ -15,6 +15,8 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     /// Pre-shared bearer token for Phase 7 authentication.
     pub auth_token: String,
+    /// Operational metrics.
+    pub metrics: Arc<memvault_api::metrics::Metrics>,
 }
 
 /// Build the complete memvault web router.
