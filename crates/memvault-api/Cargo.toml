@@ -1,0 +1,20 @@
+[package]
+name = "memvault-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memvault-core = { path = "../memvault-core" }
+memvault-auth = { path = "../memvault-auth" }
+memvault-store = { path = "../memvault-store" }
+memvault-doc = { path = "../memvault-doc" }
+memvault-query = { path = "../memvault-query" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
