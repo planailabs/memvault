@@ -1,0 +1,87 @@
+//! Query by tag, author, time range, causal/provenance links.
+
+use crate::error::StoreError;
+use crate::keys;
+use crate::tables::*;
+use crate::MemvaultStore;
+
+impl MemvaultStore {
+    /// Query CIDs by tag (scope + label), starting after `after_ns`, up to `limit` results.
+    pub fn query_by_tag(
+        &self,
+        scope: &str,
+        label: &str,
+        after_ns: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TAG)?;
+
+        let start = keys::pack_tag_prefix(scope, label, after_ns);
+        let end = keys::pack_tag_prefix_end(scope, label);
+
+        let mut results = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())?;
+        for entry in range {
+            let (key, _) = entry?;
+            let cid = keys::unpack_tag_cid(key.value())?;
+            results.push(cid.to_vec());
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    /// Query CIDs by author, starting after `after_ns`, up to `limit` results.
+    pub fn query_by_author(
+        &self,
+        author: &[u8],
+        after_ns: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_AUTHOR)?;
+
+        let start = keys::pack_author_prefix(author, after_ns);
+        let end = keys::pack_author_prefix_end(author);
+
+        let mut results = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())?;
+        for entry in range {
+            let (key, _) = entry?;
+            let cid = keys::unpack_author_cid(key.value())?;
+            results.push(cid.to_vec());
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    /// Query CIDs by time range [after_ns, before_ns), up to `limit` results.
+    pub fn query_by_time(
+        &self,
+        after_ns: u64,
+        before_ns: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TIME)?;
+
+        let start = keys::pack_time_key(after_ns, &[]);
+        let end = keys::pack_time_key(before_ns, &[]);
+
+        let mut results = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())?;
+        for entry in range {
+            let (key, _) = entry?;
+            let cid = keys::unpack_time_cid(key.value())?;
+            results.push(cid.to_vec());
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+}

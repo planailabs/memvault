@@ -1,0 +1,22 @@
+[package]
+name = "memvault-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memvault-core = { path = "../memvault-core" }
+memvault-auth = { path = "../memvault-auth" }
+libp2p = { version = "0.56", default-features = false, features = [
+    "tokio", "noise", "yamux", "quic", "tcp",
+    "mdns", "request-response", "identify", "ping",
+    "gossipsub", "kad", "macros", "serde",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_ipld_dagcbor = "0.6"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+tracing = "0.1"
+thiserror = "2"
+async-trait = "0.1"
+
+[dev-dependencies]
