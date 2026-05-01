@@ -3,6 +3,10 @@ name = "memvault-api"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+otel = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
+
 [dependencies]
 memvault-core = { path = "../memvault-core" }
 memvault-auth = { path = "../memvault-auth" }
@@ -15,6 +19,17 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 thiserror = "2"
 tracing = "0.1"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+hex = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = { version = "0.27", optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
+
+[[bin]]
+name = "memctl"
+path = "src/bin/memctl.rs"
 
 [dev-dependencies]
 tempfile = "3"
