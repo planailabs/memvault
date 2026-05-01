@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 use memvault_api::{EventBus, MemvaultClient, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
 use memvault_core::{DocId, EdgeId, EntityId, Visibility};
-use memvault_doc::{AttachmentRef, Document, Edge, Entity, TextPatch};
+use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 use memvault_auth::Role;
 
@@ -66,7 +66,7 @@ impl MemvaultClient for MockClient {
                 title: doc.frontmatter.get("title").and_then(|v| v.as_str()).map(String::from),
                 tags: vec![],
                 updated_ns: 1000,
-                attachment_count: doc.attachments.len(),
+                attachment_count: 0,
             }])
         } else {
             Ok(vec![])
@@ -75,30 +75,41 @@ impl MemvaultClient for MockClient {
 
     async fn attach_file(
         &self,
-        _doc_id: &DocId,
-        name: &str,
-        content_type: &str,
-        data: &[u8],
+        _data: &[u8],
+        _filename: Option<&str>,
+        _mime_type: &str,
+        _tags: Vec<(String, String)>,
+        _visibility: &str,
     ) -> memvault_api::Result<Vec<u8>> {
-        // Add attachment to stored doc
-        let mut guard = self.doc.write().await;
-        if let Some(doc) = guard.as_mut() {
-            doc.attachments.push(AttachmentRef {
-                name: name.to_string(),
-                content_type: content_type.to_string(),
-                size: data.len() as u64,
-                cid: vec![0xAB; 32],
-            });
-        }
         Ok(vec![0xAB; 32])
     }
 
-    async fn detach_file(&self, _doc_id: &DocId, _name: &str) -> memvault_api::Result<()> {
+    async fn read_attachment(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Vec<u8>> {
+        Ok(b"file-content-here".to_vec())
+    }
+
+    async fn read_attachment_range(&self, _manifest_cid: &[u8], _start: u64, _end: u64) -> memvault_api::Result<Vec<u8>> {
+        Ok(b"range-data".to_vec())
+    }
+
+    async fn read_extracted_text(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Option<String>> {
+        Ok(Some("extracted text".to_string()))
+    }
+
+    async fn pin_attachment(&self, _manifest_cid: &[u8]) -> memvault_api::Result<()> {
         Ok(())
     }
 
-    async fn get_attachment(&self, _cid: &[u8]) -> memvault_api::Result<Vec<u8>> {
-        Ok(b"file-content-here".to_vec())
+    async fn unpin_attachment(&self, _manifest_cid: &[u8]) -> memvault_api::Result<()> {
+        Ok(())
+    }
+
+    async fn list_pinned(&self) -> memvault_api::Result<Vec<(Vec<u8>, String)>> {
+        Ok(vec![])
+    }
+
+    async fn get_attachment_manifest(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Option<Vec<u8>>> {
+        Ok(Some(b"{}".to_vec()))
     }
 
     async fn add_entity(

@@ -18,10 +18,16 @@ pub trait MemvaultClient: Send + Sync {
     async fn edit_doc(&self, id: &DocId, patch: TextPatch) -> Result<Vec<u8>>;
     async fn list_docs(&self, tag_filter: Option<(String, String)>, limit: usize) -> Result<Vec<DocSummary>>;
 
-    // -- Attachments --
-    async fn attach_file(&self, doc_id: &DocId, name: &str, content_type: &str, data: &[u8]) -> Result<Vec<u8>>;
-    async fn detach_file(&self, doc_id: &DocId, name: &str) -> Result<()>;
-    async fn get_attachment(&self, cid: &[u8]) -> Result<Vec<u8>>;
+    // -- Attachments (new system) --
+    async fn attach_file(&self, data: &[u8], filename: Option<&str>, mime_type: &str,
+                         tags: Vec<(String, String)>, visibility: &str) -> Result<Vec<u8>>;
+    async fn read_attachment(&self, manifest_cid: &[u8]) -> Result<Vec<u8>>;
+    async fn read_attachment_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>>;
+    async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>>;
+    async fn pin_attachment(&self, manifest_cid: &[u8]) -> Result<()>;
+    async fn unpin_attachment(&self, manifest_cid: &[u8]) -> Result<()>;
+    async fn list_pinned(&self) -> Result<Vec<(Vec<u8>, String)>>;  // (cid, reason)
+    async fn get_attachment_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>>;  // returns JSON
 
     // -- Graph --
     async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId>;

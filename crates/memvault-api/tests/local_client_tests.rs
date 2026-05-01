@@ -68,13 +68,19 @@ async fn attach_file_and_get_attachment_roundtrip() {
 
     let file_data = b"This is a test file with some content for chunking tests.";
     let manifest_cid = client
-        .attach_file(&doc_id, "test.txt", "text/plain", file_data)
+        .attach_file(
+            file_data,
+            Some("test.txt"),
+            "text/plain",
+            vec![("classification".to_string(), "internal".to_string())],
+            "internal",
+        )
         .await
         .unwrap();
     assert!(!manifest_cid.is_empty());
 
-    let retrieved_data = client.get_attachment(&manifest_cid).await.unwrap();
-    assert_eq!(retrieved_data, file_data);
+    let retrieved_data = client.read_attachment(&manifest_cid).await.unwrap();
+    assert_eq!(retrieved_data, file_data.to_vec());
 }
 
 #[tokio::test]

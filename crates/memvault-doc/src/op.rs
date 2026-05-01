@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use memvault_core::{DocId, EdgeId, EntityId};
 use serde::{Deserialize, Serialize};
 
-use crate::attachment::Attachment;
 use crate::graph::{Edge, Entity};
 
 /// CRDT operation — the unit of change.
@@ -27,16 +26,6 @@ pub enum Op {
     DocRemoveMeta {
         doc_id: DocId,
         key: String,
-    },
-
-    // Attachment ops
-    AttachFile {
-        doc_id: DocId,
-        attachment: Attachment,
-    },
-    DetachFile {
-        doc_id: DocId,
-        attachment_name: String,
     },
 
     // Graph ops

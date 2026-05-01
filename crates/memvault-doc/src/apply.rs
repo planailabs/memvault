@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use memvault_core::EntityId;
 
-use crate::attachment::AttachmentRef;
 use crate::document::Document;
 use crate::error::{DocError, Result};
 use crate::graph::Entity;
@@ -92,32 +91,6 @@ pub fn apply_doc_ops(ops: &[Op]) -> Result<Document> {
                 })?;
                 d.frontmatter.remove(key);
             }
-            Op::AttachFile {
-                doc_id: _,
-                attachment,
-            } => {
-                let d = doc.as_mut().ok_or_else(|| {
-                    DocError::InvalidOp("AttachFile before DocCreate".to_string())
-                })?;
-                let manifest_bytes =
-                    serde_ipld_dagcbor::to_vec(attachment).map_err(|e| DocError::Encode(e.to_string()))?;
-                let cid = memvault_core::cid::cid_from_bytes(&manifest_bytes);
-                d.attachments.push(AttachmentRef {
-                    name: attachment.name.clone(),
-                    content_type: attachment.content_type.clone(),
-                    size: attachment.size,
-                    cid: cid.to_bytes(),
-                });
-            }
-            Op::DetachFile {
-                doc_id: _,
-                attachment_name,
-            } => {
-                let d = doc.as_mut().ok_or_else(|| {
-                    DocError::InvalidOp("DetachFile before DocCreate".to_string())
-                })?;
-                d.attachments.retain(|a| a.name != *attachment_name);
-            }
             // Skip graph ops
             Op::EntityCreate { .. }
             | Op::EntityUpdate { .. }
@@ -184,9 +157,7 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<BTreeMap<EntityId, Entity>> {
             Op::DocCreate { .. }
             | Op::DocEdit { .. }
             | Op::DocSetMeta { .. }
-            | Op::DocRemoveMeta { .. }
-            | Op::AttachFile { .. }
-            | Op::DetachFile { .. } => {}
+            | Op::DocRemoveMeta { .. } => {}
         }
     }
 

@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use memvault_core::{DocId, EdgeId, EntityId};
 
 use crate::apply::{apply_doc_ops, apply_graph_ops, apply_text_patch};
-use crate::attachment::{chunk_file, reassemble_file, MAX_CHUNK_SIZE};
 use crate::compaction::compact;
 use crate::document::Document;
 use crate::gc::collectible_ops;
@@ -314,94 +313,6 @@ fn graph_edge_update() {
     );
 }
 
-// --- Attachment Tests ---
-
-#[test]
-fn chunk_empty_file() {
-    let (attachment, chunks) = chunk_file("empty.txt", "text/plain", &[]);
-    assert_eq!(attachment.size, 0);
-    assert!(attachment.chunks.is_empty());
-    assert!(chunks.is_empty());
-}
-
-#[test]
-fn chunk_small_file() {
-    let data = b"hello world";
-    let (attachment, chunks) = chunk_file("hello.txt", "text/plain", data);
-    assert_eq!(attachment.size, 11);
-    assert_eq!(attachment.chunks.len(), 1);
-    assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].1, data.to_vec());
-}
-
-#[test]
-fn chunk_exactly_max_size() {
-    let data = vec![42u8; MAX_CHUNK_SIZE];
-    let (attachment, chunks) = chunk_file("big.bin", "application/octet-stream", &data);
-    assert_eq!(attachment.size, MAX_CHUNK_SIZE as u64);
-    assert_eq!(attachment.chunks.len(), 1);
-    assert_eq!(chunks.len(), 1);
-}
-
-#[test]
-fn chunk_multi_chunk() {
-    let data = vec![7u8; MAX_CHUNK_SIZE * 3 + 100];
-    let (attachment, chunks) = chunk_file("multi.bin", "application/octet-stream", &data);
-    assert_eq!(attachment.size, data.len() as u64);
-    assert_eq!(attachment.chunks.len(), 4);
-    assert_eq!(chunks.len(), 4);
-    // Last chunk should be 100 bytes
-    assert_eq!(chunks[3].1.len(), 100);
-}
-
-#[test]
-fn reassemble_roundtrip() {
-    let data = b"The quick brown fox jumps over the lazy dog";
-    let (attachment, chunks) = chunk_file("fox.txt", "text/plain", data);
-
-    let chunk_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-        chunks.into_iter().collect();
-
-    let result = reassemble_file(&attachment, |cid| chunk_map.get(cid).cloned()).unwrap();
-    assert_eq!(result, data.to_vec());
-}
-
-#[test]
-fn reassemble_multi_chunk_roundtrip() {
-    let data = vec![0xABu8; MAX_CHUNK_SIZE * 2 + 500];
-    let (attachment, chunks) = chunk_file("big.bin", "application/octet-stream", &data);
-
-    let chunk_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-        chunks.into_iter().collect();
-
-    let result = reassemble_file(&attachment, |cid| chunk_map.get(cid).cloned()).unwrap();
-    assert_eq!(result, data);
-}
-
-#[test]
-fn reassemble_missing_chunk_fails() {
-    let data = b"some data here";
-    let (attachment, _chunks) = chunk_file("lost.txt", "text/plain", data);
-
-    let result = reassemble_file(&attachment, |_cid| None);
-    assert!(result.is_err());
-}
-
-#[test]
-fn reassemble_integrity_failure() {
-    let data = b"correct data";
-    let (mut attachment, chunks) = chunk_file("bad.txt", "text/plain", data);
-
-    // Corrupt the hash
-    attachment.blake3_hash = [0u8; 32];
-
-    let chunk_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-        chunks.into_iter().collect();
-
-    let result = reassemble_file(&attachment, |cid| chunk_map.get(cid).cloned());
-    assert!(result.is_err());
-}
-
 // --- History Tests ---
 
 #[test]
@@ -539,38 +450,4 @@ fn gc_no_collectible_ops() {
     let all_ops = vec![vec![1u8, 2, 3]];
     let collectible = collectible_ops(&snapshot, &all_ops);
     assert!(collectible.is_empty());
-}
-
-// --- Attachment in Document ---
-
-#[test]
-fn doc_attach_and_detach() {
-    let doc_id = DocId::random();
-    let file_data = b"file content";
-    let (attachment, _chunks) = chunk_file("readme.md", "text/markdown", file_data);
-
-    let ops = vec![
-        Op::DocCreate {
-            doc_id: doc_id.clone(),
-            initial_body: "doc".to_string(),
-            frontmatter: BTreeMap::new(),
-        },
-        Op::AttachFile {
-            doc_id: doc_id.clone(),
-            attachment: attachment.clone(),
-        },
-    ];
-
-    let doc = apply_doc_ops(&ops).unwrap();
-    assert_eq!(doc.attachments.len(), 1);
-    assert_eq!(doc.attachments[0].name, "readme.md");
-
-    // Detach
-    let mut ops2 = ops.clone();
-    ops2.push(Op::DetachFile {
-        doc_id: doc_id.clone(),
-        attachment_name: "readme.md".to_string(),
-    });
-    let doc2 = apply_doc_ops(&ops2).unwrap();
-    assert!(doc2.attachments.is_empty());
 }

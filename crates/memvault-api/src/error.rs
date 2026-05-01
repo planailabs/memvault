@@ -10,6 +10,12 @@ pub enum ApiError {
     #[error("doc error: {0}")]
     Doc(#[from] memvault_doc::DocError),
 
+    #[error("attach error: {0}")]
+    Attach(#[from] memvault_attach::AttachError),
+
+    #[error("extract error: {0}")]
+    Extract(#[from] memvault_extract::ExtractError),
+
     #[error("query error: {0}")]
     Query(#[from] memvault_query::QueryError),
 

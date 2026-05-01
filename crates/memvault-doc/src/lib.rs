@@ -3,7 +3,6 @@ mod tests;
 
 pub mod apply;
 pub mod crdt;
-pub mod attachment;
 pub mod compaction;
 pub mod document;
 pub mod error;
@@ -17,7 +16,6 @@ pub mod snapshot;
 
 pub use apply::{apply_doc_ops, apply_graph_ops, apply_text_patch};
 pub use crdt::{CrdtDocument, CrdtError};
-pub use attachment::{chunk_file, reassemble_file, Attachment, AttachmentRef, ChunkRef, MAX_CHUNK_SIZE};
 pub use compaction::compact;
 pub use document::Document;
 pub use error::{DocError, Result};

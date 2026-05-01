@@ -35,17 +35,8 @@ pub struct DocResponse {
     pub cid: String,
     pub body: String,
     pub frontmatter: BTreeMap<String, serde_json::Value>,
-    pub attachments: Vec<AttachmentInfo>,
     pub tags: Vec<(String, String)>,
     pub updated_ns: u64,
-}
-
-#[derive(Serialize)]
-pub struct AttachmentInfo {
-    pub name: String,
-    pub content_type: String,
-    pub size: u64,
-    pub cid: String,
 }
 
 #[derive(Serialize)]
@@ -118,7 +109,6 @@ pub async fn create_doc(
         cid: hex::encode(&cid),
         body: req.body,
         frontmatter,
-        attachments: vec![],
         tags: req.tags,
         updated_ns: 0,
     };
@@ -140,23 +130,11 @@ pub async fn get_doc(
         .await?
         .ok_or_else(|| ApiError::not_found("Document not found"))?;
 
-    let attachments = doc
-        .attachments
-        .iter()
-        .map(|a| AttachmentInfo {
-            name: a.name.clone(),
-            content_type: a.content_type.clone(),
-            size: a.size,
-            cid: hex::encode(&a.cid),
-        })
-        .collect();
-
     let resp = DocResponse {
         id: hex::encode(doc.id.0),
         cid: String::new(),
         body: doc.body,
         frontmatter: doc.frontmatter,
-        attachments,
         tags: vec![],
         updated_ns: 0,
     };

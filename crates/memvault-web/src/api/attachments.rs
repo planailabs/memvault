@@ -7,7 +7,6 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use memvault_core::DocId;
 use serde::Serialize;
 
 use crate::api::auth::RequireAuth;
@@ -26,11 +25,9 @@ pub struct AttachmentListItem {
 pub async fn upload_attachment(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let doc_id = parse_doc_id(&id)?;
-
     let field = multipart
         .next_field()
         .await
@@ -49,7 +46,7 @@ pub async fn upload_attachment(
 
     let cid = state
         .client
-        .attach_file(&doc_id, &name, &content_type, &data)
+        .attach_file(&data, Some(&name), &content_type, vec![], "internal")
         .await?;
 
     Ok((
@@ -62,31 +59,16 @@ pub async fn upload_attachment(
 }
 
 /// GET /api/v1/docs/:id/attachments — list attachments for a document
+/// Note: With the new system, attachments are no longer embedded in documents.
+/// This endpoint returns an empty list for backwards compatibility.
 pub async fn list_attachments(
     _auth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
 ) -> Result<Json<Vec<AttachmentListItem>>, ApiError> {
-    let doc_id = parse_doc_id(&id)?;
-
-    let doc = state
-        .client
-        .get_doc(&doc_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("Document not found"))?;
-
-    let items: Vec<AttachmentListItem> = doc
-        .attachments
-        .iter()
-        .map(|a| AttachmentListItem {
-            name: a.name.clone(),
-            content_type: a.content_type.clone(),
-            size: a.size,
-            cid: hex::encode(&a.cid),
-        })
-        .collect();
-
-    Ok(Json(items))
+    // Attachments are no longer embedded in documents in the new system.
+    // This endpoint is kept for backwards compatibility but returns empty.
+    Ok(Json(vec![]))
 }
 
 /// GET /api/v1/attachments/:cid — download attachment by CID
@@ -97,7 +79,7 @@ pub async fn download_attachment(
 ) -> Result<impl IntoResponse, ApiError> {
     let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
 
-    let data = state.client.get_attachment(&cid).await?;
+    let data = state.client.read_attachment(&cid).await?;
 
     Ok((
         [(header::CONTENT_TYPE, "application/octet-stream")],
@@ -105,23 +87,13 @@ pub async fn download_attachment(
     ))
 }
 
-/// DELETE /api/v1/docs/:id/attachments/:name — detach file
+/// DELETE /api/v1/docs/:id/attachments/:name — detach file (no-op in new system)
 pub async fn detach_attachment(
     _auth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-    Path((id, name)): Path<(String, String)>,
+    State(_state): State<Arc<AppState>>,
+    Path((_id, _name)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let doc_id = parse_doc_id(&id)?;
-    state.client.detach_file(&doc_id, &name).await?;
+    // In the new system, attachments are standalone objects.
+    // Detaching from a doc is a no-op.
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn parse_doc_id(hex_str: &str) -> Result<DocId, ApiError> {
-    let bytes = hex::decode(hex_str).map_err(|_| ApiError::bad_request("Invalid document ID"))?;
-    if bytes.len() != 32 {
-        return Err(ApiError::bad_request("Document ID must be 32 bytes"));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(DocId(arr))
 }

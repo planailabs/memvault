@@ -8,8 +8,10 @@ use tokio::sync::RwLock;
 
 use memvault_core::{cid_from_bytes, DocId, EdgeId, EntityId, Visibility};
 use memvault_doc::{
-    chunk_file, reassemble_file, Attachment, Document, Edge, Entity, Op, TextPatch,
+    Document, Edge, Entity, Op, TextPatch,
 };
+use memvault_attach::{self, AttachmentManifest};
+use memvault_extract::{ExtractionHints, ExtractionRegistry};
 use memvault_query::{
     query_audit, AuditQuery, AuditRecord, QuotaManager, SearchHit, TextIndex,
 };
@@ -237,66 +239,160 @@ impl MemvaultClient for LocalClient {
 
     async fn attach_file(
         &self,
-        doc_id: &DocId,
-        name: &str,
-        content_type: &str,
         data: &[u8],
+        filename: Option<&str>,
+        mime_type: &str,
+        tags: Vec<(String, String)>,
+        visibility: &str,
     ) -> Result<Vec<u8>> {
-        let (attachment, chunks) = chunk_file(name, content_type, data);
+        // Chunk file into blocks using memvault-attach
+        let (root_cid, blocks) = memvault_attach::chunk_file(data)?;
 
-        // Store chunks in blockstore
-        for (chunk_cid, chunk_data) in &chunks {
-            self.store.put_block(chunk_cid, chunk_data)?;
+        // Store all blocks
+        for (block_cid, block_data) in &blocks {
+            self.store.put_block(block_cid, block_data)?;
         }
 
-        // Store attachment manifest
-        let manifest_bytes = serde_json::to_vec(&attachment)
+        // Create attachment manifest
+        let layout = memvault_attach::decide_layout(data.len() as u64);
+        let replication = memvault_attach::default_replication(data.len() as u64);
+
+        let manifest = AttachmentManifest {
+            content_root: root_cid,
+            content_size: data.len() as u64,
+            chunk_layout: layout,
+            filename: filename.map(|s| s.to_string()),
+            mime_type: mime_type.to_string(),
+            sha256: None,
+            width_height: None,
+            duration_ms: None,
+            extracted_text: None,
+            derived_from: None,
+            pii_findings: None,
+            replication,
+        };
+
+        // Encode manifest and store
+        let manifest_bytes = serde_json::to_vec(&manifest)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let manifest_cid = cid_from_bytes(&manifest_bytes);
         let manifest_cid_bytes = manifest_cid.to_bytes();
         self.store.put_block(&manifest_cid_bytes, &manifest_bytes)?;
 
-        // Create the op
-        let op = Op::AttachFile {
-            doc_id: doc_id.clone(),
-            attachment,
+        // Store envelope metadata for the manifest
+        let meta = EnvelopeMeta {
+            author: self.peer_id.clone(),
+            tags: tags.clone(),
+            wall_ns: memvault_core::wall_ns(),
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
         };
-        let tags = vec![Self::doc_tag(doc_id)];
-        let _cid_bytes = self.store_op(&op, &tags, &Visibility::Internal)?;
+        let envelope = serde_json::json!({
+            "version": 1,
+            "kind": "attachment",
+            "manifest_cid": manifest_cid_bytes,
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": data.len(),
+            "visibility": visibility,
+            "tags": tags,
+            "wall_ns": meta.wall_ns,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let env_cid = cid_from_bytes(&envelope_bytes);
+        self.store.insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
 
         self.event_bus.publish(MemvaultEvent::FileAttached {
-            doc_id: doc_id.clone(),
-            name: name.to_string(),
+            doc_id: DocId([0; 32]), // No doc association in new system
+            name: filename.unwrap_or("unnamed").to_string(),
         });
 
         Ok(manifest_cid_bytes)
     }
 
-    async fn detach_file(&self, doc_id: &DocId, name: &str) -> Result<()> {
-        let op = Op::DetachFile {
-            doc_id: doc_id.clone(),
-            attachment_name: name.to_string(),
-        };
-        let tags = vec![Self::doc_tag(doc_id)];
-        self.store_op(&op, &tags, &Visibility::Internal)?;
+    async fn read_attachment(&self, manifest_cid: &[u8]) -> Result<Vec<u8>> {
+        // Load manifest
+        let manifest_data = self
+            .store
+            .get_block(manifest_cid)?
+            .ok_or_else(|| ApiError::NotFound("attachment manifest not found".into()))?;
+
+        let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+
+        // Read full content via UnixFS
+        let data = memvault_attach::read_range::read_full(&self.store, &manifest.content_root)?;
+        Ok(data)
+    }
+
+    async fn read_attachment_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>> {
+        let manifest_data = self
+            .store
+            .get_block(manifest_cid)?
+            .ok_or_else(|| ApiError::NotFound("attachment manifest not found".into()))?;
+
+        let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+
+        let data = memvault_attach::read_range::read_range(&self.store, &manifest.content_root, start, end)?;
+        Ok(data)
+    }
+
+    async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>> {
+        // Load manifest to get content
+        let manifest_data = self
+            .store
+            .get_block(manifest_cid)?
+            .ok_or_else(|| ApiError::NotFound("attachment manifest not found".into()))?;
+
+        let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+
+        // Check if extraction is supported for this MIME type
+        let registry = ExtractionRegistry::with_defaults();
+        if !registry.can_extract(&manifest.mime_type) {
+            return Ok(None);
+        }
+
+        // Read the content
+        let content = memvault_attach::read_range::read_full(&self.store, &manifest.content_root)?;
+
+        // Run extraction
+        match registry.extract(&content, &manifest.mime_type, &ExtractionHints::default()) {
+            Ok(extracted) => Ok(Some(extracted.text)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn pin_attachment(&self, manifest_cid: &[u8]) -> Result<()> {
+        memvault_attach::pin::pin(&self.store, manifest_cid, memvault_attach::PinReason::Manual)?;
         Ok(())
     }
 
-    async fn get_attachment(&self, cid: &[u8]) -> Result<Vec<u8>> {
-        // Get the manifest
-        let manifest_data = self
-            .store
-            .get_block(cid)?
-            .ok_or_else(|| ApiError::NotFound("attachment manifest not found".into()))?;
+    async fn unpin_attachment(&self, manifest_cid: &[u8]) -> Result<()> {
+        memvault_attach::pin::unpin(&self.store, manifest_cid)?;
+        Ok(())
+    }
 
-        let attachment: Attachment = serde_json::from_slice(&manifest_data)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    async fn list_pinned(&self) -> Result<Vec<(Vec<u8>, String)>> {
+        // We need to scan known attachment CIDs. For now, query by the "attachment" tag.
+        // This is a simplified implementation.
+        let cids = self.store.query_by_tag("attachment", "", 0, 1000).unwrap_or_default();
+        let pinned = memvault_attach::pin::list_pinned(&self.store, &cids)?;
+        let result = pinned
+            .into_iter()
+            .map(|(cid, reason)| {
+                let reason_str = serde_json::to_string(&reason).unwrap_or_default();
+                (cid, reason_str)
+            })
+            .collect();
+        Ok(result)
+    }
 
-        let store = &self.store;
-        let data = reassemble_file(&attachment, |chunk_cid| {
-            store.get_block(chunk_cid).ok().flatten()
-        })?;
-
+    async fn get_attachment_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>> {
+        let data = self.store.get_block(manifest_cid)?;
         Ok(data)
     }
 
