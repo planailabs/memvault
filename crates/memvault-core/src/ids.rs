@@ -9,7 +9,7 @@ pub struct ClusterId(pub [u8; 32]);
 pub struct DocId(pub [u8; 32]);
 
 /// Entity identifier (knowledge-graph node).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EntityId(pub [u8; 32]);
 
 /// Edge identifier (knowledge-graph edge).
