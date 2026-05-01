@@ -4,6 +4,7 @@ pub mod client;
 pub mod error;
 pub mod health;
 pub mod local;
+pub mod memctl;
 pub mod metrics;
 pub mod otel;
 pub mod quotas;
