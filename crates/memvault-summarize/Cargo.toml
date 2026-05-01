@@ -1,0 +1,16 @@
+[package]
+name = "memvault-summarize"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memvault-core = { path = "../memvault-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+blake3 = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
