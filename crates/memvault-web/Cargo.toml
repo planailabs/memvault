@@ -9,6 +9,7 @@ memvault-api = { path = "../memvault-api" }
 memvault-doc = { path = "../memvault-doc" }
 memvault-query = { path = "../memvault-query" }
 memvault-auth = { path = "../memvault-auth" }
+plan-ai-design = { path = "../../../plan-ai-design" }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

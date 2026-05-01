@@ -1,8 +1,13 @@
 //! `memvault-web` — Axum-based REST API for the memvault daemon.
+//!
+//! Uses `plan-ai-design` for shared UI components and styling.
 
 pub mod api;
 pub mod components;
 pub mod error;
+
+/// Re-export the shared design system for consumers.
+pub use plan_ai_design as design;
 
 use std::sync::Arc;
 
