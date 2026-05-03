@@ -3,10 +3,6 @@ fn main() {
     {
         use dioxus::server::{DioxusRouterExt, ServeConfig, axum};
 
-        // Write index.html (with tailwind CSS link) so ServeConfig finds it.
-        // This is the same call the daemon makes in library mode.
-        memvault_web::prepare_public_dir();
-
         dioxus::serve(move || async move {
             let mut router = axum::Router::new()
                 .serve_dioxus_application(ServeConfig::new(), memvault_web::ui::app::App);
