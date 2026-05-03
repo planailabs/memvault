@@ -43,6 +43,38 @@ mod server_router {
         Router::new().nest("/api/v1", super::api::routes(state))
     }
 
+    /// Minimal index.html for Dioxus SSR.  Includes the WASM script tag and
+    /// Tailwind CSS link.  Dioxus injects hydration data at render time.
+    const INDEX_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>memvault</title>
+    <link rel="stylesheet" href="/tailwind.css">
+</head>
+<body>
+    <div id="main"></div>
+    <script type="module" src="/wasm/memvault-web.js"></script>
+</body>
+</html>"#;
+
+    /// Write a minimal `index.html` to a temp directory and set
+    /// `DIOXUS_PUBLIC_PATH` so `ServeConfig::new()` picks it up.
+    ///
+    /// Must be called **before** `build_fullstack_router`.
+    #[cfg(feature = "server")]
+    pub fn prepare_public_dir() {
+        let dir = std::env::temp_dir().join("memvault-web-public");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("index.html"), INDEX_HTML);
+
+        // SAFETY: called before any async runtime / threads that read this.
+        unsafe { std::env::set_var("DIOXUS_PUBLIC_PATH", &dir) };
+
+        tracing::debug!(path = %dir.display(), "memvault: prepared DIOXUS_PUBLIC_PATH");
+    }
+
     /// Build a fullstack router: API + Dioxus server fns + combined asset/SSR fallback.
     ///
     /// `try_asset` is called for each request that doesn't match an API route
@@ -81,6 +113,10 @@ mod server_router {
         };
 
         // Dioxus server functions + combined fallback.
+        //
+        // ServeConfig::new() reads index.html from DIOXUS_PUBLIC_PATH or
+        // <exe_dir>/public/. The caller must ensure a valid index.html is
+        // available at one of these locations (see `prepare_public_dir`).
         let dioxus = Router::<FullstackState>::new()
             .register_server_functions()
             .fallback(combined_fallback)
