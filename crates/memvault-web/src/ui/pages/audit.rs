@@ -1,13 +1,12 @@
 //! Audit log page — filterable audit trail.
 
 use dioxus::prelude::*;
-use plan_ai_design::{DataTable, FormField, PageHeader, SortState, SortableTh, Td, TdMuted};
+use plan_ai_design::{DataTable, FormField, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
 use crate::ui::components::cid_display::CidDisplay;
 use crate::ui::components::op_kind_badge::OpKindBadge;
-use crate::ui::components::tag_pills::TagPills;
 use crate::ui::components::time_ago::TimeAgo;
 use crate::ui::topbar::use_topbar;
 
@@ -17,17 +16,26 @@ struct AuditRow {
     op_kind: String,
     author: String,
     wall_ns: u64,
-    doc_id: Option<String>,
-    doc_title: Option<String>,
+    /// Human-readable description built from op_kind + tags + resolved labels.
+    description: String,
+    /// Optional link target (Route-compatible id).
+    link_target: Option<AuditLink>,
     tags: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AuditLink {
+    kind: String, // "note", "entity", "file"
+    id: String,
+    label: String,
 }
 
 impl AuditRow {
     fn matches_search(&self, query: &str) -> bool {
         self.op_kind.to_lowercase().contains(query)
+            || self.description.to_lowercase().contains(query)
             || self.author.contains(query)
             || self.cid.contains(query)
-            || self.doc_id.as_ref().is_some_and(|d| d.contains(query))
     }
 }
 
@@ -46,24 +54,165 @@ async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
 
     let mut rows = Vec::new();
     for r in records {
-        let doc_hex = r.doc_id.as_ref().map(|d| hex::encode(d.0));
-        let doc_title = if let Some(ref hex_id) = doc_hex {
-            let node_id = format!("doc:{hex_id}");
-            client.resolve_label(&node_id).await.unwrap_or(None)
-        } else {
-            None
-        };
+        let op_kind = format!("{:?}", r.op_kind);
+
+        // Build description and link from op_kind + tags
+        let (description, link_target) = build_description(&client, &op_kind, &r.tags, r.doc_id.as_ref()).await;
+
         rows.push(AuditRow {
             cid: hex::encode(&r.cid),
-            op_kind: format!("{:?}", r.op_kind),
+            op_kind,
             author: hex::encode(&r.author),
             wall_ns: r.wall_ns,
-            doc_id: doc_hex,
-            doc_title,
+            description,
+            link_target,
             tags: r.tags,
         });
     }
     Ok(rows)
+}
+
+#[cfg(feature = "server")]
+async fn resolve_node(
+    client: &std::sync::Arc<dyn memvault_api::MemvaultClient>,
+    node_tag: &str,
+) -> (String, Option<AuditLink>) {
+    let label = client.resolve_label(node_tag).await.unwrap_or(None);
+    let display = label.unwrap_or_else(|| short_id(node_tag));
+    let link = audit_link_from_tag(node_tag, &display);
+    (display, link)
+}
+
+#[cfg(feature = "server")]
+async fn build_description(
+    client: &std::sync::Arc<dyn memvault_api::MemvaultClient>,
+    op_kind: &str,
+    tags: &[(String, String)],
+    _doc_id: Option<&memvault_core::DocId>,
+) -> (String, Option<AuditLink>) {
+    let doc_tag = tags.iter().find(|(s, _)| s == "doc").map(|(_, l)| l.as_str());
+    let entity_tag = tags.iter().find(|(s, _)| s == "entity").map(|(_, l)| l.as_str());
+    let edge_source = tags.iter().find(|(s, _)| s == "edge_source").map(|(_, l)| l.as_str());
+    let edge_target = tags.iter().find(|(s, _)| s == "edge_target").map(|(_, l)| l.as_str());
+
+    match op_kind {
+        "DocCreate" => {
+            if let Some(hex_id) = doc_tag {
+                let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
+                (format!("Created document \"{name}\""), link)
+            } else {
+                ("Created document".to_string(), None)
+            }
+        }
+        "DocEdit" => {
+            if let Some(hex_id) = doc_tag {
+                let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
+                (format!("Edited \"{name}\""), link)
+            } else {
+                ("Edited document".to_string(), None)
+            }
+        }
+        "DocSetMeta" | "DocRemoveMeta" => {
+            if let Some(hex_id) = doc_tag {
+                let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
+                (format!("Updated metadata on \"{name}\""), link)
+            } else {
+                ("Updated document metadata".to_string(), None)
+            }
+        }
+        "AttachFile" => {
+            if let Some(hex_id) = doc_tag {
+                let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
+                (format!("Attached file to \"{name}\""), link)
+            } else {
+                ("Attached file".to_string(), None)
+            }
+        }
+        "DetachFile" => {
+            if let Some(hex_id) = doc_tag {
+                let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
+                (format!("Detached file from \"{name}\""), link)
+            } else {
+                ("Detached file".to_string(), None)
+            }
+        }
+        "EntityCreate" => {
+            if let Some(hex_id) = entity_tag {
+                let (name, link) = resolve_node(client, &format!("entity:{hex_id}")).await;
+                (format!("Created entity \"{name}\""), link)
+            } else {
+                ("Created entity".to_string(), None)
+            }
+        }
+        "EdgeAdd" => {
+            let (src, _) = if let Some(s) = edge_source {
+                resolve_node(client, s).await
+            } else {
+                ("?".to_string(), None)
+            };
+            let (tgt, _) = if let Some(t) = edge_target {
+                resolve_node(client, t).await
+            } else {
+                ("?".to_string(), None)
+            };
+            let link = edge_source.and_then(|s| audit_link_from_tag(s, &src));
+            (format!("Linked {src} \u{2192} {tgt}"), link)
+        }
+        "EdgeRemove" => {
+            let (src, _) = if let Some(s) = edge_source {
+                resolve_node(client, s).await
+            } else {
+                ("?".to_string(), None)
+            };
+            let link = edge_source.and_then(|s| audit_link_from_tag(s, &src));
+            (format!("Removed edge from {src}"), link)
+        }
+        "Retract" => {
+            if let Some(hex_id) = doc_tag {
+                let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
+                (format!("Retracted \"{name}\""), link)
+            } else if let Some(hex_id) = entity_tag {
+                let (name, link) = resolve_node(client, &format!("entity:{hex_id}")).await;
+                (format!("Retracted entity \"{name}\""), link)
+            } else {
+                ("Retracted item".to_string(), None)
+            }
+        }
+        other => {
+            (format!("{other}"), None)
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+fn short_id(tag_label: &str) -> String {
+    if let Some((_prefix, hex)) = tag_label.split_once(':') {
+        if hex.len() > 12 {
+            format!("{}...", &hex[..12])
+        } else {
+            hex.to_string()
+        }
+    } else if tag_label.len() > 12 {
+        format!("{}...", &tag_label[..12])
+    } else {
+        tag_label.to_string()
+    }
+}
+
+#[cfg(feature = "server")]
+fn audit_link_from_tag(tag_label: &str, label: &str) -> Option<AuditLink> {
+    let (prefix, hex) = tag_label.split_once(':')?;
+    let kind = match prefix {
+        "entity" => "entity",
+        "doc" => "note",
+        "attachment" => "file",
+        _ => return None,
+    };
+    Some(AuditLink {
+        kind: kind.to_string(),
+        id: hex.to_string(),
+        label: label.to_string(),
+    })
 }
 
 #[component]
@@ -162,33 +311,51 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
         DataTable {
             search, limit, total, filtered: filtered_count, shown,
             headers: rsx! {
-                th { class: "th", "CID" }
                 SortableTh { label: "Operation".to_string(), sort_key: "op".to_string(), sort }
+                th { class: "th", "Description" }
                 SortableTh { label: "Author".to_string(), sort_key: "author".to_string(), sort }
-                th { class: "th", "Document" }
-                th { class: "th", "Tags" }
                 SortableTh { label: "Time".to_string(), sort_key: "time".to_string(), sort }
             },
             body: rsx! {
                 for row in filtered.read().iter().take(limit_val) {
                     tr { key: "{row.cid}",
-                        Td { CidDisplay { cid: row.cid.clone() } }
                         Td { OpKindBadge { kind: row.op_kind.clone() } }
-                        Td { CidDisplay { cid: row.author.clone(), len: Some(8) } }
                         Td {
-                            if let Some(doc_id) = &row.doc_id {
-                                Link { to: Route::NoteDetail { id: doc_id.clone() }, class: "link",
-                                    if let Some(title) = &row.doc_title {
-                                        span { class: "truncate max-w-[12rem] inline-block", "{title}" }
+                            div { class: "space-y-1",
+                                // Main description with optional link
+                                div { class: "text-sm",
+                                    if let Some(link) = &row.link_target {
+                                        {
+                                            let route = match link.kind.as_str() {
+                                                "note" => Route::NoteDetail { id: link.id.clone() },
+                                                "entity" => Route::EntityDetail { id: link.id.clone() },
+                                                "file" => Route::FileDetail { cid: link.id.clone() },
+                                                _ => Route::NoteList {},
+                                            };
+                                            rsx! {
+                                                Link { to: route, class: "link", "{row.description}" }
+                                            }
+                                        }
                                     } else {
-                                        CidDisplay { cid: doc_id.clone(), len: Some(8) }
+                                        span { "{row.description}" }
                                     }
                                 }
-                            } else {
-                                span { class: "text-fg-faint", "\u{2014}" }
+                                // Tags as small pills underneath
+                                if !row.tags.is_empty() {
+                                    div { class: "flex flex-wrap gap-1",
+                                        for (scope, label) in &row.tags {
+                                            // Skip internal indexing tags that are already reflected in the description
+                                            if scope != "doc" && scope != "entity" && scope != "edge_source" && scope != "edge_target" {
+                                                Pill { variant: PillVariant::Muted,
+                                                    span { class: "text-[10px]", "{scope}:{label}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        Td { TagPills { tags: row.tags.clone() } }
+                        Td { CidDisplay { cid: row.author.clone(), len: Some(8) } }
                         TdMuted { TimeAgo { wall_ns: row.wall_ns } }
                     }
                 }
