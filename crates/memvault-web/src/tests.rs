@@ -10,7 +10,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use memvault_api::{EventBus, MemvaultClient, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
-use memvault_core::{DocId, EdgeId, EntityId, Visibility};
+use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 use memvault_auth::Role;
@@ -134,6 +134,36 @@ impl MemvaultClient for MockClient {
     }
 
     async fn entity_history(&self, _id: &EntityId) -> memvault_api::Result<Vec<memvault_query::AuditRecord>> {
+        Ok(vec![])
+    }
+
+    async fn add_link(
+        &self,
+        _source: &NodeRef,
+        _edge: Edge,
+        _vis: Visibility,
+    ) -> memvault_api::Result<EdgeId> {
+        Ok(EdgeId::random())
+    }
+
+    async fn remove_link_from(
+        &self,
+        _source: &NodeRef,
+        _edge_id: &EdgeId,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+
+    async fn edges_of(&self, _node: &NodeRef) -> memvault_api::Result<Vec<(NodeRef, Edge)>> {
+        Ok(vec![])
+    }
+
+    async fn traverse_from(
+        &self,
+        _from: &NodeRef,
+        _relation: Option<&str>,
+        _max_depth: usize,
+    ) -> memvault_api::Result<Vec<TraversalHit>> {
         Ok(vec![])
     }
 

@@ -1,7 +1,7 @@
 //! The MemvaultClient trait — the full API surface.
 
 use async_trait::async_trait;
-use memvault_core::{DocId, EdgeId, EntityId, Visibility};
+use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 use memvault_auth::Role;
@@ -34,6 +34,18 @@ pub trait MemvaultClient: Send + Sync {
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>>;
     async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>>;
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>>;
+
+    // -- Links (cross-type edges) --
+    /// Create a directed edge from any node to any node.
+    async fn add_link(&self, source: &NodeRef, edge: Edge, vis: Visibility) -> Result<EdgeId>;
+    /// Remove an edge by source and edge ID.
+    async fn remove_link_from(&self, source: &NodeRef, edge_id: &EdgeId) -> Result<()>;
+    /// List all edges (incoming + outgoing) touching a node.
+    async fn edges_of(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>>;
+    /// Traverse the graph from any node, following edges across types.
+    async fn traverse_from(&self, from: &NodeRef, relation: Option<&str>, max_depth: usize) -> Result<Vec<TraversalHit>>;
+
+    // -- Legacy graph edge methods (delegate to add_link/remove_link_from/traverse_from) --
     async fn add_edge(&self, source: &EntityId, edge: Edge, vis: Visibility) -> Result<EdgeId>;
     async fn remove_edge(&self, source: &EntityId, edge_id: &EdgeId) -> Result<()>;
     async fn traverse(&self, from: &EntityId, relation: Option<&str>, max_depth: usize) -> Result<Vec<TraversalHit>>;

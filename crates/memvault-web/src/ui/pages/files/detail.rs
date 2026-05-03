@@ -1,7 +1,7 @@
 //! File detail page — preview and manifest metadata.
 
 use dioxus::prelude::*;
-use plan_ai_design::{Card, PageHeader, SectionHeading};
+use plan_ai_design::{Card, PageHeader, Pill, PillVariant, SectionHeading};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::components::cid_display::CidDisplay;
@@ -19,6 +19,14 @@ struct FileData {
     replication: String,
     has_extracted_text: bool,
     extracted_text: Option<String>,
+    linked_items: Vec<FileLinkedItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct FileLinkedItem {
+    direction: String,
+    relation: String,
+    other_node: String,
 }
 
 impl FileData {
@@ -92,6 +100,21 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
             .to_string(),
         has_extracted_text: manifest.get("extracted_text").is_some(),
         extracted_text,
+        linked_items: {
+            let att_node = memvault_core::NodeRef::Attachment(cid_bytes.clone());
+            let mut items = Vec::new();
+            if let Ok(edges) = client.edges_of(&att_node).await {
+                for (source, edge) in edges {
+                    let (direction, other_node) = if source == att_node {
+                        ("outgoing".to_string(), edge.target.tag_label())
+                    } else {
+                        ("incoming".to_string(), source.tag_label())
+                    };
+                    items.push(FileLinkedItem { direction, relation: edge.relation.clone(), other_node });
+                }
+            }
+            items
+        },
     })
 }
 
@@ -180,6 +203,26 @@ fn FileView(data: FileData) -> Element {
                             tr {
                                 td { class: "td font-medium text-sm", "Replication" }
                                 td { class: "td text-sm font-mono", "{data.replication}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Linked Items
+            if !data.linked_items.is_empty() {
+                Card {
+                    div { class: "p-5",
+                        SectionHeading { "Links ({data.linked_items.len()})" }
+                        div { class: "mt-2 divide-y divide-line",
+                            for item in &data.linked_items {
+                                div { class: "flex items-center gap-3 py-2",
+                                    Pill { variant: PillVariant::Muted, "{item.direction}" }
+                                    Pill { variant: PillVariant::Muted, "{item.relation}" }
+                                    span { class: "font-mono text-sm text-fg-muted truncate flex-1",
+                                        "{item.other_node}"
+                                    }
+                                }
                             }
                         }
                     }

@@ -1,6 +1,6 @@
 //! Request/response types for the memvault API.
 
-use memvault_core::{DocId, EdgeId, EntityId};
+use memvault_core::{DocId, EdgeId, EntityId, NodeRef};
 use memvault_auth::Role;
 use serde::{Deserialize, Serialize};
 
@@ -18,9 +18,19 @@ pub struct DocSummary {
 /// A hit from a graph traversal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraversalHit {
-    pub entity_id: EntityId,
+    pub node: NodeRef,
     pub depth: usize,
     pub path: Vec<(EdgeId, String)>,
+}
+
+impl TraversalHit {
+    /// Returns the EntityId if the node is an Entity.
+    pub fn entity_id(&self) -> Option<&EntityId> {
+        match &self.node {
+            NodeRef::Entity(id) => Some(id),
+            _ => None,
+        }
+    }
 }
 
 /// Status of an issued token.

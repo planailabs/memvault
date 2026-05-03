@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use memvault_core::{DocId, EdgeId, EntityId};
+use memvault_core::{DocId, EdgeId, EntityId, NodeRef};
 
 use crate::apply::{apply_doc_ops, apply_graph_ops, apply_text_patch};
 use crate::compaction::compact;
@@ -183,8 +183,8 @@ fn graph_entity_crud() {
         },
     ];
 
-    let entities = apply_graph_ops(&ops).unwrap();
-    let e = entities.get(&eid).unwrap();
+    let state = apply_graph_ops(&ops).unwrap();
+    let e = state.entities.get(&eid).unwrap();
     assert_eq!(e.kind, "person");
     assert_eq!(e.props["name"], serde_json::json!("Alice"));
     assert_eq!(e.props["age"], serde_json::json!(30));
@@ -207,8 +207,8 @@ fn graph_entity_delete() {
         },
     ];
 
-    let entities = apply_graph_ops(&ops).unwrap();
-    assert!(entities.is_empty());
+    let state = apply_graph_ops(&ops).unwrap();
+    assert!(state.entities.is_empty());
 }
 
 #[test]
@@ -235,11 +235,11 @@ fn graph_edge_add_remove() {
             },
         },
         Op::EdgeAdd {
-            source: e1.clone(),
+            source: NodeRef::Entity(e1.clone()),
             edge: Edge {
                 id: edge_id.clone(),
                 relation: "knows".to_string(),
-                target: e2.clone(),
+                target: NodeRef::Entity(e2.clone()),
                 weight: Some(1.0),
                 props: BTreeMap::new(),
                 provenance: None,
@@ -247,18 +247,18 @@ fn graph_edge_add_remove() {
         },
     ];
 
-    let entities = apply_graph_ops(&ops).unwrap();
-    assert_eq!(entities[&e1].edges_out.len(), 1);
-    assert_eq!(entities[&e1].edges_out[0].relation, "knows");
+    let state = apply_graph_ops(&ops).unwrap();
+    assert_eq!(state.entities[&e1].edges_out.len(), 1);
+    assert_eq!(state.entities[&e1].edges_out[0].relation, "knows");
 
     // Now remove it
     let mut ops2 = ops.clone();
     ops2.push(Op::EdgeRemove {
-        source: e1.clone(),
+        source: NodeRef::Entity(e1.clone()),
         edge_id: edge_id.clone(),
     });
-    let entities2 = apply_graph_ops(&ops2).unwrap();
-    assert!(entities2[&e1].edges_out.is_empty());
+    let state2 = apply_graph_ops(&ops2).unwrap();
+    assert!(state2.entities[&e1].edges_out.is_empty());
 }
 
 #[test]
@@ -285,18 +285,18 @@ fn graph_edge_update() {
             },
         },
         Op::EdgeAdd {
-            source: e1.clone(),
+            source: NodeRef::Entity(e1.clone()),
             edge: Edge {
                 id: edge_id.clone(),
                 relation: "likes".to_string(),
-                target: e2.clone(),
+                target: NodeRef::Entity(e2.clone()),
                 weight: None,
                 props: BTreeMap::new(),
                 provenance: None,
             },
         },
         Op::EdgeUpdate {
-            source: e1.clone(),
+            source: NodeRef::Entity(e1.clone()),
             edge_id: edge_id.clone(),
             props: {
                 let mut p = BTreeMap::new();
@@ -306,9 +306,9 @@ fn graph_edge_update() {
         },
     ];
 
-    let entities = apply_graph_ops(&ops).unwrap();
+    let state = apply_graph_ops(&ops).unwrap();
     assert_eq!(
-        entities[&e1].edges_out[0].props["since"],
+        state.entities[&e1].edges_out[0].props["since"],
         serde_json::json!("2024")
     );
 }

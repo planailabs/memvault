@@ -373,7 +373,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let target_id = parse_entity_id(&target)?;
             let store = open_store(&data_dir)?;
             let client = create_client(store);
-            let edge = Edge { id: memvault_core::EdgeId::random(), relation, target: target_id, weight, props: BTreeMap::new(), provenance: None };
+            let edge = Edge { id: memvault_core::EdgeId::random(), relation, target: memvault_core::NodeRef::Entity(target_id), weight, props: BTreeMap::new(), provenance: None };
             let edge_id = client.add_edge(&source_id, edge, Visibility::Internal).await?;
             println!("{}", hex::encode(edge_id.0));
         }
@@ -382,7 +382,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let store = open_store(&data_dir)?;
             let client = create_client(store);
             let hits = client.traverse(&entity_id, relation.as_deref(), max_depth).await?;
-            for hit in hits { println!("depth={} entity={}", hit.depth, hex::encode(hit.entity_id.0)); }
+            for hit in hits { println!("depth={} node={}", hit.depth, hit.node); }
         }
         Commands::Gc { doc, before } => {
             println!("GC: doc={doc:?} before={before:?}");

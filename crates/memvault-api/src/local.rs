@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use memvault_core::{cid_from_bytes, DocId, EdgeId, EntityId, Visibility};
+use memvault_core::{cid_from_bytes, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{
     Document, Edge, Entity, Op, TextPatch,
 };
@@ -22,6 +22,14 @@ use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
 use crate::subscription::{EventBus, MemvaultEvent};
 use crate::types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
+
+/// Extract the target node's tag label from an EdgeAdd op.
+fn op_edge_target_label(op: &Op) -> Option<String> {
+    match op {
+        Op::EdgeAdd { edge, .. } => Some(edge.target.tag_label()),
+        _ => None,
+    }
+}
 
 /// LocalClient implements MemvaultClient by calling directly into the store.
 pub struct LocalClient {
@@ -434,8 +442,8 @@ impl MemvaultClient for LocalClient {
             }
         }
 
-        let entities = memvault_doc::apply_graph_ops(&ops)?;
-        Ok(entities.get(id).cloned())
+        let state = memvault_doc::apply_graph_ops(&ops)?;
+        Ok(state.entities.get(id).cloned())
     }
 
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>> {
@@ -471,49 +479,107 @@ impl MemvaultClient for LocalClient {
         Ok(entities)
     }
 
-    async fn add_edge(&self, source: &EntityId, edge: Edge, vis: Visibility) -> Result<EdgeId> {
+    // -- Links (cross-type edges) --
+
+    async fn add_link(&self, source: &NodeRef, edge: Edge, vis: Visibility) -> Result<EdgeId> {
         let edge_id = edge.id.clone();
         let op = Op::EdgeAdd {
             source: source.clone(),
             edge,
         };
 
-        let entity_label: String = source.0.iter().map(|b| format!("{b:02x}")).collect();
-        let tags = vec![("entity".to_string(), entity_label)];
+        let source_label = source.tag_label();
+        let target_label = op_edge_target_label(&op);
+        let mut tags = vec![
+            ("edge_source".to_string(), source_label),
+        ];
+        if let Some(tl) = target_label {
+            tags.push(("edge_target".to_string(), tl));
+        }
+        // Also tag by entity label if source is an entity (for backward compat with get_entity)
+        if let NodeRef::Entity(id) = source {
+            let entity_label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+            tags.push(("entity".to_string(), entity_label));
+        }
         self.store_op(&op, &tags, &vis)?;
 
         Ok(edge_id)
     }
 
-    async fn remove_edge(&self, source: &EntityId, edge_id: &EdgeId) -> Result<()> {
+    async fn remove_link_from(&self, source: &NodeRef, edge_id: &EdgeId) -> Result<()> {
         let op = Op::EdgeRemove {
             source: source.clone(),
             edge_id: edge_id.clone(),
         };
 
-        let entity_label: String = source.0.iter().map(|b| format!("{b:02x}")).collect();
-        let tags = vec![("entity".to_string(), entity_label)];
+        let source_label = source.tag_label();
+        let mut tags = vec![
+            ("edge_source".to_string(), source_label),
+        ];
+        if let NodeRef::Entity(id) = source {
+            let entity_label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+            tags.push(("entity".to_string(), entity_label));
+        }
         self.store_op(&op, &tags, &Visibility::Internal)?;
         Ok(())
     }
 
-    async fn traverse(
+    async fn edges_of(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
+        let label = node.tag_label();
+        let mut results = Vec::new();
+
+        // Edges where this node is the source
+        let source_cids = self.store.query_by_tag("edge_source", &label, 0, usize::MAX)?;
+        for cid in &source_cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Ok(Op::EdgeAdd { source, edge }) = serde_json::from_value::<Op>(payload.clone()) {
+                            results.push((source, edge));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Edges where this node is the target
+        let target_cids = self.store.query_by_tag("edge_target", &label, 0, usize::MAX)?;
+        for cid in &target_cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Ok(Op::EdgeAdd { source, edge }) = serde_json::from_value::<Op>(payload.clone()) {
+                            results.push((source, edge));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deduplicate by edge ID
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|(_, edge)| seen.insert(edge.id.clone()));
+
+        Ok(results)
+    }
+
+    async fn traverse_from(
         &self,
-        from: &EntityId,
+        from: &NodeRef,
         relation: Option<&str>,
         max_depth: usize,
     ) -> Result<Vec<TraversalHit>> {
         let mut results = Vec::new();
-        let mut visited: std::collections::HashSet<EntityId> = std::collections::HashSet::new();
-        let mut queue: VecDeque<(EntityId, usize, Vec<(EdgeId, String)>)> = VecDeque::new();
+        let mut visited: std::collections::HashSet<NodeRef> = std::collections::HashSet::new();
+        let mut queue: VecDeque<(NodeRef, usize, Vec<(EdgeId, String)>)> = VecDeque::new();
 
         visited.insert(from.clone());
         queue.push_back((from.clone(), 0, Vec::new()));
 
-        while let Some((current_id, depth, path)) = queue.pop_front() {
+        while let Some((current_node, depth, path)) = queue.pop_front() {
             if depth > 0 {
                 results.push(TraversalHit {
-                    entity_id: current_id.clone(),
+                    node: current_node.clone(),
                     depth,
                     path: path.clone(),
                 });
@@ -523,24 +589,46 @@ impl MemvaultClient for LocalClient {
                 continue;
             }
 
-            // Get entity to find edges
-            if let Some(entity) = self.get_entity(&current_id).await? {
-                for edge in &entity.edges_out {
-                    if let Some(rel_filter) = relation {
-                        if edge.relation != rel_filter {
-                            continue;
-                        }
+            // Get outgoing edges for this node
+            let edges = self.edges_of(&current_node).await?;
+            for (source, edge) in &edges {
+                // Only follow outgoing edges from the current node
+                if source != &current_node {
+                    continue;
+                }
+                if let Some(rel_filter) = relation {
+                    if edge.relation != rel_filter {
+                        continue;
                     }
-                    if visited.insert(edge.target.clone()) {
-                        let mut new_path = path.clone();
-                        new_path.push((edge.id.clone(), edge.relation.clone()));
-                        queue.push_back((edge.target.clone(), depth + 1, new_path));
-                    }
+                }
+                if visited.insert(edge.target.clone()) {
+                    let mut new_path = path.clone();
+                    new_path.push((edge.id.clone(), edge.relation.clone()));
+                    queue.push_back((edge.target.clone(), depth + 1, new_path));
                 }
             }
         }
 
         Ok(results)
+    }
+
+    // -- Legacy edge methods (delegate to links) --
+
+    async fn add_edge(&self, source: &EntityId, edge: Edge, vis: Visibility) -> Result<EdgeId> {
+        self.add_link(&NodeRef::Entity(source.clone()), edge, vis).await
+    }
+
+    async fn remove_edge(&self, source: &EntityId, edge_id: &EdgeId) -> Result<()> {
+        self.remove_link_from(&NodeRef::Entity(source.clone()), edge_id).await
+    }
+
+    async fn traverse(
+        &self,
+        from: &EntityId,
+        relation: Option<&str>,
+        max_depth: usize,
+    ) -> Result<Vec<TraversalHit>> {
+        self.traverse_from(&NodeRef::Entity(from.clone()), relation, max_depth).await
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {

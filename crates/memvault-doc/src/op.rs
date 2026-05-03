@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use memvault_core::{DocId, EdgeId, EntityId};
+use memvault_core::{DocId, EdgeId, EntityId, NodeRef};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{Edge, Entity};
@@ -40,15 +40,15 @@ pub enum Op {
         entity_id: EntityId,
     },
     EdgeAdd {
-        source: EntityId,
+        source: NodeRef,
         edge: Edge,
     },
     EdgeRemove {
-        source: EntityId,
+        source: NodeRef,
         edge_id: EdgeId,
     },
     EdgeUpdate {
-        source: EntityId,
+        source: NodeRef,
         edge_id: EdgeId,
         props: BTreeMap<String, serde_json::Value>,
     },

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use memvault_core::{EdgeId, EntityId};
+use memvault_core::{EdgeId, EntityId, NodeRef};
 use memvault_doc::{Edge, Entity};
 use serde::{Deserialize, Serialize};
 
@@ -112,7 +112,7 @@ pub async fn get_entity(
         .map(|e| EdgeResponse {
             id: hex::encode(e.id.0),
             relation: e.relation.clone(),
-            target: hex::encode(e.target.0),
+            target: e.target.tag_label(),
             weight: e.weight,
             props: e.props.clone(),
         })
@@ -155,7 +155,7 @@ pub async fn add_edge(
     let edge = Edge {
         id: EdgeId::random(),
         relation: req.relation,
-        target: target_id,
+        target: NodeRef::Entity(target_id),
         weight: req.weight,
         props: req.props,
         provenance: None,
@@ -198,7 +198,7 @@ pub async fn traverse(
     let results: Vec<TraversalHitResponse> = hits
         .into_iter()
         .map(|h| TraversalHitResponse {
-            entity_id: hex::encode(h.entity_id.0),
+            entity_id: h.node.tag_label(),
             depth: h.depth,
             path: h.path.iter().map(|(eid, rel)| (hex::encode(eid.0), rel.clone())).collect(),
         })

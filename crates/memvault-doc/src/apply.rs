@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use memvault_core::EntityId;
+use memvault_core::{EntityId, NodeRef};
 
 use crate::document::Document;
 use crate::error::{DocError, Result};
-use crate::graph::Entity;
+use crate::graph::{Edge, Entity};
 use crate::op::{Op, TextOp, TextPatch};
 
 /// Apply a TextPatch to a string.
@@ -104,9 +104,17 @@ pub fn apply_doc_ops(ops: &[Op]) -> Result<Document> {
     doc.ok_or_else(|| DocError::InvalidOp("no DocCreate op found".to_string()))
 }
 
-/// Apply a sequence of operations to build an Entity set.
-pub fn apply_graph_ops(ops: &[Op]) -> Result<BTreeMap<EntityId, Entity>> {
+/// Result of applying graph operations — entities plus standalone edges from non-entity sources.
+pub struct GraphState {
+    pub entities: BTreeMap<EntityId, Entity>,
+    /// Edges whose source is not an entity (doc or attachment sourced).
+    pub standalone_edges: Vec<(NodeRef, Edge)>,
+}
+
+/// Apply a sequence of operations to build an Entity set and collect standalone edges.
+pub fn apply_graph_ops(ops: &[Op]) -> Result<GraphState> {
     let mut entities: BTreeMap<EntityId, Entity> = BTreeMap::new();
+    let mut standalone_edges: Vec<(NodeRef, Edge)> = Vec::new();
 
     for op in ops {
         match op {
@@ -125,32 +133,57 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<BTreeMap<EntityId, Entity>> {
                 entities.remove(entity_id);
             }
             Op::EdgeAdd { source, edge } => {
-                let e = entities.get_mut(source).ok_or_else(|| {
-                    DocError::EntityNotFound(format!("{source:?}"))
-                })?;
-                e.edges_out.push(edge.clone());
+                match source {
+                    NodeRef::Entity(entity_id) => {
+                        let e = entities.get_mut(entity_id).ok_or_else(|| {
+                            DocError::EntityNotFound(format!("{entity_id:?}"))
+                        })?;
+                        e.edges_out.push(edge.clone());
+                    }
+                    other => {
+                        standalone_edges.push((other.clone(), edge.clone()));
+                    }
+                }
             }
             Op::EdgeRemove { source, edge_id } => {
-                let e = entities.get_mut(source).ok_or_else(|| {
-                    DocError::EntityNotFound(format!("{source:?}"))
-                })?;
-                e.edges_out.retain(|edge| edge.id != *edge_id);
+                match source {
+                    NodeRef::Entity(entity_id) => {
+                        let e = entities.get_mut(entity_id).ok_or_else(|| {
+                            DocError::EntityNotFound(format!("{entity_id:?}"))
+                        })?;
+                        e.edges_out.retain(|edge| edge.id != *edge_id);
+                    }
+                    _ => {
+                        standalone_edges.retain(|(_, edge)| edge.id != *edge_id);
+                    }
+                }
             }
             Op::EdgeUpdate {
                 source,
                 edge_id,
                 props,
             } => {
-                let e = entities.get_mut(source).ok_or_else(|| {
-                    DocError::EntityNotFound(format!("{source:?}"))
-                })?;
-                let edge = e
-                    .edges_out
-                    .iter_mut()
-                    .find(|edge| edge.id == *edge_id)
-                    .ok_or_else(|| DocError::EdgeNotFound(format!("{edge_id:?}")))?;
-                for (k, v) in props {
-                    edge.props.insert(k.clone(), v.clone());
+                match source {
+                    NodeRef::Entity(entity_id) => {
+                        let e = entities.get_mut(entity_id).ok_or_else(|| {
+                            DocError::EntityNotFound(format!("{entity_id:?}"))
+                        })?;
+                        let edge = e
+                            .edges_out
+                            .iter_mut()
+                            .find(|edge| edge.id == *edge_id)
+                            .ok_or_else(|| DocError::EdgeNotFound(format!("{edge_id:?}")))?;
+                        for (k, v) in props {
+                            edge.props.insert(k.clone(), v.clone());
+                        }
+                    }
+                    _ => {
+                        if let Some((_, edge)) = standalone_edges.iter_mut().find(|(_, e)| e.id == *edge_id) {
+                            for (k, v) in props {
+                                edge.props.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
                 }
             }
             // Skip doc ops
@@ -161,5 +194,5 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<BTreeMap<EntityId, Entity>> {
         }
     }
 
-    Ok(entities)
+    Ok(GraphState { entities, standalone_edges })
 }

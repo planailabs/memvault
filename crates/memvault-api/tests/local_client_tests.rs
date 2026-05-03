@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use memvault_api::{EventBus, LocalClient, MemvaultClient, MemvaultEvent};
-use memvault_core::{DocId, EdgeId, EntityId, Visibility};
+use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity};
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_store::MemvaultStore;
@@ -124,7 +124,7 @@ async fn add_entity_and_traverse() {
     let edge_ab = Edge {
         id: EdgeId::random(),
         relation: "knows".to_string(),
-        target: id_b.clone(),
+        target: NodeRef::Entity(id_b.clone()),
         weight: Some(1.0),
         props: BTreeMap::new(),
         provenance: None,
@@ -137,7 +137,7 @@ async fn add_entity_and_traverse() {
     let edge_bc = Edge {
         id: EdgeId::random(),
         relation: "knows".to_string(),
-        target: id_c.clone(),
+        target: NodeRef::Entity(id_c.clone()),
         weight: Some(1.0),
         props: BTreeMap::new(),
         provenance: None,
@@ -152,11 +152,11 @@ async fn add_entity_and_traverse() {
     assert_eq!(hits.len(), 2);
 
     // First hit should be B at depth 1
-    assert_eq!(hits[0].entity_id, id_b);
+    assert_eq!(hits[0].node, NodeRef::Entity(id_b));
     assert_eq!(hits[0].depth, 1);
 
     // Second hit should be C at depth 2
-    assert_eq!(hits[1].entity_id, id_c);
+    assert_eq!(hits[1].node, NodeRef::Entity(id_c));
     assert_eq!(hits[1].depth, 2);
 }
 

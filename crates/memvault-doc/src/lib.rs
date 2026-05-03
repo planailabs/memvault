@@ -14,7 +14,7 @@ pub mod log;
 pub mod op;
 pub mod snapshot;
 
-pub use apply::{apply_doc_ops, apply_graph_ops, apply_text_patch};
+pub use apply::{apply_doc_ops, apply_graph_ops, apply_text_patch, GraphState};
 pub use crdt::{CrdtDocument, CrdtError};
 pub use compaction::compact;
 pub use document::Document;

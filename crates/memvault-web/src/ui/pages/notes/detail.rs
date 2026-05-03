@@ -19,6 +19,16 @@ struct NoteData {
     tags: Vec<(String, String)>,
     visibility: String,
     attachment_cids: Vec<AttachmentInfo>,
+    linked_items: Vec<LinkedItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct LinkedItem {
+    edge_id: String,
+    direction: String, // "outgoing" or "incoming"
+    relation: String,
+    other_node: String,  // tag_label format: "entity:hex", "doc:hex", etc.
+    other_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +107,26 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
         }
     }
 
+    // Fetch linked items via edges_of.
+    let doc_node = memvault_core::NodeRef::Doc(doc_id.clone());
+    let mut linked_items = Vec::new();
+    if let Ok(edges) = client.edges_of(&doc_node).await {
+        for (source, edge) in edges {
+            let (direction, other_node) = if source == doc_node {
+                ("outgoing".to_string(), edge.target.tag_label())
+            } else {
+                ("incoming".to_string(), source.tag_label())
+            };
+            linked_items.push(LinkedItem {
+                edge_id: hex::encode(edge.id.0),
+                direction,
+                relation: edge.relation.clone(),
+                other_node,
+                other_label: None,
+            });
+        }
+    }
+
     Ok(NoteData {
         id: hex::encode(doc.id.0),
         body: doc.body,
@@ -105,6 +135,7 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
         tags: vec![],
         visibility: "internal".to_string(),
         attachment_cids: attachments,
+        linked_items,
     })
 }
 
@@ -199,6 +230,26 @@ fn NoteView(data: NoteData) -> Element {
                                         "{att.filename}"
                                     }
                                     span { class: "text-xs text-fg-muted font-mono", "{att.size_display()}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Linked Items
+            if !data.linked_items.is_empty() {
+                Card {
+                    div { class: "p-5",
+                        SectionHeading { "Links ({data.linked_items.len()})" }
+                        div { class: "mt-2 divide-y divide-line",
+                            for item in &data.linked_items {
+                                div { class: "flex items-center gap-3 py-2",
+                                    Pill { variant: PillVariant::Muted, "{item.direction}" }
+                                    Pill { variant: PillVariant::Muted, "{item.relation}" }
+                                    span { class: "font-mono text-sm text-fg-muted truncate flex-1",
+                                        "{item.other_node}"
+                                    }
                                 }
                             }
                         }

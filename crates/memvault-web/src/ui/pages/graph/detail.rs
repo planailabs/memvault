@@ -46,20 +46,24 @@ async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
     let mut edges = Vec::new();
     for e in &entity.edges_out {
         // Try to get the target entity's label.
-        let target_label = if let Ok(Some(target)) = client.get_entity(&e.target).await {
-            target
-                .props
-                .get("name")
-                .or_else(|| target.props.get("title"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
+        let target_label = if let memvault_core::NodeRef::Entity(ref target_id) = e.target {
+            if let Ok(Some(target)) = client.get_entity(target_id).await {
+                target
+                    .props
+                    .get("name")
+                    .or_else(|| target.props.get("title"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            } else {
+                None
+            }
         } else {
             None
         };
         edges.push(EdgeData {
             id: hex::encode(e.id.0),
             relation: e.relation.clone(),
-            target: hex::encode(e.target.0),
+            target: e.target.tag_label(),
             target_label,
             weight: e.weight,
         });

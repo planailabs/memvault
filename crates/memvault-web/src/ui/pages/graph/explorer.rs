@@ -55,7 +55,7 @@ async fn list_entities() -> Result<Vec<EntitySummary>, ServerFnError> {
                     .iter()
                     .map(|e| EdgeSummary {
                         relation: e.relation.clone(),
-                        target_id: hex::encode(e.target.0),
+                        target_id: e.target.tag_label(),
                         weight: e.weight.unwrap_or(1.0),
                     })
                     .collect(),
@@ -82,7 +82,11 @@ async fn expand_entity(id: String) -> Result<Vec<EntitySummary>, ServerFnError> 
 
     let mut neighbors = Vec::new();
     for hit in hits {
-        if let Ok(Some(entity)) = client.get_entity(&hit.entity_id).await {
+        let entity_id = match hit.entity_id() {
+            Some(id) => id,
+            None => continue, // skip non-entity nodes in graph explorer for now
+        };
+        if let Ok(Some(entity)) = client.get_entity(entity_id).await {
             let label = entity
                 .props
                 .get("name")
@@ -99,7 +103,7 @@ async fn expand_entity(id: String) -> Result<Vec<EntitySummary>, ServerFnError> 
                     .iter()
                     .map(|e| EdgeSummary {
                         relation: e.relation.clone(),
-                        target_id: hex::encode(e.target.0),
+                        target_id: e.target.tag_label(),
                         weight: e.weight.unwrap_or(1.0),
                     })
                     .collect(),

@@ -7,6 +7,7 @@ pub mod auth;
 pub mod docs;
 pub mod events;
 pub mod graph;
+pub mod links;
 pub mod ops;
 pub mod search;
 
@@ -52,6 +53,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
             delete(graph::remove_edge),
         )
         .route("/entities/{id}/traverse", get(graph::traverse))
+        // Links (cross-type edges)
+        .route("/links", post(links::create_link).get(links::list_links))
+        .route("/links/{edge_id}", delete(links::delete_link))
         // Search
         .route("/search", get(search::search))
         // Audit
