@@ -58,7 +58,7 @@ pub fn App() -> Element {
         I18nConfig::new(langid!("en-US"))
             .with_locale(Locale::new_static(
                 langid!("en-US"),
-                include_str!("en-US.ftl"),
+                plan_ai_design::i18n::EN_US,
             ))
     });
 
