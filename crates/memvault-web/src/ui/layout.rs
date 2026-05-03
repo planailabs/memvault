@@ -2,14 +2,18 @@
 
 use dioxus::prelude::*;
 
+use super::cmd_k::CommandPalette;
+use super::events::use_event_bus_provider;
 use super::navbar::Sidebar;
 use super::topbar::{Topbar, TopbarMeta};
 
 #[component]
 pub fn Layout() -> Element {
     use_context_provider::<Signal<TopbarMeta>>(|| Signal::new(TopbarMeta::default()));
+    let _event_bus = use_event_bus_provider();
 
     rsx! {
+        CommandPalette {}
         div { class: "flex h-screen bg-bg text-fg",
             Sidebar {}
             div { class: "flex-1 flex flex-col min-w-0",

@@ -1,7 +1,9 @@
 //! Memvault web UI — Dioxus fullstack application.
 
 pub mod app;
+pub mod cmd_k;
 pub mod components;
+pub mod events;
 pub mod layout;
 pub mod navbar;
 pub mod pages;

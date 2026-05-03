@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 default = ["server"]
 web = ["webui", "dioxus/web"]
-webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid"]
+webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid"]
 server = ["webui", "dioxus/server"]
 
 [dependencies]
@@ -31,7 +31,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # UI dependencies (behind webui feature)
 dioxus = { version = "0.7", features = ["fullstack", "router"], optional = true }
 wasm-bindgen = { version = "=0.2.114", optional = true }
-web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "Event"], optional = true }
+web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "Event", "KeyboardEvent", "Window", "Location"], optional = true }
+js-sys = { version = "0.3", optional = true }
 pulldown-cmark = { version = "0.12", optional = true }
 dioxus-i18n = { version = "0.5", optional = true }
 unic-langid = { version = "0.9", features = ["macros"], optional = true }
