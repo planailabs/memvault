@@ -39,6 +39,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
             delete(attachments::detach_attachment),
         )
         .route("/attachments/{cid}", get(attachments::download_attachment))
+        .route("/attachments/{cid}/manifest", get(attachments::attachment_manifest))
         // Graph
         .route("/entities", post(graph::create_entity))
         .route(

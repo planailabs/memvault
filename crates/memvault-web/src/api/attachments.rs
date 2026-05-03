@@ -87,6 +87,24 @@ pub async fn download_attachment(
     ))
 }
 
+/// GET /api/v1/attachments/:cid/manifest — get attachment manifest metadata
+pub async fn attachment_manifest(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(cid_hex): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+
+    match state.client.get_attachment_manifest(&cid).await? {
+        Some(data) => Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(data),
+        )),
+        None => Err(ApiError::not_found("Manifest not found")),
+    }
+}
+
 /// DELETE /api/v1/docs/:id/attachments/:name — detach file (no-op in new system)
 pub async fn detach_attachment(
     _auth: RequireAuth,
