@@ -209,7 +209,7 @@ pub async fn doc_history(
     Ok(Json(results))
 }
 
-fn parse_doc_id(hex_str: &str) -> Result<DocId, ApiError> {
+pub fn parse_doc_id(hex_str: &str) -> Result<DocId, ApiError> {
     let bytes = hex::decode(hex_str).map_err(|_| ApiError::bad_request("Invalid document ID"))?;
     if bytes.len() != 32 {
         return Err(ApiError::bad_request("Document ID must be 32 bytes"));
