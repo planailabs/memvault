@@ -374,6 +374,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut viewport = use_signal(Viewport::default);
     let mut viewport_initialized = use_signal(|| false);
     let mut dragging_node = use_signal(|| None::<usize>);
+    let mut did_drag = use_signal(|| false); // true if mouse moved during a node drag
     let mut panning = use_signal(|| false);
     let mut pan_start = use_signal(|| (0.0f64, 0.0f64));
     let mut sidebar_search = use_signal(String::new);
@@ -382,15 +383,23 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut detail = use_signal(|| None::<NodeDetail>);
 
     // Run the simulation to settle on initial load, then auto-fit viewport.
+    // After settling, we leave alpha at alpha_min so re-runs (hydration) are a no-op.
     use_effect(move || {
         let mut s = sim.write();
+        if s.is_settled() {
+            // Already settled (e.g. hydration re-run) — just fit viewport if needed.
+            if !*viewport_initialized.read() {
+                viewport.set(Viewport::fit_to_nodes(&s.nodes));
+                viewport_initialized.set(true);
+            }
+            return;
+        }
         for _ in 0..300 {
             if s.is_settled() {
                 break;
             }
             s.tick();
         }
-        // Auto-fit viewport to settled graph bounds (only on first load).
         if !*viewport_initialized.read() {
             viewport.set(Viewport::fit_to_nodes(&s.nodes));
             viewport_initialized.set(true);
@@ -502,19 +511,26 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
 
             // Node dragging takes priority.
             if let Some(idx) = *dragging_node.read() {
-                let mut s = sim.write();
-                let vp = *viewport.read();
-                let scale = (base_half * 2.0) / 800.0;
-                if let Some(node) = s.nodes.get_mut(idx) {
-                    let ps = *pan_start.read();
-                    let dx = (coords.x - ps.0) * scale / vp.zoom;
-                    let dy = (coords.y - ps.1) * scale / vp.zoom;
-                    node.fx = Some(node.x + dx);
-                    node.fy = Some(node.y + dy);
-                    node.x = node.fx.unwrap();
-                    node.y = node.fy.unwrap();
+                let ps = *pan_start.read();
+                let screen_dx = coords.x - ps.0;
+                let screen_dy = coords.y - ps.1;
+                // Only start moving the node after a small threshold to
+                // distinguish clicks from drags.
+                if screen_dx.abs() > 3.0 || screen_dy.abs() > 3.0 || *did_drag.read() {
+                    did_drag.set(true);
+                    let mut s = sim.write();
+                    let vp = *viewport.read();
+                    let scale = (base_half * 2.0) / 800.0;
+                    if let Some(node) = s.nodes.get_mut(idx) {
+                        let dx = screen_dx * scale / vp.zoom;
+                        let dy = screen_dy * scale / vp.zoom;
+                        node.fx = Some(node.x + dx);
+                        node.fy = Some(node.y + dy);
+                        node.x = node.fx.unwrap();
+                        node.y = node.fy.unwrap();
+                    }
+                    pan_start.set((coords.x, coords.y));
                 }
-                pan_start.set((coords.x, coords.y));
                 return;
             }
 
@@ -534,20 +550,24 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
 
     let on_svg_mouseup = move |_: Event<MouseData>| {
         if let Some(idx) = *dragging_node.read() {
-            let mut s = sim.write();
-            if let Some(node) = s.nodes.get_mut(idx) {
-                node.fx = None;
-                node.fy = None;
-            }
-            s.reheat();
-            for _ in 0..100 {
-                if s.is_settled() {
-                    break;
+            // Only reheat the simulation if the mouse actually moved (real drag).
+            if *did_drag.read() {
+                let mut s = sim.write();
+                if let Some(node) = s.nodes.get_mut(idx) {
+                    node.fx = None;
+                    node.fy = None;
                 }
-                s.tick();
+                s.reheat();
+                for _ in 0..100 {
+                    if s.is_settled() {
+                        break;
+                    }
+                    s.tick();
+                }
             }
         }
         dragging_node.set(None);
+        did_drag.set(false);
         panning.set(false);
     };
 
