@@ -94,10 +94,14 @@ pub fn CommandPalette() -> Element {
         }
     });
 
+    // Debounce generation counter — incremented on each keystroke.
+    let mut debounce_gen = use_signal(|| 0u64);
+
     if !*open.read() {
         return rsx! {};
     }
 
+    // Fire search immediately (Enter key).
     let do_search = move |e: Event<FormData>| {
         e.prevent_default();
         let q = query.read().clone();
@@ -107,6 +111,40 @@ pub fn CommandPalette() -> Element {
         }
         searching.set(true);
         spawn(async move {
+            if let Ok(r) = palette_search(q).await {
+                results.set(r);
+            }
+            searching.set(false);
+        });
+    };
+
+    // On each keystroke: update query and schedule a debounced search after 500ms.
+    let on_input = move |e: Event<FormData>| {
+        let q = e.value();
+        query.set(q.clone());
+        let generation = *debounce_gen.read() + 1;
+        debounce_gen.set(generation);
+
+        if q.trim().is_empty() {
+            results.set(Vec::new());
+            return;
+        }
+
+        spawn(async move {
+            // Wait 500ms, then check if this is still the latest keystroke.
+            #[cfg(target_arch = "wasm32")]
+            {
+                gloo_timers::future::TimeoutFuture::new(500).await;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+
+            if *debounce_gen.read() != generation {
+                return; // a newer keystroke superseded us
+            }
+            searching.set(true);
             if let Ok(r) = palette_search(q).await {
                 results.set(r);
             }
@@ -134,7 +172,7 @@ pub fn CommandPalette() -> Element {
                         r#type: "search",
                         placeholder: "Search notes, entities, files...",
                         value: "{query}",
-                        oninput: move |e: Event<FormData>| query.set(e.value()),
+                        oninput: on_input,
                         autofocus: true,
                     }
                 }
