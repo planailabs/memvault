@@ -495,7 +495,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let mut skipped = 0usize;
 
             for (cid, data) in &blocks {
-                let mut val: serde_json::Value = match serde_json::from_slice(data) {
+                let val: serde_json::Value = match serde_json::from_slice(data) {
                     Ok(v) => v,
                     Err(_) => { skipped += 1; continue; }
                 };
@@ -521,22 +521,15 @@ pub async fn run(cli: Cli) -> Result<()> {
 
                 let wall_ns: u64 = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
 
-                // Patch the envelope with the current cluster_id.
-                val.as_object_mut().unwrap().insert(
-                    "cluster_id".to_string(),
-                    serde_json::json!(cluster_bytes),
-                );
-                let patched_bytes = serde_json::to_vec(&val)
-                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
-
-                // Overwrite the block and add CLUSTER_ORIGIN index entry.
-                store.put_block(cid, &patched_bytes)?;
+                // Don't mutate the block — blocks are content-addressed, so
+                // changing bytes would break the CID invariant. Instead, just
+                // add the missing CLUSTER_ORIGIN index entry.
                 store.index_cluster_origin(cid, &cluster_bytes, wall_ns)?;
 
                 patched += 1;
             }
 
-            println!("Patched {patched} envelopes with cluster_id ({skipped} non-envelope blocks skipped).");
+            println!("Indexed {patched} envelopes into CLUSTER_ORIGIN ({skipped} non-envelope blocks skipped).");
         }
     }
 
