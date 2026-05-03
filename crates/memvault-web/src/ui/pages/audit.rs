@@ -1,7 +1,7 @@
 //! Audit log page — filterable audit trail.
 
 use dioxus::prelude::*;
-use plan_ai_design::{DataTable, PageHeader, SortState, SortableTh, Td, TdMuted};
+use plan_ai_design::{DataTable, FormField, PageHeader, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -78,15 +78,26 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 50usize);
     let sort = use_signal::<SortState>(|| ("time".to_string(), false));
+    let mut op_filter = use_signal(|| "all".to_string());
+    let mut author_filter = use_signal(String::new);
 
     let list_clone = list.clone();
     let filtered = use_memo(move || {
         let q = search.read().to_lowercase();
-        let mut items: Vec<AuditRow> = if q.is_empty() {
-            list_clone.clone()
-        } else {
-            list_clone.iter().filter(|r| r.matches_search(&q)).cloned().collect()
-        };
+        let op = op_filter.read().clone();
+        let auth = author_filter.read().to_lowercase();
+
+        let mut items: Vec<AuditRow> = list_clone
+            .iter()
+            .filter(|r| {
+                let text_match = q.is_empty() || r.matches_search(&q);
+                let op_match = op == "all" || r.op_kind == op;
+                let author_match = auth.is_empty() || r.author.contains(&auth);
+                text_match && op_match && author_match
+            })
+            .cloned()
+            .collect();
+
         let (key, asc) = sort.read().clone();
         items.sort_by(|a, b| {
             let ord = match key.as_str() {
@@ -104,7 +115,40 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
     let limit_val = *limit.read();
     let shown = filtered_count.min(limit_val);
 
+    // Collect unique op kinds for filter dropdown.
+    let mut op_kinds: Vec<String> = list.iter().map(|r| r.op_kind.clone()).collect();
+    op_kinds.sort();
+    op_kinds.dedup();
+
     rsx! {
+        // Filter row
+        div { class: "flex flex-wrap gap-3 mb-3",
+            div { class: "w-40",
+                FormField { label: "Operation".to_string(),
+                    select {
+                        class: "input input-sm",
+                        value: "{op_filter}",
+                        onchange: move |e: Event<FormData>| op_filter.set(e.value()),
+                        option { value: "all", "All" }
+                        for kind in &op_kinds {
+                            option { value: "{kind}", "{kind}" }
+                        }
+                    }
+                }
+            }
+            div { class: "w-48",
+                FormField { label: "Author".to_string(),
+                    input {
+                        class: "input input-sm",
+                        r#type: "text",
+                        placeholder: "Author ID prefix...",
+                        value: "{author_filter}",
+                        oninput: move |e: Event<FormData>| author_filter.set(e.value()),
+                    }
+                }
+            }
+        }
+
         DataTable {
             search, limit, total, filtered: filtered_count, shown,
             headers: rsx! {
@@ -127,7 +171,7 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
                                     CidDisplay { cid: doc_id.clone(), len: Some(8) }
                                 }
                             } else {
-                                span { class: "text-fg-faint", "—" }
+                                span { class: "text-fg-faint", "\u{2014}" }
                             }
                         }
                         Td { TagPills { tags: row.tags.clone() } }

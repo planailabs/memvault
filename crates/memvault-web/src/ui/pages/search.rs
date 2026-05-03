@@ -1,36 +1,120 @@
-//! Global search page.
+//! Global search page with highlighted results.
 
 use dioxus::prelude::*;
-use plan_ai_design::{Card, PageHeader};
+use plan_ai_design::{Card, PageHeader, Pill, PillVariant};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
-use crate::ui::components::cid_display::CidDisplay;
+use crate::ui::components::tag_pills::TagPills;
 use crate::ui::topbar::use_topbar;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct SearchHit {
     doc_id: String,
+    title: Option<String>,
     score: f32,
     snippet: String,
+    /// Pre-rendered snippet with `<mark>` tags around matching terms.
+    snippet_html: String,
+    tags: Vec<(String, String)>,
 }
 
 #[server]
 async fn search_docs(query: String, limit: usize) -> Result<Vec<SearchHit>, ServerFnError> {
     let client = crate::ui::state::client()?;
+    let q_lower = query.to_lowercase();
     let hits = client
         .search(&query, limit)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(hits
-        .into_iter()
-        .map(|h| SearchHit {
-            doc_id: hex::encode(h.doc_id.0),
+    let mut results = Vec::new();
+    for h in hits {
+        let doc_id = hex::encode(h.doc_id.0);
+
+        // Fetch title from the document.
+        let title = if let Ok(Some(doc)) = client.get_doc(&h.doc_id).await {
+            doc.frontmatter
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        } else {
+            None
+        };
+
+        // Highlight matching terms in snippet.
+        let snippet_html = highlight_snippet(&h.snippet, &q_lower);
+
+        results.push(SearchHit {
+            doc_id,
+            title,
             score: h.score,
             snippet: h.snippet,
-        })
-        .collect())
+            snippet_html,
+            tags: vec![],
+        });
+    }
+
+    Ok(results)
+}
+
+/// Insert `<mark>` tags around query terms in the snippet.
+#[cfg(feature = "server")]
+fn highlight_snippet(snippet: &str, query: &str) -> String {
+    let words: Vec<&str> = query.split_whitespace().filter(|w| w.len() > 1).collect();
+    if words.is_empty() {
+        return html_escape(snippet);
+    }
+
+    let lower = snippet.to_lowercase();
+    let mut result = String::new();
+    let mut i = 0;
+    let chars: Vec<char> = snippet.chars().collect();
+    let lower_chars: Vec<char> = lower.chars().collect();
+
+    while i < chars.len() {
+        let mut matched = false;
+        for word in &words {
+            let wchars: Vec<char> = word.chars().collect();
+            if i + wchars.len() <= lower_chars.len()
+                && lower_chars[i..i + wchars.len()] == wchars[..]
+            {
+                result.push_str("<mark>");
+                for c in &chars[i..i + wchars.len()] {
+                    push_escaped(&mut result, *c);
+                }
+                result.push_str("</mark>");
+                i += wchars.len();
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            push_escaped(&mut result, chars[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
+#[cfg(feature = "server")]
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        push_escaped(&mut out, c);
+    }
+    out
+}
+
+#[cfg(feature = "server")]
+fn push_escaped(out: &mut String, c: char) {
+    match c {
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        '&' => out.push_str("&amp;"),
+        '"' => out.push_str("&quot;"),
+        _ => out.push(c),
+    }
 }
 
 #[component]
@@ -86,10 +170,20 @@ pub fn SearchPage() -> Element {
                             Card { class: "hover:border-brand transition-colors",
                                 div { class: "p-4",
                                     div { class: "flex items-center gap-2 mb-1",
-                                        CidDisplay { cid: hit.doc_id.clone(), len: Some(12) }
-                                        span { class: "text-xs text-fg-faint font-mono", "score {hit.score:.2}" }
+                                        if let Some(title) = &hit.title {
+                                            span { class: "font-medium", "{title}" }
+                                        }
+                                        Pill { variant: PillVariant::Muted, "score {hit.score:.2}" }
                                     }
-                                    p { class: "text-sm text-fg-muted", "{hit.snippet}" }
+                                    p {
+                                        class: "text-sm text-fg-muted [&>mark]:bg-warn-soft [&>mark]:text-fg [&>mark]:px-0.5 [&>mark]:rounded",
+                                        dangerous_inner_html: "{hit.snippet_html}",
+                                    }
+                                    if !hit.tags.is_empty() {
+                                        div { class: "mt-2",
+                                            TagPills { tags: hit.tags.clone() }
+                                        }
+                                    }
                                 }
                             }
                         }

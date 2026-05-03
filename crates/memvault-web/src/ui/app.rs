@@ -11,7 +11,7 @@ use super::pages::files::explorer::FileExplorer;
 use super::pages::graph::detail::EntityDetail;
 use super::pages::graph::explorer::GraphExplorer;
 use super::pages::notes::detail::NoteDetail;
-use super::pages::notes::form::NoteForm;
+use super::pages::notes::form::{NoteEdit, NoteForm};
 use super::pages::notes::history::NoteHistory;
 use super::pages::notes::list::NoteList;
 use super::pages::search::SearchPage;
@@ -24,6 +24,8 @@ pub enum Route {
     NoteList {},
     #[route("/notes/new")]
     NoteForm {},
+    #[route("/notes/:id/edit")]
+    NoteEdit { id: String },
     #[route("/notes/:id")]
     NoteDetail { id: String },
     #[route("/notes/:id/history")]

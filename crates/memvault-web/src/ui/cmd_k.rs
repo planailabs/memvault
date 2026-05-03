@@ -22,12 +22,61 @@ async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnErr
     // Search documents.
     if let Ok(hits) = client.search(&query, 5).await {
         for hit in hits {
+            let title = if let Ok(Some(doc)) = client.get_doc(&hit.doc_id).await {
+                doc.frontmatter
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            } else {
+                None
+            };
             results.push(PaletteResult {
                 kind: "note".to_string(),
                 id: hex::encode(hit.doc_id.0),
-                label: hit.snippet.chars().take(60).collect(),
+                label: title.unwrap_or_else(|| hit.snippet.chars().take(60).collect()),
                 detail: format!("score {:.2}", hit.score),
             });
+        }
+    }
+
+    // Search entities via audit log.
+    if let Ok(records) = client
+        .audit(memvault_query::AuditQuery {
+            op_kind: Some(memvault_query::OpKind::EntityCreate),
+            limit: Some(50),
+            ..Default::default()
+        })
+        .await
+    {
+        let q_lower = query.to_lowercase();
+        for record in records {
+            if record.cid.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&record.cid);
+            let entity_id = memvault_core::EntityId(arr);
+            if let Ok(Some(entity)) = client.get_entity(&entity_id).await {
+                let label = entity
+                    .props
+                    .get("name")
+                    .or_else(|| entity.props.get("title"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&entity.kind);
+                if label.to_lowercase().contains(&q_lower)
+                    || entity.kind.to_lowercase().contains(&q_lower)
+                {
+                    results.push(PaletteResult {
+                        kind: "entity".to_string(),
+                        id: hex::encode(entity.id.0),
+                        label: label.to_string(),
+                        detail: entity.kind.clone(),
+                    });
+                    if results.len() >= 10 {
+                        break;
+                    }
+                }
+            }
         }
     }
 

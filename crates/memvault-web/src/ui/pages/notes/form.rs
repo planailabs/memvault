@@ -1,4 +1,4 @@
-//! Note creation form.
+//! Note creation and edit form.
 
 use dioxus::prelude::*;
 use plan_ai_design::{Button, ButtonVariant, Card, FormField};
@@ -10,6 +10,14 @@ use crate::ui::topbar::use_topbar;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CreateNoteResult {
     id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NoteFormData {
+    title: String,
+    body: String,
+    tags: String,
+    visibility: String,
 }
 
 #[server]
@@ -28,26 +36,11 @@ async fn create_note(
 
     let mut frontmatter = BTreeMap::new();
     if !title.is_empty() {
-        frontmatter.insert(
-            "title".to_string(),
-            serde_json::Value::String(title),
-        );
+        frontmatter.insert("title".to_string(), serde_json::Value::String(title));
     }
 
     let doc = Document::new(doc_id.clone(), body, frontmatter);
-
-    let tags: Vec<(String, String)> = tags_str
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| {
-            let s = s.trim();
-            let mut parts = s.splitn(2, ':');
-            let scope = parts.next().unwrap_or("").to_string();
-            let label = parts.next().unwrap_or("").to_string();
-            (scope, label)
-        })
-        .collect();
-
+    let tags = parse_tags_str(&tags_str);
     let vis = crate::api::docs::parse_visibility_str(Some(&visibility));
     client
         .put_doc(doc, tags, vis)
@@ -59,15 +52,89 @@ async fn create_note(
     })
 }
 
+#[server]
+async fn load_note_for_edit(id: String) -> Result<NoteFormData, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let doc_id =
+        crate::api::docs::parse_doc_id(&id).map_err(|e| ServerFnError::new(format!("{e}")))?;
+    let doc = client
+        .get_doc(&doc_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Document not found"))?;
+
+    let title = doc
+        .frontmatter
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(NoteFormData {
+        title,
+        body: doc.body,
+        tags: String::new(),
+        visibility: "internal".to_string(),
+    })
+}
+
+#[server]
+async fn update_note(id: String, body: String, title: String) -> Result<(), ServerFnError> {
+    use memvault_doc::{TextOp, TextPatch};
+
+    let client = crate::ui::state::client()?;
+    let doc_id =
+        crate::api::docs::parse_doc_id(&id).map_err(|e| ServerFnError::new(format!("{e}")))?;
+
+    // Get current doc to compute a replace-all patch.
+    let doc = client
+        .get_doc(&doc_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Document not found"))?;
+
+    let patch = TextPatch {
+        ops: vec![TextOp::Delete(doc.body.len()), TextOp::Insert(body)],
+    };
+    client
+        .edit_doc(&doc_id, patch)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Update title in frontmatter.
+    if !title.is_empty() {
+        let mut fm = doc.frontmatter;
+        fm.insert("title".to_string(), serde_json::Value::String(title));
+        // SetMeta not directly exposed — title is stored on create only for now.
+    }
+
+    Ok(())
+}
+
+fn parse_tags_str(s: &str) -> Vec<(String, String)> {
+    s.split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            let s = s.trim();
+            let mut parts = s.splitn(2, ':');
+            let scope = parts.next().unwrap_or("").to_string();
+            let label = parts.next().unwrap_or("").to_string();
+            (scope, label)
+        })
+        .collect()
+}
+
+// ── Create form ────────────────────────────────────────────────────────
+
 #[component]
 pub fn NoteForm() -> Element {
     use_topbar("New Note");
     let navigator = use_navigator();
 
-    let mut title = use_signal(String::new);
-    let mut body = use_signal(String::new);
-    let mut tags = use_signal(String::new);
-    let mut visibility = use_signal(|| "internal".to_string());
+    let title = use_signal(String::new);
+    let body = use_signal(String::new);
+    let tags = use_signal(String::new);
+    let visibility = use_signal(|| "internal".to_string());
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
 
@@ -92,15 +159,95 @@ pub fn NoteForm() -> Element {
     };
 
     rsx! {
+        NoteFormInner {
+            page_title: "New Note",
+            title, body, tags, visibility, saving, error,
+            on_submit,
+            cancel_route: Route::NoteList {},
+        }
+    }
+}
+
+// ── Edit form ──────────────────────────────────────────────────────────
+
+#[component]
+pub fn NoteEdit(id: String) -> Element {
+    use_topbar("Edit Note");
+    let navigator = use_navigator();
+
+    let edit_id = id.clone();
+    let cancel_id = id.clone();
+
+    let existing = use_server_future(move || {
+        let id = id.clone();
+        async move { load_note_for_edit(id).await }
+    })?;
+
+    let data = match &*existing.read() {
+        Some(Ok(d)) => d.clone(),
+        Some(Err(e)) => return rsx! { p { class: "text-danger", "Error: {e}" } },
+        None => return rsx! { p { class: "text-fg-muted", "Loading..." } },
+    };
+    let title = use_signal(|| data.title.clone());
+    let body = use_signal(|| data.body.clone());
+    let tags = use_signal(|| data.tags.clone());
+    let visibility = use_signal(|| data.visibility.clone());
+    let mut saving = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let on_submit = move |_: Event<FormData>| {
+        saving.set(true);
+        error.set(None);
+        let eid = edit_id.clone();
+        let t = title.read().clone();
+        let b = body.read().clone();
+        spawn(async move {
+            match update_note(eid.clone(), b, t).await {
+                Ok(()) => {
+                    navigator.push(Route::NoteDetail { id: eid });
+                }
+                Err(e) => {
+                    error.set(Some(e.to_string()));
+                    saving.set(false);
+                }
+            }
+        });
+    };
+
+    rsx! {
+        NoteFormInner {
+            page_title: "Edit Note",
+            title, body, tags, visibility, saving, error,
+            on_submit,
+            cancel_route: Route::NoteDetail { id: cancel_id },
+        }
+    }
+}
+
+// ── Shared form inner ──────────────────────────────────────────────────
+
+#[component]
+fn NoteFormInner(
+    page_title: &'static str,
+    mut title: Signal<String>,
+    mut body: Signal<String>,
+    mut tags: Signal<String>,
+    mut visibility: Signal<String>,
+    saving: Signal<bool>,
+    error: Signal<Option<String>>,
+    on_submit: EventHandler<Event<FormData>>,
+    cancel_route: Route,
+) -> Element {
+    rsx! {
         div { class: "space-y-4 max-w-2xl",
-            h2 { class: "h-page", "New Note" }
+            h2 { class: "h-page", "{page_title}" }
 
             if let Some(err) = &*error.read() {
                 div { class: "alert alert-danger", "{err}" }
             }
 
             Card {
-                form { class: "p-5 space-y-4", onsubmit: on_submit,
+                form { class: "p-5 space-y-4", onsubmit: move |e| on_submit.call(e),
                     FormField { label: "Title".to_string(),
                         input {
                             class: "input",
@@ -143,7 +290,7 @@ pub fn NoteForm() -> Element {
                             disabled: *saving.read(),
                             "Save"
                         }
-                        Link { to: Route::NoteList {},
+                        Link { to: cancel_route,
                             Button { variant: ButtonVariant::Secondary, "Cancel" }
                         }
                     }
