@@ -79,7 +79,8 @@ pub fn TokenManagement() -> Element {
     let mut issued_token = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
 
-    let on_issue = move |_: Event<FormData>| {
+    let on_issue = move |e: Event<FormData>| {
+        e.prevent_default();
         let role = new_role.read().clone();
         let label = new_label.read().clone();
         let max_uses: u32 = new_max_uses.read().parse().unwrap_or(1000);

@@ -125,7 +125,8 @@ pub fn SearchPage() -> Element {
     let mut results = use_signal(|| None::<Result<Vec<SearchHit>, String>>);
     let mut searching = use_signal(|| false);
 
-    let do_search = move |_| {
+    let do_search = move |e: Event<FormData>| {
+        e.prevent_default();
         let q = query.read().clone();
         if q.trim().is_empty() {
             results.set(None);

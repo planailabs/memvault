@@ -138,7 +138,8 @@ pub fn NoteForm() -> Element {
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
 
-    let on_submit = move |_: Event<FormData>| {
+    let on_submit = move |e: Event<FormData>| {
+        e.prevent_default();
         saving.set(true);
         error.set(None);
         let t = title.read().clone();
@@ -195,7 +196,8 @@ pub fn NoteEdit(id: String) -> Element {
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
 
-    let on_submit = move |_: Event<FormData>| {
+    let on_submit = move |e: Event<FormData>| {
+        e.prevent_default();
         saving.set(true);
         error.set(None);
         let eid = edit_id.clone();

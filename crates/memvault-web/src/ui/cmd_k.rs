@@ -133,7 +133,8 @@ pub fn CommandPalette() -> Element {
         return rsx! {};
     }
 
-    let do_search = move |_: Event<FormData>| {
+    let do_search = move |e: Event<FormData>| {
+        e.prevent_default();
         let q = query.read().clone();
         if q.trim().is_empty() {
             results.set(Vec::new());
