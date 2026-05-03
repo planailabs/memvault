@@ -55,6 +55,7 @@ mod server_router {
 </head>
 <body>
     <div id="main"></div>
+    <script type="module" src="/wasm/memvault-web.js"></script>
 </body>
 </html>"#;
 
