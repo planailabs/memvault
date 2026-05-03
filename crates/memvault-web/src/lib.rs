@@ -43,31 +43,50 @@ mod server_router {
         Router::new().nest("/api/v1", super::api::routes(state))
     }
 
-    /// Build a fullstack router: API + Dioxus server functions + SSR + custom asset fallback.
+    /// Build a fullstack router: API + Dioxus server fns + combined asset/SSR fallback.
     ///
-    /// The `asset_fallback` handler serves pre-built web assets (typically via
-    /// rust-embed in the host binary).  Dioxus server functions are registered
-    /// automatically so `#[server]` calls from the WASM client work.
+    /// `try_asset` is called for each request that doesn't match an API route
+    /// or server function. If it returns `Some(response)`, that response is
+    /// served.  Otherwise the Dioxus SSR handler renders the page with proper
+    /// hydration data for the WASM client.
     #[cfg(feature = "server")]
-    pub fn build_fullstack_router<F>(state: Arc<AppState>, asset_fallback: F) -> Router
+    pub fn build_fullstack_router<F>(state: Arc<AppState>, try_asset: F) -> Router
     where
-        F: FnOnce(Router) -> Router + Send + 'static,
+        F: Fn(&str) -> Option<axum::response::Response> + Clone + Send + Sync + 'static,
     {
+        use axum::extract::State;
+        use axum::http::Request;
+        use axum::body::Body;
         use dioxus::server::{DioxusRouterExt, FullstackState, ServeConfig};
 
         // API routes (already stateless — .with_state() called inside).
         let api = Router::new().nest("/api/v1", super::api::routes(state));
 
-        // Dioxus server functions + SSR.
+        // Combined fallback: try embedded asset first, then SSR.
+        let try_asset_clone = try_asset.clone();
+        let combined_fallback = move |State(ssr_state): State<FullstackState>,
+                                      request: Request<Body>| {
+            let try_asset = try_asset_clone.clone();
+            async move {
+                let path = request.uri().path().trim_start_matches('/');
+                // Try embedded static asset first (wasm, js, css, etc.).
+                if let Some(response) = try_asset(path) {
+                    return response;
+                }
+                // Fall through to SSR for HTML pages with hydration data.
+                axum::response::IntoResponse::into_response(
+                    FullstackState::render_handler(State(ssr_state), request).await
+                )
+            }
+        };
+
+        // Dioxus server functions + combined fallback.
         let dioxus = Router::<FullstackState>::new()
             .register_server_functions()
-            .fallback(axum::routing::get(FullstackState::render_handler))
+            .fallback(combined_fallback)
             .with_state(FullstackState::new(ServeConfig::new(), super::ui::app::App));
 
-        // Merge API on top (higher priority), then Dioxus server fns,
-        // then embedded assets as the outermost fallback.
-        let router = api.merge(dioxus);
-        asset_fallback(router)
+        api.merge(dioxus)
     }
 }
 
