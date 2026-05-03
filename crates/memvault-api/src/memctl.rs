@@ -22,6 +22,10 @@ pub struct Cli {
     #[arg(long, env = "MEMVAULT_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
+    /// Path to the redb database file directly (alternative to --data-dir)
+    #[arg(long, env = "MEMVAULT_DB")]
+    pub db: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -180,11 +184,18 @@ fn default_data_dir() -> PathBuf {
         .join("memvault")
 }
 
+fn open_store_at(db_path: &Path) -> Result<Arc<MemvaultStore>> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let store = MemvaultStore::open(db_path)?;
+    Ok(Arc::new(store))
+}
+
 fn open_store(data_dir: &Path) -> Result<Arc<MemvaultStore>> {
     std::fs::create_dir_all(data_dir)?;
     let db_path = data_dir.join("blocks.redb");
-    let store = MemvaultStore::open(&db_path)?;
-    Ok(Arc::new(store))
+    open_store_at(&db_path)
 }
 
 fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
@@ -217,6 +228,16 @@ fn parse_entity_id(hex_str: &str) -> Result<EntityId> {
 /// Run the memctl CLI with the given parsed arguments.
 pub async fn run(cli: Cli) -> Result<()> {
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
+    let db_override = cli.db;
+
+    // Helper: open the store using --db if provided, otherwise data_dir/blocks.redb.
+    let make_store = || -> Result<Arc<MemvaultStore>> {
+        if let Some(ref db_path) = db_override {
+            open_store_at(db_path)
+        } else {
+            open_store(&data_dir)
+        }
+    };
 
     match cli.command {
         Commands::Genesis { admin_key } => {
@@ -245,7 +266,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     buf
                 }
             };
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let tags: Vec<(String, String)> = tag.iter()
                 .filter_map(|t| { let (s, l) = t.split_once(':')?; Some((s.to_string(), l.to_string())) })
@@ -261,7 +282,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Get { cid } => {
             let cid_bytes = hex::decode(&cid)?;
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             if let Some(block) = store.get_block(&cid_bytes)? {
                 println!("{}", String::from_utf8_lossy(&block));
             } else {
@@ -270,7 +291,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
         Commands::Search { query, limit } => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let hits = client.search(&query, limit).await?;
             for hit in hits {
@@ -280,7 +301,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
         Commands::List { limit, scope } => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let tag_filter = scope.map(|s| (s, "*".to_string()));
             let docs = client.list_docs(tag_filter, limit).await?;
@@ -290,7 +311,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
         Commands::Status => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let status = client.status().await?;
             println!("Memvault Node Status");
@@ -301,7 +322,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Retract { cid, reason } => {
             let cid_bytes = hex::decode(&cid)?;
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let tombstone = client.retract(&cid_bytes, &reason).await?;
             println!("Retracted. Tombstone: {}", hex::encode(&tombstone));
@@ -311,13 +332,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                 "admin" => Role::Admin, "auditor" => Role::Auditor, "service" => Role::Service,
                 _ => Role::AgentHost,
             };
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let token_str = client.issue_token(role, ttl, max_uses, label).await?;
             println!("{token_str}");
         }
         Commands::TokenList => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let tokens = client.list_tokens().await?;
             for t in tokens {
@@ -328,13 +349,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::TokenRevoke { cid, reason } => {
             let cid_bytes = hex::decode(&cid)?;
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             client.revoke_token(&cid_bytes, &reason).await?;
             println!("Token revoked.");
         }
         Commands::Rotations => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let rotations = client.list_rotations().await?;
             for r in rotations {
@@ -343,7 +364,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
         Commands::Audit { limit, kind: _ } => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let cids = store.query_by_time(0, u64::MAX, limit)?;
             println!("{} audit records found.", cids.len());
             for cid in cids { println!("  {}", hex::encode(&cid)); }
@@ -354,14 +375,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             let len = doc_id_bytes.len().min(32);
             id[..len].copy_from_slice(&doc_id_bytes[..len]);
             let did = DocId(id);
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let records = client.history_of(&did).await?;
             println!("History for doc {doc_id}: {} ops", records.len());
             for r in records { println!("  {} kind={:?}", hex::encode(&r.cid), r.op_kind); }
         }
         Commands::GraphAdd { kind, prop } => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let props: BTreeMap<String, serde_json::Value> = prop.iter()
                 .filter_map(|p| { let (k, v) = p.split_once('=')?; Some((k.to_string(), serde_json::Value::String(v.to_string()))) })
@@ -373,7 +394,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::GraphLink { source, target, relation, weight } => {
             let source_id = parse_entity_id(&source)?;
             let target_id = parse_entity_id(&target)?;
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let source_ref = memvault_core::NodeRef::Entity(source_id);
             let edge = Edge { id: memvault_core::EdgeId::random(), relation, target: memvault_core::NodeRef::Entity(target_id), weight, props: BTreeMap::new(), provenance: None };
@@ -382,7 +403,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::GraphQuery { from, relation, max_depth } => {
             let entity_id = parse_entity_id(&from)?;
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let client = create_client(store);
             let from_ref = memvault_core::NodeRef::Entity(entity_id);
             let hits = client.traverse_from(&from_ref, relation.as_deref(), max_depth).await?;
@@ -394,7 +415,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Peers => { println!("Connected peers: 0 (standalone mode)"); }
         Commands::RepairIndex => {
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
 
             // Phase 1: Rebuild store secondary indexes (BY_TAG, BY_AUTHOR, BY_TIME, etc.)
             println!("Phase 1: Clearing secondary index tables...");
@@ -489,7 +510,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("Invalid cluster_id hex: {e}"))?;
             println!("Cluster ID: {}", hex::encode(&cluster_bytes));
 
-            let store = open_store(&data_dir)?;
+            let store = make_store()?;
             let blocks = store.iter_blocks()?;
             let mut patched = 0usize;
             let mut skipped = 0usize;
