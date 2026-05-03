@@ -38,6 +38,29 @@ mod server_router {
         pub metrics: Arc<memvault_api::metrics::Metrics>,
     }
 
+    /// Load the API bearer token from `data_dir/api.token`, generating a new
+    /// random token on first run. The file is created with mode 0600.
+    pub fn load_or_generate_token(data_dir: &std::path::Path) -> std::io::Result<String> {
+        let token_path = data_dir.join("api.token");
+        if let Ok(token) = std::fs::read_to_string(&token_path) {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+        use rand::Rng;
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill(&mut bytes);
+        let token = hex::encode(bytes);
+        std::fs::write(&token_path, &token)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(token)
+    }
+
     /// Build the API-only memvault router (no web UI).
     pub fn build_router(state: Arc<AppState>) -> Router {
         Router::new().nest("/api/v1", super::api::routes(state))

@@ -10,10 +10,21 @@ fn main() {
             // Attach REST API routes (client is lazily initialized on first use).
             if let Ok(client) = memvault_web::ui::state::client() {
                 use std::sync::Arc;
+
+                let data_dir = std::env::var("MEMVAULT_DATA_DIR")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        dirs::data_local_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("memvault")
+                    });
+                let auth_token = memvault_web::load_or_generate_token(&data_dir)
+                    .unwrap_or_default();
+
                 let app_state = Arc::new(memvault_web::AppState {
                     client,
                     event_bus: Arc::new(memvault_api::EventBus::new(64)),
-                    auth_token: String::new(),
+                    auth_token,
                     metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                 });
                 router = axum::Router::new()
