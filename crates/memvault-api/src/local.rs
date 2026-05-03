@@ -438,6 +438,24 @@ impl MemvaultClient for LocalClient {
         Ok(entities.get(id).cloned())
     }
 
+    async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>> {
+        let labels = self.store.query_unique_labels("entity", limit)?;
+        let mut entities = Vec::new();
+        for label in labels {
+            let id_bytes = hex::decode(&label).unwrap_or_default();
+            if id_bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let entity_id = EntityId(arr);
+            if let Ok(Some(entity)) = self.get_entity(&entity_id).await {
+                entities.push(entity);
+            }
+        }
+        Ok(entities)
+    }
+
     async fn add_edge(&self, source: &EntityId, edge: Edge, vis: Visibility) -> Result<EdgeId> {
         let edge_id = edge.id.clone();
         let op = Op::EdgeAdd {

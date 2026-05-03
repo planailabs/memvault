@@ -47,6 +47,44 @@ pub fn pack_tag_prefix_end(scope: &str, label: &str) -> Vec<u8> {
     buf
 }
 
+/// Build a scope-only prefix for scanning all labels under a scope.
+pub fn pack_scope_prefix(scope: &str) -> Vec<u8> {
+    let scope_bytes = scope.as_bytes();
+    let mut buf = Vec::with_capacity(2 + scope_bytes.len());
+    buf.extend_from_slice(&(scope_bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(scope_bytes);
+    buf
+}
+
+/// Build a scope-only upper bound (exclusive).
+pub fn pack_scope_prefix_end(scope: &str) -> Vec<u8> {
+    let scope_bytes = scope.as_bytes();
+    let mut buf = Vec::with_capacity(2 + scope_bytes.len() + 1);
+    buf.extend_from_slice(&(scope_bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(scope_bytes);
+    // Increment last byte to get exclusive upper bound for this scope.
+    buf.push(0xFF);
+    buf
+}
+
+/// Extract the label from a tag key.
+pub fn unpack_tag_label(key: &[u8]) -> Result<&[u8], StoreError> {
+    if key.len() < 4 {
+        return Err(StoreError::KeyEncoding("tag key too short".into()));
+    }
+    let scope_len = u16::from_be_bytes([key[0], key[1]]) as usize;
+    let offset = 2 + scope_len;
+    if key.len() < offset + 2 {
+        return Err(StoreError::KeyEncoding("tag key too short for label".into()));
+    }
+    let label_len = u16::from_be_bytes([key[offset], key[offset + 1]]) as usize;
+    let label_start = offset + 2;
+    if key.len() < label_start + label_len {
+        return Err(StoreError::KeyEncoding("tag key too short for label data".into()));
+    }
+    Ok(&key[label_start..label_start + label_len])
+}
+
 /// Extract the CID from a tag key (everything after the prefix).
 pub fn unpack_tag_cid(key: &[u8]) -> Result<&[u8], StoreError> {
     if key.len() < 4 {

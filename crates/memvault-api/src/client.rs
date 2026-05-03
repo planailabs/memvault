@@ -32,6 +32,7 @@ pub trait MemvaultClient: Send + Sync {
     // -- Graph --
     async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId>;
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>>;
+    async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>>;
     async fn add_edge(&self, source: &EntityId, edge: Edge, vis: Visibility) -> Result<EdgeId>;
     async fn remove_edge(&self, source: &EntityId, edge_id: &EdgeId) -> Result<()>;
     async fn traverse(&self, from: &EntityId, relation: Option<&str>, max_depth: usize) -> Result<Vec<TraversalHit>>;

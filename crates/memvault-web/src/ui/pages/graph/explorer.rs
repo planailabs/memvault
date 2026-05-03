@@ -30,30 +30,15 @@ struct EdgeSummary {
 
 #[server]
 async fn list_entities() -> Result<Vec<EntitySummary>, ServerFnError> {
-    use memvault_query::{AuditQuery, OpKind};
-
     let client = crate::ui::state::client()?;
-    let records = client
-        .audit(AuditQuery {
-            op_kind: Some(OpKind::EntityCreate),
-            limit: Some(200),
-            ..Default::default()
-        })
+    let entities = client
+        .list_entities(200)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let mut entities = Vec::new();
-    for record in records {
-        let entity_id = {
-            let id_bytes = match record.entity_id {
-                Some(ref bytes) if bytes.len() == 32 => bytes,
-                _ => continue,
-            };
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(id_bytes);
-            memvault_core::EntityId(arr)
-        };
-        if let Ok(Some(entity)) = client.get_entity(&entity_id).await {
+    Ok(entities
+        .into_iter()
+        .map(|entity| {
             let label = entity
                 .props
                 .get("name")
@@ -61,7 +46,7 @@ async fn list_entities() -> Result<Vec<EntitySummary>, ServerFnError> {
                 .and_then(|v| v.as_str())
                 .unwrap_or(&entity.kind)
                 .to_string();
-            entities.push(EntitySummary {
+            EntitySummary {
                 id: hex::encode(entity.id.0),
                 kind: entity.kind,
                 label,
@@ -74,10 +59,9 @@ async fn list_entities() -> Result<Vec<EntitySummary>, ServerFnError> {
                         weight: e.weight.unwrap_or(1.0),
                     })
                     .collect(),
-            });
-        }
-    }
-    Ok(entities)
+            }
+        })
+        .collect())
 }
 
 #[server]

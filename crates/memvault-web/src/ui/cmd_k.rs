@@ -39,43 +39,27 @@ async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnErr
         }
     }
 
-    // Search entities via audit log.
-    if let Ok(records) = client
-        .audit(memvault_query::AuditQuery {
-            op_kind: Some(memvault_query::OpKind::EntityCreate),
-            limit: Some(50),
-            ..Default::default()
-        })
-        .await
-    {
+    // Search entities.
+    if let Ok(entities) = client.list_entities(50).await {
         let q_lower = query.to_lowercase();
-        for record in records {
-            let id_bytes = match record.entity_id {
-                Some(ref bytes) if bytes.len() == 32 => bytes,
-                _ => continue,
-            };
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(id_bytes);
-            let entity_id = memvault_core::EntityId(arr);
-            if let Ok(Some(entity)) = client.get_entity(&entity_id).await {
-                let label = entity
-                    .props
-                    .get("name")
-                    .or_else(|| entity.props.get("title"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&entity.kind);
-                if label.to_lowercase().contains(&q_lower)
-                    || entity.kind.to_lowercase().contains(&q_lower)
-                {
-                    results.push(PaletteResult {
-                        kind: "entity".to_string(),
-                        id: hex::encode(entity.id.0),
-                        label: label.to_string(),
-                        detail: entity.kind.clone(),
-                    });
-                    if results.len() >= 10 {
-                        break;
-                    }
+        for entity in entities {
+            let label = entity
+                .props
+                .get("name")
+                .or_else(|| entity.props.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(&entity.kind);
+            if label.to_lowercase().contains(&q_lower)
+                || entity.kind.to_lowercase().contains(&q_lower)
+            {
+                results.push(PaletteResult {
+                    kind: "entity".to_string(),
+                    id: hex::encode(entity.id.0),
+                    label: label.to_string(),
+                    detail: entity.kind.clone(),
+                });
+                if results.len() >= 10 {
+                    break;
                 }
             }
         }

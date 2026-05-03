@@ -33,6 +33,41 @@ impl MemvaultStore {
         Ok(results)
     }
 
+    /// List unique labels under a tag scope, up to `limit` results.
+    ///
+    /// Scans the BY_TAG index for all entries with the given scope and
+    /// collects distinct labels.  Useful for listing all entity IDs
+    /// (scope = "entity") without going through the audit log.
+    pub fn query_unique_labels(
+        &self,
+        scope: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TAG)?;
+
+        let start = keys::pack_scope_prefix(scope);
+        let end = keys::pack_scope_prefix_end(scope);
+
+        let mut labels = Vec::new();
+        let mut last_label = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())?;
+        for entry in range {
+            let (key, _) = entry?;
+            let label = keys::unpack_tag_label(key.value())?;
+            if label != last_label {
+                last_label = label.to_vec();
+                if let Ok(s) = std::str::from_utf8(label) {
+                    labels.push(s.to_string());
+                }
+                if labels.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(labels)
+    }
+
     /// Query CIDs by author, starting after `after_ns`, up to `limit` results.
     pub fn query_by_author(
         &self,

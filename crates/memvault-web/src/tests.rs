@@ -129,6 +129,10 @@ impl MemvaultClient for MockClient {
         }))
     }
 
+    async fn list_entities(&self, _limit: usize) -> memvault_api::Result<Vec<Entity>> {
+        Ok(vec![])
+    }
+
     async fn add_edge(
         &self,
         _source: &EntityId,
