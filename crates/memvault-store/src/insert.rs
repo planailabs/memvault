@@ -17,6 +17,112 @@ pub struct EnvelopeMeta {
 }
 
 impl MemvaultStore {
+    /// Clear all secondary index tables (BY_TAG, BY_AUTHOR, BY_TIME, BY_CAUSAL, BY_PROVENANCE, CLUSTER_ORIGIN).
+    /// Does NOT touch BLOCKS, HEADS, REVOCATIONS, RETRACTED, CONSUMED_TOKENS, ROTATIONS, or EDGES.
+    pub fn clear_secondary_indexes(&self) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            // Drain each table by opening and removing all entries.
+            let mut t = txn.open_table(BY_TAG)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(BY_AUTHOR)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(BY_TIME)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(BY_CAUSAL)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(BY_PROVENANCE)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(CLUSTER_ORIGIN)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(EDGES)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Re-index a single block by CID, parsing it as an envelope and writing all secondary indexes.
+    /// Blocks that don't parse as envelopes are silently skipped.
+    pub fn reindex_block(&self, cid_bytes: &[u8], envelope_bytes: &[u8]) -> Result<bool, StoreError> {
+        let val: serde_json::Value = match serde_json::from_slice(envelope_bytes) {
+            Ok(v) => v,
+            Err(_) => return Ok(false), // not a JSON envelope, skip
+        };
+
+        // Extract envelope metadata
+        let author: Vec<u8> = val.get("author")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let tags: Vec<(String, String)> = val.get("tags")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let wall_ns: u64 = val.get("wall_ns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let causal: Vec<Vec<u8>> = val.get("causal")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let provenance: Vec<Vec<u8>> = val.get("provenance")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let cluster_id: Option<Vec<u8>> = val.get("cluster_id")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        if wall_ns == 0 && author.is_empty() && tags.is_empty() {
+            return Ok(false); // not an envelope
+        }
+
+        let meta = EnvelopeMeta {
+            author,
+            tags,
+            wall_ns,
+            causal,
+            provenance,
+            cluster_id,
+        };
+
+        // Write index entries (without re-inserting the block itself)
+        let txn = self.db.begin_write()?;
+        {
+            let mut tag_table = txn.open_table(BY_TAG)?;
+            for (scope, label) in &meta.tags {
+                let key = keys::pack_tag_key(scope, label, meta.wall_ns, cid_bytes);
+                tag_table.insert(key.as_slice(), &[] as &[u8])?;
+            }
+
+            let mut author_table = txn.open_table(BY_AUTHOR)?;
+            if !meta.author.is_empty() {
+                let author_key = keys::pack_author_key(&meta.author, meta.wall_ns, cid_bytes);
+                author_table.insert(author_key.as_slice(), &[] as &[u8])?;
+            }
+
+            let mut time_table = txn.open_table(BY_TIME)?;
+            let time_key = keys::pack_time_key(meta.wall_ns, cid_bytes);
+            time_table.insert(time_key.as_slice(), &[] as &[u8])?;
+
+            let mut causal_table = txn.open_table(BY_CAUSAL)?;
+            for parent in &meta.causal {
+                let link_key = keys::pack_link_key(parent, cid_bytes);
+                causal_table.insert(link_key.as_slice(), &[] as &[u8])?;
+            }
+
+            let mut prov_table = txn.open_table(BY_PROVENANCE)?;
+            for parent in &meta.provenance {
+                let link_key = keys::pack_link_key(parent, cid_bytes);
+                prov_table.insert(link_key.as_slice(), &[] as &[u8])?;
+            }
+
+            if let Some(cluster_id) = &meta.cluster_id {
+                let mut cluster_table = txn.open_table(CLUSTER_ORIGIN)?;
+                let cluster_key = keys::pack_cluster_key(cluster_id, meta.wall_ns, cid_bytes);
+                cluster_table.insert(cluster_key.as_slice(), &[] as &[u8])?;
+            }
+        }
+        txn.commit()?;
+        Ok(true)
+    }
+
     /// Atomically insert an envelope: stores the block and updates all relevant indexes.
     pub fn insert_envelope(
         &self,

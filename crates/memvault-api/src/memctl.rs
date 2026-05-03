@@ -392,8 +392,25 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Peers => { println!("Connected peers: 0 (standalone mode)"); }
         Commands::RepairIndex => {
-            println!("Rebuilding full-text search index from blockstore...");
             let store = open_store(&data_dir)?;
+
+            // Phase 1: Rebuild store secondary indexes (BY_TAG, BY_AUTHOR, BY_TIME, etc.)
+            println!("Phase 1: Clearing secondary index tables...");
+            store.clear_secondary_indexes()?;
+
+            println!("Phase 1: Scanning blocks and rebuilding store indexes...");
+            let blocks = store.iter_blocks()?;
+            let total_blocks = blocks.len();
+            let mut indexed_envelopes = 0usize;
+            for (cid, data) in &blocks {
+                if store.reindex_block(cid, data)? {
+                    indexed_envelopes += 1;
+                }
+            }
+            println!("  {indexed_envelopes}/{total_blocks} blocks re-indexed into store tables");
+
+            // Phase 2: Rebuild full-text search index
+            println!("Phase 2: Rebuilding full-text search index...");
             let index = Arc::new(RwLock::new(TextIndex::new()));
             let client = LocalClient::new(
                 store.clone(),
@@ -440,27 +457,25 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
             }
 
-            // Re-index attachments (scan by time for attachment envelopes)
-            let all_cids = store.query_by_time(0, u64::MAX, 10_000)?;
-            for cid in &all_cids {
-                if let Some(data) = store.get_block(cid)? {
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
-                        if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
-                            let manifest_cid = val.get("manifest_cid")
-                                .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
-                            let filename = val.get("filename").and_then(|v| v.as_str());
-                            let mime_type = val.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream");
-                            if let Some(mcid) = manifest_cid {
-                                let mut idx = index.write().await;
-                                idx.index_attachment(&mcid, filename, mime_type);
-                                attachment_count += 1;
-                            }
+            // Re-index attachments
+            for (_, data) in &blocks {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                    if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                        let manifest_cid = val.get("manifest_cid")
+                            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+                        let filename = val.get("filename").and_then(|v| v.as_str());
+                        let mime_type = val.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream");
+                        if let Some(mcid) = manifest_cid {
+                            let mut idx = index.write().await;
+                            idx.index_attachment(&mcid, filename, mime_type);
+                            attachment_count += 1;
                         }
                     }
                 }
             }
 
-            println!("Index rebuilt: {doc_count} docs, {entity_count} entities, {attachment_count} attachments");
+            println!("  {doc_count} docs, {entity_count} entities, {attachment_count} attachments");
+            println!("Repair complete.");
         }
         Commands::RenewAttestation { peer_id } => { println!("Attestation renewal for {peer_id}: not yet implemented in standalone mode"); }
     }

@@ -1,5 +1,7 @@
 //! Block put/get/has/delete operations.
 
+use redb::ReadableTable;
+
 use crate::error::StoreError;
 use crate::tables::BLOCKS;
 use crate::MemvaultStore;
@@ -28,6 +30,18 @@ impl MemvaultStore {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
         Ok(table.get(cid)?.is_some())
+    }
+
+    /// Iterate all blocks, returning (cid_bytes, block_bytes) pairs.
+    pub fn iter_blocks(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BLOCKS)?;
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (k, v) = entry?;
+            out.push((k.value().to_vec(), v.value().to_vec()));
+        }
+        Ok(out)
     }
 
     /// Delete a block by CID bytes.
