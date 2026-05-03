@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "scripts": {
+    "tailwind": "tailwindcss -i ../../../plan-ai-design/assets/input.css -o public/tailwind.css --watch",
+    "tailwind:build": "tailwindcss -i ../../../plan-ai-design/assets/input.css -o public/tailwind.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5",
+    "tailwindcss": "^3"
+  }
+}

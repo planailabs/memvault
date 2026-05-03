@@ -1,0 +1,5 @@
+[application]
+name = "memvault-web"
+
+[web.app]
+title = "memvault"
