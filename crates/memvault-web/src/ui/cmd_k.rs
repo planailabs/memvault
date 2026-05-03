@@ -17,53 +17,33 @@ struct PaletteResult {
 #[server]
 async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let mut results = Vec::new();
 
-    // Search documents.
-    if let Ok(hits) = client.search(&query, 5).await {
-        for hit in hits {
-            let title = if let Ok(Some(doc)) = client.get_doc(&hit.doc_id).await {
-                doc.frontmatter
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            } else {
-                None
+    // Unified search across docs, entities, and attachments.
+    let hits = client
+        .search_unified(&query, 15)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let results: Vec<PaletteResult> = hits
+        .into_iter()
+        .map(|hit| {
+            let (kind, id) = match hit.node_type.as_str() {
+                "doc" => ("note", hit.node_id.strip_prefix("doc:").unwrap_or(&hit.node_id).to_string()),
+                "attachment" => ("file", hit.node_id.strip_prefix("attachment:").unwrap_or(&hit.node_id).to_string()),
+                _ => ("entity", hit.node_id.strip_prefix("entity:").unwrap_or(&hit.node_id).to_string()),
             };
-            results.push(PaletteResult {
-                kind: "note".to_string(),
-                id: hex::encode(hit.doc_id.0),
-                label: title.unwrap_or_else(|| hit.snippet.chars().take(60).collect()),
-                detail: format!("score {:.2}", hit.score),
-            });
-        }
-    }
-
-    // Search entities.
-    if let Ok(entities) = client.list_entities(50).await {
-        let q_lower = query.to_lowercase();
-        for entity in entities {
-            let label = entity
-                .props
-                .get("name")
-                .or_else(|| entity.props.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(&entity.kind);
-            if label.to_lowercase().contains(&q_lower)
-                || entity.kind.to_lowercase().contains(&q_lower)
-            {
-                results.push(PaletteResult {
-                    kind: "entity".to_string(),
-                    id: hex::encode(entity.id.0),
-                    label: label.to_string(),
-                    detail: entity.kind.clone(),
-                });
-                if results.len() >= 10 {
-                    break;
-                }
+            PaletteResult {
+                kind: kind.to_string(),
+                id,
+                label: hit.label,
+                detail: if hit.node_type == "entity" {
+                    hit.snippet.chars().take(40).collect()
+                } else {
+                    format!("{:.0}", hit.score)
+                },
             }
-        }
-    }
+        })
+        .collect();
 
     Ok(results)
 }

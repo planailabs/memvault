@@ -27,6 +27,7 @@ struct FileLinkedItem {
     direction: String,
     relation: String,
     other_node: String,
+    other_label: Option<String>,
 }
 
 impl FileData {
@@ -110,7 +111,8 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
                     } else {
                         ("incoming".to_string(), source.tag_label())
                     };
-                    items.push(FileLinkedItem { direction, relation: edge.relation.clone(), other_node });
+                    let other_label = client.resolve_label(&other_node).await.unwrap_or(None);
+                    items.push(FileLinkedItem { direction, relation: edge.relation.clone(), other_node, other_label });
                 }
             }
             items
@@ -219,8 +221,12 @@ fn FileView(data: FileData) -> Element {
                                 div { class: "flex items-center gap-3 py-2",
                                     Pill { variant: PillVariant::Muted, "{item.direction}" }
                                     Pill { variant: PillVariant::Muted, "{item.relation}" }
-                                    span { class: "font-mono text-sm text-fg-muted truncate flex-1",
-                                        "{item.other_node}"
+                                    if let Some(label) = &item.other_label {
+                                        span { class: "text-sm truncate flex-1", "{label}" }
+                                    } else {
+                                        span { class: "font-mono text-sm text-fg-muted truncate flex-1",
+                                            "{item.other_node}"
+                                        }
                                     }
                                 }
                             }
@@ -243,6 +249,16 @@ fn FileView(data: FileData) -> Element {
             }
         }
     }
+}
+
+#[server]
+async fn search_file_link_targets(query: String) -> Result<Vec<(String, String, String)>, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let hits = client
+        .search_unified(&query, 8)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(hits.into_iter().map(|h| (h.node_id, h.node_type, h.label)).collect())
 }
 
 #[server]
@@ -270,42 +286,100 @@ async fn create_file_link(source: String, target: String, relation: String) -> R
 
 #[component]
 fn FileQuickLinkForm(source_id: String) -> Element {
-    let mut target_input = use_signal(String::new);
+    let mut search_input = use_signal(String::new);
+    let mut selected_target = use_signal(|| None::<(String, String)>);
+    let mut suggestions = use_signal(Vec::<(String, String, String)>::new);
     let mut relation_input = use_signal(|| "related_to".to_string());
     let mut status_msg = use_signal(|| None::<String>);
+
+    let on_search_input = move |e: Event<FormData>| {
+        let q = e.value();
+        search_input.set(q.clone());
+        selected_target.set(None);
+        if q.len() >= 2 {
+            spawn(async move {
+                if let Ok(results) = search_file_link_targets(q).await {
+                    suggestions.set(results);
+                }
+            });
+        } else {
+            suggestions.set(Vec::new());
+        }
+    };
 
     let source = source_id.clone();
     let on_submit = move |_| {
         let source = source.clone();
-        let target = target_input.read().clone();
+        let (target, _label) = match &*selected_target.read() {
+            Some(t) => t.clone(),
+            None => {
+                let raw = search_input.read().clone();
+                if raw.contains(':') {
+                    (raw.clone(), raw)
+                } else {
+                    status_msg.set(Some("Select a target from search results".to_string()));
+                    return;
+                }
+            }
+        };
         let relation = relation_input.read().clone();
-        if target.is_empty() {
-            status_msg.set(Some("Target is required".to_string()));
-            return;
-        }
         spawn(async move {
             match create_file_link(source, target, relation).await {
                 Ok(edge_id) => {
                     status_msg.set(Some(format!("Linked (edge {})", &edge_id[..8])));
-                    target_input.set(String::new());
+                    search_input.set(String::new());
+                    selected_target.set(None);
+                    suggestions.set(Vec::new());
                 }
                 Err(e) => status_msg.set(Some(format!("Error: {e}"))),
             }
         });
     };
 
+    let suggestion_list = suggestions.read().clone();
+
     rsx! {
         div { class: "mt-3 pt-3 border-t border-line",
             h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", "Add Link" }
             div { class: "flex gap-2 items-end",
-                div { class: "flex-1",
-                    label { class: "text-xs text-fg-muted", "Target (entity:hex, doc:hex, ...)" }
-                    input {
-                        class: "input input-sm w-full mt-1",
-                        r#type: "text",
-                        placeholder: "entity:abc123...",
-                        value: "{target_input}",
-                        oninput: move |e: Event<FormData>| target_input.set(e.value()),
+                div { class: "flex-1 relative",
+                    label { class: "text-xs text-fg-muted", "Target" }
+                    {
+                        let display_val = if let Some((_, ref lbl)) = *selected_target.read() {
+                            lbl.clone()
+                        } else {
+                            search_input.read().clone()
+                        };
+                        rsx! {
+                            input {
+                                class: "input input-sm w-full mt-1",
+                                r#type: "text",
+                                placeholder: "Search nodes...",
+                                value: "{display_val}",
+                                oninput: on_search_input,
+                            }
+                        }
+                    }
+                    if !suggestion_list.is_empty() && selected_target.read().is_none() {
+                        div { class: "absolute z-10 w-full mt-1 bg-surface border border-line rounded shadow-lg max-h-48 overflow-y-auto",
+                            for (node_id, node_type, label) in &suggestion_list {
+                                {
+                                    let nid = node_id.clone();
+                                    let lbl = label.clone();
+                                    rsx! {
+                                        div {
+                                            class: "px-3 py-2 hover:bg-surface-2 cursor-pointer flex items-center gap-2 text-sm",
+                                            onclick: move |_| {
+                                                selected_target.set(Some((nid.clone(), lbl.clone())));
+                                                suggestions.set(Vec::new());
+                                            },
+                                            Pill { variant: PillVariant::Muted, "{node_type}" }
+                                            span { class: "truncate", "{label}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 div {

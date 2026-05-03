@@ -312,6 +312,12 @@ impl MemvaultClient for LocalClient {
         let env_cid = cid_from_bytes(&envelope_bytes);
         self.store.insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
 
+        // Index for unified search
+        {
+            let mut idx = self.index.write().await;
+            idx.index_attachment(&manifest_cid_bytes, filename, mime_type);
+        }
+
         self.event_bus.publish(MemvaultEvent::FileAttached {
             doc_id: DocId([0; 32]), // No doc association in new system
             name: filename.unwrap_or("unnamed").to_string(),
@@ -413,6 +419,12 @@ impl MemvaultClient for LocalClient {
         let entity_label: String = entity_id.0.iter().map(|b| format!("{b:02x}")).collect();
         let tags = vec![("entity".to_string(), entity_label)];
         self.store_op(&op, &tags, &vis)?;
+
+        // Index for unified search
+        {
+            let mut idx = self.index.write().await;
+            idx.index_entity(&entity_id, &entity.kind, &entity.props);
+        }
 
         self.event_bus.publish(MemvaultEvent::EntityCreated {
             entity_id: entity_id.clone(),
@@ -616,6 +628,16 @@ impl MemvaultClient for LocalClient {
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let idx = self.index.read().await;
         Ok(idx.search(query, limit))
+    }
+
+    async fn search_unified(&self, query: &str, limit: usize) -> Result<Vec<memvault_query::UnifiedHit>> {
+        let idx = self.index.read().await;
+        Ok(idx.search_unified(query, limit))
+    }
+
+    async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
+        let idx = self.index.read().await;
+        Ok(idx.resolve_label(node_id))
     }
 
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>> {

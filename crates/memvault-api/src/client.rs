@@ -48,6 +48,10 @@ pub trait MemvaultClient: Send + Sync {
 
     // -- Search --
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
+    /// Unified search across all node types (docs, entities, attachments).
+    async fn search_unified(&self, query: &str, limit: usize) -> Result<Vec<memvault_query::UnifiedHit>>;
+    /// Resolve a node_id (tag_label like "entity:<hex>") to a human-readable label.
+    async fn resolve_label(&self, node_id: &str) -> Result<Option<String>>;
 
     // -- History & Audit --
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>>;

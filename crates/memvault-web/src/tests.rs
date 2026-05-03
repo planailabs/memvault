@@ -180,6 +180,14 @@ impl MemvaultClient for MockClient {
         }
     }
 
+    async fn search_unified(&self, _query: &str, _limit: usize) -> memvault_api::Result<Vec<memvault_query::UnifiedHit>> {
+        Ok(vec![])
+    }
+
+    async fn resolve_label(&self, _node_id: &str) -> memvault_api::Result<Option<String>> {
+        Ok(None)
+    }
+
     async fn history_of(&self, _doc_id: &DocId) -> memvault_api::Result<Vec<AuditRecord>> {
         Ok(vec![])
     }

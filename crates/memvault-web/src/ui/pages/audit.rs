@@ -18,6 +18,7 @@ struct AuditRow {
     author: String,
     wall_ns: u64,
     doc_id: Option<String>,
+    doc_title: Option<String>,
     tags: Vec<(String, String)>,
 }
 
@@ -43,17 +44,26 @@ async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(records
-        .into_iter()
-        .map(|r| AuditRow {
+    let mut rows = Vec::new();
+    for r in records {
+        let doc_hex = r.doc_id.as_ref().map(|d| hex::encode(d.0));
+        let doc_title = if let Some(ref hex_id) = doc_hex {
+            let node_id = format!("doc:{hex_id}");
+            client.resolve_label(&node_id).await.unwrap_or(None)
+        } else {
+            None
+        };
+        rows.push(AuditRow {
             cid: hex::encode(&r.cid),
             op_kind: format!("{:?}", r.op_kind),
             author: hex::encode(&r.author),
             wall_ns: r.wall_ns,
-            doc_id: r.doc_id.map(|d| hex::encode(d.0)),
+            doc_id: doc_hex,
+            doc_title,
             tags: r.tags,
-        })
-        .collect())
+        });
+    }
+    Ok(rows)
 }
 
 #[component]
@@ -168,7 +178,11 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
                         Td {
                             if let Some(doc_id) = &row.doc_id {
                                 Link { to: Route::NoteDetail { id: doc_id.clone() }, class: "link",
-                                    CidDisplay { cid: doc_id.clone(), len: Some(8) }
+                                    if let Some(title) = &row.doc_title {
+                                        span { class: "truncate max-w-[12rem] inline-block", "{title}" }
+                                    } else {
+                                        CidDisplay { cid: doc_id.clone(), len: Some(8) }
+                                    }
                                 }
                             } else {
                                 span { class: "text-fg-faint", "\u{2014}" }

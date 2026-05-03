@@ -1,4 +1,4 @@
-//! Full-text search index for memvault documents.
+//! Unified full-text search index for memvault — indexes documents, entities, and attachments.
 
 use std::collections::HashMap;
 
@@ -13,6 +13,19 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// A unified search hit that covers all node types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedHit {
+    /// Node reference in tag_label format: "entity:<hex>", "doc:<hex>", "attachment:<hex>"
+    pub node_id: String,
+    /// "entity", "doc", "attachment"
+    pub node_type: String,
+    /// Human-readable label (title, name, filename, kind)
+    pub label: String,
+    pub score: f32,
+    pub snippet: String,
+}
+
 /// Parameters for a search query.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchQuery {
@@ -23,8 +36,9 @@ pub struct SearchQuery {
 
 /// In-memory full-text search index (simple TF-based).
 pub struct TextIndex {
-    /// doc_id -> (body text, tags)
     docs: HashMap<DocId, IndexedDoc>,
+    /// Unified entries keyed by tag_label (e.g. "entity:abc123")
+    unified: HashMap<String, IndexedEntry>,
 }
 
 struct IndexedDoc {
@@ -33,10 +47,19 @@ struct IndexedDoc {
     tags: Vec<(String, String)>,
 }
 
+struct IndexedEntry {
+    node_type: String,
+    label: String,
+    /// Searchable text blob (all concatenated searchable fields)
+    text: String,
+    tags: Vec<(String, String)>,
+}
+
 impl TextIndex {
     pub fn new() -> Self {
         Self {
             docs: HashMap::new(),
+            unified: HashMap::new(),
         }
     }
 
@@ -48,6 +71,25 @@ impl TextIndex {
         title: Option<&str>,
         tags: Vec<(String, String)>,
     ) {
+        let label = title.unwrap_or("Untitled").to_string();
+        let node_id = format!("doc:{}", hex::encode(doc_id.0));
+
+        // Unified entry
+        let mut text_parts = vec![body.to_string()];
+        if let Some(t) = title {
+            text_parts.push(t.to_string());
+        }
+        for (scope, lbl) in &tags {
+            text_parts.push(format!("{scope}:{lbl}"));
+        }
+        self.unified.insert(node_id, IndexedEntry {
+            node_type: "doc".to_string(),
+            label: label.clone(),
+            text: text_parts.join(" "),
+            tags: tags.clone(),
+        });
+
+        // Legacy doc index
         self.docs.insert(
             doc_id,
             IndexedDoc {
@@ -58,12 +100,123 @@ impl TextIndex {
         );
     }
 
+    /// Index an entity's properties for unified search.
+    pub fn index_entity(
+        &mut self,
+        entity_id: &memvault_core::EntityId,
+        kind: &str,
+        props: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) {
+        let node_id = format!("entity:{}", hex::encode(entity_id.0));
+        let label = props
+            .get("name")
+            .or_else(|| props.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(kind)
+            .to_string();
+
+        let mut text_parts = vec![kind.to_string(), label.clone()];
+        for (key, val) in props {
+            text_parts.push(key.clone());
+            match val {
+                serde_json::Value::String(s) => text_parts.push(s.clone()),
+                other => text_parts.push(other.to_string()),
+            }
+        }
+
+        self.unified.insert(node_id, IndexedEntry {
+            node_type: "entity".to_string(),
+            label,
+            text: text_parts.join(" "),
+            tags: vec![],
+        });
+    }
+
+    /// Index an attachment for unified search.
+    pub fn index_attachment(
+        &mut self,
+        manifest_cid: &[u8],
+        filename: Option<&str>,
+        mime_type: &str,
+    ) {
+        let node_id = format!("attachment:{}", hex::encode(manifest_cid));
+        let label = filename.unwrap_or("unnamed file").to_string();
+
+        let mut text_parts = vec![label.clone(), mime_type.to_string()];
+        if let Some(f) = filename {
+            // Also index filename parts (split on dots, dashes, underscores)
+            for part in f.split(|c: char| c == '.' || c == '-' || c == '_' || c == ' ') {
+                if !part.is_empty() {
+                    text_parts.push(part.to_string());
+                }
+            }
+        }
+
+        self.unified.insert(node_id, IndexedEntry {
+            node_type: "attachment".to_string(),
+            label,
+            text: text_parts.join(" "),
+            tags: vec![],
+        });
+    }
+
     /// Remove a document from the index.
     pub fn remove_doc(&mut self, doc_id: &DocId) {
         self.docs.remove(doc_id);
+        let node_id = format!("doc:{}", hex::encode(doc_id.0));
+        self.unified.remove(&node_id);
     }
 
-    /// Search the index for documents matching the query text.
+    /// Unified search across all indexed nodes (docs, entities, attachments).
+    pub fn search_unified(&self, query: &str, limit: usize) -> Vec<UnifiedHit> {
+        let query_lower = query.to_lowercase();
+        let terms: Vec<&str> = query_lower.split_whitespace().collect();
+        if terms.is_empty() {
+            return Vec::new();
+        }
+
+        let mut hits: Vec<UnifiedHit> = Vec::new();
+
+        for (node_id, entry) in &self.unified {
+            let text_lower = entry.text.to_lowercase();
+            let label_lower = entry.label.to_lowercase();
+
+            let mut score: f32 = 0.0;
+            let mut matched = false;
+
+            for term in &terms {
+                let text_count = text_lower.matches(term).count();
+                let label_count = label_lower.matches(term).count();
+                if text_count > 0 || label_count > 0 {
+                    matched = true;
+                    score += text_count as f32 + label_count as f32 * 3.0;
+                }
+            }
+
+            if matched {
+                let snippet = extract_snippet(&entry.text, &terms);
+                hits.push(UnifiedHit {
+                    node_id: node_id.clone(),
+                    node_type: entry.node_type.clone(),
+                    label: entry.label.clone(),
+                    score,
+                    snippet,
+                });
+            }
+        }
+
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(limit);
+        hits
+    }
+
+    /// Resolve a node_id (tag_label) to a human-readable label.
+    /// Returns None if the node is not indexed.
+    pub fn resolve_label(&self, node_id: &str) -> Option<String> {
+        self.unified.get(node_id).map(|e| e.label.clone())
+    }
+
+    /// Search the index for documents matching the query text (legacy doc-only search).
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         self.search_filtered(query, None, limit)
     }
@@ -89,7 +242,6 @@ impl TextIndex {
         let mut hits: Vec<SearchHit> = Vec::new();
 
         for (doc_id, indexed) in &self.docs {
-            // Apply tag filter if present
             if let Some((scope, label)) = tag_filter {
                 if !indexed.tags.iter().any(|(s, l)| s == scope && l == label) {
                     continue;
@@ -135,7 +287,6 @@ impl Default for TextIndex {
 
 fn extract_snippet(body: &str, terms: &[&str]) -> String {
     let body_lower = body.to_lowercase();
-    // Find first occurrence of any term
     let mut earliest_pos = body.len();
     for term in terms {
         if let Some(pos) = body_lower.find(term) {
@@ -144,11 +295,9 @@ fn extract_snippet(body: &str, terms: &[&str]) -> String {
     }
 
     if earliest_pos == body.len() {
-        // No match found, return start of body
         return body.chars().take(100).collect();
     }
 
-    // Take context around the match
     let start = earliest_pos.saturating_sub(30);
     let snippet: String = body.chars().skip(start).take(120).collect();
     if start > 0 {
