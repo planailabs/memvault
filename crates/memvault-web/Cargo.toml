@@ -18,9 +18,10 @@ web = ["webui", "dioxus/web", "dep:getrandom"]
 webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid", "dep:gloo-timers"]
 server = [
     "webui", "dioxus/server",
-    "dep:memvault-api", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth",
+    "dep:memvault-api", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth", "dep:memvault-store",
     "dep:axum", "dep:tokio", "dep:tokio-stream",
     "dep:tower", "dep:tower-http", "dep:thiserror",
+    "dep:dirs",
 ]
 
 [dependencies]
@@ -34,6 +35,8 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Server-only dependencies (not compiled for WASM)
 memvault-api = { path = "../memvault-api", optional = true }
+memvault-store = { path = "../memvault-store", optional = true }
+dirs = { version = "6", optional = true }
 memvault-doc = { path = "../memvault-doc", optional = true }
 memvault-query = { path = "../memvault-query", optional = true }
 memvault-auth = { path = "../memvault-auth", optional = true }
