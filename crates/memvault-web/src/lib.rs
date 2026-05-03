@@ -59,13 +59,18 @@ mod server_router {
 </body>
 </html>"#;
 
-    /// Write a minimal `index.html` so `ServeConfig::new()` picks it up.
-    /// Must be called **before** `build_fullstack_router`.
+    /// Tailwind CSS — bundled at compile time from the public/ directory.
+    const TAILWIND_CSS: &[u8] = include_bytes!("../public/tailwind.css");
+
+    /// Write index.html and tailwind.css to a temp dir and set `DIOXUS_PUBLIC_PATH`
+    /// so `ServeConfig::new()` picks them up.
+    /// Must be called **before** `build_fullstack_router` or `dioxus::serve`.
     #[cfg(feature = "server")]
     pub fn prepare_public_dir() {
         let dir = std::env::temp_dir().join("memvault-web-public");
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join("index.html"), INDEX_HTML);
+        let _ = std::fs::write(dir.join("tailwind.css"), TAILWIND_CSS);
         // SAFETY: called before the router is built.
         unsafe { std::env::set_var("DIOXUS_PUBLIC_PATH", &dir) };
     }
