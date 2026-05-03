@@ -43,86 +43,47 @@ mod server_router {
         Router::new().nest("/api/v1", super::api::routes(state))
     }
 
-    /// Minimal index.html for Dioxus SSR.  Includes the WASM script tag and
-    /// Tailwind CSS link.  Dioxus injects hydration data at render time.
-    const INDEX_HTML: &str = r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>memvault</title>
-    <link rel="stylesheet" href="/tailwind.css">
-</head>
-<body>
-    <div id="main"></div>
-    <script type="module" src="/wasm/memvault-web.js"></script>
-</body>
-</html>"#;
-
-    /// Write a minimal `index.html` to a temp directory and set
-    /// `DIOXUS_PUBLIC_PATH` so `ServeConfig::new()` picks it up.
+    /// Build a fullstack router: API + Dioxus server fns + embedded asset serving.
     ///
-    /// Must be called **before** `build_fullstack_router`.
-    #[cfg(feature = "server")]
-    pub fn prepare_public_dir() {
-        let dir = std::env::temp_dir().join("memvault-web-public");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("index.html"), INDEX_HTML);
-
-        // SAFETY: called before any async runtime / threads that read this.
-        unsafe { std::env::set_var("DIOXUS_PUBLIC_PATH", &dir) };
-
-        tracing::debug!(path = %dir.display(), "memvault: prepared DIOXUS_PUBLIC_PATH");
-    }
-
-    /// Build a fullstack router: API + Dioxus server fns + combined asset/SSR fallback.
-    ///
-    /// `try_asset` is called for each request that doesn't match an API route
-    /// or server function. If it returns `Some(response)`, that response is
-    /// served.  Otherwise the Dioxus SSR handler renders the page with proper
-    /// hydration data for the WASM client.
+    /// No SSR — the pre-built WASM client renders everything client-side.
+    /// Server functions are registered headlessly so `#[server]` calls work.
+    /// `try_asset` serves embedded static files; `index.html` is the SPA fallback.
     #[cfg(feature = "server")]
     pub fn build_fullstack_router<F>(state: Arc<AppState>, try_asset: F) -> Router
     where
         F: Fn(&str) -> Option<axum::response::Response> + Clone + Send + Sync + 'static,
     {
-        use axum::extract::State;
-        use axum::http::Request;
-        use axum::body::Body;
-        use dioxus::server::{DioxusRouterExt, FullstackState, ServeConfig};
+        use dioxus::server::{DioxusRouterExt, FullstackState};
 
         // API routes (already stateless — .with_state() called inside).
         let api = Router::new().nest("/api/v1", super::api::routes(state));
 
-        // Combined fallback: try embedded asset first, then SSR.
+        // Dioxus server functions (headless — no SSR rendering).
+        let server_fns = Router::<FullstackState>::new()
+            .register_server_functions()
+            .with_state(FullstackState::headless());
+
+        // Serve embedded assets as the fallback (index.html for SPA routing).
         let try_asset_clone = try_asset.clone();
-        let combined_fallback = move |State(ssr_state): State<FullstackState>,
-                                      request: Request<Body>| {
+        let asset_fallback = move |uri: axum::http::Uri| {
             let try_asset = try_asset_clone.clone();
             async move {
-                let path = request.uri().path().trim_start_matches('/');
-                // Try embedded static asset first (wasm, js, css, etc.).
+                let path = uri.path().trim_start_matches('/');
                 if let Some(response) = try_asset(path) {
                     return response;
                 }
-                // Fall through to SSR for HTML pages with hydration data.
-                axum::response::IntoResponse::into_response(
-                    FullstackState::render_handler(State(ssr_state), request).await
-                )
+                // SPA fallback: serve index.html for unknown paths.
+                try_asset("index.html")
+                    .unwrap_or_else(|| {
+                        axum::response::IntoResponse::into_response((
+                            axum::http::StatusCode::NOT_FOUND,
+                            "index.html not found in embedded assets",
+                        ))
+                    })
             }
         };
 
-        // Dioxus server functions + combined fallback.
-        //
-        // ServeConfig::new() reads index.html from DIOXUS_PUBLIC_PATH or
-        // <exe_dir>/public/. The caller must ensure a valid index.html is
-        // available at one of these locations (see `prepare_public_dir`).
-        let dioxus = Router::<FullstackState>::new()
-            .register_server_functions()
-            .fallback(combined_fallback)
-            .with_state(FullstackState::new(ServeConfig::new(), super::ui::app::App));
-
-        api.merge(dioxus)
+        api.merge(server_fns).fallback(asset_fallback)
     }
 }
 
