@@ -47,12 +47,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/entities/{id}",
             get(graph::get_entity).delete(graph::delete_entity),
         )
-        .route("/entities/{id}/edges", post(graph::add_edge))
-        .route(
-            "/entities/{id}/edges/{edge_id}",
-            delete(graph::remove_edge),
-        )
-        .route("/entities/{id}/traverse", get(graph::traverse))
         // Links (cross-type edges)
         .route("/links", post(links::create_link).get(links::list_links))
         .route("/links/{edge_id}", delete(links::delete_link))

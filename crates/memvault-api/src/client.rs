@@ -45,10 +45,6 @@ pub trait MemvaultClient: Send + Sync {
     /// Traverse the graph from any node, following edges across types.
     async fn traverse_from(&self, from: &NodeRef, relation: Option<&str>, max_depth: usize) -> Result<Vec<TraversalHit>>;
 
-    // -- Legacy graph edge methods (delegate to add_link/remove_link_from/traverse_from) --
-    async fn add_edge(&self, source: &EntityId, edge: Edge, vis: Visibility) -> Result<EdgeId>;
-    async fn remove_edge(&self, source: &EntityId, edge_id: &EdgeId) -> Result<()>;
-    async fn traverse(&self, from: &EntityId, relation: Option<&str>, max_depth: usize) -> Result<Vec<TraversalHit>>;
 
     // -- Search --
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;

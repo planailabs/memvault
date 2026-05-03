@@ -140,6 +140,29 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
 }
 
 #[server]
+async fn create_link(source: String, target: String, relation: String) -> Result<String, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let source_ref = memvault_core::NodeRef::from_tag_label(&source)
+        .ok_or_else(|| ServerFnError::new("Invalid source node"))?;
+    let target_ref = memvault_core::NodeRef::from_tag_label(&target)
+        .ok_or_else(|| ServerFnError::new("Invalid target — use format: entity:<hex>, doc:<hex>, or attachment:<hex>"))?;
+
+    let edge = memvault_doc::Edge {
+        id: memvault_core::EdgeId::random(),
+        relation,
+        target: target_ref,
+        weight: None,
+        props: std::collections::BTreeMap::new(),
+        provenance: None,
+    };
+    let edge_id = client
+        .add_link(&source_ref, edge, memvault_core::Visibility::Internal)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(hex::encode(edge_id.0))
+}
+
+#[server]
 async fn delete_note(id: String) -> Result<(), ServerFnError> {
     let client = crate::ui::state::client()?;
     let doc_id =
@@ -237,11 +260,11 @@ fn NoteView(data: NoteData) -> Element {
                 }
             }
 
-            // Linked Items
-            if !data.linked_items.is_empty() {
-                Card {
-                    div { class: "p-5",
-                        SectionHeading { "Links ({data.linked_items.len()})" }
+            // Linked Items + Add Link
+            Card {
+                div { class: "p-5",
+                    SectionHeading { "Links ({data.linked_items.len()})" }
+                    if !data.linked_items.is_empty() {
                         div { class: "mt-2 divide-y divide-line",
                             for item in &data.linked_items {
                                 div { class: "flex items-center gap-3 py-2",
@@ -254,6 +277,8 @@ fn NoteView(data: NoteData) -> Element {
                             }
                         }
                     }
+                    // Quick-link form
+                    QuickLinkForm { source_id: format!("doc:{}", data.id) }
                 }
             }
 
@@ -276,6 +301,65 @@ fn NoteView(data: NoteData) -> Element {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Inline form to create a link from this node to another.
+#[component]
+fn QuickLinkForm(source_id: String) -> Element {
+    let mut target_input = use_signal(String::new);
+    let mut relation_input = use_signal(|| "related_to".to_string());
+    let mut status_msg = use_signal(|| None::<String>);
+
+    let source = source_id.clone();
+    let on_submit = move |_| {
+        let source = source.clone();
+        let target = target_input.read().clone();
+        let relation = relation_input.read().clone();
+        if target.is_empty() {
+            status_msg.set(Some("Target is required".to_string()));
+            return;
+        }
+        spawn(async move {
+            match create_link(source, target, relation).await {
+                Ok(edge_id) => {
+                    status_msg.set(Some(format!("Linked (edge {})", &edge_id[..8])));
+                    target_input.set(String::new());
+                }
+                Err(e) => status_msg.set(Some(format!("Error: {e}"))),
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "mt-3 pt-3 border-t border-line",
+            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", "Add Link" }
+            div { class: "flex gap-2 items-end",
+                div { class: "flex-1",
+                    label { class: "text-xs text-fg-muted", "Target (entity:hex, doc:hex, ...)" }
+                    input {
+                        class: "input input-sm w-full mt-1",
+                        r#type: "text",
+                        placeholder: "entity:abc123...",
+                        value: "{target_input}",
+                        oninput: move |e: Event<FormData>| target_input.set(e.value()),
+                    }
+                }
+                div {
+                    label { class: "text-xs text-fg-muted", "Relation" }
+                    input {
+                        class: "input input-sm w-24 mt-1",
+                        r#type: "text",
+                        value: "{relation_input}",
+                        oninput: move |e: Event<FormData>| relation_input.set(e.value()),
+                    }
+                }
+                Button { variant: ButtonVariant::Secondary, onclick: on_submit, "Link" }
+            }
+            if let Some(msg) = &*status_msg.read() {
+                p { class: "text-xs mt-1 text-fg-muted", "{msg}" }
             }
         }
     }

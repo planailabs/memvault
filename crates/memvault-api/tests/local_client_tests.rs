@@ -130,7 +130,7 @@ async fn add_entity_and_traverse() {
         provenance: None,
     };
     client
-        .add_edge(&id_a, edge_ab, Visibility::Internal)
+        .add_link(&NodeRef::Entity(id_a.clone()), edge_ab, Visibility::Internal)
         .await
         .unwrap();
 
@@ -143,12 +143,12 @@ async fn add_entity_and_traverse() {
         provenance: None,
     };
     client
-        .add_edge(&id_b, edge_bc, Visibility::Internal)
+        .add_link(&NodeRef::Entity(id_b.clone()), edge_bc, Visibility::Internal)
         .await
         .unwrap();
 
     // Traverse from A with max_depth=2
-    let hits = client.traverse(&id_a, Some("knows"), 2).await.unwrap();
+    let hits = client.traverse_from(&NodeRef::Entity(id_a.clone()), Some("knows"), 2).await.unwrap();
     assert_eq!(hits.len(), 2);
 
     // First hit should be B at depth 1

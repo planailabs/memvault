@@ -612,24 +612,6 @@ impl MemvaultClient for LocalClient {
         Ok(results)
     }
 
-    // -- Legacy edge methods (delegate to links) --
-
-    async fn add_edge(&self, source: &EntityId, edge: Edge, vis: Visibility) -> Result<EdgeId> {
-        self.add_link(&NodeRef::Entity(source.clone()), edge, vis).await
-    }
-
-    async fn remove_edge(&self, source: &EntityId, edge_id: &EdgeId) -> Result<()> {
-        self.remove_link_from(&NodeRef::Entity(source.clone()), edge_id).await
-    }
-
-    async fn traverse(
-        &self,
-        from: &EntityId,
-        relation: Option<&str>,
-        max_depth: usize,
-    ) -> Result<Vec<TraversalHit>> {
-        self.traverse_from(&NodeRef::Entity(from.clone()), relation, max_depth).await
-    }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let idx = self.index.read().await;

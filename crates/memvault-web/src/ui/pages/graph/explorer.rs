@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 use plan_ai_design::{Card, PageHeader, Pill, PillVariant};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
 use crate::ui::app::Route;
@@ -12,31 +13,59 @@ use crate::ui::topbar::use_topbar;
 // ── Data types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct EntitySummary {
+struct NodeSummary {
+    /// Unique ID in tag_label format: "entity:<hex>", "doc:<hex>", "attachment:<hex>"
     id: String,
+    /// "entity", "doc", "attachment"
+    node_type: String,
+    /// Entity kind (e.g. "person") or "document"/"file" for docs/attachments
     kind: String,
     label: String,
     edges: Vec<EdgeSummary>,
+    props: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EdgeSummary {
+    edge_id: String,
     relation: String,
     target_id: String,
     weight: f32,
 }
 
+/// Lazy-loaded detail for the sidebar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct NodeDetail {
+    id: String,
+    node_type: String,
+    kind: String,
+    label: String,
+    props: BTreeMap<String, serde_json::Value>,
+    edges: Vec<EdgeDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct EdgeDetail {
+    edge_id: String,
+    relation: String,
+    direction: String,
+    other_node: String,
+    other_label: Option<String>,
+}
+
 // ── Server functions ───────────────────────────────────────────────────
 
 #[server]
-async fn list_entities() -> Result<Vec<EntitySummary>, ServerFnError> {
+async fn list_graph_nodes() -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
+
+    // Load entities
     let entities = client
         .list_entities(200)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(entities
+    let mut nodes: Vec<NodeSummary> = entities
         .into_iter()
         .map(|entity| {
             let label = entity
@@ -46,92 +75,220 @@ async fn list_entities() -> Result<Vec<EntitySummary>, ServerFnError> {
                 .and_then(|v| v.as_str())
                 .unwrap_or(&entity.kind)
                 .to_string();
-            EntitySummary {
-                id: hex::encode(entity.id.0),
+            let id = format!("entity:{}", hex::encode(entity.id.0));
+            NodeSummary {
+                id,
+                node_type: "entity".to_string(),
                 kind: entity.kind,
                 label,
                 edges: entity
                     .edges_out
                     .iter()
                     .map(|e| EdgeSummary {
+                        edge_id: hex::encode(e.id.0),
                         relation: e.relation.clone(),
                         target_id: e.target.tag_label(),
                         weight: e.weight.unwrap_or(1.0),
                     })
                     .collect(),
+                props: entity.props,
             }
         })
-        .collect())
+        .collect();
+
+    // Collect doc/attachment nodes that are targets of edges but not yet in the list
+    let mut extra_ids: Vec<String> = Vec::new();
+    for node in &nodes {
+        for edge in &node.edges {
+            if !edge.target_id.starts_with("entity:") && !nodes.iter().any(|n| n.id == edge.target_id) {
+                extra_ids.push(edge.target_id.clone());
+            }
+        }
+    }
+    extra_ids.sort();
+    extra_ids.dedup();
+
+    for extra_id in &extra_ids {
+        let (node_type, label) = if extra_id.starts_with("doc:") {
+            ("doc", "Document")
+        } else if extra_id.starts_with("attachment:") {
+            ("attachment", "File")
+        } else {
+            continue;
+        };
+        nodes.push(NodeSummary {
+            id: extra_id.clone(),
+            node_type: node_type.to_string(),
+            kind: label.to_lowercase(),
+            label: format!("{} {}", label, &extra_id[extra_id.find(':').unwrap_or(0) + 1..][..8.min(extra_id.len())]),
+            edges: vec![],
+            props: BTreeMap::new(),
+        });
+    }
+
+    Ok(nodes)
 }
 
 #[server]
-async fn expand_entity(id: String) -> Result<Vec<EntitySummary>, ServerFnError> {
+async fn get_node_detail(node_id: String) -> Result<NodeDetail, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let bytes = hex::decode(&id).map_err(|_| ServerFnError::new("Invalid entity ID"))?;
-    if bytes.len() != 32 {
-        return Err(ServerFnError::new("Entity ID must be 32 bytes"));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    let entity_id = memvault_core::EntityId(arr);
 
-    let hits = client
-        .traverse(&entity_id, None, 1)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let node_ref = memvault_core::NodeRef::from_tag_label(&node_id)
+        .ok_or_else(|| ServerFnError::new("Invalid node ID"))?;
+
+    // Get properties + basic info
+    let (kind, label, props) = match &node_ref {
+        memvault_core::NodeRef::Entity(id) => {
+            if let Ok(Some(entity)) = client.get_entity(id).await {
+                let label = entity
+                    .props
+                    .get("name")
+                    .or_else(|| entity.props.get("title"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&entity.kind)
+                    .to_string();
+                (entity.kind, label, entity.props)
+            } else {
+                ("entity".to_string(), "Unknown".to_string(), BTreeMap::new())
+            }
+        }
+        memvault_core::NodeRef::Doc(id) => {
+            let label = if let Ok(Some(doc)) = client.get_doc(id).await {
+                doc.frontmatter
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled")
+                    .to_string()
+            } else {
+                "Document".to_string()
+            };
+            ("document".to_string(), label, BTreeMap::new())
+        }
+        memvault_core::NodeRef::Attachment(_) => {
+            ("file".to_string(), "File".to_string(), BTreeMap::new())
+        }
+    };
+
+    // Get edges
+    let mut edges = Vec::new();
+    if let Ok(edge_list) = client.edges_of(&node_ref).await {
+        for (source, edge) in edge_list {
+            let (direction, other_node) = if source == node_ref {
+                ("outgoing".to_string(), edge.target.tag_label())
+            } else {
+                ("incoming".to_string(), source.tag_label())
+            };
+            edges.push(EdgeDetail {
+                edge_id: hex::encode(edge.id.0),
+                relation: edge.relation,
+                direction,
+                other_node,
+                other_label: None,
+            });
+        }
+    }
+
+    let node_type = match &node_ref {
+        memvault_core::NodeRef::Entity(_) => "entity",
+        memvault_core::NodeRef::Doc(_) => "doc",
+        memvault_core::NodeRef::Attachment(_) => "attachment",
+    };
+
+    Ok(NodeDetail {
+        id: node_id,
+        node_type: node_type.to_string(),
+        kind,
+        label,
+        props,
+        edges,
+    })
+}
+
+#[server]
+async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let node_ref = memvault_core::NodeRef::from_tag_label(&id)
+        .ok_or_else(|| ServerFnError::new("Invalid node ID"))?;
 
     let mut neighbors = Vec::new();
-    for hit in hits {
-        let entity_id = match hit.entity_id() {
-            Some(id) => id,
-            None => continue, // skip non-entity nodes in graph explorer for now
-        };
-        if let Ok(Some(entity)) = client.get_entity(entity_id).await {
-            let label = entity
-                .props
-                .get("name")
-                .or_else(|| entity.props.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(&entity.kind)
-                .to_string();
-            neighbors.push(EntitySummary {
-                id: hex::encode(entity.id.0),
-                kind: entity.kind,
-                label,
-                edges: entity
-                    .edges_out
-                    .iter()
-                    .map(|e| EdgeSummary {
-                        relation: e.relation.clone(),
-                        target_id: e.target.tag_label(),
-                        weight: e.weight.unwrap_or(1.0),
-                    })
-                    .collect(),
+    if let Ok(edge_list) = client.edges_of(&node_ref).await {
+        for (source, edge) in edge_list {
+            let other = if source == node_ref { &edge.target } else { &source };
+            let other_id = other.tag_label();
+            // Try to get entity details for entity nodes
+            if let memvault_core::NodeRef::Entity(eid) = other {
+                if let Ok(Some(entity)) = client.get_entity(eid).await {
+                    let label = entity
+                        .props
+                        .get("name")
+                        .or_else(|| entity.props.get("title"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&entity.kind)
+                        .to_string();
+                    neighbors.push(NodeSummary {
+                        id: other_id.clone(),
+                        node_type: "entity".to_string(),
+                        kind: entity.kind,
+                        label,
+                        edges: entity
+                            .edges_out
+                            .iter()
+                            .map(|e| EdgeSummary {
+                                edge_id: hex::encode(e.id.0),
+                                relation: e.relation.clone(),
+                                target_id: e.target.tag_label(),
+                                weight: e.weight.unwrap_or(1.0),
+                            })
+                            .collect(),
+                        props: entity.props,
+                    });
+                    continue;
+                }
+            }
+            // Non-entity or unfetchable: add stub
+            let (node_type, kind, label) = match other {
+                memvault_core::NodeRef::Doc(_) => ("doc", "document", "Document"),
+                memvault_core::NodeRef::Attachment(_) => ("attachment", "file", "File"),
+                memvault_core::NodeRef::Entity(_) => ("entity", "entity", "Entity"),
+            };
+            neighbors.push(NodeSummary {
+                id: other_id,
+                node_type: node_type.to_string(),
+                kind: kind.to_string(),
+                label: label.to_string(),
+                edges: vec![],
+                props: BTreeMap::new(),
             });
         }
     }
     Ok(neighbors)
 }
 
-// ── Color helpers ──────────────────────────────────────────────────────
+// ── Color & shape helpers ─────────────────────────────────────────────
 
-fn kind_color(kind: &str) -> &'static str {
-    match kind {
-        "person" => "rgb(var(--c-info))",
-        "project" => "rgb(var(--c-brand))",
-        "concept" => "rgb(var(--c-success))",
-        "document" => "rgb(var(--c-warn))",
-        _ => "rgb(var(--c-fg-muted))",
+fn node_color(node_type: &str, kind: &str) -> &'static str {
+    match node_type {
+        "doc" => "rgb(var(--c-warn))",
+        "attachment" => "rgb(var(--c-success))",
+        _ => match kind {
+            "person" => "rgb(var(--c-info))",
+            "project" => "rgb(var(--c-brand))",
+            "concept" => "rgb(var(--c-success))",
+            _ => "rgb(var(--c-fg-muted))",
+        },
     }
 }
 
-fn kind_pill_variant(kind: &str) -> PillVariant {
-    match kind {
-        "person" => PillVariant::Info,
-        "project" => PillVariant::Accent,
-        "concept" => PillVariant::Ok,
-        "document" => PillVariant::Warn,
-        _ => PillVariant::Muted,
+fn type_pill_variant(node_type: &str, kind: &str) -> PillVariant {
+    match node_type {
+        "doc" => PillVariant::Warn,
+        "attachment" => PillVariant::Ok,
+        _ => match kind {
+            "person" => PillVariant::Info,
+            "project" => PillVariant::Accent,
+            "concept" => PillVariant::Ok,
+            _ => PillVariant::Muted,
+        },
     }
 }
 
@@ -154,30 +311,57 @@ impl Default for Viewport {
     }
 }
 
+impl Viewport {
+    /// Auto-fit the viewport to contain all given nodes with some padding.
+    fn fit_to_nodes(nodes: &[GraphNode]) -> Self {
+        if nodes.is_empty() {
+            return Self::default();
+        }
+        let min_x = nodes.iter().map(|n| n.x - n.radius).fold(f64::INFINITY, f64::min);
+        let max_x = nodes.iter().map(|n| n.x + n.radius).fold(f64::NEG_INFINITY, f64::max);
+        let min_y = nodes.iter().map(|n| n.y - n.radius).fold(f64::INFINITY, f64::min);
+        let max_y = nodes.iter().map(|n| n.y + n.radius).fold(f64::NEG_INFINITY, f64::max);
+
+        let cx = (min_x + max_x) / 2.0;
+        let cy = (min_y + max_y) / 2.0;
+        let w = (max_x - min_x).max(100.0);
+        let h = (max_y - min_y).max(100.0);
+        // Use the larger axis to determine zoom, with padding
+        let span = w.max(h) + 100.0; // 50px padding on each side
+        let zoom = 800.0 / span; // 800 is the SVG base size
+
+        Self {
+            offset_x: cx,
+            offset_y: cy,
+            zoom: zoom.clamp(0.2, 5.0),
+        }
+    }
+}
+
 // ── Components ─────────────────────────────────────────────────────────
 
 #[component]
 pub fn GraphExplorer() -> Element {
     use_topbar("Graph");
-    let entities_res = use_server_future(list_entities)?;
+    let nodes_res = use_server_future(list_graph_nodes)?;
 
-    match &*entities_res.read() {
-        Some(Ok(entities)) => rsx! { GraphView { entities: entities.clone() } },
+    match &*nodes_res.read() {
+        Some(Ok(nodes)) => rsx! { GraphView { initial_nodes: nodes.clone() } },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
         None => rsx! { p { class: "text-fg-muted", "Loading graph..." } },
     }
 }
 
 #[component]
-fn GraphView(entities: Vec<EntitySummary>) -> Element {
+fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut sim = use_signal(|| {
         let mut s = ForceSimulation::new();
-        for entity in &entities {
-            s.add_node(entity.id.clone(), entity.kind.clone(), entity.label.clone());
+        for node in &initial_nodes {
+            s.add_node(node.id.clone(), node.kind.clone(), node.label.clone());
         }
-        for entity in &entities {
-            let source = s.nodes.iter().position(|n| n.id == entity.id).unwrap_or(0);
-            for edge in &entity.edges {
+        for node in &initial_nodes {
+            let source = s.nodes.iter().position(|n| n.id == node.id).unwrap_or(0);
+            for edge in &node.edges {
                 if let Some(target) = s.nodes.iter().position(|n| n.id == edge.target_id) {
                     s.add_edge(source, target, edge.relation.clone(), edge.weight);
                 }
@@ -188,13 +372,16 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
 
     let mut selected = use_signal(|| None::<String>);
     let mut viewport = use_signal(Viewport::default);
+    let mut viewport_initialized = use_signal(|| false);
     let mut dragging_node = use_signal(|| None::<usize>);
     let mut panning = use_signal(|| false);
     let mut pan_start = use_signal(|| (0.0f64, 0.0f64));
     let mut sidebar_search = use_signal(String::new);
     let mut kind_filter = use_signal(|| None::<String>);
+    let mut focus_node = use_signal(|| None::<String>);
+    let mut detail = use_signal(|| None::<NodeDetail>);
 
-    // Run the simulation to settle on initial load.
+    // Run the simulation to settle on initial load, then auto-fit viewport.
     use_effect(move || {
         let mut s = sim.write();
         for _ in 0..300 {
@@ -203,31 +390,79 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
             }
             s.tick();
         }
+        // Auto-fit viewport to settled graph bounds (only on first load).
+        if !*viewport_initialized.read() {
+            viewport.set(Viewport::fit_to_nodes(&s.nodes));
+            viewport_initialized.set(true);
+        }
     });
 
     let s = sim.read();
-    let nodes: Vec<GraphNode> = s.nodes.clone();
-    let edges: Vec<GraphEdge> = s.edges.clone();
+    let all_nodes: Vec<GraphNode> = s.nodes.clone();
+    let all_edges: Vec<GraphEdge> = s.edges.clone();
     drop(s);
 
-    let selected_entity = selected
-        .read()
-        .as_ref()
-        .and_then(|id| entities.iter().find(|e| e.id == *id))
-        .cloned();
+    // If focus mode is active, filter to just the focused node and its neighbors.
+    let (nodes, edges) = if let Some(ref focus_id) = *focus_node.read() {
+        let focus_idx = all_nodes.iter().position(|n| &n.id == focus_id);
+        if let Some(fi) = focus_idx {
+            let mut visible_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            visible_indices.insert(fi);
+            let relevant_edges: Vec<&GraphEdge> = all_edges
+                .iter()
+                .filter(|e| e.source == fi || e.target == fi)
+                .collect();
+            for e in &relevant_edges {
+                visible_indices.insert(e.source);
+                visible_indices.insert(e.target);
+            }
+            // Re-index nodes and edges for the filtered view
+            let idx_map: std::collections::HashMap<usize, usize> = visible_indices
+                .iter()
+                .enumerate()
+                .map(|(new, &old)| (old, new))
+                .collect();
+            let filtered_nodes: Vec<GraphNode> = visible_indices
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|i| all_nodes[i].clone())
+                .collect();
+            let filtered_edges: Vec<GraphEdge> = relevant_edges
+                .into_iter()
+                .filter_map(|e| {
+                    Some(GraphEdge {
+                        source: *idx_map.get(&e.source)?,
+                        target: *idx_map.get(&e.target)?,
+                        relation: e.relation.clone(),
+                        weight: e.weight,
+                    })
+                })
+                .collect();
+            (filtered_nodes, filtered_edges)
+        } else {
+            (all_nodes.clone(), all_edges.clone())
+        }
+    } else {
+        (all_nodes.clone(), all_edges.clone())
+    };
 
-    // Collect unique entity kinds for the filter.
-    let mut kinds: Vec<String> = entities.iter().map(|e| e.kind.clone()).collect();
+    // Collect unique node kinds for the filter.
+    let mut kinds: Vec<String> = initial_nodes.iter().map(|e| {
+        if e.node_type != "entity" { e.node_type.clone() } else { e.kind.clone() }
+    }).collect();
     kinds.sort();
     kinds.dedup();
 
-    // Filter sidebar entities.
+    // Filter sidebar list.
     let sidebar_q = sidebar_search.read().to_lowercase();
     let active_kind = kind_filter.read().clone();
-    let filtered_entities: Vec<&EntitySummary> = entities
+    let filtered_list: Vec<&NodeSummary> = initial_nodes
         .iter()
         .filter(|e| {
-            let kind_match = active_kind.as_ref().map_or(true, |k| &e.kind == k);
+            let display_kind = if e.node_type != "entity" { &e.node_type } else { &e.kind };
+            let kind_match = active_kind.as_ref().map_or(true, |k| display_kind == k);
             let search_match = sidebar_q.is_empty()
                 || e.label.to_lowercase().contains(&sidebar_q)
                 || e.kind.to_lowercase().contains(&sidebar_q);
@@ -267,10 +502,9 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
 
             // Node dragging takes priority.
             if let Some(idx) = *dragging_node.read() {
-                // Approximate: convert screen delta to graph coords.
                 let mut s = sim.write();
                 let vp = *viewport.read();
-                let scale = (base_half * 2.0) / 800.0; // rough SVG-to-screen
+                let scale = (base_half * 2.0) / 800.0;
                 if let Some(node) = s.nodes.get_mut(idx) {
                     let ps = *pan_start.read();
                     let dx = (coords.x - ps.0) * scale / vp.zoom;
@@ -306,7 +540,6 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                 node.fy = None;
             }
             s.reheat();
-            // Re-settle after drag.
             for _ in 0..100 {
                 if s.is_settled() {
                     break;
@@ -318,11 +551,13 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
         panning.set(false);
     };
 
+    let is_focus_active = focus_node.read().is_some();
+
     rsx! {
         div { class: "space-y-4",
             PageHeader { "Knowledge Graph" }
 
-            if nodes.is_empty() {
+            if nodes.is_empty() && !is_focus_active {
                 Card {
                     div { class: "p-8 text-center text-fg-muted",
                         "No entities found. Create entities via the MCP tools to populate the graph."
@@ -330,14 +565,24 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                 }
             } else {
                 // Toolbar
-                div { class: "flex items-center gap-2 text-sm",
+                div { class: "flex items-center gap-2 text-sm flex-wrap",
                     span { class: "text-fg-muted", "{nodes.len()} nodes, {edges.len()} edges" }
                     span { class: "text-fg-faint", "|" }
                     span { class: "text-fg-muted", "Zoom: {vp.zoom:.1}x" }
                     button {
                         class: "btn btn-xs btn-secondary",
-                        onclick: move |_| viewport.set(Viewport::default()),
-                        "Reset View"
+                        onclick: move |_| {
+                            let s = sim.read();
+                            viewport.set(Viewport::fit_to_nodes(&s.nodes));
+                        },
+                        "Fit View"
+                    }
+                    if is_focus_active {
+                        button {
+                            class: "btn btn-xs btn-secondary",
+                            onclick: move |_| focus_node.set(None),
+                            "Show All"
+                        }
                     }
                 }
 
@@ -347,7 +592,7 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                         input {
                             class: "input input-sm w-full",
                             r#type: "search",
-                            placeholder: "Filter entities...",
+                            placeholder: "Filter nodes...",
                             value: "{sidebar_search}",
                             oninput: move |e: Event<FormData>| sidebar_search.set(e.value()),
                         }
@@ -373,21 +618,34 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                                 }
                             }
                         }
-                        // Entity list
+                        // Node list
                         div { class: "space-y-1 overflow-y-auto max-h-[500px]",
-                            for entity in &filtered_entities {
+                            for node in &filtered_list {
                                 div {
                                     class: "card p-3 cursor-pointer hover:border-brand transition-colors",
-                                    class: if selected.read().as_ref() == Some(&entity.id) { "border-brand" } else { "" },
+                                    class: if selected.read().as_ref() == Some(&node.id) { "border-brand" } else { "" },
                                     onclick: {
-                                        let id = entity.id.clone();
-                                        move |_| selected.set(Some(id.clone()))
+                                        let id = node.id.clone();
+                                        move |_| {
+                                            selected.set(Some(id.clone()));
+                                            // Lazy-load detail
+                                            let nid = id.clone();
+                                            spawn(async move {
+                                                if let Ok(d) = get_node_detail(nid).await {
+                                                    detail.set(Some(d));
+                                                }
+                                            });
+                                        }
                                     },
                                     div { class: "flex items-center gap-2",
-                                        Pill { variant: kind_pill_variant(&entity.kind), "{entity.kind}" }
-                                        span { class: "text-sm font-medium truncate", "{entity.label}" }
+                                        Pill { variant: type_pill_variant(&node.node_type, &node.kind),
+                                            if node.node_type != "entity" { "{node.node_type}" } else { "{node.kind}" }
+                                        }
+                                        span { class: "text-sm font-medium truncate", "{node.label}" }
                                     }
-                                    span { class: "text-xs text-fg-muted", "{entity.edges.len()} edges" }
+                                    if !node.edges.is_empty() {
+                                        span { class: "text-xs text-fg-muted", "{node.edges.len()} edges" }
+                                    }
                                 }
                             }
                         }
@@ -435,18 +693,34 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                                 }
                             }
 
-                            // Nodes
+                            // Nodes — different shapes per type
                             for (idx, node) in nodes.iter().enumerate() {
                                 {
-                                    let color = kind_color(&node.kind);
+                                    // Determine node_type from the id prefix
+                                    let nt = if node.id.starts_with("doc:") { "doc" }
+                                        else if node.id.starts_with("attachment:") { "attachment" }
+                                        else { "entity" };
+                                    let color = node_color(nt, &node.kind);
                                     let is_selected = selected.read().as_ref() == Some(&node.id);
                                     let stroke = if is_selected { "rgb(var(--c-brand))" } else { "transparent" };
                                     let id = node.id.clone();
                                     let expand_id = node.id.clone();
+                                    let _focus_id = node.id.clone();
                                     rsx! {
                                         g {
                                             style: "cursor: pointer",
-                                            onclick: move |_| selected.set(Some(id.clone())),
+                                            onclick: {
+                                                let click_id = id.clone();
+                                                move |_| {
+                                                    selected.set(Some(click_id.clone()));
+                                                    let nid = click_id.clone();
+                                                    spawn(async move {
+                                                        if let Ok(d) = get_node_detail(nid).await {
+                                                            detail.set(Some(d));
+                                                        }
+                                                    });
+                                                }
+                                            },
                                             onmousedown: move |e: Event<MouseData>| {
                                                 e.stop_propagation();
                                                 dragging_node.set(Some(idx));
@@ -458,16 +732,16 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                                                 move |_| {
                                                     let eid = eid.clone();
                                                     spawn(async move {
-                                                        if let Ok(neighbors) = expand_entity(eid).await {
+                                                        if let Ok(neighbors) = expand_node(eid).await {
                                                             let mut s = sim.write();
                                                             for neighbor in &neighbors {
                                                                 s.add_node(neighbor.id.clone(), neighbor.kind.clone(), neighbor.label.clone());
                                                             }
                                                             for neighbor in &neighbors {
-                                                                let source = s.nodes.iter().position(|n| n.id == neighbor.id).unwrap_or(0);
+                                                                let src = s.nodes.iter().position(|n| n.id == neighbor.id).unwrap_or(0);
                                                                 for edge in &neighbor.edges {
-                                                                    if let Some(target) = s.nodes.iter().position(|n| n.id == edge.target_id) {
-                                                                        s.add_edge(source, target, edge.relation.clone(), edge.weight);
+                                                                    if let Some(tgt) = s.nodes.iter().position(|n| n.id == edge.target_id) {
+                                                                        s.add_edge(src, tgt, edge.relation.clone(), edge.weight);
                                                                     }
                                                                 }
                                                             }
@@ -480,13 +754,53 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                                                     });
                                                 }
                                             },
-                                            circle {
-                                                cx: "{node.x}", cy: "{node.y}", r: "{node.radius}",
-                                                fill: "{color}",
-                                                stroke: "{stroke}",
-                                                stroke_width: "3",
-                                                opacity: "0.85",
+
+                                            // Shape: circle for entity, rounded rect for doc, diamond for attachment
+                                            match nt {
+                                                "doc" => rsx! {
+                                                    rect {
+                                                        x: "{node.x - node.radius}",
+                                                        y: "{node.y - node.radius * 0.7}",
+                                                        width: "{node.radius * 2.0}",
+                                                        height: "{node.radius * 1.4}",
+                                                        rx: "4", ry: "4",
+                                                        fill: "{color}",
+                                                        stroke: "{stroke}",
+                                                        stroke_width: "3",
+                                                        opacity: "0.85",
+                                                    }
+                                                },
+                                                "attachment" => {
+                                                    // Diamond shape via polygon
+                                                    let r = node.radius;
+                                                    let pts = format!(
+                                                        "{},{} {},{} {},{} {},{}",
+                                                        node.x, node.y - r,
+                                                        node.x + r, node.y,
+                                                        node.x, node.y + r,
+                                                        node.x - r, node.y,
+                                                    );
+                                                    rsx! {
+                                                        polygon {
+                                                            points: "{pts}",
+                                                            fill: "{color}",
+                                                            stroke: "{stroke}",
+                                                            stroke_width: "3",
+                                                            opacity: "0.85",
+                                                        }
+                                                    }
+                                                },
+                                                _ => rsx! {
+                                                    circle {
+                                                        cx: "{node.x}", cy: "{node.y}", r: "{node.radius}",
+                                                        fill: "{color}",
+                                                        stroke: "{stroke}",
+                                                        stroke_width: "3",
+                                                        opacity: "0.85",
+                                                    }
+                                                },
                                             }
+
                                             text {
                                                 x: "{node.x}",
                                                 y: "{node.y + node.radius + 14.0}",
@@ -504,32 +818,85 @@ fn GraphView(entities: Vec<EntitySummary>) -> Element {
                     }
 
                     // ── Right detail panel ──────────────────────────
-                    if let Some(entity) = &selected_entity {
-                        div { class: "w-72 shrink-0",
+                    if let Some(d) = &*detail.read() {
+                        div { class: "w-72 shrink-0 space-y-3",
                             Card {
                                 div { class: "p-4 space-y-3",
                                     div { class: "flex items-center gap-2",
-                                        Pill { variant: kind_pill_variant(&entity.kind), "{entity.kind}" }
+                                        Pill { variant: type_pill_variant(&d.node_type, &d.kind),
+                                            if d.node_type != "entity" { "{d.node_type}" } else { "{d.kind}" }
+                                        }
                                     }
-                                    h3 { class: "h-card font-semibold", "{entity.label}" }
-                                    CidDisplay { cid: entity.id.clone() }
+                                    h3 { class: "h-card font-semibold", "{d.label}" }
+                                    CidDisplay { cid: d.id.clone() }
 
-                                    if !entity.edges.is_empty() {
+                                    // Focus button
+                                    button {
+                                        class: "btn btn-xs btn-secondary w-full",
+                                        onclick: {
+                                            let fid = d.id.clone();
+                                            move |_| focus_node.set(Some(fid.clone()))
+                                        },
+                                        "Focus on this node"
+                                    }
+
+                                    // Properties
+                                    if !d.props.is_empty() {
                                         div { class: "pt-2 border-t border-line",
-                                            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", "Edges" }
-                                            for edge in &entity.edges {
-                                                div { class: "flex items-center gap-2 text-sm py-1",
-                                                    span { class: "text-fg-muted", "{edge.relation}" }
-                                                    span { class: "text-fg-faint", "\u{2192}" }
-                                                    CidDisplay { cid: edge.target_id.clone(), len: Some(8) }
+                                            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", "Properties" }
+                                            for (key, val) in &d.props {
+                                                div { class: "flex justify-between text-sm py-0.5",
+                                                    span { class: "text-fg-muted truncate mr-2", "{key}" }
+                                                    span { class: "font-mono text-fg-strong truncate text-right", "{val}" }
                                                 }
                                             }
                                         }
                                     }
 
-                                    Link { to: Route::EntityDetail { id: entity.id.clone() },
-                                        class: "btn btn-sm btn-secondary w-full mt-2",
-                                        "View Details"
+                                    // Edges
+                                    if !d.edges.is_empty() {
+                                        div { class: "pt-2 border-t border-line",
+                                            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2",
+                                                "Edges ({d.edges.len()})"
+                                            }
+                                            for edge in &d.edges {
+                                                div { class: "flex items-center gap-1 text-sm py-1 flex-wrap",
+                                                    span { class: "text-xs text-fg-faint",
+                                                        if edge.direction == "outgoing" { "\u{2192}" } else { "\u{2190}" }
+                                                    }
+                                                    span { class: "text-fg-muted", "{edge.relation}" }
+                                                    span { class: "text-xs font-mono text-fg-faint truncate",
+                                                        "{edge.other_node}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Navigation link
+                                    if d.node_type == "entity" {
+                                        if let Some(hex_id) = d.id.strip_prefix("entity:") {
+                                            Link { to: Route::EntityDetail { id: hex_id.to_string() },
+                                                class: "btn btn-sm btn-secondary w-full mt-2",
+                                                "View Details"
+                                            }
+                                        }
+                                    }
+                                    if d.node_type == "doc" {
+                                        if let Some(hex_id) = d.id.strip_prefix("doc:") {
+                                            Link { to: Route::NoteDetail { id: hex_id.to_string() },
+                                                class: "btn btn-sm btn-secondary w-full mt-2",
+                                                "View Document"
+                                            }
+                                        }
+                                    }
+                                    if d.node_type == "attachment" {
+                                        if let Some(hex_cid) = d.id.strip_prefix("attachment:") {
+                                            Link { to: Route::FileDetail { cid: hex_cid.to_string() },
+                                                class: "btn btn-sm btn-secondary w-full mt-2",
+                                                "View File"
+                                            }
+                                        }
                                     }
                                 }
                             }

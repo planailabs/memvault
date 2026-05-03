@@ -167,31 +167,6 @@ impl MemvaultClient for MockClient {
         Ok(vec![])
     }
 
-    async fn add_edge(
-        &self,
-        _source: &EntityId,
-        _edge: Edge,
-        _vis: Visibility,
-    ) -> memvault_api::Result<EdgeId> {
-        Ok(EdgeId::random())
-    }
-
-    async fn remove_edge(
-        &self,
-        _source: &EntityId,
-        _edge_id: &EdgeId,
-    ) -> memvault_api::Result<()> {
-        Ok(())
-    }
-
-    async fn traverse(
-        &self,
-        _from: &EntityId,
-        _relation: Option<&str>,
-        _max_depth: usize,
-    ) -> memvault_api::Result<Vec<TraversalHit>> {
-        Ok(vec![])
-    }
 
     async fn search(&self, query: &str, _limit: usize) -> memvault_api::Result<Vec<SearchHit>> {
         if query == "hello" {
