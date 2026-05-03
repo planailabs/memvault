@@ -109,7 +109,9 @@ plan-ai-memvault --db /path/to/blocks.redb --cluster-id abc123...
 |------|-------------|
 | `memvault_status` | Block count, doc count, peer count, uptime |
 
-### Example: Claude Code MCP config
+### Adding to Claude Code
+
+**Option 1: Project-scoped** (recommended) — add to `.mcp.json` in your project root:
 
 ```json
 {
@@ -123,6 +125,49 @@ plan-ai-memvault --db /path/to/blocks.redb --cluster-id abc123...
     }
   }
 }
+```
+
+**Option 2: Global** — add to `~/.claude/settings.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "memvault": {
+      "command": "plan-ai-memvault",
+      "args": ["--db", "/home/user/.local/share/memvault/blocks.redb"]
+    }
+  }
+}
+```
+
+**Option 3: Via CLI** — run inside Claude Code:
+
+```
+/mcp add memvault plan-ai-memvault --args "--db /home/user/.local/share/memvault/blocks.redb"
+```
+
+**HTTP mode** (when a daemon is running):
+
+```json
+{
+  "mcpServers": {
+    "memvault": {
+      "command": "plan-ai-memvault",
+      "args": ["--url", "http://127.0.0.1:8401"],
+      "env": {
+        "MEMVAULT_TOKEN_FILE": "/home/user/.local/share/memvault/api.token"
+      }
+    }
+  }
+}
+```
+
+After adding, restart Claude Code or run `/mcp` to verify the server is connected. You should see 18 tools available under the `memvault_*` prefix.
+
+**First use** — initialize the database if it doesn't exist yet:
+
+```bash
+memctl genesis
 ```
 
 ## memctl CLI
