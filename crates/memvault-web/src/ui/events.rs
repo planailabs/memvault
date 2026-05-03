@@ -33,7 +33,7 @@ pub fn use_event_bus_provider() -> EventBusContext {
     let ctx = EventBusContext { revision, recent };
 
     // Start the SSE listener on the client side only.
-    #[cfg(feature = "web")]
+    #[cfg(target_arch = "wasm32")]
     {
         let mut rev = ctx.revision;
         let mut rec = ctx.recent;
@@ -52,14 +52,13 @@ pub fn use_event_bus_provider() -> EventBusContext {
                     return;
                 };
 
-                let rev_clone = rev;
-                let rec_clone = rec;
-                let on_message = Closure::<dyn Fn(MessageEvent)>::new(move |e: MessageEvent| {
+                let on_message = Closure::wrap(Box::new(move |e: MessageEvent| {
                     let data = e.data().as_string().unwrap_or_default();
                     let kind = e.type_().to_string();
 
                     // Bump revision counter.
-                    rev.set(*rev_clone.read() + 1);
+                    let next = *rev.peek() + 1;
+                    rev.set(next);
 
                     // Push to recent events (cap at 50).
                     let event = RecentEvent {
@@ -67,11 +66,11 @@ pub fn use_event_bus_provider() -> EventBusContext {
                         detail: data,
                         timestamp_ms: js_sys::Date::now() as u64,
                     };
-                    let mut list = rec_clone.read().clone();
+                    let mut list = rec.peek().clone();
                     list.insert(0, event);
                     list.truncate(50);
                     rec.set(list);
-                });
+                }) as Box<dyn FnMut(MessageEvent)>);
 
                 // Listen to all named event types.
                 for event_type in &[

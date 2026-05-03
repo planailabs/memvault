@@ -3,30 +3,46 @@ name = "memvault-web"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "memvault_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "memvault-web"
+path = "src/main.rs"
+required-features = ["webui"]
+
 [features]
 default = ["server"]
-web = ["webui", "dioxus/web"]
+web = ["webui", "dioxus/web", "dep:getrandom"]
 webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid"]
-server = ["webui", "dioxus/server"]
+server = [
+    "webui", "dioxus/server",
+    "dep:memvault-api", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth",
+    "dep:axum", "dep:tokio", "dep:tokio-stream",
+    "dep:tower", "dep:tower-http", "dep:thiserror",
+]
 
 [dependencies]
 memvault-core = { path = "../memvault-core" }
-memvault-api = { path = "../memvault-api" }
-memvault-doc = { path = "../memvault-doc" }
-memvault-query = { path = "../memvault-query" }
-memvault-auth = { path = "../memvault-auth" }
 plan-ai-design = { path = "../../../plan-ai-design" }
-axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
-thiserror = "2"
 tracing = "0.1"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Server-only dependencies (not compiled for WASM)
+memvault-api = { path = "../memvault-api", optional = true }
+memvault-doc = { path = "../memvault-doc", optional = true }
+memvault-query = { path = "../memvault-query", optional = true }
+memvault-auth = { path = "../memvault-auth", optional = true }
+axum = { version = "0.8", features = ["multipart"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+thiserror = { version = "2", optional = true }
 
 # UI dependencies (behind webui feature)
 dioxus = { version = "0.7", features = ["fullstack", "router"], optional = true }
@@ -36,6 +52,7 @@ js-sys = { version = "0.3", optional = true }
 pulldown-cmark = { version = "0.12", optional = true }
 dioxus-i18n = { version = "0.5", optional = true }
 unic-langid = { version = "0.9", features = ["macros"], optional = true }
+getrandom = { version = "0.2", features = ["js"], optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -94,19 +94,23 @@ pub fn CommandPalette() -> Element {
 
     // Keyboard shortcut: Cmd/Ctrl + K.
     use_effect(move || {
-        #[cfg(feature = "web")]
+        #[cfg(target_arch = "wasm32")]
         {
             spawn(async move {
                 use wasm_bindgen::closure::Closure;
                 use wasm_bindgen::JsCast;
 
                 let window = web_sys::window().unwrap();
-                let cb = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
+                let mut open = open;
+                let mut query = query;
+                let mut results = results;
+                let cb = Closure::wrap(Box::new(
                     move |e: web_sys::KeyboardEvent| {
                         if (e.meta_key() || e.ctrl_key()) && e.key() == "k" {
                             e.prevent_default();
-                            open.set(!*open.peek());
-                            if *open.peek() {
+                            let was_open = *open.peek();
+                            open.set(!was_open);
+                            if !was_open {
                                 query.set(String::new());
                                 results.set(Vec::new());
                             }
@@ -115,7 +119,7 @@ pub fn CommandPalette() -> Element {
                             open.set(false);
                         }
                     },
-                );
+                ) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
                 let _ = window.add_event_listener_with_callback(
                     "keydown",
                     cb.as_ref().unchecked_ref(),
