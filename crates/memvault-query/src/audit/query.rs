@@ -29,6 +29,7 @@ pub struct AuditRecord {
     pub author: Vec<u8>,
     pub wall_ns: u64,
     pub doc_id: Option<DocId>,
+    pub entity_id: Option<Vec<u8>>,
     pub tags: Vec<(String, String)>,
 }
 
@@ -128,12 +129,29 @@ fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         None
     });
 
+    let entity_id = val.get("payload").and_then(|p| {
+        for key in ["EntityCreate", "EntityUpdate", "EntityDelete", "EdgeAdd", "EdgeRemove"] {
+            if let Some(inner) = p.get(key) {
+                // EntityCreate has entity.id, others have entity_id directly.
+                let id_val = inner
+                    .get("entity")
+                    .and_then(|e| e.get("id"))
+                    .or_else(|| inner.get("entity_id"));
+                if let Some(id) = id_val {
+                    return serde_json::from_value::<Vec<u8>>(id.clone()).ok();
+                }
+            }
+        }
+        None
+    });
+
     AuditRecord {
         cid: cid.to_vec(),
         op_kind,
         author,
         wall_ns,
         doc_id,
+        entity_id,
         tags,
     }
 }

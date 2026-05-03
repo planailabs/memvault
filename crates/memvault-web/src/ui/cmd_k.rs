@@ -50,11 +50,12 @@ async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnErr
     {
         let q_lower = query.to_lowercase();
         for record in records {
-            if record.cid.len() != 32 {
-                continue;
-            }
+            let id_bytes = match record.entity_id {
+                Some(ref bytes) if bytes.len() == 32 => bytes,
+                _ => continue,
+            };
             let mut arr = [0u8; 32];
-            arr.copy_from_slice(&record.cid);
+            arr.copy_from_slice(id_bytes);
             let entity_id = memvault_core::EntityId(arr);
             if let Ok(Some(entity)) = client.get_entity(&entity_id).await {
                 let label = entity

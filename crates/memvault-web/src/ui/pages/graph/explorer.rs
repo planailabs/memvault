@@ -45,11 +45,12 @@ async fn list_entities() -> Result<Vec<EntitySummary>, ServerFnError> {
     let mut entities = Vec::new();
     for record in records {
         let entity_id = {
-            if record.cid.len() != 32 {
-                continue;
-            }
+            let id_bytes = match record.entity_id {
+                Some(ref bytes) if bytes.len() == 32 => bytes,
+                _ => continue,
+            };
             let mut arr = [0u8; 32];
-            arr.copy_from_slice(&record.cid);
+            arr.copy_from_slice(id_bytes);
             memvault_core::EntityId(arr)
         };
         if let Ok(Some(entity)) = client.get_entity(&entity_id).await {
