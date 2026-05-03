@@ -165,6 +165,8 @@ pub enum Commands {
     Peers,
     /// Repair the search index
     RepairIndex,
+    /// Set cluster_id on envelopes that have null/missing cluster_id
+    FixClusterId,
     /// Renew attestation
     RenewAttestation {
         /// Target peer ID (hex)
@@ -478,6 +480,64 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("Repair complete.");
         }
         Commands::RenewAttestation { peer_id } => { println!("Attestation renewal for {peer_id}: not yet implemented in standalone mode"); }
+        Commands::FixClusterId => {
+            // Read current cluster_id from disk.
+            let id_path = data_dir.join("cluster_id");
+            let id_hex = std::fs::read_to_string(&id_path)
+                .map_err(|e| anyhow::anyhow!("Cannot read {}: {e}. Run 'genesis' first.", id_path.display()))?;
+            let cluster_bytes = hex::decode(id_hex.trim())
+                .map_err(|e| anyhow::anyhow!("Invalid cluster_id hex: {e}"))?;
+            println!("Cluster ID: {}", hex::encode(&cluster_bytes));
+
+            let store = open_store(&data_dir)?;
+            let blocks = store.iter_blocks()?;
+            let mut patched = 0usize;
+            let mut skipped = 0usize;
+
+            for (cid, data) in &blocks {
+                let mut val: serde_json::Value = match serde_json::from_slice(data) {
+                    Ok(v) => v,
+                    Err(_) => { skipped += 1; continue; }
+                };
+
+                // Check if this looks like an envelope.
+                let is_envelope = val.get("wall_ns").is_some() || val.get("author").is_some();
+                if !is_envelope {
+                    skipped += 1;
+                    continue;
+                }
+
+                // Check if cluster_id is null or missing.
+                let needs_fix = match val.get("cluster_id") {
+                    None => true,
+                    Some(serde_json::Value::Null) => true,
+                    Some(serde_json::Value::Array(arr)) if arr.is_empty() => true,
+                    _ => false,
+                };
+
+                if !needs_fix {
+                    continue;
+                }
+
+                let wall_ns: u64 = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                // Patch the envelope with the current cluster_id.
+                val.as_object_mut().unwrap().insert(
+                    "cluster_id".to_string(),
+                    serde_json::json!(cluster_bytes),
+                );
+                let patched_bytes = serde_json::to_vec(&val)
+                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+
+                // Overwrite the block and add CLUSTER_ORIGIN index entry.
+                store.put_block(cid, &patched_bytes)?;
+                store.index_cluster_origin(cid, &cluster_bytes, wall_ns)?;
+
+                patched += 1;
+            }
+
+            println!("Patched {patched} envelopes with cluster_id ({skipped} non-envelope blocks skipped).");
+        }
     }
 
     Ok(())

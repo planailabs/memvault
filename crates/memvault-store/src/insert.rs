@@ -123,6 +123,23 @@ impl MemvaultStore {
         Ok(true)
     }
 
+    /// Add a single CLUSTER_ORIGIN index entry for a block.
+    pub fn index_cluster_origin(
+        &self,
+        cid_bytes: &[u8],
+        cluster_id: &[u8],
+        wall_ns: u64,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(CLUSTER_ORIGIN)?;
+            let key = keys::pack_cluster_key(cluster_id, wall_ns, cid_bytes);
+            table.insert(key.as_slice(), &[] as &[u8])?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     /// Atomically insert an envelope: stores the block and updates all relevant indexes.
     pub fn insert_envelope(
         &self,
