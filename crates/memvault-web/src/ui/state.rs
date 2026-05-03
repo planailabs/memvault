@@ -59,14 +59,15 @@ mod inner {
             vec![0u8; 32],
         ));
 
-        // Load or rebuild the text index (blocking — runs once at init).
+        // Load or rebuild the text index in a background thread to avoid
+        // blocking the async runtime (we may be called from inside tokio).
         let index_cache = db_path.with_extension("text_index.json");
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
         let client_clone = Arc::clone(&client);
-        rt.block_on(async move {
-            let _ = client_clone.load_or_rebuild_index(&index_cache).await;
-        });
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _ = rt.block_on(client_clone.load_or_rebuild_index(&index_cache));
+        })
+        .join();
 
         Ok(client as Arc<dyn MemvaultClient>)
     }
