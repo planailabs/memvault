@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use super::cmd_k::CommandPalette;
+use super::cmd_k::{CommandPalette, PaletteOpen};
 use super::events::use_event_bus_provider;
 use super::navbar::Sidebar;
 use super::topbar::{Topbar, TopbarMeta};
@@ -10,6 +10,7 @@ use super::topbar::{Topbar, TopbarMeta};
 #[component]
 pub fn Layout() -> Element {
     use_context_provider::<Signal<TopbarMeta>>(|| Signal::new(TopbarMeta::default()));
+    use_context_provider::<PaletteOpen>(|| Signal::new(false));
     let _event_bus = use_event_bus_provider();
 
     rsx! {

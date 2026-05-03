@@ -48,10 +48,13 @@ async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnErr
     Ok(results)
 }
 
+/// Shared signal to open/close the command palette from anywhere.
+pub type PaletteOpen = Signal<bool>;
+
 /// The command palette modal. Rendered at the Layout level.
 #[component]
 pub fn CommandPalette() -> Element {
-    let mut open = use_signal(|| false);
+    let mut open = use_context::<PaletteOpen>();
     let mut query = use_signal(String::new);
     let mut results = use_signal(Vec::<PaletteResult>::new);
     let mut searching = use_signal(|| false);
