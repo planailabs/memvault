@@ -1,6 +1,8 @@
 //! Route enum and top-level App component.
 
 use dioxus::prelude::*;
+use dioxus_i18n::prelude::*;
+use unic_langid::langid;
 
 use super::layout::Layout;
 use super::pages::admin::dashboard::AdminDashboard;
@@ -52,6 +54,14 @@ pub enum Route {
 
 #[allow(non_snake_case)]
 pub fn App() -> Element {
+    use_init_i18n(|| {
+        I18nConfig::new(langid!("en-US"))
+            .with_locale(Locale::new_static(
+                langid!("en-US"),
+                include_str!("en-US.ftl"),
+            ))
+    });
+
     rsx! {
         Router::<Route> {}
     }
