@@ -41,12 +41,14 @@ pub struct TextIndex {
     unified: HashMap<String, IndexedEntry>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct IndexedDoc {
     body: String,
     title: Option<String>,
     tags: Vec<(String, String)>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct IndexedEntry {
     node_type: String,
     label: String,
@@ -55,12 +57,81 @@ struct IndexedEntry {
     tags: Vec<(String, String)>,
 }
 
+/// Bump this when the index format changes to trigger automatic re-indexing.
+pub const INDEX_FORMAT_VERSION: u32 = 1;
+
+/// Serializable snapshot of the entire index (for persistence).
+#[derive(Serialize, Deserialize)]
+struct IndexSnapshot {
+    /// Format version — if this doesn't match INDEX_FORMAT_VERSION, the index is stale.
+    version: u32,
+    docs: HashMap<String, IndexedDoc>,     // hex-encoded DocId -> doc
+    unified: HashMap<String, IndexedEntry>,
+}
+
 impl TextIndex {
     pub fn new() -> Self {
         Self {
             docs: HashMap::new(),
             unified: HashMap::new(),
         }
+    }
+
+    /// Save the index to a file.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let snapshot = IndexSnapshot {
+            version: INDEX_FORMAT_VERSION,
+            docs: self.docs.iter()
+                .map(|(k, v)| (hex::encode(k.0), IndexedDoc {
+                    body: v.body.clone(),
+                    title: v.title.clone(),
+                    tags: v.tags.clone(),
+                }))
+                .collect(),
+            unified: self.unified.iter()
+                .map(|(k, v)| (k.clone(), IndexedEntry {
+                    node_type: v.node_type.clone(),
+                    label: v.label.clone(),
+                    text: v.text.clone(),
+                    tags: v.tags.clone(),
+                }))
+                .collect(),
+        };
+        let data = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, &data)
+    }
+
+    /// Load the index from a file. Returns `None` if the file doesn't exist,
+    /// is corrupt, or has an outdated format version (caller should re-index).
+    pub fn load(path: &std::path::Path) -> Option<Self> {
+        let data = std::fs::read(path).ok()?;
+        let snapshot: IndexSnapshot = serde_json::from_slice(&data).ok()?;
+        if snapshot.version != INDEX_FORMAT_VERSION {
+            return None; // stale format, needs re-indexing
+        }
+        let docs = snapshot.docs.into_iter()
+            .filter_map(|(hex_id, doc)| {
+                let bytes = hex::decode(&hex_id).ok()?;
+                if bytes.len() != 32 { return None; }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some((DocId(arr), doc))
+            })
+            .collect();
+        Some(Self {
+            docs,
+            unified: snapshot.unified,
+        })
+    }
+
+    /// Number of entries in the unified index.
+    pub fn len(&self) -> usize {
+        self.unified.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.unified.is_empty()
     }
 
     /// Index a document's body text and metadata.

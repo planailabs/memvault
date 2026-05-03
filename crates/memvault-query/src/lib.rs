@@ -16,7 +16,7 @@ pub use audit::query::{parse_audit_record, query_audit, AuditQuery, AuditRecord,
 pub use audit::retraction::{is_retracted, retract};
 
 pub use index::effective_tags::effective_tags;
-pub use index::search::{SearchHit, SearchQuery, TextIndex, UnifiedHit};
+pub use index::search::{SearchHit, SearchQuery, TextIndex, UnifiedHit, INDEX_FORMAT_VERSION};
 
 pub use quotas::{AgentQuota, QuotaExceeded, QuotaManager};
 

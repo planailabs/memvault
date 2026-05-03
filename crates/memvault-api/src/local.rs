@@ -62,6 +62,96 @@ impl LocalClient {
         }
     }
 
+    /// Load the TextIndex from a cache file, or rebuild from the blockstore if
+    /// the cache is missing/stale. Saves the rebuilt index afterward.
+    /// Call this after construction to make search work for pre-existing data.
+    pub async fn load_or_rebuild_index(&self, cache_path: &std::path::Path) -> Result<(usize, usize, usize)> {
+        if let Some(loaded) = TextIndex::load(cache_path) {
+            let mut idx = self.index.write().await;
+            *idx = loaded;
+            let count = idx.len();
+            tracing::info!("loaded text index from cache ({count} entries)");
+            return Ok((count, 0, 0));
+        }
+        tracing::info!("text index cache missing or stale, rebuilding from blockstore...");
+        let counts = self.populate_index().await?;
+        let idx = self.index.read().await;
+        if let Err(e) = idx.save(cache_path) {
+            tracing::warn!("failed to save text index cache: {e}");
+        } else {
+            tracing::info!("saved text index cache to {}", cache_path.display());
+        }
+        Ok(counts)
+    }
+
+    /// Populate the in-memory TextIndex from the blockstore.
+    pub async fn populate_index(&self) -> Result<(usize, usize, usize)> {
+        let mut doc_count = 0usize;
+        let mut entity_count = 0usize;
+        let mut attachment_count = 0usize;
+
+        // Index documents
+        let doc_labels = self.store.query_unique_labels("doc", usize::MAX)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for label in &doc_labels {
+            let id_bytes = hex::decode(label).unwrap_or_default();
+            if id_bytes.len() != 32 { continue; }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let doc_id = DocId(arr);
+            if let Ok(Some(doc)) = self.get_doc(&doc_id).await {
+                let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
+                let mut idx = self.index.write().await;
+                idx.index_doc(doc_id, &doc.body, title, vec![]);
+                doc_count += 1;
+            }
+        }
+
+        // Index entities
+        let entity_labels = self.store.query_unique_labels("entity", usize::MAX)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for label in &entity_labels {
+            let id_bytes = hex::decode(label).unwrap_or_default();
+            if id_bytes.len() != 32 { continue; }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let eid = EntityId(arr);
+            if let Ok(Some(entity)) = self.get_entity(&eid).await {
+                let mut idx = self.index.write().await;
+                idx.index_entity(&eid, &entity.kind, &entity.props);
+                entity_count += 1;
+            }
+        }
+
+        // Index attachments
+        let blocks = self.store.iter_blocks()
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for (_, data) in &blocks {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                    let manifest_cid = val.get("manifest_cid")
+                        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+                    let filename = val.get("filename").and_then(|v| v.as_str());
+                    let mime_type = val.get("mime_type").and_then(|v| v.as_str())
+                        .unwrap_or("application/octet-stream");
+                    if let Some(mcid) = manifest_cid {
+                        let mut idx = self.index.write().await;
+                        idx.index_attachment(&mcid, filename, mime_type);
+                        attachment_count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok((doc_count, entity_count, attachment_count))
+    }
+
+    /// Save the current TextIndex to a cache file.
+    pub async fn save_index(&self, cache_path: &std::path::Path) -> Result<()> {
+        let idx = self.index.read().await;
+        idx.save(cache_path).map_err(|e| ApiError::Serialization(e.to_string()))
+    }
+
     /// Access the quota manager.
     pub fn quotas(&self) -> &Arc<RwLock<QuotaManager>> {
         &self.quotas

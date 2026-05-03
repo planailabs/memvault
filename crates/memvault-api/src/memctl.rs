@@ -434,70 +434,18 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             // Phase 2: Rebuild full-text search index
             println!("Phase 2: Rebuilding full-text search index...");
-            let index = Arc::new(RwLock::new(TextIndex::new()));
-            let client = LocalClient::new(
-                store.clone(),
-                index.clone(),
-                Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
-                Arc::new(EventBus::new(4)),
-                vec![0u8; 32],
-                vec![0u8; 32],
-            );
-
-            let mut doc_count = 0usize;
-            let mut entity_count = 0usize;
-            let mut attachment_count = 0usize;
-
-            // Re-index documents
-            let doc_labels = store.query_unique_labels("doc", usize::MAX)?;
-            for label in &doc_labels {
-                let id_bytes = hex::decode(label).unwrap_or_default();
-                if id_bytes.len() != 32 { continue; }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&id_bytes);
-                let doc_id = DocId(arr);
-                if let Ok(Some(doc)) = client.get_doc(&doc_id).await {
-                    let title = doc.frontmatter.get("title")
-                        .and_then(|v| v.as_str());
-                    let mut idx = index.write().await;
-                    idx.index_doc(doc_id, &doc.body, title, vec![]);
-                    doc_count += 1;
-                }
-            }
-
-            // Re-index entities
-            let entity_labels = store.query_unique_labels("entity", usize::MAX)?;
-            for label in &entity_labels {
-                let id_bytes = hex::decode(label).unwrap_or_default();
-                if id_bytes.len() != 32 { continue; }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&id_bytes);
-                let eid = EntityId(arr);
-                if let Ok(Some(entity)) = client.get_entity(&eid).await {
-                    let mut idx = index.write().await;
-                    idx.index_entity(&eid, &entity.kind, &entity.props);
-                    entity_count += 1;
-                }
-            }
-
-            // Re-index attachments
-            for (_, data) in &blocks {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
-                    if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
-                        let manifest_cid = val.get("manifest_cid")
-                            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
-                        let filename = val.get("filename").and_then(|v| v.as_str());
-                        let mime_type = val.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream");
-                        if let Some(mcid) = manifest_cid {
-                            let mut idx = index.write().await;
-                            idx.index_attachment(&mcid, filename, mime_type);
-                            attachment_count += 1;
-                        }
-                    }
-                }
-            }
-
+            let client = create_client(store.clone());
+            let (doc_count, entity_count, attachment_count) = client.populate_index().await?;
             println!("  {doc_count} docs, {entity_count} entities, {attachment_count} attachments");
+
+            // Save the index cache to disk
+            let cache_path = if let Some(ref db_path) = db_override {
+                db_path.with_extension("text_index.json")
+            } else {
+                data_dir.join("text_index.json")
+            };
+            client.save_index(&cache_path).await?;
+            println!("  Index cache saved to {}", cache_path.display());
             println!("Repair complete.");
         }
         Commands::RenewAttestation { peer_id } => { println!("Attestation renewal for {peer_id}: not yet implemented in standalone mode"); }
