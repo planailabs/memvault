@@ -105,8 +105,13 @@ fn EntityView(data: EntityData) -> Element {
                     Kicker { "{data.kind}" }
                     PageHeader { class: "mb-0", "{label}" }
                 }
-                Link { to: Route::GraphExplorer {}, class: "btn btn-sm btn-secondary",
-                    "View in Graph"
+                div { class: "flex gap-2",
+                    Link { to: Route::EntityHistory { id: data.id.clone() }, class: "btn btn-sm btn-secondary",
+                        "History"
+                    }
+                    Link { to: Route::GraphExplorer {}, class: "btn btn-sm btn-secondary",
+                        "View in Graph"
+                    }
                 }
             }
 

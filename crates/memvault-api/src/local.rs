@@ -438,6 +438,21 @@ impl MemvaultClient for LocalClient {
         Ok(entities.get(id).cloned())
     }
 
+    async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>> {
+        let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;
+
+        let mut records = Vec::new();
+        for cid in &cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                    records.push(memvault_query::parse_audit_record(cid, &val));
+                }
+            }
+        }
+        Ok(records)
+    }
+
     async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>> {
         let labels = self.store.query_unique_labels("entity", limit)?;
         let mut entities = Vec::new();

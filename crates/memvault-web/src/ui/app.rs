@@ -12,6 +12,7 @@ use super::pages::files::detail::FileDetail;
 use super::pages::files::explorer::FileExplorer;
 use super::pages::graph::detail::EntityDetail;
 use super::pages::graph::explorer::GraphExplorer;
+use super::pages::graph::history::EntityHistory;
 use super::pages::notes::detail::NoteDetail;
 use super::pages::notes::form::{NoteEdit, NoteForm};
 use super::pages::notes::history::NoteHistory;
@@ -36,6 +37,8 @@ pub enum Route {
     GraphExplorer {},
     #[route("/graph/:id")]
     EntityDetail { id: String },
+    #[route("/graph/:id/history")]
+    EntityHistory { id: String },
     #[route("/files")]
     FileExplorer {},
     #[route("/files/:cid")]

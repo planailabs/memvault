@@ -82,7 +82,7 @@ pub fn query_audit(
     Ok(records)
 }
 
-fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
+pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
     let author = val
         .get("author")
         .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())

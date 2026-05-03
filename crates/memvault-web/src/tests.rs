@@ -133,6 +133,10 @@ impl MemvaultClient for MockClient {
         Ok(vec![])
     }
 
+    async fn entity_history(&self, _id: &EntityId) -> memvault_api::Result<Vec<memvault_query::AuditRecord>> {
+        Ok(vec![])
+    }
+
     async fn add_edge(
         &self,
         _source: &EntityId,
