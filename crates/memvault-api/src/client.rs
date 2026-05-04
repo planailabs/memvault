@@ -46,6 +46,12 @@ pub trait MemvaultClient: Send + Sync {
     async fn traverse_from(&self, from: &NodeRef, relation: Option<&str>, max_depth: usize) -> Result<Vec<TraversalHit>>;
 
 
+    // -- Views (saved tag filter sets) --
+    async fn list_views(&self) -> Result<Vec<crate::types::View>>;
+    async fn create_view(&self, view: crate::types::View) -> Result<()>;
+    async fn delete_view(&self, name: &str) -> Result<()>;
+    async fn get_view(&self, name: &str) -> Result<Option<crate::types::View>>;
+
     // -- Search --
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
     /// Unified search across all node types (docs, entities, attachments).

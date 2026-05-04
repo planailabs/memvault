@@ -873,6 +873,65 @@ impl MemvaultClient for LocalClient {
         crate::rotation::list_rotations(&self.store)
     }
 
+    // -- Views --
+
+    async fn list_views(&self) -> Result<Vec<crate::types::View>> {
+        let labels = self.store.query_unique_labels("view", usize::MAX)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let mut views = Vec::new();
+        for label in &labels {
+            let cids = self.store.query_by_tag("view", label, 0, 1)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            for cid in &cids {
+                if let Some(data) = self.store.get_block(cid)? {
+                    if let Ok(view) = serde_json::from_slice::<crate::types::View>(&data) {
+                        views.push(view);
+                    }
+                }
+            }
+        }
+        Ok(views)
+    }
+
+    async fn create_view(&self, view: crate::types::View) -> Result<()> {
+        let view_bytes = serde_json::to_vec(&view)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = cid_from_bytes(&view_bytes);
+        let cid_bytes = cid.to_bytes();
+        let meta = EnvelopeMeta {
+            author: self.peer_id.clone(),
+            tags: vec![("view".to_string(), view.name.clone())],
+            wall_ns: view.created_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+        };
+        self.store.insert_envelope(&cid_bytes, &view_bytes, &meta)?;
+        Ok(())
+    }
+
+    async fn delete_view(&self, name: &str) -> Result<()> {
+        let cids = self.store.query_by_tag("view", name, 0, usize::MAX)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for cid in &cids {
+            self.retract(cid, "view deleted").await?;
+        }
+        Ok(())
+    }
+
+    async fn get_view(&self, name: &str) -> Result<Option<crate::types::View>> {
+        let cids = self.store.query_by_tag("view", name, 0, 1)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for cid in &cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Ok(view) = serde_json::from_slice::<crate::types::View>(&data) {
+                    return Ok(Some(view));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     async fn status(&self) -> Result<NodeStatus> {
         Ok(NodeStatus {
             peer_id: self.peer_id.clone(),

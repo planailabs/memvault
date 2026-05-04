@@ -188,6 +188,11 @@ impl MemvaultClient for MockClient {
         Ok(None)
     }
 
+    async fn list_views(&self) -> memvault_api::Result<Vec<memvault_api::View>> { Ok(vec![]) }
+    async fn create_view(&self, _view: memvault_api::View) -> memvault_api::Result<()> { Ok(()) }
+    async fn delete_view(&self, _name: &str) -> memvault_api::Result<()> { Ok(()) }
+    async fn get_view(&self, _name: &str) -> memvault_api::Result<Option<memvault_api::View>> { Ok(None) }
+
     async fn history_of(&self, _doc_id: &DocId) -> memvault_api::Result<Vec<AuditRecord>> {
         Ok(vec![])
     }

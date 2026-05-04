@@ -55,6 +55,15 @@ pub struct RotationInfo {
     pub aborted: bool,
 }
 
+/// A saved view — a named set of required tags that filters all content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct View {
+    pub name: String,
+    /// Required tags — items must have ALL of these to appear in this view.
+    pub tags: Vec<(String, String)>,
+    pub created_ns: u64,
+}
+
 /// Node status information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {

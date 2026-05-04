@@ -18,4 +18,4 @@ pub use client::MemvaultClient;
 pub use error::{ApiError, Result};
 pub use local::LocalClient;
 pub use subscription::{EventBus, MemvaultEvent};
-pub use types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
+pub use types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View};

@@ -1,6 +1,7 @@
 //! Topbar component.
 
 use dioxus::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use super::cmd_k::PaletteOpen;
 
@@ -9,6 +10,16 @@ use super::cmd_k::PaletteOpen;
 pub struct TopbarMeta {
     pub title: String,
 }
+
+/// The active view filter — None means "All" (no filter).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActiveView {
+    pub name: Option<String>,
+    pub tags: Vec<(String, String)>,
+}
+
+/// Shared signal for the active view.
+pub type ActiveViewSignal = Signal<ActiveView>;
 
 /// Set the topbar title for the current page.
 pub fn use_topbar(title: &str) {
@@ -21,20 +32,74 @@ pub fn use_topbar(title: &str) {
     });
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ViewOption {
+    name: String,
+    tag_count: usize,
+}
+
+#[server]
+async fn fetch_views() -> Result<Vec<ViewOption>, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let views = client.list_views().await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(views.iter().map(|v| ViewOption {
+        name: v.name.clone(),
+        tag_count: v.tags.len(),
+    }).collect())
+}
+
 #[component]
 pub fn Topbar() -> Element {
     let meta = use_context::<Signal<TopbarMeta>>();
     let title = meta.read().title.clone();
     let mut palette_open = use_context::<PaletteOpen>();
+    let mut active_view = use_context::<ActiveViewSignal>();
+    let views_res = use_server_future(fetch_views)?;
+
+    let current_name = active_view.read().name.clone().unwrap_or_else(|| "All".to_string());
+
+    let on_view_change = move |e: Event<FormData>| {
+        let name = e.value();
+        if name == "All" || name.is_empty() {
+            active_view.set(ActiveView::default());
+        } else {
+            // Fetch the view's tags server-side via a spawn.
+            let view_name = name.clone();
+            spawn(async move {
+                if let Ok(Some(view)) = get_view_tags(view_name.clone()).await {
+                    active_view.set(ActiveView {
+                        name: Some(view_name),
+                        tags: view,
+                    });
+                }
+            });
+        }
+    };
 
     rsx! {
         header { class: "topbar",
             div { class: "flex items-center gap-3 px-5 py-3",
-                h1 { class: "text-lg font-semibold text-fg-strong truncate flex-1", "{title}" }
+                h1 { class: "text-lg font-semibold text-fg-strong truncate", "{title}" }
+
+                // View selector
+                div { class: "flex items-center gap-1 ml-auto",
+                    select {
+                        class: "input input-sm text-sm w-auto",
+                        value: "{current_name}",
+                        onchange: on_view_change,
+                        option { value: "All", "All" }
+                        if let Some(Ok(views)) = &*views_res.read() {
+                            for v in views {
+                                option { value: "{v.name}", "{v.name} ({v.tag_count})" }
+                            }
+                        }
+                    }
+                }
+
                 button {
                     class: "flex items-center gap-2 px-3 py-1.5 text-sm text-fg-muted bg-surface-2 border border-line rounded-md hover:border-brand transition-colors",
                     onclick: move |_| palette_open.set(true),
-                    // Search icon (magnifying glass)
                     svg {
                         class: "w-4 h-4",
                         fill: "none",
@@ -52,4 +117,12 @@ pub fn Topbar() -> Element {
             }
         }
     }
+}
+
+#[server]
+async fn get_view_tags(name: String) -> Result<Option<Vec<(String, String)>>, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let view = client.get_view(&name).await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(view.map(|v| v.tags))
 }
