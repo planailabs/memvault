@@ -54,9 +54,14 @@ async fn list_files() -> Result<Vec<FileRow>, ServerFnError> {
 
     let mut files = Vec::new();
     for record in records {
-        let cid_hex = hex::encode(&record.cid);
+        // Use the manifest CID from the envelope, not the envelope CID itself.
+        let manifest_cid = match &record.attachment_cid {
+            Some(cid) => cid.clone(),
+            None => continue, // skip records without a manifest CID
+        };
+        let cid_hex = hex::encode(&manifest_cid);
         // Try to fetch manifest for metadata.
-        if let Ok(Some(manifest_bytes)) = client.get_attachment_manifest(&record.cid).await {
+        if let Ok(Some(manifest_bytes)) = client.get_attachment_manifest(&manifest_cid).await {
             if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) {
                 files.push(FileRow {
                     cid: cid_hex,

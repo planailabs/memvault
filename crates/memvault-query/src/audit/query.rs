@@ -30,6 +30,7 @@ pub struct AuditRecord {
     pub wall_ns: u64,
     pub doc_id: Option<DocId>,
     pub entity_id: Option<Vec<u8>>,
+    pub attachment_cid: Option<Vec<u8>>,
     pub tags: Vec<(String, String)>,
 }
 
@@ -95,28 +96,29 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
-    let op_kind = val
-        .get("payload")
-        .and_then(|p| {
-            if p.get("DocCreate").is_some() {
-                Some(OpKind::DocCreate)
-            } else if p.get("DocEdit").is_some() {
-                Some(OpKind::DocEdit)
-            } else if p.get("AttachFile").is_some() {
-                Some(OpKind::AttachFile)
-            } else if p.get("DetachFile").is_some() {
-                Some(OpKind::DetachFile)
-            } else if p.get("EntityCreate").is_some() {
-                Some(OpKind::EntityCreate)
-            } else if p.get("EdgeAdd").is_some() {
-                Some(OpKind::EdgeAdd)
-            } else if p.get("EdgeRemove").is_some() {
-                Some(OpKind::EdgeRemove)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(OpKind::Other("unknown".into()));
+    let op_kind = if let Some(p) = val.get("payload") {
+        if p.get("DocCreate").is_some() {
+            OpKind::DocCreate
+        } else if p.get("DocEdit").is_some() {
+            OpKind::DocEdit
+        } else if p.get("AttachFile").is_some() {
+            OpKind::AttachFile
+        } else if p.get("DetachFile").is_some() {
+            OpKind::DetachFile
+        } else if p.get("EntityCreate").is_some() {
+            OpKind::EntityCreate
+        } else if p.get("EdgeAdd").is_some() {
+            OpKind::EdgeAdd
+        } else if p.get("EdgeRemove").is_some() {
+            OpKind::EdgeRemove
+        } else {
+            OpKind::Other("unknown".into())
+        }
+    } else if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+        OpKind::AttachFile
+    } else {
+        OpKind::Other("unknown".into())
+    };
 
     let doc_id = val.get("payload").and_then(|p| {
         for key in ["DocCreate", "DocEdit", "AttachFile", "DetachFile"] {
@@ -145,6 +147,11 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         None
     });
 
+    // For attachment envelopes, extract the manifest_cid.
+    let attachment_cid = val
+        .get("manifest_cid")
+        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+
     AuditRecord {
         cid: cid.to_vec(),
         op_kind,
@@ -152,6 +159,7 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         wall_ns,
         doc_id,
         entity_id,
+        attachment_cid,
         tags,
     }
 }
