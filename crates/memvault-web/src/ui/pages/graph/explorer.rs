@@ -66,17 +66,26 @@ async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, Serv
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         let mut nodes = Vec::new();
         for (id, node_type, label, _tags) in &items {
+            // Skip vfs:dir entities from graph view.
+            if node_type == "entity" {
+                if let Some(memvault_core::NodeRef::Entity(eid)) = memvault_core::NodeRef::from_tag_label(id) {
+                    if let Ok(Some(e)) = client.get_entity(&eid).await {
+                        if e.kind == "vfs:dir" { continue; }
+                    }
+                }
+            }
             let mut edges = Vec::new();
-            if let Ok(edge_list) = client.edges_of(
-                &memvault_core::NodeRef::from_tag_label(id).unwrap_or(memvault_core::NodeRef::Entity(memvault_core::EntityId([0;32])))
-            ).await {
-                for (_, edge) in &edge_list {
-                    edges.push(EdgeSummary {
-                        edge_id: hex::encode(edge.id.0),
-                        relation: edge.relation.clone(),
-                        target_id: edge.target.tag_label(),
-                        weight: edge.weight.unwrap_or(1.0),
-                    });
+            if let Some(node_ref) = memvault_core::NodeRef::from_tag_label(id) {
+                if let Ok(edge_list) = client.edges_of(&node_ref).await {
+                    for (src, edge) in &edge_list {
+                        if src != &node_ref || edge.relation == "vfs:child" { continue; }
+                        edges.push(EdgeSummary {
+                            edge_id: hex::encode(edge.id.0),
+                            relation: edge.relation.clone(),
+                            target_id: edge.target.tag_label(),
+                            weight: edge.weight.unwrap_or(1.0),
+                        });
+                    }
                 }
             }
             nodes.push(NodeSummary {
@@ -95,6 +104,7 @@ async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, Serv
 
     let mut nodes: Vec<NodeSummary> = entities
         .into_iter()
+        .filter(|entity| entity.kind != "vfs:dir")
         .map(|entity| {
             let label = entity
                 .props
@@ -112,6 +122,7 @@ async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, Serv
                 edges: entity
                     .edges_out
                     .iter()
+                    .filter(|e| e.relation != "vfs:child")
                     .map(|e| EdgeSummary {
                         edge_id: hex::encode(e.id.0),
                         relation: e.relation.clone(),
@@ -137,18 +148,41 @@ async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, Serv
     extra_ids.dedup();
 
     for extra_id in &extra_ids {
-        let (node_type, label) = if extra_id.starts_with("doc:") {
-            ("doc", "Document")
-        } else if extra_id.starts_with("file:") || extra_id.starts_with("attachment:") {
-            ("file", "File")
-        } else {
-            continue;
+        let node_ref = match memvault_core::NodeRef::from_tag_label(extra_id) {
+            Some(r) => r,
+            None => continue,
+        };
+        let (node_type, kind, label) = match &node_ref {
+            memvault_core::NodeRef::Doc(did) => {
+                let title = client.get_doc(did).await.ok().flatten()
+                    .and_then(|d| d.frontmatter.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .unwrap_or_else(|| "Untitled".to_string());
+                ("doc".to_string(), "doc".to_string(), title)
+            }
+            memvault_core::NodeRef::Attachment(cid) => {
+                let name = client.get_file_manifest(cid).await.ok().flatten()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|v| v.get("filename").and_then(|f| f.as_str()).map(|s| s.to_string()))
+                    .unwrap_or_else(|| "Unnamed file".to_string());
+                ("file".to_string(), "file".to_string(), name)
+            }
+            memvault_core::NodeRef::Entity(eid) => {
+                // Skip vfs:dir entities that appear as edge targets.
+                if let Ok(Some(e)) = client.get_entity(eid).await {
+                    if e.kind == "vfs:dir" { continue; }
+                    let label = e.props.get("name").or_else(|| e.props.get("title"))
+                        .and_then(|v| v.as_str()).unwrap_or(&e.kind).to_string();
+                    ("entity".to_string(), e.kind.clone(), label)
+                } else {
+                    continue;
+                }
+            }
         };
         nodes.push(NodeSummary {
             id: extra_id.clone(),
-            node_type: node_type.to_string(),
-            kind: label.to_lowercase(),
-            label: format!("{} {}", label, &extra_id[extra_id.find(':').unwrap_or(0) + 1..][..8.min(extra_id.len())]),
+            node_type,
+            kind,
+            label,
             edges: vec![],
             props: BTreeMap::new(),
         });
