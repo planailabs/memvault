@@ -165,50 +165,16 @@ impl LocalClient {
                     let mime_type = val.get("mime_type").and_then(|v| v.as_str())
                         .unwrap_or("application/octet-stream");
                     if let Some(mcid) = manifest_cid {
-                        // Try cached extraction first, then extract fresh and cache.
-                        let extraction = match self.load_cached_extraction(&mcid) {
-                            Some(cached) => cached,
-                            None => {
-                                let result = if let Ok(content) = self.read_attachment(&mcid).await {
-                                    safe_extract_text(&content, mime_type)
-                                } else {
-                                    ExtractionResult::Unsupported
-                                };
-                                // Cache the result in the blockstore for next time.
-                                match &result {
-                                    ExtractionResult::Ok(text) => {
-                                        let et = memvault_extract::ExtractedText {
-                                            source: mcid.clone(),
-                                            extractor: "memvault-extract".to_string(),
-                                            extractor_version: env!("CARGO_PKG_VERSION").to_string(),
-                                            extracted_at_ns: memvault_core::wall_ns(),
-                                            text: text.clone(),
-                                            page_breaks: vec![],
-                                            warnings: vec![],
-                                        };
-                                        if let Ok(et_bytes) = serde_json::to_vec(&et) {
-                                            let et_cid = cid_from_bytes(&et_bytes);
-                                            let _ = self.store.put_block(&et_cid.to_bytes(), &et_bytes);
-                                            self.store_manifest_update(&mcid, Some(et_cid.to_bytes()), None);
-                                        }
-                                    }
-                                    ExtractionResult::Failed(err) => {
-                                        self.store_manifest_update(&mcid, None, Some(err));
-                                    }
-                                    ExtractionResult::Unsupported => {}
-                                }
-                                result
-                            }
-                        };
-                        let text = match &extraction {
-                            ExtractionResult::Ok(t) => Some(t.as_str()),
-                            _ => None,
+                        let text = if let Ok(content) = self.read_attachment(&mcid).await {
+                            self.extract_and_cache(&mcid, &content, mime_type)
+                        } else {
+                            None
                         };
                         let att_tags: Vec<(String, String)> = val.get("tags")
                             .and_then(|v| serde_json::from_value(v.clone()).ok())
                             .unwrap_or_default();
                         let mut idx = self.index.write().await;
-                        idx.index_attachment(&mcid, filename, mime_type, text, att_tags);
+                        idx.index_attachment(&mcid, filename, mime_type, text.as_deref(), att_tags);
                         attachment_count += 1;
                     }
                 }
@@ -278,6 +244,49 @@ impl LocalClient {
         };
         self.store.insert_envelope(&cid.to_bytes(), &update_bytes, &meta)?;
         Ok(())
+    }
+
+    /// Extract text from data, cache the result (success or failure) in the blockstore,
+    /// and return the extracted text if successful.
+    fn extract_and_cache(&self, manifest_cid: &[u8], data: &[u8], mime_type: &str) -> Option<String> {
+        // Check cache first.
+        match self.load_cached_extraction(manifest_cid) {
+            Some(ExtractionResult::Ok(text)) => return Some(text),
+            Some(ExtractionResult::Failed(_)) => return None,
+            _ => {}
+        }
+
+        // Extract fresh.
+        let result = safe_extract_text(data, mime_type);
+
+        // Cache the result.
+        match &result {
+            ExtractionResult::Ok(text) => {
+                let et = memvault_extract::ExtractedText {
+                    source: manifest_cid.to_vec(),
+                    extractor: "memvault-extract".to_string(),
+                    extractor_version: env!("CARGO_PKG_VERSION").to_string(),
+                    extracted_at_ns: memvault_core::wall_ns(),
+                    text: text.clone(),
+                    page_breaks: vec![],
+                    warnings: vec![],
+                };
+                if let Ok(et_bytes) = serde_json::to_vec(&et) {
+                    let et_cid = cid_from_bytes(&et_bytes);
+                    let _ = self.store.put_block(&et_cid.to_bytes(), &et_bytes);
+                    self.store_manifest_update(manifest_cid, Some(et_cid.to_bytes()), None);
+                }
+            }
+            ExtractionResult::Failed(err) => {
+                self.store_manifest_update(manifest_cid, None, Some(err));
+            }
+            ExtractionResult::Unsupported => {}
+        }
+
+        match result {
+            ExtractionResult::Ok(text) => Some(text),
+            _ => None,
+        }
     }
 
     /// Store a ManifestUpdate block linking to extracted text or recording a failure.
@@ -589,43 +598,13 @@ impl MemvaultClient for LocalClient {
         let env_cid = cid_from_bytes(&envelope_bytes);
         self.store.insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
 
-        // Try to extract text (best-effort). Cache result (success or failure) as a
-        // ManifestUpdate so we don't re-extract on every rebuild.
-        let extraction = safe_extract_text(data, mime_type);
-        let extracted_text_for_index = match &extraction {
-            ExtractionResult::Ok(text) => Some(text.as_str()),
-            _ => None,
-        };
-
-        // Store extraction result (success or failure) in blockstore.
-        match &extraction {
-            ExtractionResult::Ok(text) => {
-                let et = memvault_extract::ExtractedText {
-                    source: manifest_cid_bytes.clone(),
-                    extractor: "memvault-extract".to_string(),
-                    extractor_version: env!("CARGO_PKG_VERSION").to_string(),
-                    extracted_at_ns: memvault_core::wall_ns(),
-                    text: text.clone(),
-                    page_breaks: vec![],
-                    warnings: vec![],
-                };
-                if let Ok(et_bytes) = serde_json::to_vec(&et) {
-                    let et_cid = cid_from_bytes(&et_bytes);
-                    let _ = self.store.put_block(&et_cid.to_bytes(), &et_bytes);
-                    self.store_manifest_update(&manifest_cid_bytes, Some(et_cid.to_bytes()), None);
-                }
-            }
-            ExtractionResult::Failed(error) => {
-                // Cache the failure so we don't retry on every rebuild.
-                self.store_manifest_update(&manifest_cid_bytes, None, Some(error));
-            }
-            ExtractionResult::Unsupported => {}
-        }
+        // Extract text and cache the result (success or failure) in the blockstore.
+        let extracted_text = self.extract_and_cache(&manifest_cid_bytes, data, mime_type);
 
         // Index for unified search (includes extracted text if available).
         {
             let mut idx = self.index.write().await;
-            idx.index_attachment(&manifest_cid_bytes, filename, mime_type, extracted_text_for_index, tags.clone());
+            idx.index_attachment(&manifest_cid_bytes, filename, mime_type, extracted_text.as_deref(), tags.clone());
         }
 
         self.event_bus.publish(MemvaultEvent::FileAttached {
@@ -665,14 +644,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>> {
-        // Try cached extraction first.
-        match self.load_cached_extraction(manifest_cid) {
-            Some(ExtractionResult::Ok(text)) => return Ok(Some(text)),
-            Some(ExtractionResult::Failed(_)) => return Ok(None), // cached failure
-            _ => {}
-        }
-
-        // No cache — extract from raw content (with panic protection).
+        // Try cached extraction first, then extract fresh and cache.
         let manifest_data = self
             .store
             .get_block(manifest_cid)?
@@ -682,10 +654,7 @@ impl MemvaultClient for LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
 
         let content = memvault_attach::read_range::read_full(&self.store, &manifest.content_root)?;
-        match safe_extract_text(&content, &manifest.mime_type) {
-            ExtractionResult::Ok(text) => Ok(Some(text)),
-            _ => Ok(None),
-        }
+        Ok(self.extract_and_cache(manifest_cid, &content, &manifest.mime_type))
     }
 
     async fn pin_attachment(&self, manifest_cid: &[u8]) -> Result<()> {
