@@ -153,6 +153,12 @@ impl LocalClient {
     }
 
     /// Access the quota manager.
+    /// Access the text index (for direct queries in local backend).
+    pub fn index_ref(&self) -> &Arc<RwLock<TextIndex>> {
+        &self.index
+    }
+
+    /// Access the quota manager.
     pub fn quotas(&self) -> &Arc<RwLock<QuotaManager>> {
         &self.quotas
     }
