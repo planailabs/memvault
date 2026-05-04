@@ -186,7 +186,7 @@ async fn build_description(
                 ("Retracted item".to_string(), None)
             }
         }
-        "Other(\"TagUpdate\")" | "TagUpdate" => {
+        "TagUpdate" => {
             if let Some(target) = ann_target {
                 let (name, link) = resolve_node(client, target).await;
                 (format!("Updated tags on \"{name}\""), link)

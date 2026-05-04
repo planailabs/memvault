@@ -11,6 +11,7 @@ pub fn OpKindBadge(kind: String) -> Element {
         "AttachFile" => PillVariant::Accent,
         "EntityCreate" => PillVariant::Info,
         "EdgeAdd" => PillVariant::Info,
+        "TagUpdate" => PillVariant::Muted,
         "Retract" => PillVariant::Bad,
         _ => PillVariant::Muted,
     };
