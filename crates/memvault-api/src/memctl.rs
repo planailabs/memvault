@@ -459,9 +459,41 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cid_mismatch += 1;
                 eprintln!("  CID mismatch: {}", hex::encode(cid));
             }
-            println!("  {cid_ok} verified, {cid_envelope} envelopes (payload CID), {cid_mismatch} mismatched, {cid_unchecked} unchecked");
+            println!("  {cid_ok} verified, {cid_envelope} envelopes (legacy payload CID), {cid_mismatch} mismatched, {cid_unchecked} unchecked");
             if cid_mismatch > 0 {
                 eprintln!("  WARNING: {cid_mismatch} block(s) have CID mismatches (data corruption)");
+            }
+
+            // Phase 0b: Migrate legacy envelopes from payload-derived CID to
+            // envelope-derived CID. This ensures CID = hash(block_bytes) so
+            // sync peers can verify blocks.
+            if cid_envelope > 0 {
+                println!("Phase 0b: Migrating {cid_envelope} legacy envelope CIDs...");
+                let blocks = store.iter_blocks()?;
+                let mut migrated = 0usize;
+                for (old_cid, data) in &blocks {
+                    // Skip blocks that already verify.
+                    if let Ok(true) = memvault_core::verify_cid(old_cid, data) {
+                        continue;
+                    }
+                    // Only migrate envelopes (blocks with a "payload" field).
+                    let is_envelope = serde_json::from_slice::<serde_json::Value>(data)
+                        .ok()
+                        .and_then(|v| v.get("payload").map(|_| true))
+                        .unwrap_or(false);
+                    if !is_envelope {
+                        continue;
+                    }
+                    let new_cid = memvault_core::cid_from_bytes(data);
+                    let new_cid_bytes = new_cid.to_bytes();
+                    if new_cid_bytes == *old_cid {
+                        continue; // already correct
+                    }
+                    store.put_block_unchecked(&new_cid_bytes, data)?;
+                    store.delete_block(old_cid)?;
+                    migrated += 1;
+                }
+                println!("  Migrated {migrated} envelope(s) to content-addressed CIDs");
             }
 
             // Phase 1: Rebuild store secondary indexes (BY_TAG, BY_AUTHOR, BY_TIME, etc.)
