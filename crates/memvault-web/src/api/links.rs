@@ -113,6 +113,57 @@ pub struct ListNodesQuery {
     pub limit: Option<usize>,
 }
 
+/// GET /api/v1/nodes/:node_id — get any node by type:hex ID.
+pub async fn get_node(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let node_ref = NodeRef::from_tag_label(&node_id)
+        .ok_or_else(|| ApiError::bad_request("Invalid node ID — expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
+
+    match node_ref {
+        NodeRef::Entity(eid) => {
+            let entity = state.client.get_entity(&eid).await?
+                .ok_or_else(|| ApiError::not_found("Entity not found"))?;
+            Ok(Json(serde_json::json!({
+                "node_id": node_id,
+                "node_type": "entity",
+                "kind": entity.kind,
+                "props": entity.props,
+                "edges": entity.edges_out.iter().map(|e| serde_json::json!({
+                    "edge_id": hex::encode(e.id.0),
+                    "relation": e.relation,
+                    "target": e.target.tag_label(),
+                    "weight": e.weight,
+                })).collect::<Vec<_>>(),
+                "tags": state.client.get_tags(&node_id).await.unwrap_or_default(),
+            })))
+        }
+        NodeRef::Doc(did) => {
+            let doc = state.client.get_doc(&did).await?
+                .ok_or_else(|| ApiError::not_found("Document not found"))?;
+            Ok(Json(serde_json::json!({
+                "node_id": node_id,
+                "node_type": "doc",
+                "title": doc.frontmatter.get("title").and_then(|v| v.as_str()),
+                "body": doc.body,
+                "frontmatter": doc.frontmatter,
+                "tags": state.client.get_tags(&node_id).await.unwrap_or_default(),
+            })))
+        }
+        NodeRef::Attachment(cid) => {
+            let manifest = state.client.get_attachment_manifest(&cid).await?;
+            Ok(Json(serde_json::json!({
+                "node_id": node_id,
+                "node_type": "attachment",
+                "manifest": manifest.map(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).flatten(),
+                "tags": state.client.get_tags(&node_id).await.unwrap_or_default(),
+            })))
+        }
+    }
+}
+
 /// GET /api/v1/nodes — list all nodes, optionally filtered by view.
 pub async fn list_nodes(
     _auth: RequireAuth,
