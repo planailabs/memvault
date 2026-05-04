@@ -180,10 +180,11 @@ impl LocalClient {
             }
         }
 
-        // Replay tag updates
+        // Replay tag updates and retractions
         for (_, data) in &blocks {
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
-                if val.get("kind").and_then(|v| v.as_str()) == Some("tag_update") {
+                let kind = val.get("kind").and_then(|v| v.as_str());
+                if kind == Some("tag_update") {
                     let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
                     let add: Vec<(String, String)> = val.get("add")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -194,6 +195,12 @@ impl LocalClient {
                     if !node_id.is_empty() {
                         let mut idx = self.index.write().await;
                         idx.apply_tag_update(node_id, &add, &remove);
+                    }
+                } else if kind == Some("node_retraction") {
+                    let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if !node_id.is_empty() {
+                        let mut idx = self.index.write().await;
+                        idx.retract_node(node_id);
                     }
                 }
             }
@@ -906,6 +913,34 @@ impl MemvaultClient for LocalClient {
         });
 
         Ok(tombstone_bytes)
+    }
+
+    async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()> {
+        // Store a retraction block in the blockstore.
+        let retraction = serde_json::json!({
+            "kind": "node_retraction",
+            "node_id": node_id,
+            "reason": reason,
+            "wall_ns": memvault_core::wall_ns(),
+        });
+        let retraction_bytes = serde_json::to_vec(&retraction)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = cid_from_bytes(&retraction_bytes);
+        let meta = EnvelopeMeta {
+            author: self.peer_id.clone(),
+            tags: vec![("node_retraction".to_string(), node_id.to_string())],
+            wall_ns: memvault_core::wall_ns(),
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+        };
+        self.store.insert_envelope(&cid.to_bytes(), &retraction_bytes, &meta)?;
+
+        // Remove from in-memory index.
+        let mut idx = self.index.write().await;
+        idx.retract_node(node_id);
+
+        Ok(())
     }
 
     async fn issue_token(

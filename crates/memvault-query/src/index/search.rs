@@ -41,6 +41,8 @@ pub struct TextIndex {
     docs: HashMap<DocId, IndexedDoc>,
     /// Unified entries keyed by tag_label (e.g. "entity:abc123")
     unified: HashMap<String, IndexedEntry>,
+    /// Set of retracted node_ids — filtered from all query results.
+    retracted: std::collections::HashSet<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,7 +62,7 @@ struct IndexedEntry {
 }
 
 /// Bump this when the index format changes to trigger automatic re-indexing.
-pub const INDEX_FORMAT_VERSION: u32 = 3;
+pub const INDEX_FORMAT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire index (for persistence).
 #[derive(Serialize, Deserialize)]
@@ -69,6 +71,8 @@ struct IndexSnapshot {
     version: u32,
     docs: HashMap<String, IndexedDoc>,     // hex-encoded DocId -> doc
     unified: HashMap<String, IndexedEntry>,
+    #[serde(default)]
+    retracted: std::collections::HashSet<String>,
 }
 
 impl TextIndex {
@@ -76,6 +80,7 @@ impl TextIndex {
         Self {
             docs: HashMap::new(),
             unified: HashMap::new(),
+            retracted: std::collections::HashSet::new(),
         }
     }
 
@@ -99,6 +104,7 @@ impl TextIndex {
                     tags: v.tags.clone(),
                 }))
                 .collect(),
+            retracted: self.retracted.clone(),
         };
         let data = serde_json::to_vec(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -130,6 +136,7 @@ impl TextIndex {
         Some(Self {
             docs,
             unified: snapshot.unified,
+            retracted: snapshot.retracted,
         })
     }
 
@@ -305,6 +312,27 @@ impl TextIndex {
         hits
     }
 
+    /// Mark a node_id as retracted. It will be excluded from all queries.
+    pub fn retract_node(&mut self, node_id: &str) {
+        self.retracted.insert(node_id.to_string());
+        self.unified.remove(node_id);
+        // Also remove from docs if it's a doc
+        if let Some(hex) = node_id.strip_prefix("doc:") {
+            if let Ok(bytes) = hex::decode(hex) {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    self.docs.remove(&DocId(arr));
+                }
+            }
+        }
+    }
+
+    /// Check if a node_id has been retracted.
+    pub fn is_retracted(&self, node_id: &str) -> bool {
+        self.retracted.contains(node_id)
+    }
+
     /// Apply a tag update to a node in the index.
     pub fn apply_tag_update(&mut self, node_id: &str, add: &[(String, String)], remove: &[(String, String)]) {
         if let Some(entry) = self.unified.get_mut(node_id) {
@@ -341,8 +369,9 @@ impl TextIndex {
     }
 
     /// Resolve a node_id (tag_label) to a human-readable label.
-    /// Returns None if the node is not indexed.
+    /// Returns None if the node is not indexed or is retracted.
     pub fn resolve_label(&self, node_id: &str) -> Option<String> {
+        if self.retracted.contains(node_id) { return None; }
         self.unified.get(node_id).map(|e| e.label.clone())
     }
 

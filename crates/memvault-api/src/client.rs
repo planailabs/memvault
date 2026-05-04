@@ -74,6 +74,9 @@ pub trait MemvaultClient: Send + Sync {
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>>;
     async fn audit(&self, query: AuditQuery) -> Result<Vec<AuditRecord>>;
     async fn retract(&self, target_cid: &[u8], reason: &str) -> Result<Vec<u8>>;
+    /// Retract a node by its tag_label (e.g. "entity:<hex>", "doc:<hex>", "attachment:<hex>").
+    /// Removes it from the search index and marks it as retracted.
+    async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()>;
 
     // -- Tokens --
     async fn issue_token(&self, role: Role, ttl_secs: u64, max_uses: u32, label: Option<String>) -> Result<String>;

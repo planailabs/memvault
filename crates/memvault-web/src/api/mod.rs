@@ -55,6 +55,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         // Links (cross-type edges)
         .route("/links", post(links::create_link).get(links::list_links))
         .route("/links/{edge_id}", delete(links::delete_link))
+        // Nodes
+        .route("/nodes/{node_id}", delete(links::retract_node))
         // Tags
         .route("/tags/{node_id}", get(views::get_tags).put(views::add_tags).delete(views::remove_tags))
         // Views

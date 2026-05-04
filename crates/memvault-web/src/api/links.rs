@@ -107,6 +107,16 @@ pub async fn list_links(
     Ok(Json(results))
 }
 
+/// DELETE /api/v1/nodes/:node_id — retract (soft-delete) any node.
+pub async fn retract_node(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    state.client.retract_node(&node_id, "retracted via API").await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// DELETE /api/v1/links/:edge_id?source=entity:<hex> — remove an edge by ID.
 /// The source parameter is required because edges are indexed by source.
 pub async fn delete_link(
