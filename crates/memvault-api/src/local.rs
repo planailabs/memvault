@@ -414,33 +414,31 @@ impl LocalClient {
     }
 
     fn store_op(&self, op: &Op, tags: &[(String, String)], vis: &Visibility) -> Result<Vec<u8>> {
-        let op_bytes = serde_json::to_vec(op)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&op_bytes);
-        let cid_bytes = cid.to_bytes();
+        let wall_ns = memvault_core::wall_ns();
 
         let meta = EnvelopeMeta {
             author: self.peer_id.clone(),
             tags: tags.to_vec(),
-            wall_ns: memvault_core::wall_ns(),
+            wall_ns,
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
         };
 
-        // Store raw op bytes so the CID can be verified by hashing
-        // payload_bytes directly (avoids serde_json Value reordering).
+        // CID is computed from the full envelope bytes so any peer
+        // receiving the block can verify: CID == hash(block_bytes).
         let envelope = serde_json::json!({
             "version": 1,
             "payload": op,
-            "payload_bytes": op_bytes,
             "author": self.peer_id,
             "tags": tags,
             "visibility": vis,
-            "wall_ns": meta.wall_ns,
+            "wall_ns": wall_ns,
         });
         let envelope_bytes = serde_json::to_vec(&envelope)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = cid_from_bytes(&envelope_bytes);
+        let cid_bytes = cid.to_bytes();
 
         self.store.insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
