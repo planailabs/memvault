@@ -1,7 +1,7 @@
 //! Graph explorer page — interactive force-directed knowledge graph.
 
 use dioxus::prelude::*;
-use plan_ai_design::{Card, PageHeader};
+use plan_ai_design::{Card, PageHeader, Pill};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -690,17 +690,9 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     div { class: "flex items-center gap-2",
                                         {
                                             let color = node_color(&node.node_type, &node.kind);
-                                            let display_kind = if node.node_type != "entity" { &node.node_type } else { &node.kind };
+                                            let display_kind = if node.node_type != "entity" { node.node_type.clone() } else { node.kind.clone() };
                                             rsx! {
-                                                span {
-                                                    class: "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium",
-                                                    style: "background: {color}20; color: {color};",
-                                                    span {
-                                                        class: "w-2 h-2 rounded-full",
-                                                        style: "background: {color};",
-                                                    }
-                                                    "{display_kind}"
-                                                }
+                                                Pill { color: color, "{display_kind}" }
                                             }
                                         }
                                         span { class: "text-sm font-medium truncate", "{node.label}" }
@@ -913,14 +905,9 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     div { class: "flex items-center gap-2",
                                         {
                                             let color = node_color(&d.node_type, &d.kind);
-                                            let display_kind = if d.node_type != "entity" { &d.node_type } else { &d.kind };
+                                            let display_kind = if d.node_type != "entity" { d.node_type.clone() } else { d.kind.clone() };
                                             rsx! {
-                                                span {
-                                                    class: "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium",
-                                                    style: "background: {color}20; color: {color};",
-                                                    span { class: "w-2 h-2 rounded-full", style: "background: {color};" }
-                                                    "{display_kind}"
-                                                }
+                                                Pill { color: color, "{display_kind}" }
                                             }
                                         }
                                     }
