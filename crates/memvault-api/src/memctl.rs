@@ -167,7 +167,7 @@ pub enum Commands {
     },
     /// Show connected peers
     Peers,
-    /// Rebuild all indexes from the blockstore (store secondary indexes + full-text search index with tags)
+    /// Rebuild all indexes from blockstore, repair VFS tree (re-link orphaned directories)
     RepairIndex,
     /// Set cluster_id on envelopes that have null/missing cluster_id
     FixClusterId,
@@ -446,6 +446,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             client.save_index(&cache_path).await?;
             println!("  Index cache saved to {}", cache_path.display());
+
+            // Phase 3: Repair VFS tree — ensure all vfs:dir entities are reachable from the root
+            println!("Phase 3: Checking VFS tree integrity...");
+            let vfs_repaired = repair_vfs_tree(&client).await?;
+            if vfs_repaired > 0 {
+                println!("  Linked {vfs_repaired} orphaned directory/ies to VFS root");
+            } else {
+                println!("  VFS tree OK (no orphans)");
+            }
             println!("Repair complete.");
         }
         Commands::RenewAttestation { peer_id } => { println!("Attestation renewal for {peer_id}: not yet implemented in standalone mode"); }
@@ -503,4 +512,101 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Repair the VFS tree: find or create the root, then link any orphaned
+/// `vfs:dir` entities (not reachable via `vfs:child` edges) to the root.
+async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
+    use memvault_core::{EdgeId, NodeRef};
+    use std::collections::HashSet;
+
+    const VFS_DIR_KIND: &str = "vfs:dir";
+    const VFS_CHILD_REL: &str = "vfs:child";
+
+    // 1. Find all vfs:dir entities.
+    let entities = client.list_entities(10_000).await?;
+    let mut all_dirs: Vec<(EntityId, String)> = Vec::new(); // (id, name)
+    for e in &entities {
+        if e.kind == VFS_DIR_KIND {
+            let name = e.props.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            all_dirs.push((EntityId(e.id.0), name));
+        }
+    }
+    if all_dirs.is_empty() {
+        return Ok(0);
+    }
+
+    // 2. Find or create root (by tag, then by name="/").
+    let mut root_id: Option<EntityId> = None;
+    for (id, _) in &all_dirs {
+        let node_id = format!("entity:{}", hex::encode(id.0));
+        let tags = client.get_tags(&node_id).await.unwrap_or_default();
+        if tags.iter().any(|(s, l)| s == "vfs" && l == "root") {
+            root_id = Some(EntityId(id.0));
+            break;
+        }
+    }
+    if root_id.is_none() {
+        // Fallback: find by name="/"
+        for (id, name) in &all_dirs {
+            if name == "/" {
+                let node_id = format!("entity:{}", hex::encode(id.0));
+                let _ = client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await;
+                root_id = Some(EntityId(id.0));
+                break;
+            }
+        }
+    }
+    let root_bytes = match root_id {
+        Some(id) => id.0,
+        None => return Ok(0), // no VFS tree at all
+    };
+
+    // 3. Walk the tree from root, collecting all reachable entity IDs.
+    let mut reachable: HashSet<[u8; 32]> = HashSet::new();
+    reachable.insert(root_bytes);
+    let mut stack = vec![NodeRef::Entity(EntityId(root_bytes))];
+    while let Some(current) = stack.pop() {
+        let edges = client.edges_of(&current).await.unwrap_or_default();
+        for (src, edge) in &edges {
+            if src != &current || edge.relation != VFS_CHILD_REL {
+                continue;
+            }
+            if let NodeRef::Entity(child_eid) = &edge.target {
+                if reachable.insert(child_eid.0) {
+                    stack.push(edge.target.clone());
+                }
+            }
+        }
+    }
+
+    // 4. Link orphaned vfs:dir entities to root.
+    let mut linked = 0usize;
+    let root_ref = NodeRef::Entity(EntityId(root_bytes));
+    for (id, name) in &all_dirs {
+        if reachable.contains(&id.0) {
+            continue;
+        }
+        // Orphan found — link it to root with its name.
+        let entry_name = if name.is_empty() { hex::encode(id.0)[..8].to_string() } else { name.clone() };
+        let mut props = BTreeMap::new();
+        props.insert("name".to_string(), serde_json::Value::String(entry_name.clone()));
+        let child_ref = NodeRef::Entity(EntityId(id.0));
+        let edge = Edge {
+            id: EdgeId::random(),
+            relation: VFS_CHILD_REL.to_string(),
+            target: child_ref,
+            weight: None,
+            props,
+            provenance: None,
+        };
+        if let Err(e) = client.add_link(&root_ref, edge, Visibility::Internal).await {
+            eprintln!("  warning: failed to link orphan {}: {e}", hex::encode(id.0));
+        } else {
+            println!("  Linked orphan \"{entry_name}\" ({}) to root", hex::encode(id.0));
+            linked += 1;
+        }
+    }
+
+    Ok(linked)
 }
