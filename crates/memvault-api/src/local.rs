@@ -245,12 +245,14 @@ impl LocalClient {
     /// extraction results, retractions) use this unified format.
     /// Tagged with `_ann:<target>` for discovery.
     fn store_annotation(&self, target: &str, ann_type: &str, data: serde_json::Value) -> Result<()> {
+        let tags = vec![("_ann".to_string(), target.to_string())];
         let block = serde_json::json!({
             "kind": "annotation",
             "target": target,
             "type": ann_type,
             "data": data,
             "wall_ns": memvault_core::wall_ns(),
+            "tags": tags,
         });
         let block_bytes = serde_json::to_vec(&block)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;

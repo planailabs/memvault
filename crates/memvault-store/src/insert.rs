@@ -55,9 +55,18 @@ impl MemvaultStore {
         let author: Vec<u8> = val.get("author")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        let tags: Vec<(String, String)> = val.get("tags")
+        let mut tags: Vec<(String, String)> = val.get("tags")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        // Legacy annotation blocks stored tags only in EnvelopeMeta, not in
+        // the body. Recover _ann tag from the annotation target field.
+        if tags.is_empty() {
+            if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
+                if let Some(target) = val.get("target").and_then(|v| v.as_str()) {
+                    tags.push(("_ann".to_string(), target.to_string()));
+                }
+            }
+        }
         let wall_ns: u64 = val.get("wall_ns")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);

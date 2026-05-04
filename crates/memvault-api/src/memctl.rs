@@ -452,6 +452,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             let vfs_repaired = repair_vfs_tree(&client).await?;
             if vfs_repaired > 0 {
                 println!("  Linked {vfs_repaired} orphaned directory/ies to VFS root");
+                // Re-save index cache (Phase 3 may have retracted entities).
+                client.save_index(&cache_path).await?;
+                println!("  Index cache re-saved");
             } else {
                 println!("  VFS tree OK (no orphans)");
             }
@@ -547,14 +550,16 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         }
     }
     if root_id.is_none() {
-        // Fallback: find by name="/"
-        for (id, name) in &all_dirs {
-            if name == "/" {
-                let node_id = format!("entity:{}", hex::encode(id.0));
-                let _ = client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await;
-                root_id = Some(EntityId(id.0));
-                break;
-            }
+        // Fallback: find by name="/", pick smallest ID for deterministic choice.
+        let mut slash_candidates: Vec<[u8; 32]> = all_dirs.iter()
+            .filter(|(_, name)| name == "/")
+            .map(|(id, _)| id.0)
+            .collect();
+        slash_candidates.sort();
+        if let Some(best) = slash_candidates.first() {
+            let node_id = format!("entity:{}", hex::encode(best));
+            let _ = client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await;
+            root_id = Some(EntityId(*best));
         }
     }
     let root_bytes = match root_id {
