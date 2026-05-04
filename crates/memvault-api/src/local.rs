@@ -116,6 +116,7 @@ impl LocalClient {
 
     /// Populate the in-memory TextIndex from the blockstore.
     pub async fn populate_index(&self) -> Result<(usize, usize, usize)> {
+        tracing::info!("populating text index from blockstore...");
         let mut doc_count = 0usize;
         let mut entity_count = 0usize;
         let mut attachment_count = 0usize;
@@ -249,10 +250,17 @@ impl LocalClient {
     /// Extract text from data, cache the result (success or failure) in the blockstore,
     /// and return the extracted text if successful.
     fn extract_and_cache(&self, manifest_cid: &[u8], data: &[u8], mime_type: &str) -> Option<String> {
+        tracing::debug!(mime_type, "extracting text");
         // Check cache first.
         match self.load_cached_extraction(manifest_cid) {
-            Some(ExtractionResult::Ok(text)) => return Some(text),
-            Some(ExtractionResult::Failed(_)) => return None,
+            Some(ExtractionResult::Ok(text)) => {
+                tracing::debug!(mime_type, "extraction cache hit");
+                return Some(text);
+            }
+            Some(ExtractionResult::Failed(_)) => {
+                tracing::debug!(mime_type, "extraction cache hit");
+                return None;
+            }
             _ => {}
         }
 
@@ -276,8 +284,10 @@ impl LocalClient {
                     let _ = self.store.put_block(&et_cid.to_bytes(), &et_bytes);
                     self.store_manifest_update(manifest_cid, Some(et_cid.to_bytes()), None);
                 }
+                tracing::debug!(mime_type, text_len = text.len(), "extraction succeeded, cached");
             }
             ExtractionResult::Failed(err) => {
+                tracing::debug!(mime_type, error = %err, "extraction failed, cached failure");
                 self.store_manifest_update(manifest_cid, None, Some(err));
             }
             ExtractionResult::Unsupported => {}
@@ -409,6 +419,7 @@ impl MemvaultClient for LocalClient {
         all_tags.push(Self::doc_tag(&doc.id));
 
         let cid_bytes = self.store_op(&op, &all_tags, &vis)?;
+        tracing::info!(doc_id = %hex::encode(doc.id.0), "doc created");
 
         // Index for search
         let title = doc
@@ -597,6 +608,7 @@ impl MemvaultClient for LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let env_cid = cid_from_bytes(&envelope_bytes);
         self.store.insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
+        tracing::info!(filename = ?filename, mime_type, size = data.len(), "file attached");
 
         // Extract text and cache the result (success or failure) in the blockstore.
         let extracted_text = self.extract_and_cache(&manifest_cid_bytes, data, mime_type);
@@ -696,6 +708,7 @@ impl MemvaultClient for LocalClient {
         let entity_label: String = entity_id.0.iter().map(|b| format!("{b:02x}")).collect();
         let tags = vec![("entity".to_string(), entity_label)];
         self.store_op(&op, &tags, &vis)?;
+        tracing::info!(entity_id = %hex::encode(entity_id.0), kind = %entity.kind, "entity created");
 
         // Index for unified search
         {
@@ -791,6 +804,7 @@ impl MemvaultClient for LocalClient {
             tags.push(("entity".to_string(), entity_label));
         }
         self.store_op(&op, &tags, &vis)?;
+        tracing::info!(source = %source.tag_label(), target = %op_edge_target_label(&op).unwrap_or_default(), "link created");
 
         Ok(edge_id)
     }
@@ -979,6 +993,7 @@ impl MemvaultClient for LocalClient {
             cluster_id: Some(self.cluster_id.clone()),
         };
         self.store.insert_envelope(&cid.to_bytes(), &retraction_bytes, &meta)?;
+        tracing::info!(node_id, reason, "node retracted");
 
         // Remove from in-memory index.
         let mut idx = self.index.write().await;
@@ -1016,6 +1031,7 @@ impl MemvaultClient for LocalClient {
         self.store_tag_update(node_id, &tags, &[])?;
         let mut idx = self.index.write().await;
         idx.apply_tag_update(node_id, &tags, &[]);
+        tracing::debug!(node_id, tag_count = tags.len(), "tags added");
         Ok(())
     }
 
@@ -1023,6 +1039,7 @@ impl MemvaultClient for LocalClient {
         self.store_tag_update(node_id, &[], &tags)?;
         let mut idx = self.index.write().await;
         idx.apply_tag_update(node_id, &[], &tags);
+        tracing::debug!(node_id, tag_count = tags.len(), "tags removed");
         Ok(())
     }
 
@@ -1065,6 +1082,7 @@ impl MemvaultClient for LocalClient {
             cluster_id: Some(self.cluster_id.clone()),
         };
         self.store.insert_envelope(&cid_bytes, &view_bytes, &meta)?;
+        tracing::info!(name = %view.name, tag_count = view.tags.len(), "view created");
         Ok(())
     }
 
@@ -1103,6 +1121,7 @@ impl MemvaultClient for LocalClient {
         let doc_count = self.store.query_unique_labels("doc", usize::MAX)
             .map(|l| l.len() as u64)
             .unwrap_or(0);
+        tracing::debug!(block_count, doc_count, "status queried");
         Ok(NodeStatus {
             peer_id: self.peer_id.clone(),
             cluster_id: self.cluster_id.clone(),

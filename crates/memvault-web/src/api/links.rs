@@ -65,9 +65,10 @@ pub async fn create_link(
 
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
 
+    let relation = req.relation;
     let edge = Edge {
         id: EdgeId::random(),
-        relation: req.relation,
+        relation: relation.clone(),
         target,
         weight: req.weight,
         props: req.props,
@@ -75,6 +76,7 @@ pub async fn create_link(
     };
 
     let edge_id = state.client.add_link(&source, edge, vis).await?;
+    tracing::info!(source = %req.source, target = %req.target, relation = %relation, "API: link created");
     Ok((
         axum::http::StatusCode::CREATED,
         Json(serde_json::json!({ "edge_id": hex::encode(edge_id.0) })),
@@ -119,6 +121,7 @@ pub async fn get_node(
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::debug!(node_id = %node_id, "API: get node");
     let node_ref = NodeRef::from_tag_label(&node_id)
         .ok_or_else(|| ApiError::bad_request("Invalid node ID — expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
 
@@ -190,6 +193,7 @@ pub async fn retract_node(
     Path(node_id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     state.client.retract_node(&node_id, "retracted via API").await?;
+    tracing::info!(node_id = %node_id, "API: node retracted");
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

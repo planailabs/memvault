@@ -20,6 +20,7 @@ impl MemvaultStore {
     /// Clear all secondary index tables (BY_TAG, BY_AUTHOR, BY_TIME, BY_CAUSAL, BY_PROVENANCE, CLUSTER_ORIGIN).
     /// Does NOT touch BLOCKS, HEADS, REVOCATIONS, RETRACTED, CONSUMED_TOKENS, ROTATIONS, or EDGES.
     pub fn clear_secondary_indexes(&self) -> Result<(), StoreError> {
+        tracing::info!("clearing secondary index tables");
         let txn = self.db.begin_write()?;
         {
             // Drain each table by opening and removing all entries.
@@ -120,6 +121,7 @@ impl MemvaultStore {
             }
         }
         txn.commit()?;
+        tracing::debug!("reindexed block");
         Ok(true)
     }
 

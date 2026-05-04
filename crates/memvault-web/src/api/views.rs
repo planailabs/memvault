@@ -32,6 +32,7 @@ pub async fn add_tags(
     Json(req): Json<TagUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.client.add_tags(&node_id, req.tags).await?;
+    tracing::debug!(node_id = %node_id, "API: tags added");
     Ok(Json(serde_json::json!({ "node_id": node_id, "status": "tags_added" })))
 }
 
@@ -79,6 +80,7 @@ pub async fn create_view(
         created_ns: memvault_core::wall_ns(),
     };
     state.client.create_view(view).await?;
+    tracing::info!(name = %req.name, "API: view created");
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "name": req.name, "status": "created" }))))
 }
 

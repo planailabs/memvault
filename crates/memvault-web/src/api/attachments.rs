@@ -97,6 +97,7 @@ pub async fn upload_standalone(
         .client
         .attach_file(&data, Some(&name), &content_type, vec![], "internal")
         .await?;
+    tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
 
     Ok((
         StatusCode::CREATED,

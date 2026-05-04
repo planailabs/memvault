@@ -103,6 +103,7 @@ pub async fn create_doc(
     let vis = parse_visibility_str(req.visibility.as_deref());
 
     let cid = state.client.put_doc(doc, req.tags.clone(), vis).await?;
+    tracing::info!(doc_id = %hex::encode(doc_id.0), "API: doc created");
 
     let resp = DocResponse {
         id: hex::encode(doc_id.0),
@@ -182,6 +183,7 @@ pub async fn delete_doc(
     let doc_id = parse_doc_id(&id)?;
     let cid_bytes = doc_id.0.to_vec();
     let cid = state.client.retract(&cid_bytes, "deleted via API").await?;
+    tracing::info!(id = %id, "API: doc deleted");
     Ok(Json(serde_json::json!({ "cid": hex::encode(&cid) })))
 }
 

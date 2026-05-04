@@ -56,14 +56,16 @@ pub async fn create_entity(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateEntityRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+    let kind = req.kind;
     let entity = Entity {
         id: EntityId::random(),
-        kind: req.kind,
+        kind: kind.clone(),
         props: req.props,
         edges_out: vec![],
     };
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
     let id = state.client.add_entity(entity, vis).await?;
+    tracing::info!(kind = %kind, "API: entity created");
     Ok((
         axum::http::StatusCode::CREATED,
         Json(serde_json::json!({ "id": hex::encode(id.0) })),
