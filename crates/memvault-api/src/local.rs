@@ -1077,13 +1077,11 @@ impl MemvaultClient for LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let mut views = Vec::new();
         for label in &labels {
-            let cids = self.store.query_by_tag("view", label, 0, 1)
-                .map_err(|e| ApiError::Serialization(e.to_string()))?;
-            for cid in &cids {
-                if let Some(data) = self.store.get_block(cid)? {
-                    if let Ok(view) = serde_json::from_slice::<crate::types::View>(&data) {
-                        views.push(view);
-                    }
+            let cid_bytes = hex::decode(label).unwrap_or_default();
+            if let Some(data) = self.store.get_block(&cid_bytes)? {
+                if let Ok(mut view) = serde_json::from_slice::<crate::types::View>(&data) {
+                    view.cid = label.clone();
+                    views.push(view);
                 }
             }
         }
@@ -1095,9 +1093,10 @@ impl MemvaultClient for LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&view_bytes);
         let cid_bytes = cid.to_bytes();
+        let cid_hex = hex::encode(&cid_bytes);
         let meta = EnvelopeMeta {
             author: self.peer_id.clone(),
-            tags: vec![("view".to_string(), view.name.clone())],
+            tags: vec![("view".to_string(), cid_hex)],
             wall_ns: view.created_ns,
             causal: vec![],
             provenance: vec![],
@@ -1109,31 +1108,26 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn delete_view(&self, name: &str) -> Result<()> {
-        let cids = self.store.query_by_tag("view", name, 0, usize::MAX)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for cid in &cids {
-            self.retract(cid, "view deleted").await?;
+        // Find the view by name (scan all views).
+        let views = self.list_views().await?;
+        for view in &views {
+            if view.name == name {
+                let cid_bytes = hex::decode(&view.cid).unwrap_or_default();
+                self.retract(&cid_bytes, "view deleted").await?;
+            }
         }
         Ok(())
     }
 
     async fn update_view(&self, view: crate::types::View) -> Result<()> {
-        // Delete old version, then create new.
         self.delete_view(&view.name).await?;
         self.create_view(view).await
     }
 
     async fn get_view(&self, name: &str) -> Result<Option<crate::types::View>> {
-        let cids = self.store.query_by_tag("view", name, 0, 1)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for cid in &cids {
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Ok(view) = serde_json::from_slice::<crate::types::View>(&data) {
-                    return Ok(Some(view));
-                }
-            }
-        }
-        Ok(None)
+        // Scan all views and find by name.
+        let views = self.list_views().await?;
+        Ok(views.into_iter().find(|v| v.name == name))
     }
 
     async fn status(&self) -> Result<NodeStatus> {

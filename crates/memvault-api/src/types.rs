@@ -62,6 +62,9 @@ pub struct View {
     /// Required tags — items must have ALL of these to appear in this view.
     pub tags: Vec<(String, String)>,
     pub created_ns: u64,
+    /// Block CID (hex). Set after storage, empty on input.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cid: String,
 }
 
 /// Node status information.
