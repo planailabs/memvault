@@ -1,7 +1,7 @@
 //! Graph explorer page — interactive force-directed knowledge graph.
 
 use dioxus::prelude::*;
-use plan_ai_design::{Card, PageHeader, Pill, PillVariant};
+use plan_ai_design::{Card, PageHeader};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -317,18 +317,6 @@ fn node_color(node_type: &str, kind: &str) -> String {
     }
 }
 
-fn type_pill_variant(node_type: &str, kind: &str) -> PillVariant {
-    match node_type {
-        "doc" => PillVariant::Warn,
-        "attachment" => PillVariant::Ok,
-        _ => match kind {
-            "person" => PillVariant::Info,
-            "project" => PillVariant::Accent,
-            "concept" => PillVariant::Ok,
-            _ => PillVariant::Muted,
-        },
-    }
-}
 
 // ── Viewport state ─────────────────────────────────────────────────────
 
@@ -700,8 +688,20 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         }
                                     },
                                     div { class: "flex items-center gap-2",
-                                        Pill { variant: type_pill_variant(&node.node_type, &node.kind),
-                                            if node.node_type != "entity" { "{node.node_type}" } else { "{node.kind}" }
+                                        {
+                                            let color = node_color(&node.node_type, &node.kind);
+                                            let display_kind = if node.node_type != "entity" { &node.node_type } else { &node.kind };
+                                            rsx! {
+                                                span {
+                                                    class: "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium",
+                                                    style: "background: {color}20; color: {color};",
+                                                    span {
+                                                        class: "w-2 h-2 rounded-full",
+                                                        style: "background: {color};",
+                                                    }
+                                                    "{display_kind}"
+                                                }
+                                            }
                                         }
                                         span { class: "text-sm font-medium truncate", "{node.label}" }
                                     }
@@ -911,8 +911,17 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                             Card {
                                 div { class: "p-4 space-y-3",
                                     div { class: "flex items-center gap-2",
-                                        Pill { variant: type_pill_variant(&d.node_type, &d.kind),
-                                            if d.node_type != "entity" { "{d.node_type}" } else { "{d.kind}" }
+                                        {
+                                            let color = node_color(&d.node_type, &d.kind);
+                                            let display_kind = if d.node_type != "entity" { &d.node_type } else { &d.kind };
+                                            rsx! {
+                                                span {
+                                                    class: "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium",
+                                                    style: "background: {color}20; color: {color};",
+                                                    span { class: "w-2 h-2 rounded-full", style: "background: {color};" }
+                                                    "{display_kind}"
+                                                }
+                                            }
                                         }
                                     }
                                     h3 { class: "h-card font-semibold", "{d.label}" }
