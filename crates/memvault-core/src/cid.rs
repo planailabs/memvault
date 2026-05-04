@@ -28,6 +28,24 @@ pub fn cid_from_string(s: &str) -> Result<Cid> {
     s.parse::<Cid>().map_err(|e| Error::Cid(e.to_string()))
 }
 
+/// Verify that a CID's hash matches the given data.
+///
+/// Parses the CID from bytes, extracts the hash algorithm from the
+/// embedded multihash, recomputes the digest over `data`, and compares.
+/// Supports all hash algorithms in `multihash-codetable` (Blake3, SHA2-256, etc.).
+///
+/// Returns `Ok(true)` if valid, `Ok(false)` if the digest doesn't match,
+/// `Err` if the CID can't be parsed or the hash algorithm is unsupported.
+pub fn verify_cid(cid_bytes: &[u8], data: &[u8]) -> Result<bool> {
+    let cid = Cid::read_bytes(std::io::Cursor::new(cid_bytes))
+        .map_err(|e| Error::Cid(format!("cannot parse CID: {e}")))?;
+    let hash_code = cid.hash().code();
+    let code = Code::try_from(hash_code)
+        .map_err(|_| Error::Cid(format!("unsupported hash algorithm: 0x{hash_code:x}")))?;
+    let expected = code.digest(data);
+    Ok(cid.hash() == &expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

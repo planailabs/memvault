@@ -9,15 +9,21 @@ use crate::MemvaultStore;
 impl MemvaultStore {
     /// Store a raw block by CID bytes.
     ///
-    /// Verifies that the CID matches the blake3 hash of the data before
-    /// writing. Returns `CidMismatch` if the check fails.
+    /// Verifies the CID's embedded hash matches the data before writing.
+    /// Supports all hash algorithms known to `multihash-codetable` (Blake3, SHA2-256, etc.).
     pub fn put_block(&self, cid: &[u8], data: &[u8]) -> Result<(), StoreError> {
-        let expected = memvault_core::cid_from_bytes(data);
-        if expected.to_bytes() != cid {
-            return Err(StoreError::CidMismatch {
-                expected: format!("{:?}", &expected.to_bytes()[..8.min(expected.to_bytes().len())]),
-                got: format!("{:?}", &cid[..8.min(cid.len())]),
-            });
+        match memvault_core::verify_cid(cid, data) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(StoreError::CidMismatch {
+                    expected: format!("hash of {} bytes", data.len()),
+                    got: format!("CID {}", hex::encode(&cid[..cid.len().min(16)])),
+                });
+            }
+            Err(_) => {
+                // Unsupported hash algorithm — allow the write but log.
+                tracing::debug!(cid_len = cid.len(), "put_block: CID uses unknown hash, skipping validation");
+            }
         }
         let txn = self.db.begin_write()?;
         {

@@ -418,35 +418,41 @@ pub async fn run(cli: Cli) -> Result<()> {
             let store = make_store()?;
 
             // Phase 0: Validate block CID integrity.
+            // Uses verify_cid which parses the multihash from the CID and
+            // recomputes the digest with the correct algorithm (Blake3, SHA2-256, etc.).
             println!("Phase 0: Validating block CIDs...");
             let blocks = store.iter_blocks()?;
             let mut cid_ok = 0usize;
             let mut cid_mismatch = 0usize;
+            let mut cid_unchecked = 0usize;
             for (cid, data) in &blocks {
-                // Direct match: CID == hash(stored data).
-                let expected = memvault_core::cid_from_bytes(data);
-                if expected.to_bytes() == *cid {
-                    cid_ok += 1;
-                    continue;
+                // Direct match: CID hash matches the stored block data.
+                match memvault_core::verify_cid(cid, data) {
+                    Ok(true) => { cid_ok += 1; continue; }
+                    Err(_) => { cid_unchecked += 1; continue; } // unparseable CID
+                    Ok(false) => {}
                 }
-                // Envelope match: CID == hash(inner payload).
+                // Envelope match: CID hash matches the inner "payload" field.
+                // Op envelopes compute CID from the payload, not the wrapper.
+                let mut matched = false;
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
                     if let Some(payload) = val.get("payload") {
                         if let Ok(payload_bytes) = serde_json::to_vec(payload) {
-                            let payload_cid = memvault_core::cid_from_bytes(&payload_bytes);
-                            if payload_cid.to_bytes() == *cid {
+                            if let Ok(true) = memvault_core::verify_cid(cid, &payload_bytes) {
                                 cid_ok += 1;
-                                continue;
+                                matched = true;
                             }
                         }
                     }
                 }
-                cid_mismatch += 1;
-                eprintln!("  CID mismatch: {}", hex::encode(cid));
+                if !matched {
+                    cid_mismatch += 1;
+                    eprintln!("  CID mismatch: {}", hex::encode(cid));
+                }
             }
-            println!("  {cid_ok} OK, {cid_mismatch} mismatched");
+            println!("  {cid_ok} verified, {cid_mismatch} mismatched, {cid_unchecked} unchecked");
             if cid_mismatch > 0 {
-                eprintln!("  WARNING: {cid_mismatch} block(s) have CID mismatches (data corruption or format change)");
+                eprintln!("  WARNING: {cid_mismatch} block(s) have CID mismatches (data corruption)");
             }
 
             // Phase 1: Rebuild store secondary indexes (BY_TAG, BY_AUTHOR, BY_TIME, etc.)

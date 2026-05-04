@@ -9,7 +9,7 @@ pub mod tags_lint;
 pub mod time;
 pub mod visibility;
 
-pub use self::cid::{cid_from_bytes, cid_from_string, cid_from_value, cid_to_string};
+pub use self::cid::{cid_from_bytes, cid_from_string, cid_from_value, cid_to_string, verify_cid};
 pub use classification::Classification;
 pub use codec::{decode, encode};
 pub use envelope::Signed;
