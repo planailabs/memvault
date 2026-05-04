@@ -114,9 +114,8 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
 pub fn FileExplorer() -> Element {
     use_topbar("Files");
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
-    let view_name = active_view.read().name.clone();
     let files = use_server_future(move || {
-        let v = view_name.clone();
+        let v = active_view.read().name.clone();
         async move { list_files(v).await }
     })?;
     let mut grid_view = use_signal(|| false);

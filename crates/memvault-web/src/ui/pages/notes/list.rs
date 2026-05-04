@@ -63,9 +63,8 @@ async fn list_notes(view: Option<String>) -> Result<Vec<NoteRow>, ServerFnError>
 pub fn NoteList() -> Element {
     use_topbar("Notes");
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
-    let view_name = active_view.read().name.clone();
     let notes = use_server_future(move || {
-        let v = view_name.clone();
+        let v = active_view.read().name.clone();
         async move { list_notes(v).await }
     })?;
 

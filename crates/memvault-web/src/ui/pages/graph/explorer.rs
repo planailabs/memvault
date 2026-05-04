@@ -371,9 +371,8 @@ impl Viewport {
 pub fn GraphExplorer() -> Element {
     use_topbar("Graph");
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
-    let view_name = active_view.read().name.clone();
     let nodes_res = use_server_future(move || {
-        let v = view_name.clone();
+        let v = active_view.read().name.clone();
         async move { list_graph_nodes(v).await }
     })?;
 
