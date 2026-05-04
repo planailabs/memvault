@@ -428,10 +428,12 @@ impl LocalClient {
             cluster_id: Some(self.cluster_id.clone()),
         };
 
-        // Wrap op in a pseudo-envelope JSON for audit purposes
+        // Store raw op bytes so the CID can be verified by hashing
+        // payload_bytes directly (avoids serde_json Value reordering).
         let envelope = serde_json::json!({
             "version": 1,
             "payload": op,
+            "payload_bytes": op_bytes,
             "author": self.peer_id,
             "tags": tags,
             "visibility": vis,

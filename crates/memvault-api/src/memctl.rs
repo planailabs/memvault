@@ -446,13 +446,23 @@ pub async fn run(cli: Cli) -> Result<()> {
                     Err(_) => { cid_unchecked += 1; continue; }
                     Ok(false) => {}
                 }
-                // Op envelopes: CID is computed from the original struct
-                // serialization, which can't be reconstructed from the JSON
-                // Value (field ordering differs). If the block has a "payload"
-                // field, treat it as an envelope — the CID is of the payload
-                // struct, not verifiable after round-tripping through Value.
+                // Op envelopes: CID is of the payload, not the wrapper.
+                // New envelopes include payload_bytes for direct verification.
+                // Legacy envelopes (no payload_bytes) can't be verified due to
+                // serde_json Value field reordering.
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
                     if val.get("payload").is_some() {
+                        // Try payload_bytes first (new format).
+                        if let Some(raw) = val.get("payload_bytes")
+                            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
+                        {
+                            match memvault_core::verify_cid(cid, &raw) {
+                                Ok(true) => { cid_ok += 1; continue; }
+                                Ok(false) => { cid_mismatch += 1; eprintln!("  CID mismatch: {}", hex::encode(cid)); continue; }
+                                Err(_) => {}
+                            }
+                        }
+                        // Legacy envelope without payload_bytes — unverifiable.
                         cid_envelope += 1;
                         continue;
                     }
