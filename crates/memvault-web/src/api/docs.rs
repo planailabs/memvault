@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use memvault_core::{DocId, Visibility};
-use memvault_doc::{Document, TextPatch};
+use memvault_doc::TextPatch;
 use serde::{Deserialize, Serialize};
 
 use crate::api::auth::RequireAuth;
@@ -99,27 +99,24 @@ pub async fn create_doc(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateDocRequest>,
 ) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
-    let doc_id = DocId::random();
-    let frontmatter = req.frontmatter.unwrap_or_default();
-    let doc = Document::new(doc_id.clone(), req.body.clone(), frontmatter.clone());
-
     let vis = parse_visibility_str(req.visibility.as_deref());
 
-    let cid = state.client.put_doc(doc, req.tags.clone(), vis).await?;
-    let node_id = format!("doc:{}", hex::encode(doc_id.0));
-    tracing::info!(doc_id = %hex::encode(doc_id.0), "API: doc created");
-
-    if let Some(vfs_path) = &req.vfs_path {
-        if let Err(e) = memvault_api::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
-            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after doc creation");
-        }
-    }
+    let result = memvault_api::docs::create_doc(
+        state.client.as_ref(),
+        &req.body,
+        None, // title already in frontmatter if provided
+        req.frontmatter.clone(),
+        req.tags.clone(),
+        vis,
+        req.vfs_path.as_deref(),
+    ).await?;
+    tracing::info!(doc_id = %result.node_id, "API: doc created");
 
     let resp = DocResponse {
-        id: node_id,
-        cid: hex::encode(&cid),
+        id: result.node_id,
+        cid: hex::encode(&result.cid),
         body: req.body,
-        frontmatter,
+        frontmatter: result.frontmatter,
         tags: req.tags,
         updated_ns: 0,
     };

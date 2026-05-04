@@ -290,8 +290,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             let client = create_client(store);
             let tags = crate::docs::parse_tags(&tag);
             let vis = crate::docs::parse_visibility(Some(&visibility));
-            let (_cid, node_id) = crate::docs::create_doc(&client, &text, title.as_deref(), tags, vis, None).await?;
-            println!("{node_id}");
+            let result = crate::docs::create_doc(&client, &text, title.as_deref(), None, tags, vis, None).await?;
+            println!("{}", result.node_id);
         }
         Commands::Get { cid } => {
             let cid_bytes = hex::decode(&cid)?;
@@ -655,10 +655,10 @@ async fn import_docs(
         let body = std::fs::read_to_string(file_path)?;
         let title = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
         let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
-        let (_cid, node_id) = crate::docs::create_doc(
-            client, &body, title.as_deref(), tags.to_vec(), vis, vfs_path.as_deref(),
+        let result = crate::docs::create_doc(
+            client, &body, title.as_deref(), None, tags.to_vec(), vis, vfs_path.as_deref(),
         ).await?;
-        println!("  {} -> {node_id}", file_path.display());
+        println!("  {} -> {}", file_path.display(), result.node_id);
         count += 1;
     }
     Ok(count)

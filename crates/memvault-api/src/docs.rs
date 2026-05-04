@@ -10,24 +10,40 @@ use memvault_doc::Document;
 use crate::error::Result;
 use crate::MemvaultClient;
 
+/// Result of creating a document.
+pub struct CreateDocResult {
+    /// Raw CID bytes of the stored envelope.
+    pub cid: Vec<u8>,
+    /// Node ID in "doc:<hex>" format.
+    pub node_id: String,
+    /// The DocId that was generated.
+    pub doc_id: DocId,
+    /// The frontmatter that was stored (including title if provided).
+    pub frontmatter: BTreeMap<String, serde_json::Value>,
+}
+
 /// Create a document, optionally linking it into the VFS.
-/// Returns (cid_bytes, node_id).
+///
+/// If `title` is provided AND `frontmatter` doesn't already contain a "title"
+/// key, the title is inserted into frontmatter automatically.
 ///
 /// Audit logging is automatic via `MemvaultClient::put_doc`.
 pub async fn create_doc(
     client: &dyn MemvaultClient,
     body: &str,
     title: Option<&str>,
+    frontmatter: Option<BTreeMap<String, serde_json::Value>>,
     tags: Vec<(String, String)>,
     vis: Visibility,
     vfs_path: Option<&str>,
-) -> Result<(Vec<u8>, String)> {
+) -> Result<CreateDocResult> {
     let doc_id = DocId::random();
-    let mut frontmatter = BTreeMap::new();
+    let mut fm = frontmatter.unwrap_or_default();
     if let Some(t) = title {
-        frontmatter.insert("title".to_string(), serde_json::Value::String(t.to_string()));
+        fm.entry("title".to_string())
+            .or_insert_with(|| serde_json::Value::String(t.to_string()));
     }
-    let doc = Document::new(doc_id.clone(), body.to_string(), frontmatter);
+    let doc = Document::new(doc_id.clone(), body.to_string(), fm.clone());
     let cid = client.put_doc(doc, tags, vis).await?;
     let node_id = format!("doc:{}", hex::encode(doc_id.0));
 
@@ -37,7 +53,7 @@ pub async fn create_doc(
         }
     }
 
-    Ok((cid, node_id))
+    Ok(CreateDocResult { cid, node_id, doc_id, frontmatter: fm })
 }
 
 /// Parse tags from "scope:label" strings.
