@@ -59,12 +59,11 @@ pub fn Topbar() -> Element {
     let mut active_view = use_context::<ActiveViewSignal>();
     let views_res = use_server_future(fetch_views)?;
 
-    let current_name = active_view.read().name.clone().unwrap_or_else(|| t!("all"));
+    let current_name = active_view.read().name.clone().unwrap_or_else(|| "All".to_string());
 
     let on_view_change = move |e: Event<FormData>| {
         let name = e.value();
-        let all_label = t!("all");
-        if name == all_label || name.is_empty() {
+        if name == "All" || name.is_empty() {
             active_view.set(ActiveView::default());
         } else {
             let view_name = name.clone();
@@ -89,10 +88,10 @@ pub fn Topbar() -> Element {
                         class: "input input-sm text-sm w-auto",
                         value: "{current_name}",
                         onchange: on_view_change,
-                        option { value: "{t!(\"all\")}", {t!("all")} }
+                        option { value: "All", selected: active_view.read().name.is_none(), {t!("all")} }
                         if let Some(Ok(views)) = &*views_res.read() {
                             for v in views {
-                                option { value: "{v.name}", "{v.name} ({v.tag_count})" }
+                                option { value: "{v.name}", selected: active_view.read().name.as_deref() == Some(v.name.as_str()), "{v.name} ({v.tag_count})" }
                             }
                         }
                     }
