@@ -453,6 +453,13 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn get_doc(&self, id: &DocId) -> Result<Option<Document>> {
+        // Check retraction in the index.
+        let node_id = format!("doc:{}", hex::encode(id.0));
+        {
+            let idx = self.index.read().await;
+            if idx.is_retracted(&node_id) { return Ok(None); }
+        }
+
         let (_, label) = Self::doc_tag(id);
         let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX)?;
 
@@ -523,6 +530,10 @@ impl MemvaultClient for LocalClient {
                                 serde_json::from_value::<DocId>(dc["doc_id"].clone())
                             {
                                 if seen_docs.insert(doc_id.clone()) {
+                                    let node_id = format!("doc:{}", hex::encode(doc_id.0));
+                                    let idx = self.index.read().await;
+                                    if idx.is_retracted(&node_id) { continue; }
+                                    drop(idx);
                                     let title = dc
                                         .get("frontmatter")
                                         .and_then(|fm| fm.get("title"))
@@ -640,7 +651,13 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn read_attachment(&self, manifest_cid: &[u8]) -> Result<Vec<u8>> {
-        // Load manifest
+        let node_id = format!("attachment:{}", hex::encode(manifest_cid));
+        {
+            let idx = self.index.read().await;
+            if idx.is_retracted(&node_id) {
+                return Err(ApiError::NotFound("attachment retracted".into()));
+            }
+        }
         let manifest_data = self
             .store
             .get_block(manifest_cid)?
@@ -707,6 +724,11 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn get_attachment_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>> {
+        let node_id = format!("attachment:{}", hex::encode(manifest_cid));
+        {
+            let idx = self.index.read().await;
+            if idx.is_retracted(&node_id) { return Ok(None); }
+        }
         let data = self.store.get_block(manifest_cid)?;
         Ok(data)
     }
@@ -736,6 +758,12 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>> {
+        let node_id = format!("entity:{}", hex::encode(id.0));
+        {
+            let idx = self.index.read().await;
+            if idx.is_retracted(&node_id) { return Ok(None); }
+        }
+
         let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
         let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;
 
