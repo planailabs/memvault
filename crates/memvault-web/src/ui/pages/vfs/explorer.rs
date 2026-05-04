@@ -265,28 +265,24 @@ async fn vfs_create_edge(
 
 // ── UI Components ──────────────────────────────────────────────────
 
-/// Route component for `/vfs` (root directory).
+/// Route component for `/vfs/:path`.
+/// The path is URL-encoded: `/` is the root, `/projects` is a subdirectory.
 #[component]
-pub fn VfsRoot() -> Element {
-    rsx! { VfsExplorerInner { path: "/".to_string() } }
-}
-
-/// Route component for `/vfs/*segments` (subdirectory).
-#[component]
-pub fn VfsBrowse(segments: String) -> Element {
-    let path = format!("/{segments}");
-    rsx! { VfsExplorerInner { path } }
+pub fn VfsExplorer(path: String) -> Element {
+    // Decode %2F back to / for nested paths.
+    let decoded = path.replace("%2F", "/");
+    let vfs_path = if decoded.starts_with('/') { decoded } else { format!("/{decoded}") };
+    rsx! { VfsExplorerInner { path: vfs_path } }
 }
 
 /// Compute the Dioxus route for a directory path.
 fn dir_route(current_path: &str, name: &str) -> Route {
     let child_path = if current_path == "/" {
-        name.to_string()
+        format!("/{name}")
     } else {
-        let trimmed = current_path.strip_prefix('/').unwrap_or(current_path);
-        format!("{trimmed}/{name}")
+        format!("{current_path}/{name}")
     };
-    Route::VfsBrowse { segments: child_path }
+    Route::VfsExplorer { path: child_path }
 }
 
 #[component]
@@ -304,14 +300,12 @@ fn VfsExplorerInner(path: String) -> Element {
 
     let breadcrumbs = {
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut crumbs: Vec<(Route, String)> = vec![(Route::VfsRoot {}, "/".to_string())];
+        let mut crumbs: Vec<(Route, String)> = vec![(Route::VfsExplorer { path: "/".to_string() }, "/".to_string())];
         let mut accum = String::new();
         for part in parts {
-            if !accum.is_empty() {
-                accum.push('/');
-            }
+            accum.push('/');
             accum.push_str(part);
-            crumbs.push((Route::VfsBrowse { segments: accum.clone() }, part.to_string()));
+            crumbs.push((Route::VfsExplorer { path: accum.clone() }, part.to_string()));
         }
         crumbs
     };

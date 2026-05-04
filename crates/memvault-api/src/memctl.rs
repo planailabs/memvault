@@ -580,14 +580,82 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         }
     }
 
-    // 4. Link orphaned vfs:dir entities to root.
+    // 4. Re-parent children of duplicate roots, then retract duplicates.
     let mut linked = 0usize;
     let root_ref = NodeRef::Entity(EntityId(root_bytes));
-    for (id, name) in &all_dirs {
+
+    // Find duplicate root entities (name="/", not the chosen root).
+    let duplicate_roots: Vec<[u8; 32]> = all_dirs.iter()
+        .filter(|(id, name)| name == "/" && id.0 != root_bytes)
+        .map(|(id, _)| id.0)
+        .collect();
+
+    for dup_bytes in &duplicate_roots {
+        // Move children of the duplicate root to the real root.
+        let dup_ref = NodeRef::Entity(EntityId(*dup_bytes));
+        let edges = client.edges_of(&dup_ref).await.unwrap_or_default();
+        for (src, edge) in &edges {
+            if src != &dup_ref || edge.relation != VFS_CHILD_REL {
+                continue;
+            }
+            let child_name = edge.props.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            // Check if root already has a child with this name.
+            let root_edges = client.edges_of(&root_ref).await.unwrap_or_default();
+            let already_exists = root_edges.iter().any(|(s, e)| {
+                s == &root_ref && e.relation == VFS_CHILD_REL
+                    && e.props.get("name").and_then(|v| v.as_str()) == Some(&child_name)
+            });
+            if already_exists {
+                continue;
+            }
+            let mut props = BTreeMap::new();
+            props.insert("name".to_string(), serde_json::Value::String(child_name.clone()));
+            let new_edge = Edge {
+                id: EdgeId::random(),
+                relation: VFS_CHILD_REL.to_string(),
+                target: edge.target.clone(),
+                weight: None,
+                props,
+                provenance: None,
+            };
+            if client.add_link(&root_ref, new_edge, Visibility::Internal).await.is_ok() {
+                println!("  Re-parented \"{child_name}\" from duplicate root to real root");
+                linked += 1;
+            }
+        }
+        // Retract the duplicate root entity.
+        let node_id = format!("entity:{}", hex::encode(dup_bytes));
+        if client.retract_node(&node_id, "duplicate VFS root").await.is_ok() {
+            println!("  Retracted duplicate root {}", hex::encode(dup_bytes));
+        }
+    }
+
+    // 5. Link remaining orphaned vfs:dir entities to root.
+    // Re-walk tree since we may have added children above.
+    reachable.clear();
+    reachable.insert(root_bytes);
+    let mut stack = vec![NodeRef::Entity(EntityId(root_bytes))];
+    while let Some(current) = stack.pop() {
+        let edges = client.edges_of(&current).await.unwrap_or_default();
+        for (src, edge) in &edges {
+            if src != &current || edge.relation != VFS_CHILD_REL {
+                continue;
+            }
+            if let NodeRef::Entity(child_eid) = &edge.target {
+                if reachable.insert(child_eid.0) {
+                    stack.push(edge.target.clone());
+                }
+            }
+        }
+    }
+    // Filter out retracted duplicates.
+    let live_dirs: Vec<&(EntityId, String)> = all_dirs.iter()
+        .filter(|(id, _)| !duplicate_roots.contains(&id.0))
+        .collect();
+    for (id, name) in live_dirs {
         if reachable.contains(&id.0) {
             continue;
         }
-        // Orphan found — link it to root with its name.
         let entry_name = if name.is_empty() { hex::encode(id.0)[..8].to_string() } else { name.clone() };
         let mut props = BTreeMap::new();
         props.insert("name".to_string(), serde_json::Value::String(entry_name.clone()));
@@ -600,9 +668,7 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
             props,
             provenance: None,
         };
-        if let Err(e) = client.add_link(&root_ref, edge, Visibility::Internal).await {
-            eprintln!("  warning: failed to link orphan {}: {e}", hex::encode(id.0));
-        } else {
+        if client.add_link(&root_ref, edge, Visibility::Internal).await.is_ok() {
             println!("  Linked orphan \"{entry_name}\" ({}) to root", hex::encode(id.0));
             linked += 1;
         }
