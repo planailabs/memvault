@@ -114,10 +114,14 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         } else {
             OpKind::Other("unknown".into())
         }
-    } else if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
-        OpKind::AttachFile
     } else {
-        OpKind::Other("unknown".into())
+        match val.get("kind").and_then(|v| v.as_str()) {
+            Some("attachment") => OpKind::AttachFile,
+            Some("node_retraction") => OpKind::Retract,
+            Some("tag_update") => OpKind::Other("TagUpdate".into()),
+            Some(other) => OpKind::Other(other.into()),
+            None => OpKind::Other("unknown".into()),
+        }
     };
 
     let doc_id = val.get("payload").and_then(|p| {
