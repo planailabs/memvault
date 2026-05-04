@@ -71,6 +71,42 @@ pub async fn list_attachments(
     Ok(Json(vec![]))
 }
 
+/// POST /api/v1/attachments — upload a standalone file attachment (multipart)
+pub async fn upload_standalone(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(format!("Multipart error: {e}")))?
+        .ok_or_else(|| ApiError::bad_request("No file field in multipart body"))?;
+
+    let name = field.file_name().unwrap_or("unnamed").to_string();
+    let content_type = field
+        .content_type()
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let data = field
+        .bytes()
+        .await
+        .map_err(|e| ApiError::bad_request(format!("Failed to read file: {e}")))?;
+
+    let cid = state
+        .client
+        .attach_file(&data, Some(&name), &content_type, vec![], "internal")
+        .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "cid": hex::encode(&cid),
+            "name": name,
+        })),
+    ))
+}
+
 /// GET /api/v1/attachments/:cid — download attachment by CID
 pub async fn download_attachment(
     _auth: RequireAuth,
