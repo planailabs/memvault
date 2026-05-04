@@ -247,13 +247,37 @@ async fn vfs_create_edge(
 
 // ── UI Components ──────────────────────────────────────────────────
 
+/// Route component for `/vfs` (root directory).
 #[component]
-pub fn VfsExplorer() -> Element {
+pub fn VfsRoot() -> Element {
+    rsx! { VfsExplorerInner { path: "/".to_string() } }
+}
+
+/// Route component for `/vfs/*segments` (subdirectory).
+#[component]
+pub fn VfsBrowse(segments: String) -> Element {
+    let path = format!("/{segments}");
+    rsx! { VfsExplorerInner { path } }
+}
+
+/// Compute the Dioxus route for a directory path.
+fn dir_route(current_path: &str, name: &str) -> Route {
+    let child_path = if current_path == "/" {
+        name.to_string()
+    } else {
+        let trimmed = current_path.strip_prefix('/').unwrap_or(current_path);
+        format!("{trimmed}/{name}")
+    };
+    Route::VfsBrowse { segments: child_path }
+}
+
+#[component]
+fn VfsExplorerInner(path: String) -> Element {
     use_topbar(&t!("vfs-title"));
 
-    let mut path = use_signal(|| "/".to_string());
+    let path_clone = path.clone();
     let mut entries = use_server_future(move || {
-        let p = path.read().clone();
+        let p = path_clone.clone();
         async move { list_vfs_entries(p).await }
     })?;
     let mut grid_view = use_signal(|| true);
@@ -261,14 +285,15 @@ pub fn VfsExplorer() -> Element {
     let mut creating = use_signal(|| false);
 
     let breadcrumbs = {
-        let p = path.read().clone();
-        let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
-        let mut crumbs: Vec<(String, String)> = vec![("/".to_string(), "/".to_string())];
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut crumbs: Vec<(Route, String)> = vec![(Route::VfsRoot {}, "/".to_string())];
         let mut accum = String::new();
         for part in parts {
-            accum.push('/');
+            if !accum.is_empty() {
+                accum.push('/');
+            }
             accum.push_str(part);
-            crumbs.push((accum.clone(), part.to_string()));
+            crumbs.push((Route::VfsBrowse { segments: accum.clone() }, part.to_string()));
         }
         crumbs
     };
@@ -277,18 +302,11 @@ pub fn VfsExplorer() -> Element {
         div { class: "space-y-4",
             div { class: "flex items-center justify-between flex-wrap gap-2",
                 nav { class: "flex items-center gap-1 text-sm",
-                    for (i, (crumb_path, label)) in breadcrumbs.iter().enumerate() {
+                    for (i, (route, label)) in breadcrumbs.iter().enumerate() {
                         if i > 0 {
                             span { class: "text-fg-muted", "/" }
                         }
-                        button {
-                            class: "link text-sm",
-                            onclick: {
-                                let p = crumb_path.clone();
-                                move |_| path.set(p.clone())
-                            },
-                            "{label}"
-                        }
+                        Link { to: route.clone(), class: "link text-sm", "{label}" }
                     }
                 }
                 div { class: "flex gap-1 items-center",
@@ -316,22 +334,24 @@ pub fn VfsExplorer() -> Element {
                 button {
                     class: "btn btn-sm btn-secondary",
                     disabled: *creating.read() || new_dir_name.read().is_empty(),
-                    onclick: move |_| {
-                        let dir_name = new_dir_name.read().clone();
-                        if dir_name.is_empty() { return; }
-                        let current_path = path.read().clone();
-                        let mkdir_path = if current_path == "/" {
-                            format!("/{dir_name}")
-                        } else {
-                            format!("{current_path}/{dir_name}")
-                        };
-                        creating.set(true);
-                        spawn(async move {
-                            let _ = vfs_mkdir(mkdir_path).await;
-                            creating.set(false);
-                            new_dir_name.set(String::new());
-                            entries.restart();
-                        });
+                    onclick: {
+                        let current_path = path.clone();
+                        move |_| {
+                            let dir_name = new_dir_name.read().clone();
+                            if dir_name.is_empty() { return; }
+                            let mkdir_path = if current_path == "/" {
+                                format!("/{dir_name}")
+                            } else {
+                                format!("{current_path}/{dir_name}")
+                            };
+                            creating.set(true);
+                            spawn(async move {
+                                let _ = vfs_mkdir(mkdir_path).await;
+                                creating.set(false);
+                                new_dir_name.set(String::new());
+                                entries.restart();
+                            });
+                        }
                     },
                     if *creating.read() { {t!("vfs-creating")} } else { {t!("vfs-new-folder")} }
                 }
@@ -346,9 +366,9 @@ pub fn VfsExplorer() -> Element {
                             }
                         }
                     } else if *grid_view.read() {
-                        rsx! { VfsGrid { list: list.clone(), path } }
+                        rsx! { VfsGrid { list: list.clone(), current_path: path.clone() } }
                     } else {
-                        rsx! { VfsTable { list: list.clone(), path } }
+                        rsx! { VfsTable { list: list.clone(), current_path: path.clone() } }
                     }
                 },
                 Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
@@ -359,31 +379,22 @@ pub fn VfsExplorer() -> Element {
 }
 
 #[component]
-fn VfsGrid(list: Vec<VfsRow>, path: Signal<String>) -> Element {
+fn VfsGrid(list: Vec<VfsRow>, current_path: String) -> Element {
     rsx! {
         div { class: "grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3",
             for entry in &list {
-                {render_grid_card(entry, path)}
+                {render_grid_card(entry, &current_path)}
             }
         }
     }
 }
 
-fn render_grid_card(entry: &VfsRow, mut path: Signal<String>) -> Element {
+fn render_grid_card(entry: &VfsRow, current_path: &str) -> Element {
     let entry_clone = entry.clone();
     if entry.node_type == "dir" {
-        let target_path = {
-            let current = path.read().clone();
-            if current == "/" {
-                format!("/{}", entry.name)
-            } else {
-                format!("{}/{}", current, entry.name)
-            }
-        };
+        let route = dir_route(current_path, &entry.name);
         rsx! {
-            div {
-                onclick: move |_| path.set(target_path.clone()),
-                class: "cursor-pointer",
+            Link { to: route,
                 Card { class: "hover:border-brand transition-colors",
                     div { class: "p-4 text-center space-y-2",
                         div { class: "w-full h-20 flex items-center justify-center bg-surface-2 rounded",
@@ -426,7 +437,7 @@ fn render_grid_card(entry: &VfsRow, mut path: Signal<String>) -> Element {
 }
 
 #[component]
-fn VfsTable(list: Vec<VfsRow>, path: Signal<String>) -> Element {
+fn VfsTable(list: Vec<VfsRow>, current_path: String) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 50usize);
     let sort = use_signal::<SortState>(|| ("name".to_string(), true));
@@ -466,7 +477,7 @@ fn VfsTable(list: Vec<VfsRow>, path: Signal<String>) -> Element {
             },
             body: rsx! {
                 for entry in filtered.read().iter().take(limit_val) {
-                    VfsTableRow { entry: entry.clone(), path }
+                    VfsTableRow { entry: entry.clone(), current_path: current_path.clone() }
                 }
             },
         }
@@ -474,13 +485,14 @@ fn VfsTable(list: Vec<VfsRow>, path: Signal<String>) -> Element {
 }
 
 #[component]
-fn VfsTableRow(entry: VfsRow, path: Signal<String>) -> Element {
-    let entry_name = entry.clone();
+fn VfsTableRow(entry: VfsRow, current_path: String) -> Element {
     rsx! {
         tr { key: "{entry.edge_id}",
             Td {
                 if entry.node_type == "dir" {
-                    {render_dir_link(&entry_name, path)}
+                    Link { to: dir_route(&current_path, &entry.name), class: "link font-medium",
+                        "\u{1F4C1} {entry.name}"
+                    }
                 } else if let Some(route) = node_route(&entry.node_id, &entry.node_type) {
                     Link { to: route, class: "link",
                         "{entry.type_icon()} {entry.name}"
@@ -491,24 +503,6 @@ fn VfsTableRow(entry: VfsRow, path: Signal<String>) -> Element {
             }
             Td { Pill { variant: PillVariant::Muted, "{entry.node_type}" } }
             TdMuted { class: "font-mono text-xs", "{entry.node_id}" }
-        }
-    }
-}
-
-fn render_dir_link(entry: &VfsRow, mut path: Signal<String>) -> Element {
-    let target_path = {
-        let current = path.read().clone();
-        if current == "/" {
-            format!("/{}", entry.name)
-        } else {
-            format!("{}/{}", current, entry.name)
-        }
-    };
-    rsx! {
-        button {
-            class: "link font-medium",
-            onclick: move |_| path.set(target_path.clone()),
-            "\u{1F4C1} {entry.name}"
         }
     }
 }
