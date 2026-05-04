@@ -167,7 +167,7 @@ pub enum Commands {
     },
     /// Show connected peers
     Peers,
-    /// Repair the search index
+    /// Rebuild all indexes from the blockstore (store secondary indexes + full-text search index with tags)
     RepairIndex,
     /// Set cluster_id on envelopes that have null/missing cluster_id
     FixClusterId,
