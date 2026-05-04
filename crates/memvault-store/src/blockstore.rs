@@ -8,7 +8,17 @@ use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Store a raw block by CID bytes.
+    ///
+    /// Verifies that the CID matches the blake3 hash of the data before
+    /// writing. Returns `CidMismatch` if the check fails.
     pub fn put_block(&self, cid: &[u8], data: &[u8]) -> Result<(), StoreError> {
+        let expected = memvault_core::cid_from_bytes(data);
+        if expected.to_bytes() != cid {
+            return Err(StoreError::CidMismatch {
+                expected: format!("{:?}", &expected.to_bytes()[..8.min(expected.to_bytes().len())]),
+                got: format!("{:?}", &cid[..8.min(cid.len())]),
+            });
+        }
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(BLOCKS)?;

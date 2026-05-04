@@ -22,4 +22,7 @@ pub enum StoreError {
 
     #[error("invalid key encoding: {0}")]
     KeyEncoding(String),
+
+    #[error("CID mismatch: expected {expected}, got {got}")]
+    CidMismatch { expected: String, got: String },
 }
