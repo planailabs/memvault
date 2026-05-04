@@ -27,6 +27,9 @@ pub struct CreateDocRequest {
     #[serde(default)]
     pub tags: Vec<(String, String)>,
     pub visibility: Option<String>,
+    /// Optional VFS path to place the new document at.
+    #[serde(default)]
+    pub vfs_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -103,10 +106,18 @@ pub async fn create_doc(
     let vis = parse_visibility_str(req.visibility.as_deref());
 
     let cid = state.client.put_doc(doc, req.tags.clone(), vis).await?;
+    let node_id = format!("doc:{}", hex::encode(doc_id.0));
     tracing::info!(doc_id = %hex::encode(doc_id.0), "API: doc created");
 
+    // VFS link if requested.
+    if let Some(vfs_path) = &req.vfs_path {
+        if let Err(e) = super::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
+            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after doc creation");
+        }
+    }
+
     let resp = DocResponse {
-        id: format!("doc:{}", hex::encode(doc_id.0)),
+        id: node_id,
         cid: hex::encode(&cid),
         body: req.body,
         frontmatter,

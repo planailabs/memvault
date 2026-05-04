@@ -10,6 +10,7 @@ pub mod graph;
 pub mod links;
 pub mod ops;
 pub mod search;
+pub mod vfs;
 pub mod views;
 
 use std::sync::Arc;
@@ -62,6 +63,13 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/attachments", post(attachments::upload_standalone))
         .route("/attachments/{cid}", get(attachments::download_attachment))
         .route("/attachments/{cid}/manifest", get(attachments::attachment_manifest))
+
+        // ── VFS (virtual filesystem) ───────────────────────────────
+        .route("/vfs", get(vfs::vfs_ls).delete(vfs::vfs_unlink))
+        .route("/vfs/resolve", get(vfs::vfs_resolve))
+        .route("/vfs/mkdir", post(vfs::vfs_mkdir))
+        .route("/vfs/link", post(vfs::vfs_link))
+        .route("/vfs/mv", post(vfs::vfs_mv))
 
         // ── File upload body limit (2GB) ───────────────────────────
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))

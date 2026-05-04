@@ -25,6 +25,9 @@ pub struct CreateEntityRequest {
     #[serde(default)]
     pub props: BTreeMap<String, serde_json::Value>,
     pub visibility: Option<String>,
+    /// Optional VFS path to place the new entity at.
+    #[serde(default)]
+    pub vfs_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -65,10 +68,18 @@ pub async fn create_entity(
     };
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
     let id = state.client.add_entity(entity, vis).await?;
+    let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
+
+    if let Some(vfs_path) = &req.vfs_path {
+        if let Err(e) = super::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
+            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
+        }
+    }
+
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "id": format!("entity:{}", hex::encode(id.0)) })),
+        Json(serde_json::json!({ "id": node_id })),
     ))
 }
 

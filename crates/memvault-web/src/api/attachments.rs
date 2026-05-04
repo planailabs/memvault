@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
@@ -72,9 +72,16 @@ pub async fn list_attachments(
 }
 
 /// POST /api/v1/attachments — upload a standalone file attachment (multipart)
+#[derive(Deserialize)]
+pub struct UploadQuery {
+    /// Optional VFS path to place the attachment at.
+    pub vfs_path: Option<String>,
+}
+
 pub async fn upload_standalone(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
+    Query(query): Query<UploadQuery>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let field = multipart
@@ -97,12 +104,19 @@ pub async fn upload_standalone(
         .client
         .attach_file(&data, Some(&name), &content_type, vec![], "internal")
         .await?;
+    let node_id = format!("attachment:{}", hex::encode(&cid));
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
+
+    if let Some(vfs_path) = &query.vfs_path {
+        if let Err(e) = super::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
+            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after attachment upload");
+        }
+    }
 
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "cid": format!("attachment:{}", hex::encode(&cid)),
+            "cid": node_id,
             "name": name,
         })),
     ))
