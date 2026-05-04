@@ -1,9 +1,14 @@
 //! File upload helpers — shared logic for uploading files to memvault.
+//!
+//! Used by: HTTP API, web UI server functions, MCP tools, CLI.
 
 use crate::error::Result;
 use crate::MemvaultClient;
 
-/// Upload file data and return (manifest_cid_bytes, node_id).
+/// Upload file data, optionally linking it into the VFS.
+/// Returns (manifest_cid_bytes, node_id).
+///
+/// Audit logging is automatic via `MemvaultClient::upload_file`.
 pub async fn upload_file(
     client: &dyn MemvaultClient,
     data: &[u8],
@@ -11,9 +16,17 @@ pub async fn upload_file(
     mime_type: &str,
     tags: Vec<(String, String)>,
     visibility: &str,
+    vfs_path: Option<&str>,
 ) -> Result<(Vec<u8>, String)> {
     let cid = client.upload_file(data, filename, mime_type, tags, visibility).await?;
     let node_id = format!("file:{}", hex::encode(&cid));
+
+    if let Some(path) = vfs_path {
+        if let Err(e) = crate::vfs::link_node_at_path(client, path, &node_id).await {
+            tracing::warn!(path, error = %e, "VFS link failed after file upload");
+        }
+    }
+
     Ok((cid, node_id))
 }
 

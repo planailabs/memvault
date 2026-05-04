@@ -1,4 +1,6 @@
 //! Document helpers — shared logic for creating and managing documents.
+//!
+//! Used by: HTTP API, web UI server functions, MCP tools, CLI.
 
 use std::collections::BTreeMap;
 
@@ -8,13 +10,17 @@ use memvault_doc::Document;
 use crate::error::Result;
 use crate::MemvaultClient;
 
-/// Create a document and return (cid_bytes, node_id).
+/// Create a document, optionally linking it into the VFS.
+/// Returns (cid_bytes, node_id).
+///
+/// Audit logging is automatic via `MemvaultClient::put_doc`.
 pub async fn create_doc(
     client: &dyn MemvaultClient,
     body: &str,
     title: Option<&str>,
     tags: Vec<(String, String)>,
     vis: Visibility,
+    vfs_path: Option<&str>,
 ) -> Result<(Vec<u8>, String)> {
     let doc_id = DocId::random();
     let mut frontmatter = BTreeMap::new();
@@ -24,6 +30,13 @@ pub async fn create_doc(
     let doc = Document::new(doc_id.clone(), body.to_string(), frontmatter);
     let cid = client.put_doc(doc, tags, vis).await?;
     let node_id = format!("doc:{}", hex::encode(doc_id.0));
+
+    if let Some(path) = vfs_path {
+        if let Err(e) = crate::vfs::link_node_at_path(client, path, &node_id).await {
+            tracing::warn!(path, error = %e, "VFS link failed after doc creation");
+        }
+    }
+
     Ok((cid, node_id))
 }
 

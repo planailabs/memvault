@@ -109,9 +109,8 @@ pub async fn create_doc(
     let node_id = format!("doc:{}", hex::encode(doc_id.0));
     tracing::info!(doc_id = %hex::encode(doc_id.0), "API: doc created");
 
-    // VFS link if requested.
     if let Some(vfs_path) = &req.vfs_path {
-        if let Err(e) = super::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
+        if let Err(e) = memvault_api::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
             tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after doc creation");
         }
     }

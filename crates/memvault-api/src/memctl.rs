@@ -290,7 +290,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let client = create_client(store);
             let tags = crate::docs::parse_tags(&tag);
             let vis = crate::docs::parse_visibility(Some(&visibility));
-            let (_cid, node_id) = crate::docs::create_doc(&client, &text, title.as_deref(), tags, vis).await?;
+            let (_cid, node_id) = crate::docs::create_doc(&client, &text, title.as_deref(), tags, vis, None).await?;
             println!("{node_id}");
         }
         Commands::Get { cid } => {
@@ -616,16 +616,11 @@ async fn import_files(
         let data = std::fs::read(file_path)?;
         let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unnamed");
         let mime = crate::files::detect_mime(file_path);
-        let (_cid, node_id) = crate::files::upload_file(client, &data, Some(filename), mime, tags.to_vec(), visibility).await?;
+        let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
+        let (_cid, node_id) = crate::files::upload_file(
+            client, &data, Some(filename), mime, tags.to_vec(), visibility, vfs_path.as_deref(),
+        ).await?;
         println!("  {} -> {node_id}", file_path.display());
-
-        if let Some(folder) = vfs_folder {
-            let vfs_path = compute_vfs_path(folder, base_dir, file_path, path.is_dir());
-            if let Err(e) = crate::vfs::link_node_at_path(client, &vfs_path, &node_id).await {
-                // Duplicate name is fine — skip silently.
-                tracing::debug!(path = %vfs_path, error = %e, "VFS link skipped");
-            }
-        }
         count += 1;
     }
     Ok(count)
@@ -659,15 +654,11 @@ async fn import_docs(
     for file_path in &files {
         let body = std::fs::read_to_string(file_path)?;
         let title = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
-        let (_cid, node_id) = crate::docs::create_doc(client, &body, title.as_deref(), tags.to_vec(), vis.clone()).await?;
+        let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
+        let (_cid, node_id) = crate::docs::create_doc(
+            client, &body, title.as_deref(), tags.to_vec(), vis, vfs_path.as_deref(),
+        ).await?;
         println!("  {} -> {node_id}", file_path.display());
-
-        if let Some(folder) = vfs_folder {
-            let vfs_path = compute_vfs_path(folder, base_dir, file_path, path.is_dir());
-            if let Err(e) = crate::vfs::link_node_at_path(client, &vfs_path, &node_id).await {
-                tracing::debug!(path = %vfs_path, error = %e, "VFS link skipped");
-            }
-        }
         count += 1;
     }
     Ok(count)

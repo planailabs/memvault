@@ -100,18 +100,11 @@ pub async fn upload_file(
         .await
         .map_err(|e| ApiError::bad_request(format!("Failed to read file: {e}")))?;
 
-    let cid = state
-        .client
-        .upload_file(&data, Some(&name), &content_type, vec![], "internal")
-        .await?;
-    let node_id = format!("file:{}", hex::encode(&cid));
+    let (_cid, node_id) = memvault_api::files::upload_file(
+        state.client.as_ref(), &data, Some(&name), &content_type,
+        vec![], "internal", query.vfs_path.as_deref(),
+    ).await?;
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
-
-    if let Some(vfs_path) = &query.vfs_path {
-        if let Err(e) = super::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
-            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after file upload");
-        }
-    }
 
     Ok((
         StatusCode::CREATED,
