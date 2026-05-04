@@ -11,7 +11,7 @@ const MAX_LINKS: usize = 174;
 
 /// Build a UnixFS file DAG from bytes.
 ///
-/// Returns (root_cid, all_blocks) where blocks include leaves and interior nodes.
+/// Returns (root_cid_bytes, all_blocks) where each block is (cid_bytes, data).
 pub fn build_unixfs_dag(
     data: &[u8],
     chunk_size: usize,
@@ -39,8 +39,9 @@ pub fn build_unixfs_dag(
         };
         let block = node.encode_to_vec();
         let block_cid = cid::dag_pb_cid(&block);
-        leaf_cids.push((block_cid.clone(), chunk.len() as u64));
-        all_blocks.push((block_cid, block));
+        let cid_bytes = block_cid.to_bytes();
+        leaf_cids.push((cid_bytes.clone(), chunk.len() as u64));
+        all_blocks.push((cid_bytes, block));
     }
 
     // If only one leaf, it is the root.
@@ -81,8 +82,9 @@ pub fn build_unixfs_dag(
             };
             let block = node.encode_to_vec();
             let block_cid = cid::dag_pb_cid(&block);
-            next_level.push((block_cid.clone(), total_size));
-            all_blocks.push((block_cid, block));
+            let cid_bytes = block_cid.to_bytes();
+            next_level.push((cid_bytes.clone(), total_size));
+            all_blocks.push((cid_bytes, block));
         }
 
         if next_level.len() == 1 {

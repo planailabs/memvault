@@ -54,8 +54,9 @@ pub fn default_replication(size: u64) -> ReplicationHint {
     crate::replication::default_replication(size)
 }
 
-/// Chunk a file into blocks. Returns (root_cid, Vec<(cid, block_bytes)>).
+/// Chunk a file into blocks. Returns (root_cid, Vec<(cid_bytes, block_bytes)>).
 ///
+/// CID bytes are the canonical multihash-encoded CIDv1.
 /// For inline files: single raw block with CID.
 /// For chunked files: leaf chunks + intermediate DAG-PB nodes + root node.
 pub fn chunk_file(data: &[u8]) -> Result<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>), AttachError> {
@@ -65,11 +66,12 @@ pub fn chunk_file(data: &[u8]) -> Result<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>), Att
 
     let size = data.len() as u64;
     if size <= INLINE_THRESHOLD {
-        // Inline: single raw block
+        // Inline: single raw block.
         let cid = crate::cid::raw_cid(data);
-        Ok((cid.clone(), vec![(cid, data.to_vec())]))
+        let cid_bytes = cid.to_bytes();
+        Ok((cid_bytes.clone(), vec![(cid_bytes, data.to_vec())]))
     } else {
-        // UnixFS DAG
+        // UnixFS DAG.
         unixfs::build_unixfs_dag(data, DEFAULT_CHUNK_SIZE)
     }
 }
