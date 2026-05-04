@@ -43,8 +43,8 @@ pub enum Route {
     FileExplorer {},
     #[route("/files/:cid")]
     FileDetail { cid: String },
-    #[route("/vfs/:path")]
-    VfsExplorer { path: String },
+    #[route("/vfs")]
+    VfsExplorer {},
     #[route("/views")]
     ViewManager {},
     #[route("/audit")]
