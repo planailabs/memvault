@@ -94,6 +94,8 @@ async fn build_description(
     let entity_tag = tags.iter().find(|(s, _)| s == "entity").map(|(_, l)| l.as_str());
     let edge_source = tags.iter().find(|(s, _)| s == "edge_source").map(|(_, l)| l.as_str());
     let edge_target = tags.iter().find(|(s, _)| s == "edge_target").map(|(_, l)| l.as_str());
+    // Unified annotation target (type:hex node_id)
+    let ann_target = tags.iter().find(|(s, _)| s == "_ann").map(|(_, l)| l.as_str());
 
     match op_kind {
         "DocCreate" => {
@@ -124,6 +126,9 @@ async fn build_description(
             if let Some(hex_id) = doc_tag {
                 let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
                 (format!("Attached file to \"{name}\""), link)
+            } else if let Some(target) = ann_target {
+                let (name, link) = resolve_node(client, target).await;
+                (format!("Attached file \"{name}\""), link)
             } else {
                 ("Attached file".to_string(), None)
             }
@@ -168,7 +173,10 @@ async fn build_description(
             (format!("Removed edge from {src}"), link)
         }
         "Retract" => {
-            if let Some(hex_id) = doc_tag {
+            if let Some(target) = ann_target {
+                let (name, link) = resolve_node(client, target).await;
+                (format!("Retracted \"{name}\""), link)
+            } else if let Some(hex_id) = doc_tag {
                 let (name, link) = resolve_node(client, &format!("doc:{hex_id}")).await;
                 (format!("Retracted \"{name}\""), link)
             } else if let Some(hex_id) = entity_tag {
@@ -178,8 +186,29 @@ async fn build_description(
                 ("Retracted item".to_string(), None)
             }
         }
+        "Other(\"TagUpdate\")" | "TagUpdate" => {
+            if let Some(target) = ann_target {
+                let (name, link) = resolve_node(client, target).await;
+                (format!("Updated tags on \"{name}\""), link)
+            } else {
+                ("Updated tags".to_string(), None)
+            }
+        }
+        "Other(\"Extraction\")" | "Extraction" => {
+            if let Some(target) = ann_target {
+                let (name, link) = resolve_node(client, target).await;
+                (format!("Extracted text from \"{name}\""), link)
+            } else {
+                ("Extracted text".to_string(), None)
+            }
+        }
         other => {
-            (format!("{other}"), None)
+            if let Some(target) = ann_target {
+                let (name, link) = resolve_node(client, target).await;
+                (format!("{other} on \"{name}\""), link)
+            } else {
+                (other.to_string(), None)
+            }
         }
     }
 }

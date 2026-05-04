@@ -186,14 +186,34 @@ impl LocalClient {
         for (_, data) in &blocks {
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
                 let kind = val.get("kind").and_then(|v| v.as_str());
-                if kind == Some("tag_update") {
+
+                // Unified annotation format
+                if kind == Some("annotation") {
+                    let target = val.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                    let ann_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let ann_data = val.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                    if !target.is_empty() {
+                        let mut idx = self.index.write().await;
+                        match ann_type {
+                            "tag_update" => {
+                                let add: Vec<(String, String)> = ann_data.get("add")
+                                    .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+                                let remove: Vec<(String, String)> = ann_data.get("remove")
+                                    .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+                                idx.apply_tag_update(target, &add, &remove);
+                            }
+                            "retraction" => { idx.retract_node(target); }
+                            _ => {} // extraction annotations handled during attachment indexing
+                        }
+                    }
+                }
+                // Legacy formats (backward compat)
+                else if kind == Some("tag_update") {
                     let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
                     let add: Vec<(String, String)> = val.get("add")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                     let remove: Vec<(String, String)> = val.get("remove")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                     if !node_id.is_empty() {
                         let mut idx = self.index.write().await;
                         idx.apply_tag_update(node_id, &add, &remove);
@@ -218,33 +238,34 @@ impl LocalClient {
     }
 
     /// Access the quota manager.
-    /// Store a tag update block in the blockstore, tagged with `tag_update:<node_id>`.
-    fn store_tag_update(
-        &self,
-        node_id: &str,
-        add: &[(String, String)],
-        remove: &[(String, String)],
-    ) -> Result<()> {
-        let update = serde_json::json!({
-            "kind": "tag_update",
-            "node_id": node_id,
-            "add": add,
-            "remove": remove,
+    /// Store an annotation block in the blockstore. All sidecars (tag updates,
+    /// extraction results, retractions) use this unified format.
+    /// Tagged with `_ann:<target>` for discovery.
+    fn store_annotation(&self, target: &str, ann_type: &str, data: serde_json::Value) -> Result<()> {
+        let block = serde_json::json!({
+            "kind": "annotation",
+            "target": target,
+            "type": ann_type,
+            "data": data,
             "wall_ns": memvault_core::wall_ns(),
         });
-        let update_bytes = serde_json::to_vec(&update)
+        let block_bytes = serde_json::to_vec(&block)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&update_bytes);
+        let cid = cid_from_bytes(&block_bytes);
         let meta = EnvelopeMeta {
             author: self.peer_id.clone(),
-            tags: vec![("tag_update".to_string(), node_id.to_string())],
+            tags: vec![("_ann".to_string(), target.to_string())],
             wall_ns: memvault_core::wall_ns(),
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
         };
-        self.store.insert_envelope(&cid.to_bytes(), &update_bytes, &meta)?;
+        self.store.insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
         Ok(())
+    }
+
+    fn store_tag_update(&self, node_id: &str, add: &[(String, String)], remove: &[(String, String)]) -> Result<()> {
+        self.store_annotation(node_id, "tag_update", serde_json::json!({ "add": add, "remove": remove }))
     }
 
     /// Extract text from data, cache the result (success or failure) in the blockstore,
@@ -299,29 +320,12 @@ impl LocalClient {
         }
     }
 
-    /// Store a ManifestUpdate block linking to extracted text or recording a failure.
     fn store_manifest_update(&self, manifest_cid: &[u8], extracted_text_cid: Option<Vec<u8>>, error: Option<&str>) {
-        let update = serde_json::json!({
-            "target_manifest": manifest_cid,
+        let target = format!("attachment:{}", hex::encode(manifest_cid));
+        let _ = self.store_annotation(&target, "extraction", serde_json::json!({
             "extracted_text": extracted_text_cid,
             "extraction_error": error,
-            "updated_at_ns": memvault_core::wall_ns(),
-        });
-        if let Ok(upd_bytes) = serde_json::to_vec(&update) {
-            let upd_cid = cid_from_bytes(&upd_bytes);
-            let _ = self.store.put_block(&upd_cid.to_bytes(), &upd_bytes);
-            let upd_meta = EnvelopeMeta {
-                author: self.peer_id.clone(),
-                tags: vec![
-                    ("manifest_update".to_string(), hex::encode(manifest_cid)),
-                ],
-                wall_ns: memvault_core::wall_ns(),
-                causal: vec![],
-                provenance: vec![],
-                cluster_id: Some(self.cluster_id.clone()),
-            };
-            let _ = self.store.insert_envelope(&upd_cid.to_bytes(), &upd_bytes, &upd_meta);
-        }
+        }));
     }
 
     /// Load cached extraction result.
@@ -329,19 +333,27 @@ impl LocalClient {
     /// `Some(ExtractionResult::Failed(err))` on cached failure,
     /// `None` if no cache exists.
     fn load_cached_extraction(&self, manifest_cid: &[u8]) -> Option<ExtractionResult> {
-        let label = hex::encode(manifest_cid);
-        let update_cids = self.store.query_by_tag("manifest_update", &label, 0, 1).ok()?;
-        for cid in &update_cids {
-            let data = self.store.get_block(cid).ok()??;
-            let update: serde_json::Value = serde_json::from_slice(&data).ok()?;
+        let target = format!("attachment:{}", hex::encode(manifest_cid));
 
-            // Check for cached failure first.
-            if let Some(err) = update.get("extraction_error").and_then(|v| v.as_str()) {
-                return Some(ExtractionResult::Failed(err.to_string()));
+        // Try new unified annotation format first, then legacy manifest_update.
+        let ann_cids = self.store.query_by_tag("_ann", &target, 0, 10).ok()?;
+        let legacy_label = hex::encode(manifest_cid);
+        let legacy_cids = self.store.query_by_tag("manifest_update", &legacy_label, 0, 10).ok()?;
+
+        for cid in ann_cids.iter().chain(legacy_cids.iter()) {
+            let block_data = self.store.get_block(cid).ok()??;
+            let val: serde_json::Value = serde_json::from_slice(&block_data).ok()?;
+
+            // Unified annotation format
+            let data_field = val.get("data").unwrap_or(&val);
+
+            if let Some(err) = data_field.get("extraction_error").and_then(|v| v.as_str()) {
+                if !err.is_empty() {
+                    return Some(ExtractionResult::Failed(err.to_string()));
+                }
             }
 
-            // Check for cached success.
-            if let Some(et_cid) = update.get("extracted_text")
+            if let Some(et_cid) = data_field.get("extracted_text")
                 .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
             {
                 let et_bytes = self.store.get_block(&et_cid).ok()??;
@@ -974,25 +986,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()> {
-        // Store a retraction block in the blockstore.
-        let retraction = serde_json::json!({
-            "kind": "node_retraction",
-            "node_id": node_id,
-            "reason": reason,
-            "wall_ns": memvault_core::wall_ns(),
-        });
-        let retraction_bytes = serde_json::to_vec(&retraction)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&retraction_bytes);
-        let meta = EnvelopeMeta {
-            author: self.peer_id.clone(),
-            tags: vec![("node_retraction".to_string(), node_id.to_string())],
-            wall_ns: memvault_core::wall_ns(),
-            causal: vec![],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-        };
-        self.store.insert_envelope(&cid.to_bytes(), &retraction_bytes, &meta)?;
+        self.store_annotation(node_id, "retraction", serde_json::json!({ "reason": reason }))?;
         tracing::info!(node_id, reason, "node retracted");
 
         // Remove from in-memory index.

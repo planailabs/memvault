@@ -115,12 +115,18 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
             OpKind::Other("unknown".into())
         }
     } else {
-        match val.get("kind").and_then(|v| v.as_str()) {
-            Some("attachment") => OpKind::AttachFile,
-            Some("node_retraction") => OpKind::Retract,
-            Some("tag_update") => OpKind::Other("TagUpdate".into()),
-            Some(other) => OpKind::Other(other.into()),
-            None => OpKind::Other("unknown".into()),
+        let kind = val.get("kind").and_then(|v| v.as_str());
+        let ann_type = val.get("type").and_then(|v| v.as_str());
+        match (kind, ann_type) {
+            (Some("annotation"), Some("retraction")) => OpKind::Retract,
+            (Some("annotation"), Some("tag_update")) => OpKind::Other("TagUpdate".into()),
+            (Some("annotation"), Some("extraction")) => OpKind::Other("Extraction".into()),
+            (Some("annotation"), Some(t)) => OpKind::Other(t.into()),
+            (Some("attachment"), _) => OpKind::AttachFile,
+            (Some("node_retraction"), _) => OpKind::Retract, // legacy
+            (Some("tag_update"), _) => OpKind::Other("TagUpdate".into()), // legacy
+            (Some(other), _) => OpKind::Other(other.into()),
+            (None, _) => OpKind::Other("unknown".into()),
         }
     };
 
