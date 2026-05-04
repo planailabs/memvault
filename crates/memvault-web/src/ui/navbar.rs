@@ -20,7 +20,6 @@ pub fn Sidebar() -> Element {
             NavLink { to: Route::NoteList {}, label: "Notes" }
             NavLink { to: Route::GraphExplorer {}, label: "Graph" }
             NavLink { to: Route::FileExplorer {}, label: "Files" }
-            NavLink { to: Route::Timeline {}, label: "Timeline" }
 
             // Operations section
             div { class: "px-3 pt-6 pb-1",

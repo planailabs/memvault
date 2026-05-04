@@ -3,5 +3,4 @@ pub mod audit;
 pub mod files;
 pub mod graph;
 pub mod notes;
-pub mod timeline;
 pub mod views;
