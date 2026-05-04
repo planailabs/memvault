@@ -135,8 +135,20 @@ impl LocalClient {
                     let mime_type = val.get("mime_type").and_then(|v| v.as_str())
                         .unwrap_or("application/octet-stream");
                     if let Some(mcid) = manifest_cid {
+                        // Try to extract text from the attachment for search.
+                        let extracted_text = if let Ok(content) = self.read_attachment(&mcid).await {
+                            let registry = memvault_extract::ExtractionRegistry::with_defaults();
+                            if registry.can_extract(mime_type) {
+                                registry.extract(&content, mime_type, &memvault_extract::ExtractionHints::default())
+                                    .ok().map(|e| e.text)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
                         let mut idx = self.index.write().await;
-                        idx.index_attachment(&mcid, filename, mime_type);
+                        idx.index_attachment(&mcid, filename, mime_type, extracted_text.as_deref());
                         attachment_count += 1;
                     }
                 }
@@ -408,10 +420,23 @@ impl MemvaultClient for LocalClient {
         let env_cid = cid_from_bytes(&envelope_bytes);
         self.store.insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
 
-        // Index for unified search
+        // Try to extract text for full-text search (best-effort, don't fail the upload).
+        let extracted_text = {
+            let registry = memvault_extract::ExtractionRegistry::with_defaults();
+            if registry.can_extract(mime_type) {
+                match registry.extract(data, mime_type, &memvault_extract::ExtractionHints::default()) {
+                    Ok(extracted) => Some(extracted.text),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        };
+
+        // Index for unified search (includes extracted text if available).
         {
             let mut idx = self.index.write().await;
-            idx.index_attachment(&manifest_cid_bytes, filename, mime_type);
+            idx.index_attachment(&manifest_cid_bytes, filename, mime_type, extracted_text.as_deref());
         }
 
         self.event_bus.publish(MemvaultEvent::FileAttached {

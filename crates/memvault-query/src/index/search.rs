@@ -58,7 +58,7 @@ struct IndexedEntry {
 }
 
 /// Bump this when the index format changes to trigger automatic re-indexing.
-pub const INDEX_FORMAT_VERSION: u32 = 1;
+pub const INDEX_FORMAT_VERSION: u32 = 2;
 
 /// Serializable snapshot of the entire index (for persistence).
 #[derive(Serialize, Deserialize)]
@@ -78,6 +78,7 @@ impl TextIndex {
     }
 
     /// Save the index to a file.
+    /// Save the index to a file atomically (write to temp, then rename).
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         let snapshot = IndexSnapshot {
             version: INDEX_FORMAT_VERSION,
@@ -99,7 +100,12 @@ impl TextIndex {
         };
         let data = serde_json::to_vec(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(path, &data)
+
+        // Atomic write: write to a temp file in the same directory, then rename.
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &data)?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
     }
 
     /// Load the index from a file. Returns `None` if the file doesn't exist,
@@ -204,23 +210,28 @@ impl TextIndex {
     }
 
     /// Index an attachment for unified search.
+    /// Index an attachment for unified search.
+    /// `extracted_text` is the text content extracted from the file (PDF, DOCX, etc.).
     pub fn index_attachment(
         &mut self,
         manifest_cid: &[u8],
         filename: Option<&str>,
         mime_type: &str,
+        extracted_text: Option<&str>,
     ) {
         let node_id = format!("attachment:{}", hex::encode(manifest_cid));
         let label = filename.unwrap_or("unnamed file").to_string();
 
         let mut text_parts = vec![label.clone(), mime_type.to_string()];
         if let Some(f) = filename {
-            // Also index filename parts (split on dots, dashes, underscores)
             for part in f.split(|c: char| c == '.' || c == '-' || c == '_' || c == ' ') {
                 if !part.is_empty() {
                     text_parts.push(part.to_string());
                 }
             }
+        }
+        if let Some(text) = extracted_text {
+            text_parts.push(text.to_string());
         }
 
         self.unified.insert(node_id, IndexedEntry {
