@@ -29,7 +29,8 @@ struct EdgeData {
 #[server]
 async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let bytes = hex::decode(&id).map_err(|_| ServerFnError::new("Invalid entity ID"))?;
+    let hex_id = id.strip_prefix("entity:").unwrap_or(&id);
+    let bytes = hex::decode(hex_id).map_err(|_| ServerFnError::new("Invalid entity ID"))?;
     if bytes.len() != 32 {
         return Err(ServerFnError::new("Entity ID must be 32 bytes"));
     }
@@ -157,11 +158,24 @@ fn EntityView(data: EntityData) -> Element {
                                             Pill { variant: PillVariant::Muted, "{edge.relation}" }
                                         }
                                         Td {
-                                            Link { to: Route::EntityDetail { id: edge.target.clone() }, class: "link",
-                                                if let Some(label) = &edge.target_label {
-                                                    "{label}"
+                                            {
+                                                let route = if let Some(hex) = edge.target.strip_prefix("entity:") {
+                                                    Route::EntityDetail { id: hex.to_string() }
+                                                } else if let Some(hex) = edge.target.strip_prefix("doc:") {
+                                                    Route::NoteDetail { id: hex.to_string() }
+                                                } else if let Some(hex) = edge.target.strip_prefix("attachment:") {
+                                                    Route::FileDetail { cid: hex.to_string() }
                                                 } else {
-                                                    CidDisplay { cid: edge.target.clone(), len: Some(12) }
+                                                    Route::EntityDetail { id: edge.target.clone() }
+                                                };
+                                                rsx! {
+                                                    Link { to: route, class: "link",
+                                                        if let Some(label) = &edge.target_label {
+                                                            "{label}"
+                                                        } else {
+                                                            CidDisplay { cid: edge.target.clone(), len: Some(12) }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
