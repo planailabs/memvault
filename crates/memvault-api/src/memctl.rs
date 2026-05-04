@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::{EventBus, LocalClient, MemvaultClient};
 use memvault_core::{ClusterId, DocId, EntityId, Visibility};
-use memvault_doc::{Document, Edge, Entity};
+use memvault_doc::{Edge, Entity};
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_auth::Role;
 use memvault_store::MemvaultStore;
@@ -190,6 +190,20 @@ pub enum Commands {
         #[arg(short, long, default_value = "internal")]
         visibility: String,
     },
+    /// Import text/markdown files as documents, optionally placing them in the VFS
+    ImportDocs {
+        /// Path to file or folder to import (reads .md, .txt, .markdown files)
+        path: PathBuf,
+        /// VFS folder to place imported docs in (e.g. "/notes")
+        #[arg(long)]
+        vfs: Option<String>,
+        /// Tags to apply to all imported docs (scope:label format)
+        #[arg(short, long)]
+        tag: Vec<String>,
+        /// Visibility (internal, federated, public)
+        #[arg(short, long, default_value = "internal")]
+        visibility: String,
+    },
 }
 
 fn default_data_dir() -> PathBuf {
@@ -221,14 +235,6 @@ fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
         vec![0u8; 32],
         vec![0u8; 32],
     )
-}
-
-fn parse_visibility(s: &str) -> Visibility {
-    match s {
-        "public" => Visibility::Public,
-        "federated" => Visibility::Federated,
-        _ => Visibility::Internal,
-    }
 }
 
 fn parse_entity_id(hex_str: &str) -> Result<EntityId> {
@@ -282,17 +288,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             let store = make_store()?;
             let client = create_client(store);
-            let tags: Vec<(String, String)> = tag.iter()
-                .filter_map(|t| { let (s, l) = t.split_once(':')?; Some((s.to_string(), l.to_string())) })
-                .collect();
-            let vis = parse_visibility(&visibility);
-            let mut frontmatter = BTreeMap::new();
-            if let Some(t) = title {
-                frontmatter.insert("title".into(), serde_json::Value::String(t));
-            }
-            let doc = Document::new(DocId::random(), text, frontmatter);
-            let cid = client.put_doc(doc, tags, vis).await?;
-            println!("{}", hex::encode(&cid));
+            let tags = crate::docs::parse_tags(&tag);
+            let vis = crate::docs::parse_visibility(Some(&visibility));
+            let (_cid, node_id) = crate::docs::create_doc(&client, &text, title.as_deref(), tags, vis).await?;
+            println!("{node_id}");
         }
         Commands::Get { cid } => {
             let cid_bytes = hex::decode(&cid)?;
@@ -570,53 +569,45 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Rebuild index so VFS operations work.
             client.populate_index().await?;
 
-            let tags: Vec<(String, String)> = tag.iter()
-                .filter_map(|t| {
-                    let (s, l) = t.split_once(':')?;
-                    Some((s.trim().to_string(), l.trim().to_string()))
-                })
-                .collect();
-
-            let imported = import_path(&client, &path, vfs.as_deref(), &tags, &visibility).await?;
+            let tags = crate::docs::parse_tags(&tag);
+            let imported = import_files(&client, &path, vfs.as_deref(), &tags, &visibility).await?;
             println!("Imported {imported} file(s).");
+        }
+        Commands::ImportDocs { path, vfs, tag, visibility } => {
+            let store = make_store()?;
+            let client = create_client(store.clone());
+            client.populate_index().await?;
+
+            let tags = crate::docs::parse_tags(&tag);
+            let vis = crate::docs::parse_visibility(Some(&visibility));
+            let imported = import_docs(&client, &path, vfs.as_deref(), &tags, vis).await?;
+            println!("Imported {imported} document(s).");
         }
     }
 
     Ok(())
 }
 
-/// Import a file or directory recursively into memvault.
-/// Returns the number of files imported.
-async fn import_path(
+/// Import files recursively, optionally placing them in the VFS.
+async fn import_files(
     client: &LocalClient,
     path: &Path,
     vfs_folder: Option<&str>,
     tags: &[(String, String)],
     visibility: &str,
 ) -> Result<usize> {
-    use memvault_core::NodeRef;
-
-    // Collect files to import.
     let mut files: Vec<PathBuf> = Vec::new();
     if path.is_file() {
         files.push(path.to_path_buf());
     } else if path.is_dir() {
-        collect_files(path, &mut files)?;
+        collect_files_recursive(path, &mut files, None)?;
     } else {
         anyhow::bail!("path does not exist: {}", path.display());
     }
-
     if files.is_empty() {
         println!("No files found at {}", path.display());
         return Ok(0);
     }
-
-    // Ensure VFS folder exists if requested.
-    let vfs_parent: Option<NodeRef> = if let Some(folder) = vfs_folder {
-        Some(crate::vfs::ensure_dir_path(client, folder).await?)
-    } else {
-        None
-    };
 
     let base_dir = if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) };
     let mut count = 0usize;
@@ -624,75 +615,97 @@ async fn import_path(
     for file_path in &files {
         let data = std::fs::read(file_path)?;
         let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unnamed");
-        let mime = mime_guess::from_path(file_path).first_raw().unwrap_or("application/octet-stream");
+        let mime = crate::files::detect_mime(file_path);
+        let (_cid, node_id) = crate::files::upload_file(client, &data, Some(filename), mime, tags.to_vec(), visibility).await?;
+        println!("  {} -> {node_id}", file_path.display());
 
-        let manifest_cid = client.upload_file(&data, Some(filename), mime, tags.to_vec(), visibility).await?;
-        let node_id = format!("file:{}", hex::encode(&manifest_cid));
-        println!("  {} -> {}", file_path.display(), node_id);
-
-        // Place in VFS if requested.
-        if let Some(ref parent_ref) = vfs_parent {
-            let target = NodeRef::from_tag_label(&node_id)
-                .ok_or_else(|| anyhow::anyhow!("invalid node_id: {node_id}"))?;
-
-            if path.is_dir() {
-                let rel = file_path.strip_prefix(base_dir).unwrap_or(file_path);
-                let components: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
-                if components.len() > 1 {
-                    // Create intermediate dirs for nested paths.
-                    let dir_parts = &components[..components.len()-1];
-                    let mut current = parent_ref.clone();
-                    for dir_name in dir_parts {
-                        current = match crate::vfs::find_named_child(client, &current, dir_name).await? {
-                            Some((child, _)) => child,
-                            None => {
-                                let id = crate::vfs::create_dir(client, dir_name).await?;
-                                let child = NodeRef::Entity(id);
-                                // Use low-level edge creation (skip collision check since we just checked).
-                                let mut props = BTreeMap::new();
-                                props.insert("name".to_string(), serde_json::Value::String(dir_name.to_string()));
-                                let edge = Edge {
-                                    id: memvault_core::EdgeId::random(),
-                                    relation: crate::vfs::VFS_CHILD_REL.to_string(),
-                                    target: child.clone(), weight: None, props, provenance: None,
-                                };
-                                client.add_link(&current, edge, Visibility::Internal).await?;
-                                child
-                            }
-                        };
-                    }
-                    let file_name = components.last().unwrap_or(&filename);
-                    let _ = crate::vfs::create_child_edge(client, &current, &target, file_name).await;
-                } else {
-                    let _ = crate::vfs::create_child_edge(client, parent_ref, &target, filename).await;
-                }
-            } else {
-                let _ = crate::vfs::create_child_edge(client, parent_ref, &target, filename).await;
+        if let Some(folder) = vfs_folder {
+            let vfs_path = compute_vfs_path(folder, base_dir, file_path, path.is_dir());
+            if let Err(e) = crate::vfs::link_node_at_path(client, &vfs_path, &node_id).await {
+                // Duplicate name is fine — skip silently.
+                tracing::debug!(path = %vfs_path, error = %e, "VFS link skipped");
             }
         }
-
         count += 1;
     }
-
     Ok(count)
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Import text/markdown files as documents, optionally placing them in the VFS.
+async fn import_docs(
+    client: &LocalClient,
+    path: &Path,
+    vfs_folder: Option<&str>,
+    tags: &[(String, String)],
+    vis: Visibility,
+) -> Result<usize> {
+    let doc_extensions = &["md", "txt", "markdown", "text", "rst"];
+    let mut files: Vec<PathBuf> = Vec::new();
+    if path.is_file() {
+        files.push(path.to_path_buf());
+    } else if path.is_dir() {
+        collect_files_recursive(path, &mut files, Some(doc_extensions))?;
+    } else {
+        anyhow::bail!("path does not exist: {}", path.display());
+    }
+    if files.is_empty() {
+        println!("No document files found at {}", path.display());
+        return Ok(0);
+    }
+
+    let base_dir = if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) };
+    let mut count = 0usize;
+
+    for file_path in &files {
+        let body = std::fs::read_to_string(file_path)?;
+        let title = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
+        let (_cid, node_id) = crate::docs::create_doc(client, &body, title.as_deref(), tags.to_vec(), vis.clone()).await?;
+        println!("  {} -> {node_id}", file_path.display());
+
+        if let Some(folder) = vfs_folder {
+            let vfs_path = compute_vfs_path(folder, base_dir, file_path, path.is_dir());
+            if let Err(e) = crate::vfs::link_node_at_path(client, &vfs_path, &node_id).await {
+                tracing::debug!(path = %vfs_path, error = %e, "VFS link skipped");
+            }
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Compute the VFS path for a file being imported.
+fn compute_vfs_path(vfs_folder: &str, base_dir: &Path, file_path: &Path, is_dir_import: bool) -> String {
+    let folder = vfs_folder.trim_end_matches('/');
+    if is_dir_import {
+        let rel = file_path.strip_prefix(base_dir).unwrap_or(file_path);
+        let rel_str = rel.to_string_lossy();
+        format!("{folder}/{rel_str}")
+    } else {
+        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unnamed");
+        format!("{folder}/{filename}")
+    }
+}
+
+/// Collect files recursively, skipping hidden entries.
+/// If `extensions` is Some, only includes files with matching extensions.
+fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>, extensions: Option<&[&str]>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') {
+            continue;
+        }
         if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if !name.starts_with('.') {
-                    out.push(path);
+            if let Some(exts) = extensions {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !exts.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+                    continue;
                 }
             }
+            out.push(path);
         } else if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if !name.starts_with('.') {
-                    collect_files(&path, out)?;
-                }
-            }
+            collect_files_recursive(&path, out, extensions)?;
         }
     }
     Ok(())

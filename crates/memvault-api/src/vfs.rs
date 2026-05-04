@@ -218,6 +218,18 @@ pub async fn link_at_path(
     create_child_edge(client, &parent, target, name).await
 }
 
+/// Convenience: link a node (by its "type:hex" ID string) at a VFS path.
+pub async fn link_node_at_path(
+    client: &dyn MemvaultClient,
+    path: &str,
+    node_id: &str,
+) -> Result<()> {
+    let target = NodeRef::from_tag_label(node_id)
+        .ok_or_else(|| crate::error::ApiError::Other(format!("invalid node_id: {node_id}")))?;
+    link_at_path(client, path, &target).await?;
+    Ok(())
+}
+
 /// Resolve the display type for a node ("dir", "entity", "doc", "file").
 pub async fn resolve_node_type(client: &dyn MemvaultClient, node: &NodeRef) -> String {
     match node {
