@@ -293,15 +293,26 @@ async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
 
 // ── Color & shape helpers ─────────────────────────────────────────────
 
-fn node_color(node_type: &str, kind: &str) -> &'static str {
+/// Deterministic HSL color from a string hash. Picks a hue on the color wheel,
+/// keeps saturation/lightness in a pleasant range.
+fn hash_color(s: &str) -> String {
+    let mut h: u32 = 0;
+    for b in s.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    let hue = h % 360;
+    format!("hsl({hue}, 55%, 55%)")
+}
+
+fn node_color(node_type: &str, kind: &str) -> String {
     match node_type {
-        "doc" => "rgb(var(--c-warn))",
-        "attachment" => "rgb(var(--c-success))",
+        "doc" => "rgb(var(--c-warn))".to_string(),
+        "attachment" => "rgb(var(--c-success))".to_string(),
         _ => match kind {
-            "person" => "rgb(var(--c-info))",
-            "project" => "rgb(var(--c-brand))",
-            "concept" => "rgb(var(--c-success))",
-            _ => "rgb(var(--c-fg-muted))",
+            "person" => "rgb(var(--c-info))".to_string(),
+            "project" => "rgb(var(--c-brand))".to_string(),
+            "concept" => "rgb(var(--c-success))".to_string(),
+            _ => hash_color(kind),
         },
     }
 }
