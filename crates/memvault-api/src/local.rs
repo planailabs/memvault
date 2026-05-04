@@ -919,6 +919,12 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
+    async fn update_view(&self, view: crate::types::View) -> Result<()> {
+        // Delete old version, then create new.
+        self.delete_view(&view.name).await?;
+        self.create_view(view).await
+    }
+
     async fn get_view(&self, name: &str) -> Result<Option<crate::types::View>> {
         let cids = self.store.query_by_tag("view", name, 0, 1)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;

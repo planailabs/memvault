@@ -51,6 +51,7 @@ pub trait MemvaultClient: Send + Sync {
     async fn create_view(&self, view: crate::types::View) -> Result<()>;
     async fn delete_view(&self, name: &str) -> Result<()>;
     async fn get_view(&self, name: &str) -> Result<Option<crate::types::View>>;
+    async fn update_view(&self, view: crate::types::View) -> Result<()>;
 
     // -- Search --
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;

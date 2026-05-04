@@ -27,6 +27,7 @@ pub fn Sidebar() -> Element {
                 span { class: "kicker", "Operations" }
             }
             NavLink { to: Route::AuditLog {}, label: "Audit" }
+            NavLink { to: Route::ViewManager {}, label: "Views" }
             NavLink { to: Route::AdminDashboard {}, label: "Admin" }
         }
     }

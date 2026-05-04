@@ -51,6 +51,22 @@ pub async fn delete_view(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// PUT /api/v1/views/:name — update a view's tags.
+pub async fn update_view(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<CreateViewRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let view = memvault_api::View {
+        name: name.clone(),
+        tags: req.tags,
+        created_ns: memvault_core::wall_ns(),
+    };
+    state.client.update_view(view).await?;
+    Ok(Json(serde_json::json!({ "name": name, "status": "updated" })))
+}
+
 /// GET /api/v1/views/:name — get a single view.
 pub async fn get_view(
     _auth: RequireAuth,

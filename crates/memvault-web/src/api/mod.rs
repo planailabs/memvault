@@ -57,7 +57,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/links/{edge_id}", delete(links::delete_link))
         // Views
         .route("/views", get(views::list_views).post(views::create_view))
-        .route("/views/{name}", get(views::get_view).delete(views::delete_view))
+        .route("/views/{name}", get(views::get_view).put(views::update_view).delete(views::delete_view))
         // Search
         .route("/search", get(search::search))
         // Audit
