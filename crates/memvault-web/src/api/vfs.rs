@@ -77,18 +77,30 @@ fn split_path(path: &str) -> Result<Vec<&str>, ApiError> {
 async fn ensure_root(client: &dyn MemvaultClient) -> Result<EntityId, ApiError> {
     let entities = client.list_entities(500).await.map_err(|e| ApiError::internal(e.to_string()))?;
     let mut candidates: Vec<[u8; 32]> = Vec::new();
+    let mut fallback_candidates: Vec<[u8; 32]> = Vec::new();
     for e in &entities {
-        if e.kind == VFS_DIR_KIND {
-            let node_id = format!("entity:{}", hex::encode(e.id.0));
-            let tags = client.get_tags(&node_id).await.unwrap_or_default();
-            if tags.iter().any(|(s, l)| s == "vfs" && l == "root") {
-                candidates.push(e.id.0);
-            }
+        if e.kind != VFS_DIR_KIND {
+            continue;
+        }
+        let node_id = format!("entity:{}", hex::encode(e.id.0));
+        let tags = client.get_tags(&node_id).await.unwrap_or_default();
+        if tags.iter().any(|(s, l)| s == "vfs" && l == "root") {
+            candidates.push(e.id.0);
+        }
+        if e.props.get("name").and_then(|v| v.as_str()) == Some("/") {
+            fallback_candidates.push(e.id.0);
         }
     }
     if !candidates.is_empty() {
         candidates.sort();
         return Ok(EntityId(candidates[0]));
+    }
+    if !fallback_candidates.is_empty() {
+        fallback_candidates.sort();
+        let id = EntityId(fallback_candidates[0]);
+        let node_id = format!("entity:{}", hex::encode(id.0));
+        let _ = client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await;
+        return Ok(id);
     }
     // Create root.
     let mut props = BTreeMap::new();

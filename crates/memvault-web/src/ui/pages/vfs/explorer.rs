@@ -122,20 +122,38 @@ async fn vfs_ensure_root(
 
     let entities = client.list_entities(500).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Pass 1: find roots by vfs:root tag (from text index).
     let mut candidates: Vec<[u8; 32]> = Vec::new();
+    let mut fallback_candidates: Vec<[u8; 32]> = Vec::new();
     for e in &entities {
-        if e.kind == VFS_DIR_KIND {
-            let node_id = format!("entity:{}", hex::encode(e.id.0));
-            let tags = client.get_tags(&node_id).await.unwrap_or_default();
-            if tags.iter().any(|(s, l)| s == "vfs" && l == "root") {
-                candidates.push(e.id.0);
-            }
+        if e.kind != VFS_DIR_KIND {
+            continue;
+        }
+        let node_id = format!("entity:{}", hex::encode(e.id.0));
+        let tags = client.get_tags(&node_id).await.unwrap_or_default();
+        if tags.iter().any(|(s, l)| s == "vfs" && l == "root") {
+            candidates.push(e.id.0);
+        }
+        // Fallback: detect root by name="/" prop (in case text index is stale).
+        if e.props.get("name").and_then(|v| v.as_str()) == Some("/") {
+            fallback_candidates.push(e.id.0);
         }
     }
     if !candidates.is_empty() {
         candidates.sort();
         return Ok(EntityId(candidates[0]));
     }
+    // Pass 2: fallback — root entity exists but tag wasn't in text index.
+    // Re-tag it so future lookups succeed.
+    if !fallback_candidates.is_empty() {
+        fallback_candidates.sort();
+        let id = EntityId(fallback_candidates[0]);
+        let node_id = format!("entity:{}", hex::encode(id.0));
+        let _ = client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await;
+        return Ok(id);
+    }
+    // Create a new root.
     let mut props = BTreeMap::new();
     props.insert("name".to_string(), serde_json::json!("/"));
     let entity = Entity {
