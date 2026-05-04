@@ -17,6 +17,7 @@ use super::pages::notes::detail::NoteDetail;
 use super::pages::notes::form::{NoteEdit, NoteForm};
 use super::pages::notes::history::NoteHistory;
 use super::pages::notes::list::NoteList;
+use super::pages::vfs::explorer::VfsExplorer;
 use super::pages::views::ViewManager;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -42,6 +43,8 @@ pub enum Route {
     FileExplorer {},
     #[route("/files/:cid")]
     FileDetail { cid: String },
+    #[route("/vfs")]
+    VfsExplorer {},
     #[route("/views")]
     ViewManager {},
     #[route("/audit")]
