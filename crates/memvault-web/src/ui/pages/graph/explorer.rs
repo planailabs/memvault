@@ -15,11 +15,11 @@ use crate::ui::topbar::use_topbar;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct NodeSummary {
-    /// Unique ID in tag_label format: "entity:<hex>", "doc:<hex>", "attachment:<hex>"
+    /// Unique ID in tag_label format: "entity:<hex>", "doc:<hex>", "file:<hex>"
     id: String,
-    /// "entity", "doc", "attachment"
+    /// "entity", "doc", "file"
     node_type: String,
-    /// Entity kind (e.g. "person") or "document"/"file" for docs/attachments
+    /// Entity kind (e.g. "person") or "document"/"file" for docs/files
     kind: String,
     label: String,
     edges: Vec<EdgeSummary>,
@@ -139,8 +139,8 @@ async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, Serv
     for extra_id in &extra_ids {
         let (node_type, label) = if extra_id.starts_with("doc:") {
             ("doc", "Document")
-        } else if extra_id.starts_with("attachment:") {
-            ("attachment", "File")
+        } else if extra_id.starts_with("file:") || extra_id.starts_with("attachment:") {
+            ("file", "File")
         } else {
             continue;
         };
@@ -219,7 +219,7 @@ async fn get_node_detail(node_id: String) -> Result<NodeDetail, ServerFnError> {
     let node_type = match &node_ref {
         memvault_core::NodeRef::Entity(_) => "entity",
         memvault_core::NodeRef::Doc(_) => "doc",
-        memvault_core::NodeRef::Attachment(_) => "attachment",
+        memvault_core::NodeRef::Attachment(_) => "file",
     };
 
     Ok(NodeDetail {
@@ -276,7 +276,7 @@ async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
             // Non-entity or unfetchable: add stub
             let (node_type, kind, label) = match other {
                 memvault_core::NodeRef::Doc(_) => ("doc", "document", "Document"),
-                memvault_core::NodeRef::Attachment(_) => ("attachment", "file", "File"),
+                memvault_core::NodeRef::Attachment(_) => ("file", "file", "File"),
                 memvault_core::NodeRef::Entity(_) => ("entity", "entity", "Entity"),
             };
             neighbors.push(NodeSummary {
@@ -308,7 +308,7 @@ fn hash_color(s: &str) -> String {
 fn node_color(node_type: &str, kind: &str) -> String {
     match node_type {
         "doc" => "rgb(var(--c-warn))".to_string(),
-        "attachment" => "rgb(var(--c-success))".to_string(),
+        "file" | "attachment" => "rgb(var(--c-success))".to_string(),
         _ => match kind {
             "person" => "rgb(var(--c-info))".to_string(),
             "project" => "rgb(var(--c-brand))".to_string(),
@@ -779,7 +779,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                 {
                                     // Determine node_type from the id prefix
                                     let nt = if node.id.starts_with("doc:") { "doc" }
-                                        else if node.id.starts_with("attachment:") { "attachment" }
+                                        else if node.id.starts_with("file:") || node.id.starts_with("attachment:") { "file" }
                                         else { "entity" };
                                     let color = node_color(nt, &node.kind);
                                     let is_selected = selected.read().as_ref() == Some(&node.id);
@@ -836,7 +836,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 }
                                             },
 
-                                            // Shape: circle for entity, rounded rect for doc, diamond for attachment
+                                            // Shape: circle for entity, rounded rect for doc, diamond for file
                                             match nt {
                                                 "doc" => rsx! {
                                                     rect {
@@ -851,7 +851,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                         opacity: "0.85",
                                                     }
                                                 },
-                                                "attachment" => {
+                                                "file" | "attachment" => {
                                                     // Diamond shape via polygon
                                                     let r = node.radius;
                                                     let pts = format!(
@@ -975,8 +975,8 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                             }
                                         }
                                     }
-                                    if d.node_type == "attachment" {
-                                        if let Some(hex_cid) = d.id.strip_prefix("attachment:") {
+                                    if d.node_type == "file" || d.node_type == "attachment" {
+                                        if let Some(hex_cid) = d.id.strip_prefix("file:").or_else(|| d.id.strip_prefix("attachment:")) {
                                             Link { to: Route::FileDetail { cid: hex_cid.to_string() },
                                                 class: "btn btn-sm btn-secondary w-full mt-2",
                                                 {t!("graph-view-file")}

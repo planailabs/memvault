@@ -128,7 +128,7 @@ impl TextIndex {
 
     pub fn index_attachment(&mut self, manifest_cid: &[u8], filename: Option<&str>, mime_type: &str,
                              extracted_text: Option<&str>, tags: Vec<(String, String)>) {
-        let node_id = format!("attachment:{}", hex::encode(manifest_cid));
+        let node_id = format!("file:{}", hex::encode(manifest_cid));
         let label = filename.unwrap_or("unnamed file").to_string();
         let mut text_parts = vec![label.clone(), mime_type.to_string()];
         if let Some(f) = filename {
@@ -139,7 +139,7 @@ impl TextIndex {
         if let Some(text) = extracted_text { text_parts.push(text.to_string()); }
         for (scope, lbl) in &tags { text_parts.push(format!("{scope}:{lbl}")); }
         self.unified.insert(node_id, IndexedEntry {
-            node_type: "attachment".to_string(), label, text: text_parts.join(" "), tags,
+            node_type: "file".to_string(), label, text: text_parts.join(" "), tags,
         });
     }
 

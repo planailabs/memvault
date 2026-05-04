@@ -1,2 +1,2 @@
-server: dx serve | cat
+server: RUST_LOG=debug dx serve | cat
 tailwind: npm run tailwind

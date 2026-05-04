@@ -88,7 +88,7 @@ impl NodeRef {
         match self {
             NodeRef::Entity(id) => format!("entity:{}", hex::encode(id.0)),
             NodeRef::Doc(id) => format!("doc:{}", hex::encode(id.0)),
-            NodeRef::Attachment(cid) => format!("attachment:{}", hex::encode(cid)),
+            NodeRef::Attachment(cid) => format!("file:{}", hex::encode(cid)),
         }
     }
 
@@ -109,7 +109,7 @@ impl NodeRef {
                 arr.copy_from_slice(&bytes);
                 Some(NodeRef::Doc(DocId(arr)))
             }
-            "attachment" => Some(NodeRef::Attachment(bytes)),
+            "file" | "attachment" => Some(NodeRef::Attachment(bytes)),
             _ => None,
         }
     }
@@ -219,7 +219,16 @@ mod tests {
 
         let nr3 = NodeRef::Attachment(vec![3, 4, 5]);
         let label3 = nr3.tag_label();
+        assert!(label3.starts_with("file:"), "tag_label should use 'file:' prefix");
         let back3 = NodeRef::from_tag_label(&label3).unwrap();
         assert_eq!(nr3, back3);
+    }
+
+    #[test]
+    fn noderef_from_tag_label_accepts_legacy_attachment_prefix() {
+        let nr = NodeRef::Attachment(vec![3, 4, 5]);
+        let legacy_label = format!("attachment:{}", hex::encode(&[3, 4, 5]));
+        let back = NodeRef::from_tag_label(&legacy_label).unwrap();
+        assert_eq!(nr, back);
     }
 }

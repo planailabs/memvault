@@ -1,4 +1,4 @@
-//! File explorer page — browse attachments.
+//! File explorer page — browse files.
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
@@ -40,12 +40,12 @@ impl FileRow {
 async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
-    // If a view is active, use list_all filtered to attachments.
+    // If a view is active, use list_all filtered to files.
     if let Some(ref view_name) = view {
         let items = client.list_all(Some(view_name), 500).await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         return Ok(items.into_iter()
-            .filter(|(_, node_type, _, _)| node_type == "attachment")
+            .filter(|(_, node_type, _, _)| node_type == "file" || node_type == "attachment")
             .map(|(id, _, label, _)| FileRow {
                 cid: id, filename: label, mime_type: "".to_string(),
                 size: 0, wall_ns: 0,
@@ -55,7 +55,7 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
 
     use memvault_query::AuditQuery;
 
-    // Query audit log for AttachFile operations to discover attachments.
+    // Query audit log for AttachFile operations to discover files.
     let query = AuditQuery {
         op_kind: Some(memvault_query::OpKind::AttachFile),
         limit: Some(500),
@@ -75,7 +75,7 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
         };
         let cid_hex = hex::encode(&manifest_cid);
         // Try to fetch manifest for metadata.
-        if let Ok(Some(manifest_bytes)) = client.get_attachment_manifest(&manifest_cid).await {
+        if let Ok(Some(manifest_bytes)) = client.get_file_manifest(&manifest_cid).await {
             if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) {
                 files.push(FileRow {
                     cid: cid_hex,
@@ -172,7 +172,7 @@ fn FileGrid(list: Vec<FileRow>) -> Element {
                             // Thumbnail or icon
                             if file.mime_type.starts_with("image/") {
                                 img {
-                                    src: "/api/v1/attachments/{file.cid}",
+                                    src: "/api/v1/files/{file.cid}",
                                     alt: "{file.filename}",
                                     class: "w-full h-32 object-cover rounded",
                                 }

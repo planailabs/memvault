@@ -81,7 +81,7 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
     {
         for record in records {
             if let Ok(Some(manifest_bytes)) =
-                client.get_attachment_manifest(&record.cid).await
+                client.get_file_manifest(&record.cid).await
             {
                 if let Ok(manifest) =
                     serde_json::from_slice::<serde_json::Value>(&manifest_bytes)

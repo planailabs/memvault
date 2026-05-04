@@ -259,7 +259,7 @@ async fn resolve_vfs_type(client: &dyn MemvaultClient, node: &NodeRef) -> String
             "entity".to_string()
         }
         NodeRef::Doc(_) => "doc".to_string(),
-        NodeRef::Attachment(_) => "attachment".to_string(),
+        NodeRef::Attachment(_) => "file".to_string(),
     }
 }
 

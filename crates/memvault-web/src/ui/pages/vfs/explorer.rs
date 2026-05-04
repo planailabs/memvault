@@ -30,7 +30,7 @@ impl VfsRow {
         match self.node_type.as_str() {
             "dir" => "\u{1F4C1}",
             "doc" => "\u{1F4DD}",
-            "attachment" => "\u{1F4CE}",
+            "file" | "attachment" => "\u{1F4CE}",
             "entity" => "\u{1F7E3}",
             _ => "\u{2753}",
         }
@@ -213,7 +213,7 @@ async fn vfs_resolve_type(
             "entity".to_string()
         }
         memvault_core::NodeRef::Doc(_) => "doc".to_string(),
-        memvault_core::NodeRef::Attachment(_) => "attachment".to_string(),
+        memvault_core::NodeRef::Attachment(_) => "file".to_string(),
     }
 }
 
@@ -560,8 +560,11 @@ fn node_route(node_id: &str, node_type: &str) -> Option<Route> {
             let id = node_id.strip_prefix("entity:").unwrap_or(node_id).to_string();
             Some(Route::EntityDetail { id })
         }
-        "attachment" => {
-            let cid = node_id.strip_prefix("attachment:").unwrap_or(node_id).to_string();
+        "file" | "attachment" => {
+            let cid = node_id.strip_prefix("file:")
+                .or_else(|| node_id.strip_prefix("attachment:"))
+                .unwrap_or(node_id)
+                .to_string();
             Some(Route::FileDetail { cid })
         }
         _ => None,

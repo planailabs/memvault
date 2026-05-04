@@ -169,7 +169,7 @@ impl LocalClient {
                     let mime_type = val.get("mime_type").and_then(|v| v.as_str())
                         .unwrap_or("application/octet-stream");
                     if let Some(mcid) = manifest_cid {
-                        let text = if let Ok(content) = self.read_attachment(&mcid).await {
+                        let text = if let Ok(content) = self.read_file(&mcid).await {
                             self.extract_and_cache(&mcid, &content, mime_type)
                         } else {
                             None
@@ -326,7 +326,7 @@ impl LocalClient {
     }
 
     fn store_manifest_update(&self, manifest_cid: &[u8], extracted_text_cid: Option<Vec<u8>>, error: Option<&str>) {
-        let target = format!("attachment:{}", hex::encode(manifest_cid));
+        let target = format!("file:{}", hex::encode(manifest_cid));
         let _ = self.store_annotation(&target, "extraction", serde_json::json!({
             "extracted_text": extracted_text_cid,
             "extraction_error": error,
@@ -338,10 +338,15 @@ impl LocalClient {
     /// `Some(ExtractionResult::Failed(err))` on cached failure,
     /// `None` if no cache exists.
     fn load_cached_extraction(&self, manifest_cid: &[u8]) -> Option<ExtractionResult> {
-        let target = format!("attachment:{}", hex::encode(manifest_cid));
+        let target = format!("file:{}", hex::encode(manifest_cid));
+        let legacy_target = format!("attachment:{}", hex::encode(manifest_cid));
 
         // Try new unified annotation format first, then legacy manifest_update.
-        let ann_cids = self.store.query_by_tag("_ann", &target, 0, 10).ok()?;
+        let mut ann_cids = self.store.query_by_tag("_ann", &target, 0, 10).ok()?;
+        // Also check legacy "attachment:" annotations for backward compat.
+        if let Ok(legacy_ann) = self.store.query_by_tag("_ann", &legacy_target, 0, 10) {
+            ann_cids.extend(legacy_ann);
+        }
         let legacy_label = hex::encode(manifest_cid);
         let legacy_cids = self.store.query_by_tag("manifest_update", &legacy_label, 0, 10).ok()?;
 
@@ -598,7 +603,7 @@ impl MemvaultClient for LocalClient {
         Ok(summaries)
     }
 
-    async fn attach_file(
+    async fn upload_file(
         &self,
         data: &[u8],
         filename: Option<&str>,
@@ -683,18 +688,20 @@ impl MemvaultClient for LocalClient {
         Ok(manifest_cid_bytes)
     }
 
-    async fn read_attachment(&self, manifest_cid: &[u8]) -> Result<Vec<u8>> {
-        let node_id = format!("attachment:{}", hex::encode(manifest_cid));
+    async fn read_file(&self, manifest_cid: &[u8]) -> Result<Vec<u8>> {
+        // Accept both "file:" and legacy "attachment:" node IDs for retraction checks.
+        let node_id = format!("file:{}", hex::encode(manifest_cid));
+        let legacy_node_id = format!("attachment:{}", hex::encode(manifest_cid));
         {
             let idx = self.index.read().await;
-            if idx.is_retracted(&node_id) {
-                return Err(ApiError::NotFound("attachment retracted".into()));
+            if idx.is_retracted(&node_id) || idx.is_retracted(&legacy_node_id) {
+                return Err(ApiError::NotFound("file retracted".into()));
             }
         }
         let manifest_data = self
             .store
             .get_block(manifest_cid)?
-            .ok_or_else(|| ApiError::NotFound("attachment manifest not found".into()))?;
+            .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
 
         let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
@@ -704,11 +711,11 @@ impl MemvaultClient for LocalClient {
         Ok(data)
     }
 
-    async fn read_attachment_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>> {
+    async fn read_file_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>> {
         let manifest_data = self
             .store
             .get_block(manifest_cid)?
-            .ok_or_else(|| ApiError::NotFound("attachment manifest not found".into()))?;
+            .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
 
         let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
@@ -722,7 +729,7 @@ impl MemvaultClient for LocalClient {
         let manifest_data = self
             .store
             .get_block(manifest_cid)?
-            .ok_or_else(|| ApiError::NotFound("attachment manifest not found".into()))?;
+            .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
 
         let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
@@ -731,12 +738,12 @@ impl MemvaultClient for LocalClient {
         Ok(self.extract_and_cache(manifest_cid, &content, &manifest.mime_type))
     }
 
-    async fn pin_attachment(&self, manifest_cid: &[u8]) -> Result<()> {
+    async fn pin_file(&self, manifest_cid: &[u8]) -> Result<()> {
         memvault_attach::pin::pin(&self.store, manifest_cid, memvault_attach::PinReason::Manual)?;
         Ok(())
     }
 
-    async fn unpin_attachment(&self, manifest_cid: &[u8]) -> Result<()> {
+    async fn unpin_file(&self, manifest_cid: &[u8]) -> Result<()> {
         memvault_attach::pin::unpin(&self.store, manifest_cid)?;
         Ok(())
     }
@@ -756,11 +763,13 @@ impl MemvaultClient for LocalClient {
         Ok(result)
     }
 
-    async fn get_attachment_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>> {
-        let node_id = format!("attachment:{}", hex::encode(manifest_cid));
+    async fn get_file_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>> {
+        // Accept both "file:" and legacy "attachment:" node IDs for retraction checks.
+        let node_id = format!("file:{}", hex::encode(manifest_cid));
+        let legacy_node_id = format!("attachment:{}", hex::encode(manifest_cid));
         {
             let idx = self.index.read().await;
-            if idx.is_retracted(&node_id) { return Ok(None); }
+            if idx.is_retracted(&node_id) || idx.is_retracted(&legacy_node_id) { return Ok(None); }
         }
         let data = self.store.get_block(manifest_cid)?;
         Ok(data)

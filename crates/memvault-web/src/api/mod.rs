@@ -1,7 +1,7 @@
 //! API route registration.
 
 pub mod admin;
-pub mod attachments;
+pub mod files;
 pub mod audit;
 pub mod auth;
 pub mod docs;
@@ -23,7 +23,7 @@ use crate::AppState;
 
 /// Build all API v1 routes.
 ///
-/// All node IDs use "type:hex" format: entity:<hex>, doc:<hex>, attachment:<hex>.
+/// All node IDs use "type:hex" format: entity:<hex>, doc:<hex>, file:<hex>.
 /// Legacy /docs and /entities endpoints accept both raw hex and type:hex.
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
@@ -59,10 +59,14 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/entities", post(graph::create_entity))
         .route("/entities/{id}", get(graph::get_entity).delete(graph::delete_entity))
 
-        // ── Attachments ──────────��─────────────────────────────────
-        .route("/attachments", post(attachments::upload_standalone))
-        .route("/attachments/{cid}", get(attachments::download_attachment))
-        .route("/attachments/{cid}/manifest", get(attachments::attachment_manifest))
+        // ── Files ────────────────────────────────────────────────────
+        .route("/files", post(files::upload_file))
+        .route("/files/{cid}", get(files::download_file))
+        .route("/files/{cid}/manifest", get(files::file_manifest))
+        // Backward compat: keep old /attachments routes working
+        .route("/attachments", post(files::upload_file))
+        .route("/attachments/{cid}", get(files::download_file))
+        .route("/attachments/{cid}/manifest", get(files::file_manifest))
 
         // ── VFS (virtual filesystem) ───────────────────────────────
         .route("/vfs", get(vfs::vfs_ls).delete(vfs::vfs_unlink))

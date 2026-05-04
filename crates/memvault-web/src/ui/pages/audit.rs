@@ -235,7 +235,7 @@ fn audit_link_from_tag(tag_label: &str, label: &str) -> Option<AuditLink> {
     let kind = match prefix {
         "entity" => "entity",
         "doc" => "note",
-        "attachment" => "file",
+        "file" | "attachment" => "file",
         _ => return None,
     };
     Some(AuditLink {

@@ -14,15 +14,15 @@ use crate::error::ApiError;
 use crate::AppState;
 
 #[derive(Serialize)]
-pub struct AttachmentListItem {
+pub struct FileListItem {
     pub name: String,
     pub content_type: String,
     pub size: u64,
     pub cid: String,
 }
 
-/// POST /api/v1/docs/:id/attachments — upload file attachment (multipart)
-pub async fn upload_attachment(
+/// POST /api/v1/docs/:id/files — upload file (multipart)
+pub async fn upload_doc_file(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(_id): Path<String>,
@@ -46,39 +46,39 @@ pub async fn upload_attachment(
 
     let cid = state
         .client
-        .attach_file(&data, Some(&name), &content_type, vec![], "internal")
+        .upload_file(&data, Some(&name), &content_type, vec![], "internal")
         .await?;
 
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "cid": format!("attachment:{}", hex::encode(&cid)),
+            "cid": format!("file:{}", hex::encode(&cid)),
             "name": name,
         })),
     ))
 }
 
-/// GET /api/v1/docs/:id/attachments — list attachments for a document
-/// Note: With the new system, attachments are no longer embedded in documents.
+/// GET /api/v1/docs/:id/files — list files for a document
+/// Note: With the new system, files are no longer embedded in documents.
 /// This endpoint returns an empty list for backwards compatibility.
-pub async fn list_attachments(
+pub async fn list_doc_files(
     _auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Path(_id): Path<String>,
-) -> Result<Json<Vec<AttachmentListItem>>, ApiError> {
-    // Attachments are no longer embedded in documents in the new system.
+) -> Result<Json<Vec<FileListItem>>, ApiError> {
+    // Files are no longer embedded in documents in the new system.
     // This endpoint is kept for backwards compatibility but returns empty.
     Ok(Json(vec![]))
 }
 
-/// POST /api/v1/attachments — upload a standalone file attachment (multipart)
+/// POST /api/v1/files — upload a file (multipart)
 #[derive(Deserialize)]
 pub struct UploadQuery {
-    /// Optional VFS path to place the attachment at.
+    /// Optional VFS path to place the file at.
     pub vfs_path: Option<String>,
 }
 
-pub async fn upload_standalone(
+pub async fn upload_file(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(query): Query<UploadQuery>,
@@ -102,14 +102,14 @@ pub async fn upload_standalone(
 
     let cid = state
         .client
-        .attach_file(&data, Some(&name), &content_type, vec![], "internal")
+        .upload_file(&data, Some(&name), &content_type, vec![], "internal")
         .await?;
-    let node_id = format!("attachment:{}", hex::encode(&cid));
+    let node_id = format!("file:{}", hex::encode(&cid));
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
 
     if let Some(vfs_path) = &query.vfs_path {
         if let Err(e) = super::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
-            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after attachment upload");
+            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after file upload");
         }
     }
 
@@ -122,15 +122,15 @@ pub async fn upload_standalone(
     ))
 }
 
-/// GET /api/v1/attachments/:cid — download attachment by CID
-pub async fn download_attachment(
+/// GET /api/v1/files/:cid — download file by CID
+pub async fn download_file(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
 
-    let data = state.client.read_attachment(&cid).await?;
+    let data = state.client.read_file(&cid).await?;
 
     Ok((
         [(header::CONTENT_TYPE, "application/octet-stream")],
@@ -138,15 +138,15 @@ pub async fn download_attachment(
     ))
 }
 
-/// GET /api/v1/attachments/:cid/manifest — get attachment manifest metadata
-pub async fn attachment_manifest(
+/// GET /api/v1/files/:cid/manifest — get file manifest metadata
+pub async fn file_manifest(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
 
-    match state.client.get_attachment_manifest(&cid).await? {
+    match state.client.get_file_manifest(&cid).await? {
         Some(data) => Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
@@ -156,13 +156,13 @@ pub async fn attachment_manifest(
     }
 }
 
-/// DELETE /api/v1/docs/:id/attachments/:name — detach file (no-op in new system)
-pub async fn detach_attachment(
+/// DELETE /api/v1/docs/:id/files/:name — detach file (no-op in new system)
+pub async fn detach_file(
     _auth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     Path((_id, _name)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    // In the new system, attachments are standalone objects.
+    // In the new system, files are standalone objects.
     // Detaching from a doc is a no-op.
     Ok(StatusCode::NO_CONTENT)
 }

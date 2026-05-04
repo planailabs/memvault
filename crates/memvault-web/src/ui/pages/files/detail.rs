@@ -57,7 +57,7 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
     let cid_bytes = hex::decode(&cid).map_err(|_| ServerFnError::new("Invalid CID hex"))?;
 
     let manifest_bytes = client
-        .get_attachment_manifest(&cid_bytes)
+        .get_file_manifest(&cid_bytes)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Manifest not found"))?;
@@ -138,7 +138,7 @@ pub fn FileDetail(cid: String) -> Element {
 
 #[component]
 fn FileView(data: FileData) -> Element {
-    let download_url = format!("/api/v1/attachments/{}", data.cid);
+    let download_url = format!("/api/v1/files/{}", data.cid);
 
     rsx! {
         div { class: "space-y-4",
@@ -233,7 +233,7 @@ fn FileView(data: FileData) -> Element {
                             }
                         }
                     }
-                    FileQuickLinkForm { source_id: format!("attachment:{}", data.cid) }
+                    FileQuickLinkForm { source_id: format!("file:{}", data.cid) }
                 }
             }
 
@@ -268,7 +268,7 @@ async fn create_file_link(source: String, target: String, relation: String) -> R
     let source_ref = memvault_core::NodeRef::from_tag_label(&source)
         .ok_or_else(|| ServerFnError::new("Invalid source node"))?;
     let target_ref = memvault_core::NodeRef::from_tag_label(&target)
-        .ok_or_else(|| ServerFnError::new("Invalid target — use format: entity:<hex>, doc:<hex>, or attachment:<hex>"))?;
+        .ok_or_else(|| ServerFnError::new("Invalid target — use format: entity:<hex>, doc:<hex>, or file:<hex>"))?;
 
     let edge = memvault_doc::Edge {
         id: memvault_core::EdgeId::random(),

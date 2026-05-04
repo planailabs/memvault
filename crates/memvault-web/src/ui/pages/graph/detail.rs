@@ -165,7 +165,7 @@ fn EntityView(data: EntityData) -> Element {
                                                     Route::EntityDetail { id: hex.to_string() }
                                                 } else if let Some(hex) = edge.target.strip_prefix("doc:") {
                                                     Route::NoteDetail { id: hex.to_string() }
-                                                } else if let Some(hex) = edge.target.strip_prefix("attachment:") {
+                                                } else if let Some(hex) = edge.target.strip_prefix("file:").or_else(|| edge.target.strip_prefix("attachment:")) {
                                                     Route::FileDetail { cid: hex.to_string() }
                                                 } else {
                                                     Route::EntityDetail { id: edge.target.clone() }

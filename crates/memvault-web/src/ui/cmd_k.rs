@@ -31,7 +31,7 @@ async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnErr
         .map(|hit| {
             let (kind, id) = match hit.node_type.as_str() {
                 "doc" => ("note", hit.node_id.strip_prefix("doc:").unwrap_or(&hit.node_id).to_string()),
-                "attachment" => ("file", hit.node_id.strip_prefix("attachment:").unwrap_or(&hit.node_id).to_string()),
+                "file" | "attachment" => ("file", hit.node_id.strip_prefix("file:").or_else(|| hit.node_id.strip_prefix("attachment:")).unwrap_or(&hit.node_id).to_string()),
                 _ => ("entity", hit.node_id.strip_prefix("entity:").unwrap_or(&hit.node_id).to_string()),
             };
             PaletteResult {

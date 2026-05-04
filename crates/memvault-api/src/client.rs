@@ -18,16 +18,16 @@ pub trait MemvaultClient: Send + Sync {
     async fn edit_doc(&self, id: &DocId, patch: TextPatch) -> Result<Vec<u8>>;
     async fn list_docs(&self, tag_filter: Option<(String, String)>, limit: usize) -> Result<Vec<DocSummary>>;
 
-    // -- Attachments (new system) --
-    async fn attach_file(&self, data: &[u8], filename: Option<&str>, mime_type: &str,
+    // -- Files --
+    async fn upload_file(&self, data: &[u8], filename: Option<&str>, mime_type: &str,
                          tags: Vec<(String, String)>, visibility: &str) -> Result<Vec<u8>>;
-    async fn read_attachment(&self, manifest_cid: &[u8]) -> Result<Vec<u8>>;
-    async fn read_attachment_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>>;
+    async fn read_file(&self, manifest_cid: &[u8]) -> Result<Vec<u8>>;
+    async fn read_file_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>>;
     async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>>;
-    async fn pin_attachment(&self, manifest_cid: &[u8]) -> Result<()>;
-    async fn unpin_attachment(&self, manifest_cid: &[u8]) -> Result<()>;
+    async fn pin_file(&self, manifest_cid: &[u8]) -> Result<()>;
+    async fn unpin_file(&self, manifest_cid: &[u8]) -> Result<()>;
     async fn list_pinned(&self) -> Result<Vec<(Vec<u8>, String)>>;  // (cid, reason)
-    async fn get_attachment_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>>;  // returns JSON
+    async fn get_file_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>>;  // returns JSON
 
     // -- Graph --
     async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId>;
@@ -47,7 +47,7 @@ pub trait MemvaultClient: Send + Sync {
 
 
     // -- Tags --
-    /// Add tags to an existing item (doc, entity, or attachment).
+    /// Add tags to an existing item (doc, entity, or file).
     async fn add_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()>;
     /// Remove tags from an existing item.
     async fn remove_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()>;
@@ -63,7 +63,7 @@ pub trait MemvaultClient: Send + Sync {
 
     // -- Search --
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
-    /// Unified search across all node types (docs, entities, attachments).
+    /// Unified search across all node types (docs, entities, files).
     async fn search_unified(&self, query: &str, limit: usize) -> Result<Vec<memvault_query::UnifiedHit>>;
     /// List all nodes, optionally filtered by a view name. Returns (node_id, node_type, label, tags).
     async fn list_all(&self, view_name: Option<&str>, limit: usize) -> Result<Vec<(String, String, String, Vec<(String, String)>)>>;
@@ -76,7 +76,7 @@ pub trait MemvaultClient: Send + Sync {
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>>;
     async fn audit(&self, query: AuditQuery) -> Result<Vec<AuditRecord>>;
     async fn retract(&self, target_cid: &[u8], reason: &str) -> Result<Vec<u8>>;
-    /// Retract a node by its tag_label (e.g. "entity:<hex>", "doc:<hex>", "attachment:<hex>").
+    /// Retract a node by its tag_label (e.g. "entity:<hex>", "doc:<hex>", "file:<hex>").
     /// Removes it from the search index and marks it as retracted.
     async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()>;
 

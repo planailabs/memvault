@@ -73,7 +73,7 @@ impl MemvaultClient for MockClient {
         }
     }
 
-    async fn attach_file(
+    async fn upload_file(
         &self,
         _data: &[u8],
         _filename: Option<&str>,
@@ -84,11 +84,11 @@ impl MemvaultClient for MockClient {
         Ok(vec![0xAB; 32])
     }
 
-    async fn read_attachment(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Vec<u8>> {
+    async fn read_file(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Vec<u8>> {
         Ok(b"file-content-here".to_vec())
     }
 
-    async fn read_attachment_range(&self, _manifest_cid: &[u8], _start: u64, _end: u64) -> memvault_api::Result<Vec<u8>> {
+    async fn read_file_range(&self, _manifest_cid: &[u8], _start: u64, _end: u64) -> memvault_api::Result<Vec<u8>> {
         Ok(b"range-data".to_vec())
     }
 
@@ -96,11 +96,11 @@ impl MemvaultClient for MockClient {
         Ok(Some("extracted text".to_string()))
     }
 
-    async fn pin_attachment(&self, _manifest_cid: &[u8]) -> memvault_api::Result<()> {
+    async fn pin_file(&self, _manifest_cid: &[u8]) -> memvault_api::Result<()> {
         Ok(())
     }
 
-    async fn unpin_attachment(&self, _manifest_cid: &[u8]) -> memvault_api::Result<()> {
+    async fn unpin_file(&self, _manifest_cid: &[u8]) -> memvault_api::Result<()> {
         Ok(())
     }
 
@@ -108,7 +108,7 @@ impl MemvaultClient for MockClient {
         Ok(vec![])
     }
 
-    async fn get_attachment_manifest(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Option<Vec<u8>>> {
+    async fn get_file_manifest(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Option<Vec<u8>>> {
         Ok(Some(b"{}".to_vec()))
     }
 

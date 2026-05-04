@@ -68,7 +68,7 @@ async fn attach_file_and_get_attachment_roundtrip() {
 
     let file_data = b"This is a test file with some content for chunking tests.";
     let manifest_cid = client
-        .attach_file(
+        .upload_file(
             file_data,
             Some("test.txt"),
             "text/plain",
@@ -79,7 +79,7 @@ async fn attach_file_and_get_attachment_roundtrip() {
         .unwrap();
     assert!(!manifest_cid.is_empty());
 
-    let retrieved_data = client.read_attachment(&manifest_cid).await.unwrap();
+    let retrieved_data = client.read_file(&manifest_cid).await.unwrap();
     assert_eq!(retrieved_data, file_data.to_vec());
 }
 

@@ -156,10 +156,10 @@ pub async fn get_node(
             })))
         }
         NodeRef::Attachment(cid) => {
-            let manifest = state.client.get_attachment_manifest(&cid).await?;
+            let manifest = state.client.get_file_manifest(&cid).await?;
             Ok(Json(serde_json::json!({
                 "node_id": node_id,
-                "node_type": "attachment",
+                "node_type": "file",
                 "manifest": manifest.map(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).flatten(),
                 "tags": state.client.get_tags(&node_id).await.unwrap_or_default(),
             })))
