@@ -12,6 +12,7 @@ pub fn OpKindBadge(kind: String) -> Element {
         "EntityCreate" => PillVariant::Info,
         "EdgeAdd" => PillVariant::Info,
         "TagUpdate" => PillVariant::Muted,
+        "Extraction" => PillVariant::Muted,
         "Retract" => PillVariant::Bad,
         _ => PillVariant::Muted,
     };
