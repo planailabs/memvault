@@ -43,27 +43,23 @@ async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Entity not found"))?;
 
+    // Get all edges (outgoing + incoming) via edges_of, not just edges_out.
+    let node_ref = memvault_core::NodeRef::Entity(entity_id);
+    let all_edges = client.edges_of(&node_ref).await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
     let mut edges = Vec::new();
-    for e in &entity.edges_out {
-        // Try to get the target entity's label.
-        let target_label = if let memvault_core::NodeRef::Entity(ref target_id) = e.target {
-            if let Ok(Some(target)) = client.get_entity(target_id).await {
-                target
-                    .props
-                    .get("name")
-                    .or_else(|| target.props.get("title"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            } else {
-                None
-            }
+    for (source, e) in &all_edges {
+        let (_direction, other_node) = if source == &node_ref {
+            ("outgoing", e.target.tag_label())
         } else {
-            None
+            ("incoming", source.tag_label())
         };
+        let target_label = client.resolve_label(&other_node).await.unwrap_or(None);
         edges.push(EdgeData {
             id: hex::encode(e.id.0),
             relation: e.relation.clone(),
-            target: e.target.tag_label(),
+            target: other_node,
             target_label,
             weight: e.weight,
         });
