@@ -75,10 +75,10 @@ async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
 }
 
 #[component]
-pub fn EntityDetail(id: String) -> Element {
+pub fn EntityDetail(id: ReadSignal<String>) -> Element {
     use_topbar("Entity");
     let entity = use_server_future(move || {
-        let id = id.clone();
+        let id = id.read().clone();
         async move { get_entity_detail(id).await }
     })?;
 
