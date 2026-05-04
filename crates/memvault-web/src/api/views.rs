@@ -17,6 +17,47 @@ pub struct CreateViewRequest {
     pub tags: Vec<(String, String)>,
 }
 
+// ── Tag updates ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct TagUpdateRequest {
+    pub tags: Vec<(String, String)>,
+}
+
+/// PUT /api/v1/tags/:node_id — add tags to an item.
+pub async fn add_tags(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+    Json(req): Json<TagUpdateRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.client.add_tags(&node_id, req.tags).await?;
+    Ok(Json(serde_json::json!({ "node_id": node_id, "status": "tags_added" })))
+}
+
+/// DELETE /api/v1/tags/:node_id — remove tags from an item.
+pub async fn remove_tags(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+    Json(req): Json<TagUpdateRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.client.remove_tags(&node_id, req.tags).await?;
+    Ok(Json(serde_json::json!({ "node_id": node_id, "status": "tags_removed" })))
+}
+
+/// GET /api/v1/tags/:node_id — get effective tags for an item.
+pub async fn get_tags(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tags = state.client.get_tags(&node_id).await?;
+    Ok(Json(serde_json::json!({ "node_id": node_id, "tags": tags })))
+}
+
+// ── Views ──────────────────────────────────────────────────────────
+
 /// GET /api/v1/views — list all views.
 pub async fn list_views(
     _auth: RequireAuth,

@@ -46,6 +46,14 @@ pub trait MemvaultClient: Send + Sync {
     async fn traverse_from(&self, from: &NodeRef, relation: Option<&str>, max_depth: usize) -> Result<Vec<TraversalHit>>;
 
 
+    // -- Tags --
+    /// Add tags to an existing item (doc, entity, or attachment).
+    async fn add_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()>;
+    /// Remove tags from an existing item.
+    async fn remove_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()>;
+    /// Get the effective tags for a node (original + added - removed).
+    async fn get_tags(&self, node_id: &str) -> Result<Vec<(String, String)>>;
+
     // -- Views (saved tag filter sets) --
     async fn list_views(&self) -> Result<Vec<crate::types::View>>;
     async fn create_view(&self, view: crate::types::View) -> Result<()>;

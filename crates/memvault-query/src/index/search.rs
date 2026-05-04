@@ -305,6 +305,25 @@ impl TextIndex {
         hits
     }
 
+    /// Apply a tag update to a node in the index.
+    pub fn apply_tag_update(&mut self, node_id: &str, add: &[(String, String)], remove: &[(String, String)]) {
+        if let Some(entry) = self.unified.get_mut(node_id) {
+            // Remove tags
+            entry.tags.retain(|t| !remove.contains(t));
+            // Add tags (deduplicate)
+            for tag in add {
+                if !entry.tags.contains(tag) {
+                    entry.tags.push(tag.clone());
+                }
+            }
+        }
+    }
+
+    /// Get the effective tags for a node.
+    pub fn get_tags(&self, node_id: &str) -> Vec<(String, String)> {
+        self.unified.get(node_id).map(|e| e.tags.clone()).unwrap_or_default()
+    }
+
     /// Return all node_ids whose tags contain ALL of the required view tags.
     pub fn members_of_view(&self, required_tags: &[(String, String)]) -> Vec<String> {
         if required_tags.is_empty() {

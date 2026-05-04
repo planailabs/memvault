@@ -180,6 +180,25 @@ impl LocalClient {
             }
         }
 
+        // Replay tag updates
+        for (_, data) in &blocks {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                if val.get("kind").and_then(|v| v.as_str()) == Some("tag_update") {
+                    let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let add: Vec<(String, String)> = val.get("add")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    let remove: Vec<(String, String)> = val.get("remove")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    if !node_id.is_empty() {
+                        let mut idx = self.index.write().await;
+                        idx.apply_tag_update(node_id, &add, &remove);
+                    }
+                }
+            }
+        }
+
         Ok((doc_count, entity_count, attachment_count))
     }
 
@@ -190,6 +209,35 @@ impl LocalClient {
     }
 
     /// Access the quota manager.
+    /// Store a tag update block in the blockstore, tagged with `tag_update:<node_id>`.
+    fn store_tag_update(
+        &self,
+        node_id: &str,
+        add: &[(String, String)],
+        remove: &[(String, String)],
+    ) -> Result<()> {
+        let update = serde_json::json!({
+            "kind": "tag_update",
+            "node_id": node_id,
+            "add": add,
+            "remove": remove,
+            "wall_ns": memvault_core::wall_ns(),
+        });
+        let update_bytes = serde_json::to_vec(&update)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = cid_from_bytes(&update_bytes);
+        let meta = EnvelopeMeta {
+            author: self.peer_id.clone(),
+            tags: vec![("tag_update".to_string(), node_id.to_string())],
+            wall_ns: memvault_core::wall_ns(),
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+        };
+        self.store.insert_envelope(&cid.to_bytes(), &update_bytes, &meta)?;
+        Ok(())
+    }
+
     /// Load cached extracted text by looking for a ManifestUpdate tagged with this manifest CID.
     fn load_cached_extracted_text(&self, manifest_cid: &[u8]) -> Option<String> {
         // Look for ManifestUpdate blocks tagged with this manifest.
@@ -881,6 +929,27 @@ impl MemvaultClient for LocalClient {
 
     async fn list_rotations(&self) -> Result<Vec<RotationInfo>> {
         crate::rotation::list_rotations(&self.store)
+    }
+
+    // -- Tags --
+
+    async fn add_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()> {
+        self.store_tag_update(node_id, &tags, &[])?;
+        let mut idx = self.index.write().await;
+        idx.apply_tag_update(node_id, &tags, &[]);
+        Ok(())
+    }
+
+    async fn remove_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()> {
+        self.store_tag_update(node_id, &[], &tags)?;
+        let mut idx = self.index.write().await;
+        idx.apply_tag_update(node_id, &[], &tags);
+        Ok(())
+    }
+
+    async fn get_tags(&self, node_id: &str) -> Result<Vec<(String, String)>> {
+        let idx = self.index.read().await;
+        Ok(idx.get_tags(node_id))
     }
 
     // -- Views --
