@@ -141,7 +141,7 @@ impl LocalClient {
             let eid = EntityId(arr);
             if let Ok(Some(entity)) = self.get_entity(&eid).await {
                 let mut idx = self.index.write().await;
-                idx.index_entity(&eid, &entity.kind, &entity.props);
+                idx.index_entity(&eid, &entity.kind, &entity.props, vec![]);
                 entity_count += 1;
             }
         }
@@ -169,8 +169,11 @@ impl LocalClient {
                                 }
                             }
                         };
+                        let att_tags: Vec<(String, String)> = val.get("tags")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
                         let mut idx = self.index.write().await;
-                        idx.index_attachment(&mcid, filename, mime_type, extracted_text.as_deref());
+                        idx.index_attachment(&mcid, filename, mime_type, extracted_text.as_deref(), att_tags);
                         attachment_count += 1;
                     }
                 }
@@ -509,7 +512,7 @@ impl MemvaultClient for LocalClient {
         // Index for unified search (includes extracted text if available).
         {
             let mut idx = self.index.write().await;
-            idx.index_attachment(&manifest_cid_bytes, filename, mime_type, extracted_text.as_deref());
+            idx.index_attachment(&manifest_cid_bytes, filename, mime_type, extracted_text.as_deref(), tags.clone());
         }
 
         self.event_bus.publish(MemvaultEvent::FileAttached {
@@ -610,7 +613,7 @@ impl MemvaultClient for LocalClient {
         // Index for unified search
         {
             let mut idx = self.index.write().await;
-            idx.index_entity(&entity_id, &entity.kind, &entity.props);
+            idx.index_entity(&entity_id, &entity.kind, &entity.props, tags.clone());
         }
 
         self.event_bus.publish(MemvaultEvent::EntityCreated {
@@ -819,6 +822,13 @@ impl MemvaultClient for LocalClient {
     async fn search_unified(&self, query: &str, limit: usize) -> Result<Vec<memvault_query::UnifiedHit>> {
         let idx = self.index.read().await;
         Ok(idx.search_unified(query, limit))
+    }
+
+    async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
+        let view = self.get_view(view_name).await?
+            .ok_or_else(|| ApiError::NotFound(format!("view '{view_name}' not found")))?;
+        let idx = self.index.read().await;
+        Ok(idx.members_of_view(&view.tags))
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {

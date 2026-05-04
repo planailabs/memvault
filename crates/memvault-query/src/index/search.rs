@@ -60,7 +60,7 @@ struct IndexedEntry {
 }
 
 /// Bump this when the index format changes to trigger automatic re-indexing.
-pub const INDEX_FORMAT_VERSION: u32 = 2;
+pub const INDEX_FORMAT_VERSION: u32 = 3;
 
 /// Serializable snapshot of the entire index (for persistence).
 #[derive(Serialize, Deserialize)]
@@ -185,6 +185,7 @@ impl TextIndex {
         entity_id: &memvault_core::EntityId,
         kind: &str,
         props: &std::collections::BTreeMap<String, serde_json::Value>,
+        tags: Vec<(String, String)>,
     ) {
         let node_id = format!("entity:{}", hex::encode(entity_id.0));
         let label = props
@@ -202,12 +203,15 @@ impl TextIndex {
                 other => text_parts.push(other.to_string()),
             }
         }
+        for (scope, lbl) in &tags {
+            text_parts.push(format!("{scope}:{lbl}"));
+        }
 
         self.unified.insert(node_id, IndexedEntry {
             node_type: "entity".to_string(),
             label,
             text: text_parts.join(" "),
-            tags: vec![],
+            tags,
         });
     }
 
@@ -220,6 +224,7 @@ impl TextIndex {
         filename: Option<&str>,
         mime_type: &str,
         extracted_text: Option<&str>,
+        tags: Vec<(String, String)>,
     ) {
         let node_id = format!("attachment:{}", hex::encode(manifest_cid));
         let label = filename.unwrap_or("unnamed file").to_string();
@@ -236,11 +241,15 @@ impl TextIndex {
             text_parts.push(text.to_string());
         }
 
+        for (scope, lbl) in &tags {
+            text_parts.push(format!("{scope}:{lbl}"));
+        }
+
         self.unified.insert(node_id, IndexedEntry {
             node_type: "attachment".to_string(),
             label,
             text: text_parts.join(" "),
-            tags: vec![],
+            tags,
         });
     }
 
@@ -294,6 +303,22 @@ impl TextIndex {
         hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(limit);
         hits
+    }
+
+    /// Return all node_ids whose tags contain ALL of the required view tags.
+    pub fn members_of_view(&self, required_tags: &[(String, String)]) -> Vec<String> {
+        if required_tags.is_empty() {
+            return self.unified.keys().cloned().collect();
+        }
+        self.unified
+            .iter()
+            .filter(|(_, entry)| {
+                required_tags.iter().all(|(scope, label)| {
+                    entry.tags.iter().any(|(s, l)| s == scope && l == label)
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Resolve a node_id (tag_label) to a human-readable label.

@@ -67,6 +67,16 @@ pub async fn update_view(
     Ok(Json(serde_json::json!({ "name": name, "status": "updated" })))
 }
 
+/// GET /api/v1/views/:name/members — list node_ids matching this view's tags.
+pub async fn view_members(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let members = state.client.view_members(&name).await?;
+    Ok(Json(serde_json::json!({ "view": name, "count": members.len(), "members": members })))
+}
+
 /// GET /api/v1/views/:name — get a single view.
 pub async fn get_view(
     _auth: RequireAuth,
