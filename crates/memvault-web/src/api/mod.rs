@@ -13,6 +13,7 @@ pub mod search;
 
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use axum::Router;
 
@@ -42,6 +43,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/attachments", post(attachments::upload_standalone))
         .route("/attachments/{cid}", get(attachments::download_attachment))
         .route("/attachments/{cid}/manifest", get(attachments::attachment_manifest))
+        // Raise body size limit for file uploads (default is 2MB).
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         // Graph
         .route("/entities", post(graph::create_entity))
         .route(
