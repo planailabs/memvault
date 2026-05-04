@@ -12,6 +12,8 @@ struct PaletteResult {
     id: String,
     label: String,
     detail: String,
+    /// Up to 3 context snippets showing where matches were found.
+    contexts: Vec<String>,
 }
 
 #[server]
@@ -41,6 +43,7 @@ async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnErr
                 } else {
                     format!("{:.0}", hit.score)
                 },
+                contexts: hit.match_contexts,
             }
         })
         .collect();
@@ -205,10 +208,20 @@ pub fn CommandPalette() -> Element {
                                     Link {
                                         to: route,
                                         onclick: move |_| open.set(false),
-                                        div { class: "flex items-center gap-2 px-4 py-2 hover:bg-surface-2 cursor-pointer",
-                                            Pill { variant, "{result.kind}" }
-                                            span { class: "text-sm flex-1 truncate", "{result.label}" }
-                                            span { class: "text-xs text-fg-faint", "{result.detail}" }
+                                        div { class: "px-4 py-2 hover:bg-surface-2 cursor-pointer",
+                                            div { class: "flex items-center gap-2",
+                                                Pill { variant, "{result.kind}" }
+                                                span { class: "text-sm flex-1 truncate font-medium", "{result.label}" }
+                                            }
+                                            if !result.contexts.is_empty() {
+                                                div { class: "mt-1 space-y-0.5 pl-1",
+                                                    for ctx in &result.contexts {
+                                                        p { class: "text-xs text-fg-muted truncate leading-snug",
+                                                            "{ctx}"
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }

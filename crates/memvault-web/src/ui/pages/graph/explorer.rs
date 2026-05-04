@@ -686,21 +686,47 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                 panning.set(false);
                             },
 
-                            // Edges
+                            // Arrow marker definition
+                            defs {
+                                marker {
+                                    id: "arrowhead",
+                                    marker_width: "10",
+                                    marker_height: "7",
+                                    ref_x: "10",
+                                    ref_y: "3.5",
+                                    orient: "auto",
+                                    marker_units: "strokeWidth",
+                                    path {
+                                        d: "M0,0 L10,3.5 L0,7",
+                                        fill: "rgb(var(--c-line))",
+                                        opacity: "0.6",
+                                    }
+                                }
+                            }
+
+                            // Edges with arrowheads
                             for edge in &edges {
                                 {
                                     let sn = &nodes[edge.source];
                                     let tn = &nodes[edge.target];
+                                    // Shorten line so arrow tip meets the node border, not center.
+                                    let dx = tn.x - sn.x;
+                                    let dy = tn.y - sn.y;
+                                    let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+                                    let shorten = tn.radius + 4.0; // stop before node edge
+                                    let end_x = tn.x - dx / dist * shorten;
+                                    let end_y = tn.y - dy / dist * shorten;
                                     let mid_x = (sn.x + tn.x) / 2.0;
                                     let mid_y = (sn.y + tn.y) / 2.0;
                                     let thickness = 1.0 + edge.weight as f64;
                                     rsx! {
                                         line {
                                             x1: "{sn.x}", y1: "{sn.y}",
-                                            x2: "{tn.x}", y2: "{tn.y}",
+                                            x2: "{end_x}", y2: "{end_y}",
                                             stroke: "rgb(var(--c-line))",
                                             stroke_width: "{thickness}",
                                             stroke_opacity: "0.6",
+                                            marker_end: "url(#arrowhead)",
                                         }
                                         text {
                                             x: "{mid_x}", y: "{mid_y}",

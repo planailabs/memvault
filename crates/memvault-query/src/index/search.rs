@@ -24,6 +24,8 @@ pub struct UnifiedHit {
     pub label: String,
     pub score: f32,
     pub snippet: String,
+    /// Up to 3 context snippets showing where matches were found.
+    pub match_contexts: Vec<String>,
 }
 
 /// Parameters for a search query.
@@ -277,12 +279,14 @@ impl TextIndex {
 
             if matched {
                 let snippet = extract_snippet(&entry.text, &terms);
+                let match_contexts = extract_match_contexts(&entry.text, &terms, 3);
                 hits.push(UnifiedHit {
                     node_id: node_id.clone(),
                     node_type: entry.node_type.clone(),
                     label: entry.label.clone(),
                     score,
                     snippet,
+                    match_contexts,
                 });
             }
         }
@@ -365,6 +369,41 @@ impl Default for TextIndex {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Extract up to `max` non-overlapping context windows around term matches.
+fn extract_match_contexts(body: &str, terms: &[&str], max: usize) -> Vec<String> {
+    let body_lower = body.to_lowercase();
+    let mut positions: Vec<usize> = Vec::new();
+
+    for term in terms {
+        let mut start = 0;
+        while let Some(pos) = body_lower[start..].find(term) {
+            positions.push(start + pos);
+            start += pos + term.len();
+        }
+    }
+    positions.sort();
+    positions.dedup();
+
+    let mut contexts = Vec::new();
+    let mut last_end: usize = 0;
+    for &pos in &positions {
+        if contexts.len() >= max {
+            break;
+        }
+        // Skip positions that overlap with a previous context window.
+        let window_start = pos.saturating_sub(40);
+        if window_start < last_end && !contexts.is_empty() {
+            continue;
+        }
+        let snip: String = body.chars().skip(window_start).take(100).collect();
+        let prefix = if window_start > 0 { "..." } else { "" };
+        let suffix = if window_start + 100 < body.len() { "..." } else { "" };
+        contexts.push(format!("{prefix}{snip}{suffix}"));
+        last_end = window_start + 100;
+    }
+    contexts
 }
 
 fn extract_snippet(body: &str, terms: &[&str]) -> String {
