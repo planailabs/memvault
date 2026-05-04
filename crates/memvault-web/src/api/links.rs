@@ -107,6 +107,31 @@ pub async fn list_links(
     Ok(Json(results))
 }
 
+#[derive(Deserialize)]
+pub struct ListNodesQuery {
+    pub view: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/nodes — list all nodes, optionally filtered by view.
+pub async fn list_nodes(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListNodesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = params.limit.unwrap_or(100);
+    let items = state.client.list_all(params.view.as_deref(), limit).await?;
+    Ok(Json(serde_json::json!({
+        "count": items.len(),
+        "nodes": items.iter().map(|(id, nt, label, tags)| serde_json::json!({
+            "node_id": id,
+            "node_type": nt,
+            "label": label,
+            "tags": tags,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
 /// DELETE /api/v1/nodes/:node_id — retract (soft-delete) any node.
 pub async fn retract_node(
     _auth: RequireAuth,

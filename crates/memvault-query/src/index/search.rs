@@ -368,6 +368,26 @@ impl TextIndex {
             .collect()
     }
 
+    /// List all indexed nodes, optionally filtered by a view's required tags.
+    /// Returns (node_id, node_type, label, tags) tuples.
+    pub fn list_all(&self, view_tags: Option<&[(String, String)]>, limit: usize) -> Vec<(String, String, String, Vec<(String, String)>)> {
+        self.unified
+            .iter()
+            .filter(|(id, entry)| {
+                if self.retracted.contains(id.as_str()) { return false; }
+                if let Some(tags) = view_tags {
+                    tags.iter().all(|(scope, label)| {
+                        entry.tags.iter().any(|(s, l)| s == scope && l == label)
+                    })
+                } else {
+                    true
+                }
+            })
+            .take(limit)
+            .map(|(id, entry)| (id.clone(), entry.node_type.clone(), entry.label.clone(), entry.tags.clone()))
+            .collect()
+    }
+
     /// Resolve a node_id (tag_label) to a human-readable label.
     /// Returns None if the node is not indexed or is retracted.
     pub fn resolve_label(&self, node_id: &str) -> Option<String> {

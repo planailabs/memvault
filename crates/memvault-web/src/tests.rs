@@ -196,6 +196,7 @@ impl MemvaultClient for MockClient {
     async fn remove_tags(&self, _node_id: &str, _tags: Vec<(String, String)>) -> memvault_api::Result<()> { Ok(()) }
     async fn get_tags(&self, _node_id: &str) -> memvault_api::Result<Vec<(String, String)>> { Ok(vec![]) }
     async fn retract_node(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> { Ok(()) }
+    async fn list_all(&self, _view: Option<&str>, _limit: usize) -> memvault_api::Result<Vec<(String, String, String, Vec<(String, String)>)>> { Ok(vec![]) }
     async fn delete_view(&self, _name: &str) -> memvault_api::Result<()> { Ok(()) }
     async fn get_view(&self, _name: &str) -> memvault_api::Result<Option<memvault_api::View>> { Ok(None) }
 

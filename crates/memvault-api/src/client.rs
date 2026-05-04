@@ -65,6 +65,8 @@ pub trait MemvaultClient: Send + Sync {
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
     /// Unified search across all node types (docs, entities, attachments).
     async fn search_unified(&self, query: &str, limit: usize) -> Result<Vec<memvault_query::UnifiedHit>>;
+    /// List all nodes, optionally filtered by a view name. Returns (node_id, node_type, label, tags).
+    async fn list_all(&self, view_name: Option<&str>, limit: usize) -> Result<Vec<(String, String, String, Vec<(String, String)>)>>;
     /// Return node_ids of all items matching a view's required tags.
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>>;
     /// Resolve a node_id (tag_label like "entity:<hex>") to a human-readable label.

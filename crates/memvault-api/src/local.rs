@@ -886,6 +886,18 @@ impl MemvaultClient for LocalClient {
         Ok(idx.members_of_view(&view.tags))
     }
 
+    async fn list_all(&self, view_name: Option<&str>, limit: usize) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
+        let view_tags = if let Some(name) = view_name {
+            let view = self.get_view(name).await?
+                .ok_or_else(|| ApiError::NotFound(format!("view '{name}' not found")))?;
+            Some(view.tags)
+        } else {
+            None
+        };
+        let idx = self.index.read().await;
+        Ok(idx.list_all(view_tags.as_deref(), limit))
+    }
+
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
         let idx = self.index.read().await;
         Ok(idx.resolve_label(node_id))
@@ -1053,11 +1065,17 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn status(&self) -> Result<NodeStatus> {
+        let block_count = self.store.iter_blocks()
+            .map(|b| b.len() as u64)
+            .unwrap_or(0);
+        let doc_count = self.store.query_unique_labels("doc", usize::MAX)
+            .map(|l| l.len() as u64)
+            .unwrap_or(0);
         Ok(NodeStatus {
             peer_id: self.peer_id.clone(),
             cluster_id: self.cluster_id.clone(),
-            block_count: 0, // Would need a count method on store
-            doc_count: 0,
+            block_count,
+            doc_count,
             peer_count: 1,
             uptime_secs: self.start_time.elapsed().as_secs(),
         })
