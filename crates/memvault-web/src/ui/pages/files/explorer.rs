@@ -36,10 +36,23 @@ impl FileRow {
 }
 
 #[server]
-async fn list_files() -> Result<Vec<FileRow>, ServerFnError> {
-    use memvault_query::AuditQuery;
-
+async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
+
+    // If a view is active, use list_all filtered to attachments.
+    if let Some(ref view_name) = view {
+        let items = client.list_all(Some(view_name), 500).await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+        return Ok(items.into_iter()
+            .filter(|(_, node_type, _, _)| node_type == "attachment")
+            .map(|(id, _, label, _)| FileRow {
+                cid: id, filename: label, mime_type: "".to_string(),
+                size: 0, wall_ns: 0,
+            })
+            .collect());
+    }
+
+    use memvault_query::AuditQuery;
 
     // Query audit log for AttachFile operations to discover attachments.
     let query = AuditQuery {
@@ -100,7 +113,12 @@ async fn list_files() -> Result<Vec<FileRow>, ServerFnError> {
 #[component]
 pub fn FileExplorer() -> Element {
     use_topbar("Files");
-    let files = use_server_future(list_files)?;
+    let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
+    let view_name = active_view.read().name.clone();
+    let files = use_server_future(move || {
+        let v = view_name.clone();
+        async move { list_files(v).await }
+    })?;
     let mut grid_view = use_signal(|| false);
 
     rsx! {

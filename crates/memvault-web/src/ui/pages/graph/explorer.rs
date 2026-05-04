@@ -56,8 +56,35 @@ struct EdgeDetail {
 // ── Server functions ───────────────────────────────────────────────────
 
 #[server]
-async fn list_graph_nodes() -> Result<Vec<NodeSummary>, ServerFnError> {
+async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
+
+    // If a view is active, get all nodes matching the view.
+    if let Some(ref view_name) = view {
+        let items = client.list_all(Some(view_name), 200).await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+        let mut nodes = Vec::new();
+        for (id, node_type, label, _tags) in &items {
+            let mut edges = Vec::new();
+            if let Ok(edge_list) = client.edges_of(
+                &memvault_core::NodeRef::from_tag_label(id).unwrap_or(memvault_core::NodeRef::Entity(memvault_core::EntityId([0;32])))
+            ).await {
+                for (_, edge) in &edge_list {
+                    edges.push(EdgeSummary {
+                        edge_id: hex::encode(edge.id.0),
+                        relation: edge.relation.clone(),
+                        target_id: edge.target.tag_label(),
+                        weight: edge.weight.unwrap_or(1.0),
+                    });
+                }
+            }
+            nodes.push(NodeSummary {
+                id: id.clone(), node_type: node_type.clone(), kind: node_type.clone(),
+                label: label.clone(), edges, props: std::collections::BTreeMap::new(),
+            });
+        }
+        return Ok(nodes);
+    }
 
     // Load entities
     let entities = client
@@ -343,7 +370,12 @@ impl Viewport {
 #[component]
 pub fn GraphExplorer() -> Element {
     use_topbar("Graph");
-    let nodes_res = use_server_future(list_graph_nodes)?;
+    let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
+    let view_name = active_view.read().name.clone();
+    let nodes_res = use_server_future(move || {
+        let v = view_name.clone();
+        async move { list_graph_nodes(v).await }
+    })?;
 
     match &*nodes_res.read() {
         Some(Ok(nodes)) => rsx! { GraphView { initial_nodes: nodes.clone() } },

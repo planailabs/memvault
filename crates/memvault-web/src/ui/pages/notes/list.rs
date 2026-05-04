@@ -31,22 +31,30 @@ impl NoteRow {
 }
 
 #[server]
-async fn list_notes() -> Result<Vec<NoteRow>, ServerFnError> {
+async fn list_notes(view: Option<String>) -> Result<Vec<NoteRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let docs = client
-        .list_docs(None, 500)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(docs
-        .into_iter()
+    // If a view is active, use list_all (view-filtered) and filter to docs only.
+    if let Some(ref view_name) = view {
+        let items = client.list_all(Some(view_name), 500).await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+        return Ok(items.into_iter()
+            .filter(|(_, node_type, _, _)| node_type == "doc")
+            .map(|(id, _, label, tags)| NoteRow {
+                id, title: label, tags, visibility: "internal".to_string(),
+                attachment_count: 0, updated_ns: 0,
+            })
+            .collect());
+    }
+
+    let docs = client.list_docs(None, 500).await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(docs.into_iter()
         .map(|d| NoteRow {
-            id: hex::encode(d.id.0),
+            id: format!("doc:{}", hex::encode(d.id.0)),
             title: d.title.unwrap_or_else(|| "Untitled".to_string()),
-            tags: d.tags,
-            visibility: "internal".to_string(),
-            attachment_count: d.attachment_count,
-            updated_ns: d.updated_ns,
+            tags: d.tags, visibility: "internal".to_string(),
+            attachment_count: d.attachment_count, updated_ns: d.updated_ns,
         })
         .collect())
 }
@@ -54,7 +62,12 @@ async fn list_notes() -> Result<Vec<NoteRow>, ServerFnError> {
 #[component]
 pub fn NoteList() -> Element {
     use_topbar("Notes");
-    let notes = use_server_future(list_notes)?;
+    let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
+    let view_name = active_view.read().name.clone();
+    let notes = use_server_future(move || {
+        let v = view_name.clone();
+        async move { list_notes(v).await }
+    })?;
 
     rsx! {
         div { class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4",
