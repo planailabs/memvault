@@ -436,34 +436,31 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("Phase 0: Validating block CIDs...");
             let blocks = store.iter_blocks()?;
             let mut cid_ok = 0usize;
+            let mut cid_envelope = 0usize;
             let mut cid_mismatch = 0usize;
             let mut cid_unchecked = 0usize;
             for (cid, data) in &blocks {
                 // Direct match: CID hash matches the stored block data.
                 match memvault_core::verify_cid(cid, data) {
                     Ok(true) => { cid_ok += 1; continue; }
-                    Err(_) => { cid_unchecked += 1; continue; } // unparseable CID
+                    Err(_) => { cid_unchecked += 1; continue; }
                     Ok(false) => {}
                 }
-                // Envelope match: CID hash matches the inner "payload" field.
-                // Op envelopes compute CID from the payload, not the wrapper.
-                let mut matched = false;
+                // Op envelopes: CID is computed from the original struct
+                // serialization, which can't be reconstructed from the JSON
+                // Value (field ordering differs). If the block has a "payload"
+                // field, treat it as an envelope — the CID is of the payload
+                // struct, not verifiable after round-tripping through Value.
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(payload_bytes) = serde_json::to_vec(payload) {
-                            if let Ok(true) = memvault_core::verify_cid(cid, &payload_bytes) {
-                                cid_ok += 1;
-                                matched = true;
-                            }
-                        }
+                    if val.get("payload").is_some() {
+                        cid_envelope += 1;
+                        continue;
                     }
                 }
-                if !matched {
-                    cid_mismatch += 1;
-                    eprintln!("  CID mismatch: {}", hex::encode(cid));
-                }
+                cid_mismatch += 1;
+                eprintln!("  CID mismatch: {}", hex::encode(cid));
             }
-            println!("  {cid_ok} verified, {cid_mismatch} mismatched, {cid_unchecked} unchecked");
+            println!("  {cid_ok} verified, {cid_envelope} envelopes (payload CID), {cid_mismatch} mismatched, {cid_unchecked} unchecked");
             if cid_mismatch > 0 {
                 eprintln!("  WARNING: {cid_mismatch} block(s) have CID mismatches (data corruption)");
             }
