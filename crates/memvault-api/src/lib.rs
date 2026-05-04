@@ -13,6 +13,7 @@ pub mod rpc;
 pub mod subscription;
 pub mod tokens;
 pub mod types;
+pub mod vfs;
 
 pub use client::MemvaultClient;
 pub use error::{ApiError, Result};
