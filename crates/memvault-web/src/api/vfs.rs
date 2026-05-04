@@ -112,7 +112,10 @@ async fn find_child(
 ) -> Result<Vec<(String, NodeRef, EdgeId)>, ApiError> {
     let edges = client.edges_of(parent).await.map_err(|e| ApiError::internal(e.to_string()))?;
     let mut children = Vec::new();
-    for (_src, edge) in &edges {
+    for (src, edge) in &edges {
+        if src != parent {
+            continue;
+        }
         if edge.relation == VFS_CHILD_REL {
             let name = edge
                 .props

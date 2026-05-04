@@ -132,8 +132,10 @@ impl LocalClient {
             let doc_id = DocId(arr);
             if let Ok(Some(doc)) = self.get_doc(&doc_id).await {
                 let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
+                // Recover creation-time tags from the envelope metadata.
+                let creation_tags = self.extract_creation_tags("doc", label);
                 let mut idx = self.index.write().await;
-                idx.index_doc(doc_id, &doc.body, title, vec![]);
+                idx.index_doc(doc_id, &doc.body, title, creation_tags);
                 doc_count += 1;
             }
         }
@@ -148,8 +150,9 @@ impl LocalClient {
             arr.copy_from_slice(&id_bytes);
             let eid = EntityId(arr);
             if let Ok(Some(entity)) = self.get_entity(&eid).await {
+                let creation_tags = self.extract_creation_tags("entity", label);
                 let mut idx = self.index.write().await;
-                idx.index_entity(&eid, &entity.kind, &entity.props, vec![]);
+                idx.index_entity(&eid, &entity.kind, &entity.props, creation_tags);
                 entity_count += 1;
             }
         }
@@ -373,6 +376,34 @@ impl LocalClient {
     /// Access the quota manager.
     pub fn quotas(&self) -> &Arc<RwLock<QuotaManager>> {
         &self.quotas
+    }
+
+    /// Extract user-facing tags from the creation envelope for a given node.
+    /// Scans envelopes tagged (tag_key, label) and returns all non-internal tags.
+    fn extract_creation_tags(&self, tag_key: &str, label: &str) -> Vec<(String, String)> {
+        let cids = self.store.query_by_tag(tag_key, label, 0, 1)
+            .unwrap_or_default();
+        for cid in &cids {
+            if let Ok(Some(data)) = self.store.get_block(cid) {
+                if let Ok(env) = serde_json::from_slice::<serde_json::Value>(&data) {
+                    if let Some(tags_arr) = env.get("tags").and_then(|v| v.as_array()) {
+                        return tags_arr.iter()
+                            .filter_map(|v| {
+                                let pair = v.as_array()?;
+                                let scope = pair.first()?.as_str()?;
+                                let lbl = pair.get(1)?.as_str()?;
+                                // Skip internal tags (doc/entity ID tags).
+                                if scope == "doc" || scope == "entity" || scope == "edge_source" || scope == "edge_target" {
+                                    return None;
+                                }
+                                Some((scope.to_string(), lbl.to_string()))
+                            })
+                            .collect();
+                    }
+                }
+            }
+        }
+        vec![]
     }
 
     fn store_op(&self, op: &Op, tags: &[(String, String)], vis: &Visibility) -> Result<Vec<u8>> {

@@ -26,16 +26,6 @@ grid = Grid
 untitled = Untitled
 unnamed = Unnamed
 
-## ── Theme Toggle ────────────────────────────────────────────────
-
-theme-system = Using system theme. Click for light mode
-theme-light = Using light mode. Click for dark mode
-theme-dark = Using dark mode. Click for system theme
-
-## ── Language Picker ─────────────────────────────────────────────
-
-language-picker-label = Language
-
 ## ── Topbar ──────────────────────────────────────────────────────
 
 topbar-search = Search

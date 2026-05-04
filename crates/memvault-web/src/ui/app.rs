@@ -55,21 +55,7 @@ pub enum Route {
     TokenManagement {},
 }
 
-// Sets `.dark` class on `<html>` before CSS loads, preventing theme flash.
-const THEME_INIT_SCRIPT: &str = r#"
-(function(){
-    try {
-        var d = document.documentElement;
-        var t = localStorage.getItem('theme');
-        var dark = t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches);
-        d.classList.toggle('dark', dark);
-        d.style.colorScheme = dark ? 'dark' : 'light';
-    } catch(e){}
-})();
-"#;
-
-// Pre-hydration loading banner with self-contained styling.
-const WASM_LOADING_INNER: &str = r#"<style>@media(prefers-color-scheme:dark){#wasm-loading{background:#1a1f2e!important;color:#7b9fe0!important;border-bottom-color:#2a3040!important}}#wasm-loading svg{animation:wasm-spin 1s linear infinite;width:16px;height:16px}@keyframes wasm-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}</style><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.25"/><path d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" fill="currentColor" opacity="0.75"/></svg>Loading&hellip;"#;
+use plan_ai_design::theme_toggle::{THEME_INIT_SCRIPT, WASM_LOADING_INNER, WASM_LOADING_STYLE};
 
 #[allow(non_snake_case)]
 pub fn App() -> Element {
@@ -111,7 +97,7 @@ pub fn App() -> Element {
         script { dangerous_inner_html: THEME_INIT_SCRIPT }
 
         div { id: "wasm-loading",
-            style: "position:fixed;top:0;left:0;right:0;display:flex;align-items:center;justify-content:center;gap:8px;padding:10px;background:#f0f4ff;color:#3b5998;font-family:system-ui,-apple-system,sans-serif;font-size:13px;z-index:9999;border-bottom:1px solid #d0d8e8",
+            style: WASM_LOADING_STYLE,
             dangerous_inner_html: WASM_LOADING_INNER,
         }
 

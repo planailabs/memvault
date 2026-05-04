@@ -58,7 +58,11 @@ async fn list_vfs_entries(path: String) -> Result<Vec<VfsRow>, ServerFnError> {
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut entries = Vec::new();
-    for (_src, edge) in &edges {
+    for (src, edge) in &edges {
+        // Only outgoing edges (source == current dir); edges_of returns both directions.
+        if src != &current {
+            continue;
+        }
         if edge.relation != VFS_CHILD_REL {
             continue;
         }
@@ -157,7 +161,10 @@ async fn vfs_find_named_child(
     let edges = client.edges_of(parent).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let mut best: Option<(memvault_core::NodeRef, [u8; 32])> = None;
-    for (_src, edge) in &edges {
+    for (src, edge) in &edges {
+        if src != parent {
+            continue;
+        }
         if edge.relation != VFS_CHILD_REL {
             continue;
         }
