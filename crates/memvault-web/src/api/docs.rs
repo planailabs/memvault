@@ -78,7 +78,7 @@ pub async fn list_docs(
     let results: Vec<DocSummaryResponse> = docs
         .into_iter()
         .map(|d| DocSummaryResponse {
-            id: hex::encode(d.id.0),
+            id: format!("doc:{}", hex::encode(d.id.0)),
             cid: hex::encode(&d.cid),
             title: d.title,
             tags: d.tags,
@@ -106,7 +106,7 @@ pub async fn create_doc(
     tracing::info!(doc_id = %hex::encode(doc_id.0), "API: doc created");
 
     let resp = DocResponse {
-        id: hex::encode(doc_id.0),
+        id: format!("doc:{}", hex::encode(doc_id.0)),
         cid: hex::encode(&cid),
         body: req.body,
         frontmatter,
@@ -132,7 +132,7 @@ pub async fn get_doc(
         .ok_or_else(|| ApiError::not_found("Document not found"))?;
 
     let resp = DocResponse {
-        id: hex::encode(doc.id.0),
+        id: format!("doc:{}", hex::encode(doc.id.0)),
         cid: String::new(),
         body: doc.body,
         frontmatter: doc.frontmatter,

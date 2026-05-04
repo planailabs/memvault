@@ -52,7 +52,7 @@ pub async fn upload_attachment(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "cid": hex::encode(&cid),
+            "cid": format!("attachment:{}", hex::encode(&cid)),
             "name": name,
         })),
     ))
@@ -102,7 +102,7 @@ pub async fn upload_standalone(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "cid": hex::encode(&cid),
+            "cid": format!("attachment:{}", hex::encode(&cid)),
             "name": name,
         })),
     ))

@@ -32,16 +32,16 @@ fn event_to_sse(event: MemvaultEvent) -> Event {
     match event {
         MemvaultEvent::DocCreated { doc_id, cid } => Event::default()
             .event("doc_created")
-            .data(serde_json::json!({"doc_id": hex::encode(doc_id.0), "cid": hex::encode(&cid)}).to_string()),
+            .data(serde_json::json!({"node_id": format!("doc:{}", hex::encode(doc_id.0)), "cid": hex::encode(&cid)}).to_string()),
         MemvaultEvent::DocUpdated { doc_id, cid } => Event::default()
             .event("doc_updated")
-            .data(serde_json::json!({"doc_id": hex::encode(doc_id.0), "cid": hex::encode(&cid)}).to_string()),
+            .data(serde_json::json!({"node_id": format!("doc:{}", hex::encode(doc_id.0)), "cid": hex::encode(&cid)}).to_string()),
         MemvaultEvent::FileAttached { doc_id, name } => Event::default()
             .event("file_attached")
-            .data(serde_json::json!({"doc_id": hex::encode(doc_id.0), "name": name}).to_string()),
+            .data(serde_json::json!({"node_id": format!("doc:{}", hex::encode(doc_id.0)), "name": name}).to_string()),
         MemvaultEvent::EntityCreated { entity_id } => Event::default()
             .event("entity_created")
-            .data(serde_json::json!({"entity_id": hex::encode(entity_id.0)}).to_string()),
+            .data(serde_json::json!({"node_id": format!("entity:{}", hex::encode(entity_id.0))}).to_string()),
         MemvaultEvent::Retracted { cid } => Event::default()
             .event("retracted")
             .data(serde_json::json!({"cid": hex::encode(&cid)}).to_string()),

@@ -68,7 +68,7 @@ pub async fn create_entity(
     tracing::info!(kind = %kind, "API: entity created");
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "id": hex::encode(id.0) })),
+        Json(serde_json::json!({ "id": format!("entity:{}", hex::encode(id.0)) })),
     ))
 }
 
@@ -98,7 +98,7 @@ pub async fn get_entity(
         .collect();
 
     Ok(Json(EntityResponse {
-        id: hex::encode(entity.id.0),
+        id: format!("entity:{}", hex::encode(entity.id.0)),
         kind: entity.kind,
         props: entity.props,
         edges,
