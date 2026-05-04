@@ -43,10 +43,29 @@ notes-th-updated = Aktualisiert
 notes-placeholder-title = Titel der Notiz
 notes-placeholder-body = Markdown-Inhalt...
 notes-placeholder-tags = bereich:label, bereich:label, ...
+notes-th-title = Titel
 notes-section-attachments = Anhänge ({ $count })
+notes-attachments = Anhänge ({ $count })
 notes-section-links = Verknüpfungen ({ $count })
+notes-links = Verknüpfungen ({ $count })
 notes-section-metadata = Metadaten
+notes-metadata = Metadaten
+notes-detail-title = Notiz
 notes-history-title = Verlauf
+notes-history-empty = Keine Verlaufseinträge.
+notes-add-link = Verknüpfung hinzufügen
+notes-link-target = Ziel
+notes-link-relation = Beziehung
+notes-link-btn = Verknüpfen
+notes-link-search-placeholder = Knoten suchen...
+notes-form-title = Titel
+notes-form-title-placeholder = Titel der Notiz
+notes-form-body = Inhalt
+notes-form-body-placeholder = Markdown-Inhalt...
+notes-form-tags = Tags
+notes-form-tags-placeholder = bereich:label, bereich:label, ...
+notes-form-visibility = Sichtbarkeit
+by = von
 
 ## ── Graph ───────────────────────────────────────────────────────
 

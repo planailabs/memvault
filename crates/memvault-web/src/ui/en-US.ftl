@@ -43,10 +43,29 @@ notes-th-updated = Updated
 notes-placeholder-title = Note title
 notes-placeholder-body = Markdown content...
 notes-placeholder-tags = scope:label, scope:label, ...
+notes-th-title = Title
 notes-section-attachments = Attachments ({ $count })
+notes-attachments = Attachments ({ $count })
 notes-section-links = Links ({ $count })
+notes-links = Links ({ $count })
 notes-section-metadata = Metadata
+notes-metadata = Metadata
+notes-detail-title = Note
 notes-history-title = History
+notes-history-empty = No history entries.
+notes-add-link = Add Link
+notes-link-target = Target
+notes-link-relation = Relation
+notes-link-btn = Link
+notes-link-search-placeholder = Search nodes...
+notes-form-title = Title
+notes-form-title-placeholder = Note title
+notes-form-body = Body
+notes-form-body-placeholder = Markdown content...
+notes-form-tags = Tags
+notes-form-tags-placeholder = scope:label, scope:label, ...
+notes-form-visibility = Visibility
+by = by
 
 ## ── Graph ───────────────────────────────────────────────────────
 
