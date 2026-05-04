@@ -50,6 +50,9 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if self.status.is_server_error() {
+            tracing::error!(status = %self.status, error = %self.message, "API server error");
+        }
         let body = ErrorBody {
             error: self.message,
             status: self.status.as_u16(),
