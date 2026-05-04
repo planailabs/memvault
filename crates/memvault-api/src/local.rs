@@ -635,36 +635,35 @@ impl MemvaultClient for LocalClient {
     async fn edges_of(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
         let label = node.tag_label();
         let mut results = Vec::new();
+        let mut removed_ids: std::collections::HashSet<EdgeId> = std::collections::HashSet::new();
 
-        // Edges where this node is the source
+        // Scan all ops tagged with this node as source or target.
         let source_cids = self.store.query_by_tag("edge_source", &label, 0, usize::MAX)?;
-        for cid in &source_cids {
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(Op::EdgeAdd { source, edge }) = serde_json::from_value::<Op>(payload.clone()) {
-                            results.push((source, edge));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Edges where this node is the target
         let target_cids = self.store.query_by_tag("edge_target", &label, 0, usize::MAX)?;
-        for cid in &target_cids {
+
+        let mut all_cids = source_cids;
+        all_cids.extend(target_cids);
+
+        for cid in &all_cids {
             if let Some(data) = self.store.get_block(cid)? {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
                     if let Some(payload) = val.get("payload") {
-                        if let Ok(Op::EdgeAdd { source, edge }) = serde_json::from_value::<Op>(payload.clone()) {
-                            results.push((source, edge));
+                        match serde_json::from_value::<Op>(payload.clone()) {
+                            Ok(Op::EdgeAdd { source, edge }) => {
+                                results.push((source, edge));
+                            }
+                            Ok(Op::EdgeRemove { edge_id, .. }) => {
+                                removed_ids.insert(edge_id);
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
         }
 
-        // Deduplicate by edge ID
+        // Filter out removed edges, then deduplicate by edge ID.
+        results.retain(|(_, edge)| !removed_ids.contains(&edge.id));
         let mut seen = std::collections::HashSet::new();
         results.retain(|(_, edge)| seen.insert(edge.id.clone()));
 

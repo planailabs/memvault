@@ -46,6 +46,12 @@ pub struct LinksQuery {
     pub node: String,
 }
 
+#[derive(Deserialize)]
+pub struct DeleteLinkQuery {
+    /// Source node — required to identify which node's edge to remove.
+    pub source: String,
+}
+
 /// POST /api/v1/links — create an edge between any two nodes.
 pub async fn create_link(
     _auth: RequireAuth,
@@ -101,11 +107,13 @@ pub async fn list_links(
     Ok(Json(results))
 }
 
-/// DELETE /api/v1/links/:edge_id — remove an edge by ID.
+/// DELETE /api/v1/links/:edge_id?source=entity:<hex> — remove an edge by ID.
+/// The source parameter is required because edges are indexed by source.
 pub async fn delete_link(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(edge_id_str): Path<String>,
+    Query(params): Query<DeleteLinkQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     let bytes = hex::decode(&edge_id_str).map_err(|_| ApiError::bad_request("Invalid edge ID"))?;
     if bytes.len() != 32 {
@@ -115,13 +123,10 @@ pub async fn delete_link(
     arr.copy_from_slice(&bytes);
     let edge_id = EdgeId(arr);
 
-    // We need to find the source to remove the edge. Query by edge_id tag.
-    // For now, use a simple approach: try to find the edge in edges_of results.
-    // Since remove_link_from needs a source, we search for it.
-    let edges = state.client.edges_of(&NodeRef::Entity(memvault_core::EntityId([0; 32]))).await;
-    // Fallback: retract the edge by edge_id bytes
-    let _ = edges;
-    state.client.retract(&edge_id.0, "deleted via links API").await?;
+    let source = NodeRef::from_tag_label(&params.source)
+        .ok_or_else(|| ApiError::bad_request("Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
+
+    state.client.remove_link_from(&source, &edge_id).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

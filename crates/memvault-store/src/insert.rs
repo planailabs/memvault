@@ -160,10 +160,12 @@ impl MemvaultStore {
                 tag_table.insert(key.as_slice(), &[] as &[u8])?;
             }
 
-            // Author index
-            let mut author_table = txn.open_table(BY_AUTHOR)?;
-            let author_key = keys::pack_author_key(&meta.author, meta.wall_ns, cid_bytes);
-            author_table.insert(author_key.as_slice(), &[] as &[u8])?;
+            // Author index (skip empty authors, consistent with reindex_block)
+            if !meta.author.is_empty() {
+                let mut author_table = txn.open_table(BY_AUTHOR)?;
+                let author_key = keys::pack_author_key(&meta.author, meta.wall_ns, cid_bytes);
+                author_table.insert(author_key.as_slice(), &[] as &[u8])?;
+            }
 
             // Time index
             let mut time_table = txn.open_table(BY_TIME)?;
