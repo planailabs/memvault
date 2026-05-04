@@ -1,6 +1,7 @@
 //! Audit log page — filterable audit trail.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{DataTable, FormField, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
@@ -246,16 +247,16 @@ fn audit_link_from_tag(tag_label: &str, label: &str) -> Option<AuditLink> {
 
 #[component]
 pub fn AuditLog() -> Element {
-    use_topbar("Audit");
+    use_topbar(&t!("audit-title"));
     let audit = use_server_future(|| list_audit(500))?;
 
     rsx! {
         div { class: "space-y-4",
-            PageHeader { "Audit Trail" }
+            PageHeader { {t!("audit-title")} }
             {match &*audit.read() {
                 Some(Ok(list)) => rsx! { AuditTable { list: list.clone() } },
                 Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-                None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+                None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
             }}
         }
     }
@@ -312,12 +313,12 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
         // Filter row
         div { class: "flex flex-wrap gap-3 mb-3",
             div { class: "w-40",
-                FormField { label: "Operation".to_string(),
+                FormField { label: t!("audit-th-operation"),
                     select {
                         class: "input input-sm",
                         value: "{op_filter}",
                         onchange: move |e: Event<FormData>| op_filter.set(e.value()),
-                        option { value: "all", "All" }
+                        option { value: "all", {t!("all")} }
                         for kind in &op_kinds {
                             option { value: "{kind}", "{kind}" }
                         }
@@ -325,11 +326,11 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
                 }
             }
             div { class: "w-48",
-                FormField { label: "Author".to_string(),
+                FormField { label: t!("audit-th-author"),
                     input {
                         class: "input input-sm",
                         r#type: "text",
-                        placeholder: "Author ID prefix...",
+                        placeholder: t!("audit-placeholder-author"),
                         value: "{author_filter}",
                         oninput: move |e: Event<FormData>| author_filter.set(e.value()),
                     }
@@ -340,10 +341,10 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
         DataTable {
             search, limit, total, filtered: filtered_count, shown,
             headers: rsx! {
-                SortableTh { label: "Operation".to_string(), sort_key: "op".to_string(), sort }
-                th { class: "th", "Description" }
-                SortableTh { label: "Author".to_string(), sort_key: "author".to_string(), sort }
-                SortableTh { label: "Time".to_string(), sort_key: "time".to_string(), sort }
+                SortableTh { label: t!("audit-th-operation"), sort_key: "op".to_string(), sort }
+                th { class: "th", {t!("audit-th-description")} }
+                SortableTh { label: t!("audit-th-author"), sort_key: "author".to_string(), sort }
+                SortableTh { label: t!("audit-th-time"), sort_key: "time".to_string(), sort }
             },
             body: rsx! {
                 for row in filtered.read().iter().take(limit_val) {

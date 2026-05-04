@@ -1,6 +1,7 @@
 //! Admin dashboard — node status, tokens, peers.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Card, PageHeader, Pill, PillVariant, SectionHeading, StatBlock, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
@@ -67,13 +68,13 @@ async fn get_admin_data() -> Result<(NodeStatusData, Vec<TokenRow>), ServerFnErr
 
 #[component]
 pub fn AdminDashboard() -> Element {
-    use_topbar("Admin");
+    use_topbar(&t!("admin-title"));
     let data = use_server_future(get_admin_data)?;
 
     match &*data.read() {
         Some(Ok((status, tokens))) => rsx! { AdminView { status: status.clone(), tokens: tokens.clone() } },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-        None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+        None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
     }
 }
 
@@ -94,28 +95,28 @@ fn format_uptime(secs: u64) -> String {
 fn AdminView(status: NodeStatusData, tokens: Vec<TokenRow>) -> Element {
     rsx! {
         div { class: "space-y-6",
-            PageHeader { "Administration" }
+            PageHeader { {t!("admin-title")} }
 
             // Stats
             div { class: "grid grid-cols-2 lg:grid-cols-4 gap-3",
-                StatBlock { label: "Documents".to_string(), value: format!("{}", status.doc_count) }
-                StatBlock { label: "Blocks".to_string(), value: format!("{}", status.block_count) }
-                StatBlock { label: "Peers".to_string(), value: format!("{}", status.peer_count) }
-                StatBlock { label: "Uptime".to_string(), value: format_uptime(status.uptime_secs) }
+                StatBlock { label: t!("admin-stat-documents"), value: format!("{}", status.doc_count) }
+                StatBlock { label: t!("admin-stat-blocks"), value: format!("{}", status.block_count) }
+                StatBlock { label: t!("admin-stat-peers"), value: format!("{}", status.peer_count) }
+                StatBlock { label: t!("admin-stat-uptime"), value: format_uptime(status.uptime_secs) }
             }
 
             // Node info
             Card {
                 div { class: "p-5",
-                    SectionHeading { "Node Info" }
+                    SectionHeading { {t!("admin-section-node")} }
                     table { class: "table mt-2",
                         tbody { class: "tbody",
                             tr {
-                                td { class: "td font-medium text-sm", "Peer ID" }
+                                td { class: "td font-medium text-sm", {t!("admin-peer-id")} }
                                 td { class: "td", CidDisplay { cid: status.peer_id.clone(), len: Some(16) } }
                             }
                             tr {
-                                td { class: "td font-medium text-sm", "Cluster ID" }
+                                td { class: "td font-medium text-sm", {t!("admin-cluster-id")} }
                                 td { class: "td", CidDisplay { cid: status.cluster_id.clone(), len: Some(16) } }
                             }
                         }
@@ -126,17 +127,17 @@ fn AdminView(status: NodeStatusData, tokens: Vec<TokenRow>) -> Element {
             // Tokens
             Card {
                 div { class: "p-5",
-                    SectionHeading { "API Tokens ({tokens.len()})" }
+                    SectionHeading { {t!("admin-section-tokens", count: tokens.len())} }
                     if tokens.is_empty() {
-                        p { class: "text-fg-muted mt-2", "No tokens issued." }
+                        p { class: "text-fg-muted mt-2", {t!("admin-no-tokens")} }
                     } else {
                         table { class: "table mt-2",
                             thead { class: "thead",
                                 tr {
-                                    th { class: "th", "Label" }
-                                    th { class: "th", "Role" }
-                                    th { class: "th", "Used" }
-                                    th { class: "th", "Status" }
+                                    th { class: "th", {t!("tokens-th-label")} }
+                                    th { class: "th", {t!("tokens-th-role")} }
+                                    th { class: "th", {t!("tokens-th-used")} }
+                                    th { class: "th", {t!("tokens-th-status")} }
                                 }
                             }
                             tbody { class: "tbody",
@@ -153,9 +154,9 @@ fn AdminView(status: NodeStatusData, tokens: Vec<TokenRow>) -> Element {
                                         TdMuted { "{token.consumed_count} / {token.max_uses}" }
                                         Td {
                                             if token.revoked {
-                                                Pill { variant: PillVariant::Bad, "Revoked" }
+                                                Pill { variant: PillVariant::Bad, {t!("tokens-status-revoked")} }
                                             } else {
-                                                Pill { variant: PillVariant::Ok, "Active" }
+                                                Pill { variant: PillVariant::Ok, {t!("tokens-status-active")} }
                                             }
                                         }
                                     }

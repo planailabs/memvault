@@ -1,6 +1,7 @@
 //! Note creation and edit form.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Button, ButtonVariant, Card, FormField};
 use serde::{Deserialize, Serialize};
 
@@ -128,7 +129,7 @@ fn parse_tags_str(s: &str) -> Vec<(String, String)> {
 
 #[component]
 pub fn NoteForm() -> Element {
-    use_topbar("New Note");
+    use_topbar(&t!("notes-new"));
     let navigator = use_navigator();
 
     let title = use_signal(String::new);
@@ -161,7 +162,7 @@ pub fn NoteForm() -> Element {
 
     rsx! {
         NoteFormInner {
-            page_title: "New Note",
+            page_title: t!("notes-new"),
             title, body, tags, visibility, saving, error,
             on_submit,
             cancel_route: Route::NoteList {},
@@ -173,7 +174,7 @@ pub fn NoteForm() -> Element {
 
 #[component]
 pub fn NoteEdit(id: String) -> Element {
-    use_topbar("Edit Note");
+    use_topbar(&t!("notes-edit"));
     let navigator = use_navigator();
 
     let edit_id = id.clone();
@@ -187,7 +188,7 @@ pub fn NoteEdit(id: String) -> Element {
     let data = match &*existing.read() {
         Some(Ok(d)) => d.clone(),
         Some(Err(e)) => return rsx! { p { class: "text-danger", "Error: {e}" } },
-        None => return rsx! { p { class: "text-fg-muted", "Loading..." } },
+        None => return rsx! { p { class: "text-fg-muted", {t!("loading")} } },
     };
     let title = use_signal(|| data.title.clone());
     let body = use_signal(|| data.body.clone());
@@ -218,7 +219,7 @@ pub fn NoteEdit(id: String) -> Element {
 
     rsx! {
         NoteFormInner {
-            page_title: "Edit Note",
+            page_title: t!("notes-edit"),
             title, body, tags, visibility, saving, error,
             on_submit,
             cancel_route: Route::NoteDetail { id: cancel_id },
@@ -230,7 +231,7 @@ pub fn NoteEdit(id: String) -> Element {
 
 #[component]
 fn NoteFormInner(
-    page_title: &'static str,
+    page_title: String,
     mut title: Signal<String>,
     mut body: Signal<String>,
     mut tags: Signal<String>,
@@ -250,50 +251,50 @@ fn NoteFormInner(
 
             Card {
                 form { class: "p-5 space-y-4", onsubmit: move |e| on_submit.call(e),
-                    FormField { label: "Title".to_string(),
+                    FormField { label: t!("notes-form-title"),
                         input {
                             class: "input",
                             r#type: "text",
-                            placeholder: "Note title",
+                            placeholder: t!("notes-form-title-placeholder"),
                             value: "{title}",
                             oninput: move |e: Event<FormData>| title.set(e.value()),
                         }
                     }
-                    FormField { label: "Body".to_string(),
+                    FormField { label: t!("notes-form-body"),
                         textarea {
                             class: "input font-mono min-h-[300px]",
-                            placeholder: "Markdown content...",
+                            placeholder: t!("notes-form-body-placeholder"),
                             value: "{body}",
                             oninput: move |e: Event<FormData>| body.set(e.value()),
                         }
                     }
-                    FormField { label: "Tags".to_string(),
+                    FormField { label: t!("notes-form-tags"),
                         input {
                             class: "input",
                             r#type: "text",
-                            placeholder: "scope:label, scope:label, ...",
+                            placeholder: t!("notes-form-tags-placeholder"),
                             value: "{tags}",
                             oninput: move |e: Event<FormData>| tags.set(e.value()),
                         }
                     }
-                    FormField { label: "Visibility".to_string(),
+                    FormField { label: t!("notes-form-visibility"),
                         select {
                             class: "input",
                             value: "{visibility}",
                             onchange: move |e: Event<FormData>| visibility.set(e.value()),
-                            option { value: "internal", "Internal" }
-                            option { value: "federated", "Federated" }
-                            option { value: "public", "Public" }
+                            option { value: "internal", {t!("visibility-internal")} }
+                            option { value: "federated", {t!("visibility-federated")} }
+                            option { value: "public", {t!("visibility-public")} }
                         }
                     }
                     div { class: "flex gap-2 pt-2",
                         Button {
                             variant: ButtonVariant::Primary,
                             disabled: *saving.read(),
-                            "Save"
+                            {t!("save")}
                         }
                         Link { to: cancel_route,
-                            Button { variant: ButtonVariant::Secondary, "Cancel" }
+                            Button { variant: ButtonVariant::Secondary, {t!("cancel")} }
                         }
                     }
                 }

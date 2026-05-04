@@ -1,6 +1,7 @@
 //! Note history page — document audit trail.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Card, PageHeader};
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +41,7 @@ async fn get_note_history(id: String) -> Result<Vec<HistoryEntry>, ServerFnError
 
 #[component]
 pub fn NoteHistory(id: String) -> Element {
-    use_topbar("Note History");
+    use_topbar(&t!("notes-history-title"));
     let history = use_server_future(move || {
         let id = id.clone();
         async move { get_note_history(id).await }
@@ -48,7 +49,7 @@ pub fn NoteHistory(id: String) -> Element {
 
     rsx! {
         div { class: "space-y-4",
-            PageHeader { "History" }
+            PageHeader { {t!("history")} }
 
             {match &*history.read() {
                 Some(Ok(entries)) => rsx! {
@@ -58,7 +59,7 @@ pub fn NoteHistory(id: String) -> Element {
                                 div { class: "flex items-center gap-3 px-5 py-3",
                                     OpKindBadge { kind: entry.op_kind.clone() }
                                     div { class: "flex-1 min-w-0",
-                                        span { class: "text-sm text-fg-muted", "by " }
+                                        span { class: "text-sm text-fg-muted", {t!("by")} " " }
                                         CidDisplay { cid: entry.author.clone(), len: Some(8) }
                                     }
                                     TimeAgo { wall_ns: entry.wall_ns }
@@ -67,14 +68,14 @@ pub fn NoteHistory(id: String) -> Element {
                             }
                             if entries.is_empty() {
                                 div { class: "px-5 py-8 text-center text-fg-muted",
-                                    "No history entries."
+                                    {t!("notes-history-empty")}
                                 }
                             }
                         }
                     }
                 },
                 Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-                None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+                None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
             }}
         }
     }

@@ -1,6 +1,7 @@
 //! Notes list page.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{DataTable, PageHeader, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +62,7 @@ async fn list_notes(view: Option<String>) -> Result<Vec<NoteRow>, ServerFnError>
 
 #[component]
 pub fn NoteList() -> Element {
-    use_topbar("Notes");
+    use_topbar(&t!("notes-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
     let notes = use_server_future(move || {
         let v = active_view.read().name.clone();
@@ -70,15 +71,15 @@ pub fn NoteList() -> Element {
 
     rsx! {
         div { class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4",
-            PageHeader { class: "mb-0", "Notes" }
+            PageHeader { class: "mb-0", {t!("notes-title")} }
             Link { to: Route::NoteForm {}, class: "btn btn-md btn-primary",
-                "New Note"
+                {t!("notes-new")}
             }
         }
         {match &*notes.read() {
             Some(Ok(list)) => rsx! { NoteTable { list: list.clone() } },
             Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-            None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+            None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
         }}
     }
 }
@@ -126,11 +127,11 @@ fn NoteTable(list: Vec<NoteRow>) -> Element {
         DataTable {
             search, limit, total, filtered: filtered_count, shown,
             headers: rsx! {
-                SortableTh { label: "Title".to_string(), sort_key: "title".to_string(), sort }
-                th { class: "th", "Tags" }
-                th { class: "th", "Visibility" }
-                SortableTh { label: "Files".to_string(), sort_key: "attachments".to_string(), sort }
-                SortableTh { label: "Updated".to_string(), sort_key: "updated".to_string(), sort }
+                SortableTh { label: t!("notes-th-title"), sort_key: "title".to_string(), sort }
+                th { class: "th", {t!("notes-th-tags")} }
+                th { class: "th", {t!("notes-th-visibility")} }
+                SortableTh { label: t!("notes-th-files"), sort_key: "attachments".to_string(), sort }
+                SortableTh { label: t!("notes-th-updated"), sort_key: "updated".to_string(), sort }
             },
             body: rsx! {
                 for note in filtered.read().iter().take(limit_val) {

@@ -1,6 +1,7 @@
 //! File detail page — preview and manifest metadata.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant, SectionHeading};
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +123,7 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
 
 #[component]
 pub fn FileDetail(cid: String) -> Element {
-    use_topbar("File");
+    use_topbar(&t!("file-title"));
     let file = use_server_future(move || {
         let cid = cid.clone();
         async move { get_file_detail(cid).await }
@@ -131,7 +132,7 @@ pub fn FileDetail(cid: String) -> Element {
     match &*file.read() {
         Some(Ok(data)) => rsx! { FileView { data: data.clone() } },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-        None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+        None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
     }
 }
 
@@ -145,7 +146,7 @@ fn FileView(data: FileData) -> Element {
             div { class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3",
                 PageHeader { class: "mb-0", "{data.filename}" }
                 a { href: "{download_url}", class: "btn btn-md btn-primary", download: "{data.filename}",
-                    "Download"
+                    {t!("file-download")}
                 }
             }
 
@@ -165,45 +166,45 @@ fn FileView(data: FileData) -> Element {
             // Manifest metadata
             Card {
                 div { class: "p-5",
-                    SectionHeading { "Metadata" }
+                    SectionHeading { {t!("file-section-metadata")} }
                     table { class: "table mt-2",
                         tbody { class: "tbody",
                             tr {
-                                td { class: "td font-medium text-sm", "Filename" }
+                                td { class: "td font-medium text-sm", {t!("file-meta-filename")} }
                                 td { class: "td text-sm font-mono", "{data.filename}" }
                             }
                             tr {
-                                td { class: "td font-medium text-sm", "MIME Type" }
+                                td { class: "td font-medium text-sm", {t!("file-meta-mime")} }
                                 td { class: "td text-sm font-mono", "{data.mime_type}" }
                             }
                             tr {
-                                td { class: "td font-medium text-sm", "Size" }
+                                td { class: "td font-medium text-sm", {t!("file-meta-size")} }
                                 td { class: "td text-sm font-mono", "{data.size_display()}" }
                             }
                             if let Some(hash) = &data.sha256 {
                                 tr {
-                                    td { class: "td font-medium text-sm", "SHA256" }
+                                    td { class: "td font-medium text-sm", {t!("file-meta-sha256")} }
                                     td { class: "td text-sm", CidDisplay { cid: hash.clone(), len: Some(16) } }
                                 }
                             }
                             if let Some((w, h)) = data.width_height {
                                 tr {
-                                    td { class: "td font-medium text-sm", "Dimensions" }
+                                    td { class: "td font-medium text-sm", {t!("file-meta-dimensions")} }
                                     td { class: "td text-sm font-mono", "{w} x {h}" }
                                 }
                             }
                             if let Some(ms) = data.duration_ms {
                                 tr {
-                                    td { class: "td font-medium text-sm", "Duration" }
+                                    td { class: "td font-medium text-sm", {t!("file-meta-duration")} }
                                     td { class: "td text-sm font-mono", "{ms / 1000}s" }
                                 }
                             }
                             tr {
-                                td { class: "td font-medium text-sm", "CID" }
+                                td { class: "td font-medium text-sm", {t!("file-meta-cid")} }
                                 td { class: "td text-sm", CidDisplay { cid: data.cid.clone(), len: Some(24) } }
                             }
                             tr {
-                                td { class: "td font-medium text-sm", "Replication" }
+                                td { class: "td font-medium text-sm", {t!("file-meta-replication")} }
                                 td { class: "td text-sm font-mono", "{data.replication}" }
                             }
                         }
@@ -214,7 +215,7 @@ fn FileView(data: FileData) -> Element {
             // Linked Items + Add Link
             Card {
                 div { class: "p-5",
-                    SectionHeading { "Links ({data.linked_items.len()})" }
+                    SectionHeading { {t!("file-section-links", count: data.linked_items.len())} }
                     if !data.linked_items.is_empty() {
                         div { class: "mt-2 divide-y divide-line",
                             for item in &data.linked_items {
@@ -240,7 +241,7 @@ fn FileView(data: FileData) -> Element {
             if let Some(text) = &data.extracted_text {
                 Card {
                     div { class: "p-5",
-                        SectionHeading { "Extracted Text" }
+                        SectionHeading { {t!("file-section-text")} }
                         pre { class: "mt-2 text-sm text-fg-muted bg-surface-2 p-3 rounded overflow-x-auto max-h-[400px] overflow-y-auto",
                             "{text}"
                         }
@@ -317,7 +318,7 @@ fn FileQuickLinkForm(source_id: String) -> Element {
                 if raw.contains(':') {
                     (raw.clone(), raw)
                 } else {
-                    status_msg.set(Some("Select a target from search results".to_string()));
+                    status_msg.set(Some(t!("link-select-target")));
                     return;
                 }
             }
@@ -326,7 +327,7 @@ fn FileQuickLinkForm(source_id: String) -> Element {
         spawn(async move {
             match create_file_link(source, target, relation).await {
                 Ok(edge_id) => {
-                    status_msg.set(Some(format!("Linked (edge {})", &edge_id[..8])));
+                    status_msg.set(Some(t!("link-linked", edgeId: &edge_id[..8])));
                     search_input.set(String::new());
                     selected_target.set(None);
                     suggestions.set(Vec::new());
@@ -340,10 +341,10 @@ fn FileQuickLinkForm(source_id: String) -> Element {
 
     rsx! {
         div { class: "mt-3 pt-3 border-t border-line",
-            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", "Add Link" }
+            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", {t!("link-add")} }
             div { class: "flex gap-2 items-end",
                 div { class: "flex-1 relative",
-                    label { class: "text-xs text-fg-muted", "Target" }
+                    label { class: "text-xs text-fg-muted", {t!("link-label-target")} }
                     {
                         let display_val = if let Some((_, ref lbl)) = *selected_target.read() {
                             lbl.clone()
@@ -354,7 +355,7 @@ fn FileQuickLinkForm(source_id: String) -> Element {
                             input {
                                 class: "input input-sm w-full mt-1",
                                 r#type: "text",
-                                placeholder: "Search nodes...",
+                                placeholder: t!("link-placeholder-search"),
                                 value: "{display_val}",
                                 oninput: on_search_input,
                             }
@@ -383,7 +384,7 @@ fn FileQuickLinkForm(source_id: String) -> Element {
                     }
                 }
                 div {
-                    label { class: "text-xs text-fg-muted", "Relation" }
+                    label { class: "text-xs text-fg-muted", {t!("link-label-relation")} }
                     input {
                         class: "input input-sm w-24 mt-1",
                         r#type: "text",
@@ -391,7 +392,7 @@ fn FileQuickLinkForm(source_id: String) -> Element {
                         oninput: move |e: Event<FormData>| relation_input.set(e.value()),
                     }
                 }
-                Button { variant: ButtonVariant::Secondary, onclick: on_submit, "Link" }
+                Button { variant: ButtonVariant::Secondary, onclick: on_submit, {t!("link-btn")} }
             }
             if let Some(msg) = &*status_msg.read() {
                 p { class: "text-xs mt-1 text-fg-muted", "{msg}" }

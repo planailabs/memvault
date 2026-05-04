@@ -1,6 +1,7 @@
 //! Entity detail page.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Card, Kicker, PageHeader, Pill, PillVariant, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -76,7 +77,7 @@ async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
 
 #[component]
 pub fn EntityDetail(id: ReadSignal<String>) -> Element {
-    use_topbar("Entity");
+    use_topbar(&t!("entity-title"));
     let entity = use_server_future(move || {
         let id = id.read().clone();
         async move { get_entity_detail(id).await }
@@ -85,18 +86,19 @@ pub fn EntityDetail(id: ReadSignal<String>) -> Element {
     match &*entity.read() {
         Some(Ok(data)) => rsx! { EntityView { data: data.clone() } },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-        None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+        None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
     }
 }
 
 #[component]
 fn EntityView(data: EntityData) -> Element {
+    let unnamed = t!("unnamed");
     let label = data
         .props
         .get("name")
         .or_else(|| data.props.get("title"))
         .and_then(|v| v.as_str())
-        .unwrap_or("Unnamed")
+        .unwrap_or(&unnamed)
         .to_string();
 
     rsx! {
@@ -108,10 +110,10 @@ fn EntityView(data: EntityData) -> Element {
                 }
                 div { class: "flex gap-2",
                     Link { to: Route::EntityHistory { id: data.id.clone() }, class: "btn btn-sm btn-secondary",
-                        "History"
+                        {t!("history")}
                     }
                     Link { to: Route::GraphExplorer {}, class: "btn btn-sm btn-secondary",
-                        "View in Graph"
+                        {t!("entity-view-in-graph")}
                     }
                 }
             }
@@ -119,7 +121,7 @@ fn EntityView(data: EntityData) -> Element {
             // Properties
             Card {
                 div { class: "p-5",
-                    h3 { class: "h-section mb-2", "Properties" }
+                    h3 { class: "h-section mb-2", {t!("graph-section-properties")} }
                     table { class: "table",
                         tbody { class: "tbody",
                             for (key, val) in &data.props {
@@ -130,7 +132,7 @@ fn EntityView(data: EntityData) -> Element {
                             }
                             if data.props.is_empty() {
                                 tr {
-                                    td { class: "td text-fg-muted", colspan: "2", "No properties" }
+                                    td { class: "td text-fg-muted", colspan: "2", {t!("entity-no-properties")} }
                                 }
                             }
                         }
@@ -142,13 +144,13 @@ fn EntityView(data: EntityData) -> Element {
             if !data.edges.is_empty() {
                 Card {
                     div { class: "p-5",
-                        h3 { class: "h-section mb-2", "Outgoing Edges ({data.edges.len()})" }
+                        h3 { class: "h-section mb-2", {t!("entity-section-edges", count: data.edges.len())} }
                         table { class: "table",
                             thead { class: "thead",
                                 tr {
-                                    th { class: "th", "Relation" }
-                                    th { class: "th", "Target" }
-                                    th { class: "th", "Weight" }
+                                    th { class: "th", {t!("entity-th-relation")} }
+                                    th { class: "th", {t!("entity-th-target")} }
+                                    th { class: "th", {t!("entity-th-weight")} }
                                 }
                             }
                             tbody { class: "tbody",

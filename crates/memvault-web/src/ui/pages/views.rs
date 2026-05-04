@@ -1,6 +1,7 @@
 //! View management page — create, edit, and delete saved tag filter sets.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant, SectionHeading};
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +55,7 @@ async fn remove_view(name: String) -> Result<(), ServerFnError> {
 
 #[component]
 pub fn ViewManager() -> Element {
-    use_topbar("Views");
+    use_topbar(&t!("views-title"));
     let views = use_server_future(list_all_views)?;
     let mut editing = use_signal(|| None::<String>); // view name being edited
     let mut show_create = use_signal(|| false);
@@ -62,16 +63,16 @@ pub fn ViewManager() -> Element {
     rsx! {
         div { class: "space-y-4",
             div { class: "flex items-center justify-between",
-                PageHeader { class: "mb-0", "Views" }
+                PageHeader { class: "mb-0", {t!("views-title")} }
                 Button {
                     variant: ButtonVariant::Primary,
                     onclick: move |_| show_create.set(true),
-                    "New View"
+                    {t!("views-new")}
                 }
             }
 
             p { class: "text-sm text-fg-muted",
-                "Views are saved tag filter sets. When a view is active, only items with ALL the required tags are shown."
+                {t!("views-description")}
             }
 
             // Create form
@@ -111,7 +112,7 @@ pub fn ViewManager() -> Element {
                                                         Pill { variant: PillVariant::Muted, "{scope}:{label}" }
                                                     }
                                                     if view.tags.is_empty() {
-                                                        span { class: "text-sm text-fg-faint", "No tags (matches everything)" }
+                                                        span { class: "text-sm text-fg-faint", {t!("views-no-tags")} }
                                                     }
                                                 }
                                             }
@@ -122,7 +123,7 @@ pub fn ViewManager() -> Element {
                                                         Button {
                                                             variant: ButtonVariant::Secondary,
                                                             onclick: move |_| editing.set(Some(name.clone())),
-                                                            "Edit"
+                                                            {t!("edit")}
                                                         }
                                                     }
                                                 }
@@ -137,7 +138,7 @@ pub fn ViewManager() -> Element {
                                                                     let _ = remove_view(name).await;
                                                                 });
                                                             },
-                                                            "Delete"
+                                                            {t!("delete")}
                                                         }
                                                     }
                                                 }
@@ -152,12 +153,12 @@ pub fn ViewManager() -> Element {
                 Some(Ok(_)) => rsx! {
                     Card {
                         div { class: "p-8 text-center text-fg-muted",
-                            "No views yet. Create one to filter content by tags."
+                            {t!("views-empty")}
                         }
                     }
                 },
                 Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-                None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+                None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
             }
         }
     }
@@ -184,7 +185,7 @@ fn ViewForm(
     let do_save = move |_| {
         let name = name_input.read().trim().to_string();
         if name.is_empty() {
-            status.set(Some("Name is required".to_string()));
+            status.set(Some(t!("views-name-required")));
             return;
         }
         let tags: Vec<(String, String)> = tag_input
@@ -207,34 +208,34 @@ fn ViewForm(
 
     rsx! {
         div { class: "space-y-3",
-            SectionHeading { if is_edit { "Edit View" } else { "New View" } }
+            SectionHeading { if is_edit { {t!("views-edit")} } else { {t!("views-new")} } }
             div {
-                label { class: "text-xs text-fg-muted", "Name" }
+                label { class: "text-xs text-fg-muted", {t!("files-th-name")} }
                 input {
                     class: "input input-sm w-full mt-1",
                     r#type: "text",
-                    placeholder: "e.g. Research, Project X",
+                    placeholder: t!("views-placeholder-name"),
                     value: "{name_input}",
                     disabled: is_edit,
                     oninput: move |e: Event<FormData>| name_input.set(e.value()),
                 }
             }
             div {
-                label { class: "text-xs text-fg-muted", "Required tags (comma-separated, scope:label format)" }
+                label { class: "text-xs text-fg-muted", {t!("views-tags-label")} }
                 input {
                     class: "input input-sm w-full mt-1",
                     r#type: "text",
-                    placeholder: "e.g. domain:pharmacology, type:research-paper",
+                    placeholder: t!("views-placeholder-tags"),
                     value: "{tag_input}",
                     oninput: move |e: Event<FormData>| tag_input.set(e.value()),
                 }
             }
             div { class: "flex gap-2",
                 Button { variant: ButtonVariant::Primary, onclick: do_save,
-                    if is_edit { "Save" } else { "Create" }
+                    if is_edit { {t!("save")} } else { {t!("views-create")} }
                 }
                 Button { variant: ButtonVariant::Secondary, onclick: move |_| on_cancel.call(()),
-                    "Cancel"
+                    {t!("cancel")}
                 }
             }
             if let Some(msg) = &*status.read() {

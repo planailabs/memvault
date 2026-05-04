@@ -1,6 +1,7 @@
 //! Graph explorer page — interactive force-directed knowledge graph.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Card, PageHeader, Pill};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -368,7 +369,7 @@ impl Viewport {
 
 #[component]
 pub fn GraphExplorer() -> Element {
-    use_topbar("Graph");
+    use_topbar(&t!("graph-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
     let nodes_res = use_server_future(move || {
         let v = active_view.read().name.clone();
@@ -378,7 +379,7 @@ pub fn GraphExplorer() -> Element {
     match &*nodes_res.read() {
         Some(Ok(nodes)) => rsx! { GraphView { initial_nodes: nodes.clone() } },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-        None => rsx! { p { class: "text-fg-muted", "Loading graph..." } },
+        None => rsx! { p { class: "text-fg-muted", {t!("graph-loading")} } },
     }
 }
 
@@ -605,33 +606,33 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
 
     rsx! {
         div { class: "space-y-4",
-            PageHeader { "Knowledge Graph" }
+            PageHeader { {t!("graph-title")} }
 
             if nodes.is_empty() && !is_focus_active {
                 Card {
                     div { class: "p-8 text-center text-fg-muted",
-                        "No entities found. Create entities via the MCP tools to populate the graph."
+                        {t!("graph-empty")}
                     }
                 }
             } else {
                 // Toolbar
                 div { class: "flex items-center gap-2 text-sm flex-wrap",
-                    span { class: "text-fg-muted", "{nodes.len()} nodes, {edges.len()} edges" }
+                    span { class: "text-fg-muted", {t!("graph-node-count", nodes: nodes.len(), edges: edges.len())} }
                     span { class: "text-fg-faint", "|" }
-                    span { class: "text-fg-muted", "Zoom: {vp.zoom:.1}x" }
+                    span { class: "text-fg-muted", {t!("graph-zoom", level: format!("{:.1}", vp.zoom))} }
                     button {
                         class: "btn btn-xs btn-secondary",
                         onclick: move |_| {
                             let s = sim.read();
                             viewport.set(Viewport::fit_to_nodes(&s.nodes));
                         },
-                        "Fit View"
+                        {t!("graph-fit-view")}
                     }
                     if is_focus_active {
                         button {
                             class: "btn btn-xs btn-secondary",
                             onclick: move |_| focus_node.set(None),
-                            "Show All"
+                            {t!("graph-show-all")}
                         }
                     }
                 }
@@ -642,7 +643,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                         input {
                             class: "input input-sm w-full",
                             r#type: "search",
-                            placeholder: "Filter nodes...",
+                            placeholder: t!("graph-filter-nodes"),
                             value: "{sidebar_search}",
                             oninput: move |e: Event<FormData>| sidebar_search.set(e.value()),
                         }
@@ -698,7 +699,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         span { class: "text-sm font-medium truncate", "{node.label}" }
                                     }
                                     if !node.edges.is_empty() {
-                                        span { class: "text-xs text-fg-muted", "{node.edges.len()} edges" }
+                                        span { class: "text-xs text-fg-muted", {t!("graph-edges-count", count: node.edges.len())} }
                                     }
                                 }
                             }
@@ -921,13 +922,13 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                             let fid = d.id.clone();
                                             move |_| focus_node.set(Some(fid.clone()))
                                         },
-                                        "Focus on this node"
+                                        {t!("graph-focus-node")}
                                     }
 
                                     // Properties
                                     if !d.props.is_empty() {
                                         div { class: "pt-2 border-t border-line",
-                                            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", "Properties" }
+                                            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", {t!("graph-section-properties")} }
                                             for (key, val) in &d.props {
                                                 div { class: "flex justify-between text-sm py-0.5",
                                                     span { class: "text-fg-muted truncate mr-2", "{key}" }
@@ -941,7 +942,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     if !d.edges.is_empty() {
                                         div { class: "pt-2 border-t border-line",
                                             h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2",
-                                                "Edges ({d.edges.len()})"
+                                                {t!("graph-section-edges", count: d.edges.len())}
                                             }
                                             for edge in &d.edges {
                                                 div { class: "flex items-center gap-1 text-sm py-1 flex-wrap",
@@ -962,7 +963,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         if let Some(hex_id) = d.id.strip_prefix("entity:") {
                                             Link { to: Route::EntityDetail { id: hex_id.to_string() },
                                                 class: "btn btn-sm btn-secondary w-full mt-2",
-                                                "View Details"
+                                                {t!("graph-view-details")}
                                             }
                                         }
                                     }
@@ -970,7 +971,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         if let Some(hex_id) = d.id.strip_prefix("doc:") {
                                             Link { to: Route::NoteDetail { id: hex_id.to_string() },
                                                 class: "btn btn-sm btn-secondary w-full mt-2",
-                                                "View Document"
+                                                {t!("graph-view-document")}
                                             }
                                         }
                                     }
@@ -978,7 +979,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         if let Some(hex_cid) = d.id.strip_prefix("attachment:") {
                                             Link { to: Route::FileDetail { cid: hex_cid.to_string() },
                                                 class: "btn btn-sm btn-secondary w-full mt-2",
-                                                "View File"
+                                                {t!("graph-view-file")}
                                             }
                                         }
                                     }

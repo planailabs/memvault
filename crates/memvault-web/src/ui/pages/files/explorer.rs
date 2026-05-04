@@ -1,6 +1,7 @@
 //! File explorer page — browse attachments.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
@@ -112,7 +113,7 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
 
 #[component]
 pub fn FileExplorer() -> Element {
-    use_topbar("Files");
+    use_topbar(&t!("files-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
     let files = use_server_future(move || {
         let v = active_view.read().name.clone();
@@ -123,17 +124,17 @@ pub fn FileExplorer() -> Element {
     rsx! {
         div { class: "space-y-4",
             div { class: "flex items-center justify-between",
-                PageHeader { class: "mb-0", "Files" }
+                PageHeader { class: "mb-0", {t!("files-title")} }
                 div { class: "flex gap-1",
                     button {
                         class: if !*grid_view.read() { "btn btn-xs btn-primary" } else { "btn btn-xs btn-secondary" },
                         onclick: move |_| grid_view.set(false),
-                        "List"
+                        {t!("list")}
                     }
                     button {
                         class: if *grid_view.read() { "btn btn-xs btn-primary" } else { "btn btn-xs btn-secondary" },
                         onclick: move |_| grid_view.set(true),
-                        "Grid"
+                        {t!("grid")}
                     }
                 }
             }
@@ -146,7 +147,7 @@ pub fn FileExplorer() -> Element {
                     }
                 },
                 Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-                None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+                None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
             }}
         }
     }
@@ -157,7 +158,7 @@ fn FileGrid(list: Vec<FileRow>) -> Element {
     if list.is_empty() {
         return rsx! {
             Card {
-                div { class: "p-8 text-center text-fg-muted", "No files found." }
+                div { class: "p-8 text-center text-fg-muted", {t!("files-empty")} }
             }
         };
     }
@@ -229,11 +230,11 @@ fn FileTable(list: Vec<FileRow>) -> Element {
         DataTable {
             search, limit, total, filtered: filtered_count, shown,
             headers: rsx! {
-                SortableTh { label: "Name".to_string(), sort_key: "name".to_string(), sort }
-                SortableTh { label: "Type".to_string(), sort_key: "type".to_string(), sort }
-                SortableTh { label: "Size".to_string(), sort_key: "size".to_string(), sort }
-                th { class: "th", "CID" }
-                SortableTh { label: "Uploaded".to_string(), sort_key: "wall_ns".to_string(), sort }
+                SortableTh { label: t!("files-th-name"), sort_key: "name".to_string(), sort }
+                SortableTh { label: t!("files-th-type"), sort_key: "type".to_string(), sort }
+                SortableTh { label: t!("files-th-size"), sort_key: "size".to_string(), sort }
+                th { class: "th", {t!("files-th-cid")} }
+                SortableTh { label: t!("files-th-uploaded"), sort_key: "wall_ns".to_string(), sort }
             },
             body: rsx! {
                 for file in filtered.read().iter().take(limit_val) {

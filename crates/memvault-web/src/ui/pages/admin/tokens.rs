@@ -1,6 +1,7 @@
 //! Token management page.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Button, ButtonVariant, Card, FormField, PageHeader, Pill, PillVariant, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +71,7 @@ async fn revoke_token(cid: String) -> Result<(), ServerFnError> {
 
 #[component]
 pub fn TokenManagement() -> Element {
-    use_topbar("Tokens");
+    use_topbar(&t!("tokens-title"));
     let mut tokens = use_server_future(list_tokens)?;
     let mut show_form = use_signal(|| false);
     let mut new_role = use_signal(|| "Service".to_string());
@@ -98,11 +99,11 @@ pub fn TokenManagement() -> Element {
     rsx! {
         div { class: "space-y-4",
             div { class: "flex items-center justify-between",
-                PageHeader { class: "mb-0", "API Tokens" }
+                PageHeader { class: "mb-0", {t!("tokens-title")} }
                 Button {
                     variant: ButtonVariant::Primary,
                     onclick: move |_| { let v = *show_form.read(); show_form.set(!v); },
-                    "Issue Token"
+                    {t!("tokens-issue")}
                 }
             }
 
@@ -112,7 +113,7 @@ pub fn TokenManagement() -> Element {
 
             if let Some(token) = &*issued_token.read() {
                 div { class: "alert alert-success",
-                    p { class: "font-semibold", "Token issued! Copy it now — it won't be shown again:" }
+                    p { class: "font-semibold", {t!("tokens-issued-message")} }
                     code { class: "block mt-1 font-mono text-sm break-all", "{token}" }
                 }
             }
@@ -122,30 +123,30 @@ pub fn TokenManagement() -> Element {
                     form { class: "p-5 space-y-3", onsubmit: on_issue,
                         div { class: "flex gap-3",
                             div { class: "flex-1",
-                                FormField { label: "Label".to_string(),
+                                FormField { label: t!("tokens-th-label"),
                                     input {
                                         class: "input input-sm",
-                                        placeholder: "Token label",
+                                        placeholder: t!("tokens-placeholder-label"),
                                         value: "{new_label}",
                                         oninput: move |e: Event<FormData>| new_label.set(e.value()),
                                     }
                                 }
                             }
                             div { class: "w-36",
-                                FormField { label: "Role".to_string(),
+                                FormField { label: t!("tokens-th-role"),
                                     select {
                                         class: "input input-sm",
                                         value: "{new_role}",
                                         onchange: move |e: Event<FormData>| new_role.set(e.value()),
-                                        option { value: "Service", "Service" }
-                                        option { value: "AgentHost", "Agent Host" }
-                                        option { value: "Auditor", "Auditor" }
-                                        option { value: "Admin", "Admin" }
+                                        option { value: "Service", {t!("tokens-role-service")} }
+                                        option { value: "AgentHost", {t!("tokens-role-agent-host")} }
+                                        option { value: "Auditor", {t!("tokens-role-auditor")} }
+                                        option { value: "Admin", {t!("tokens-role-admin")} }
                                     }
                                 }
                             }
                             div { class: "w-28",
-                                FormField { label: "Max Uses".to_string(),
+                                FormField { label: t!("tokens-placeholder-max-uses"),
                                     input {
                                         class: "input input-sm",
                                         r#type: "number",
@@ -155,7 +156,7 @@ pub fn TokenManagement() -> Element {
                                 }
                             }
                         }
-                        Button { variant: ButtonVariant::Primary, "Issue" }
+                        Button { variant: ButtonVariant::Primary, {t!("tokens-issue-button")} }
                     }
                 }
             }
@@ -166,10 +167,10 @@ pub fn TokenManagement() -> Element {
                         table { class: "table",
                             thead { class: "thead",
                                 tr {
-                                    th { class: "th", "Label" }
-                                    th { class: "th", "Role" }
-                                    th { class: "th", "Used" }
-                                    th { class: "th", "Status" }
+                                    th { class: "th", {t!("tokens-th-label")} }
+                                    th { class: "th", {t!("tokens-th-role")} }
+                                    th { class: "th", {t!("tokens-th-used")} }
+                                    th { class: "th", {t!("tokens-th-status")} }
                                     th { class: "th", "" }
                                 }
                             }
@@ -190,9 +191,9 @@ pub fn TokenManagement() -> Element {
                                                 TdMuted { "{token.consumed_count} / {token.max_uses}" }
                                                 Td {
                                                     if token.revoked {
-                                                        Pill { variant: PillVariant::Bad, "Revoked" }
+                                                        Pill { variant: PillVariant::Bad, {t!("tokens-status-revoked")} }
                                                     } else {
-                                                        Pill { variant: PillVariant::Ok, "Active" }
+                                                        Pill { variant: PillVariant::Ok, {t!("tokens-status-active")} }
                                                     }
                                                 }
                                                 Td {
@@ -206,7 +207,7 @@ pub fn TokenManagement() -> Element {
                                                                     tokens.restart();
                                                                 });
                                                             },
-                                                            "Revoke"
+                                                            {t!("tokens-revoke")}
                                                         }
                                                     }
                                                 }
@@ -219,7 +220,7 @@ pub fn TokenManagement() -> Element {
                     }
                 },
                 Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-                None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+                None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
             }}
         }
     }

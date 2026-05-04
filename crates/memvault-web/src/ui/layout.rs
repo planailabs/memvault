@@ -1,6 +1,7 @@
 //! Application shell: sidebar + topbar + main content.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 
 use super::cmd_k::{CommandPalette, PaletteOpen};
 use super::events::use_event_bus_provider;
@@ -40,7 +41,7 @@ pub fn Layout() -> Element {
                                             d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z",
                                         }
                                     }
-                                    span { class: "text-sm text-fg-muted", "Loading..." }
+                                    span { class: "text-sm text-fg-muted", {t!("loading")} }
                                 }
                             }
                         },

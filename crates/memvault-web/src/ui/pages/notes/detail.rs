@@ -1,6 +1,7 @@
 //! Note detail page — view a single document.
 
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant, SectionHeading};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -188,7 +189,7 @@ async fn delete_note(id: String) -> Result<(), ServerFnError> {
 
 #[component]
 pub fn NoteDetail(id: String) -> Element {
-    use_topbar("Note");
+    use_topbar(&t!("notes-detail-title"));
     let note = use_server_future(move || {
         let id = id.clone();
         async move { get_note(id).await }
@@ -197,7 +198,7 @@ pub fn NoteDetail(id: String) -> Element {
     match &*note.read() {
         Some(Ok(data)) => rsx! { NoteView { data: data.clone() } },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-        None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+        None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
     }
 }
 
@@ -231,12 +232,12 @@ fn NoteView(data: NoteData) -> Element {
                 }
                 div { class: "flex gap-2",
                     Link { to: Route::NoteEdit { id: data.id.clone() },
-                        Button { variant: ButtonVariant::Secondary, "Edit" }
+                        Button { variant: ButtonVariant::Secondary, {t!("edit")} }
                     }
                     Link { to: Route::NoteHistory { id: data.id.clone() },
-                        Button { variant: ButtonVariant::Secondary, "History" }
+                        Button { variant: ButtonVariant::Secondary, {t!("history")} }
                     }
-                    Button { variant: ButtonVariant::Danger, onclick: on_delete, "Delete" }
+                    Button { variant: ButtonVariant::Danger, onclick: on_delete, {t!("delete")} }
                 }
             }
 
@@ -256,7 +257,7 @@ fn NoteView(data: NoteData) -> Element {
             if !data.attachment_cids.is_empty() {
                 Card {
                     div { class: "p-5",
-                        SectionHeading { "Attachments ({data.attachment_cids.len()})" }
+                        SectionHeading { {t!("notes-attachments", count: data.attachment_cids.len())} }
                         div { class: "mt-2 divide-y divide-line",
                             for att in &data.attachment_cids {
                                 div { class: "flex items-center gap-3 py-2",
@@ -275,7 +276,7 @@ fn NoteView(data: NoteData) -> Element {
             // Linked Items + Add Link
             Card {
                 div { class: "p-5",
-                    SectionHeading { "Links ({data.linked_items.len()})" }
+                    SectionHeading { {t!("notes-links", count: data.linked_items.len())} }
                     if !data.linked_items.is_empty() {
                         div { class: "mt-2 divide-y divide-line",
                             for item in &data.linked_items {
@@ -302,7 +303,7 @@ fn NoteView(data: NoteData) -> Element {
             if data.frontmatter.len() > 1 || (data.frontmatter.len() == 1 && !data.frontmatter.contains_key("title")) {
                 Card {
                     div { class: "p-5",
-                        SectionHeading { "Metadata" }
+                        SectionHeading { {t!("notes-metadata")} }
                         table { class: "table mt-2",
                             tbody { class: "tbody",
                                 for (key, val) in &data.frontmatter {
@@ -380,10 +381,10 @@ fn QuickLinkForm(source_id: String) -> Element {
 
     rsx! {
         div { class: "mt-3 pt-3 border-t border-line",
-            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", "Add Link" }
+            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", {t!("notes-add-link")} }
             div { class: "flex gap-2 items-end",
                 div { class: "flex-1 relative",
-                    label { class: "text-xs text-fg-muted", "Target" }
+                    label { class: "text-xs text-fg-muted", {t!("notes-link-target")} }
                     {
                         let display_val = if let Some((_, ref lbl)) = *selected_target.read() {
                             lbl.clone()
@@ -394,7 +395,7 @@ fn QuickLinkForm(source_id: String) -> Element {
                             input {
                                 class: "input input-sm w-full mt-1",
                                 r#type: "text",
-                                placeholder: "Search nodes...",
+                                placeholder: t!("notes-link-search-placeholder"),
                                 value: "{display_val}",
                                 oninput: on_search_input,
                             }
@@ -424,7 +425,7 @@ fn QuickLinkForm(source_id: String) -> Element {
                     }
                 }
                 div {
-                    label { class: "text-xs text-fg-muted", "Relation" }
+                    label { class: "text-xs text-fg-muted", {t!("notes-link-relation")} }
                     input {
                         class: "input input-sm w-24 mt-1",
                         r#type: "text",
@@ -432,7 +433,7 @@ fn QuickLinkForm(source_id: String) -> Element {
                         oninput: move |e: Event<FormData>| relation_input.set(e.value()),
                     }
                 }
-                Button { variant: ButtonVariant::Secondary, onclick: on_submit, "Link" }
+                Button { variant: ButtonVariant::Secondary, onclick: on_submit, {t!("notes-link-btn")} }
             }
             if let Some(msg) = &*status_msg.read() {
                 p { class: "text-xs mt-1 text-fg-muted", "{msg}" }
