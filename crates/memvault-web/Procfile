@@ -1,0 +1,2 @@
+server: dx serve | cat
+tailwind: npm run tailwind
