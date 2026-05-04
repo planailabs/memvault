@@ -550,10 +550,16 @@ impl MemvaultClient for LocalClient {
         tag_filter: Option<(String, String)>,
         limit: usize,
     ) -> Result<Vec<DocSummary>> {
+        // Use the "doc" tag index to find DocCreate envelopes directly,
+        // rather than scanning all envelopes by time (which can miss docs
+        // if non-doc operations fill the limit).
         let cids = if let Some((ref scope, ref label)) = tag_filter {
-            self.store.query_by_tag(scope, label, 0, limit)?
+            self.store.query_by_tag(scope, label, 0, limit * 5)?
         } else {
-            self.store.query_by_time(0, u64::MAX, limit)?
+            self.store.query_unique_labels("doc", limit * 5)?
+                .into_iter()
+                .flat_map(|label| self.store.query_by_tag("doc", &label, 0, 10).unwrap_or_default())
+                .collect()
         };
 
         let mut summaries = Vec::new();
