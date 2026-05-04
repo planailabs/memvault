@@ -11,7 +11,6 @@ use memvault_doc::{
     Document, Edge, Entity, Op, TextPatch,
 };
 use memvault_attach::{self, AttachmentManifest};
-use memvault_extract::{ExtractionHints, ExtractionRegistry};
 use memvault_query::{
     query_audit, AuditQuery, AuditRecord, QuotaManager, SearchHit, TextIndex,
 };
@@ -550,7 +549,12 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>> {
-        // Load manifest to get content
+        // Try cached extracted text first.
+        if let Some(text) = self.load_cached_extracted_text(manifest_cid) {
+            return Ok(Some(text));
+        }
+
+        // No cache — extract from raw content (with panic protection).
         let manifest_data = self
             .store
             .get_block(manifest_cid)?
@@ -559,20 +563,8 @@ impl MemvaultClient for LocalClient {
         let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
 
-        // Check if extraction is supported for this MIME type
-        let registry = ExtractionRegistry::with_defaults();
-        if !registry.can_extract(&manifest.mime_type) {
-            return Ok(None);
-        }
-
-        // Read the content
         let content = memvault_attach::read_range::read_full(&self.store, &manifest.content_root)?;
-
-        // Run extraction
-        match registry.extract(&content, &manifest.mime_type, &ExtractionHints::default()) {
-            Ok(extracted) => Ok(Some(extracted.text)),
-            Err(_) => Ok(None),
-        }
+        Ok(safe_extract_text(&content, &manifest.mime_type))
     }
 
     async fn pin_attachment(&self, manifest_cid: &[u8]) -> Result<()> {
