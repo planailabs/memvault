@@ -165,15 +165,39 @@ impl LocalClient {
                     let mime_type = val.get("mime_type").and_then(|v| v.as_str())
                         .unwrap_or("application/octet-stream");
                     if let Some(mcid) = manifest_cid {
-                        // Try cached extraction first, then extract fresh.
+                        // Try cached extraction first, then extract fresh and cache.
                         let extraction = match self.load_cached_extraction(&mcid) {
                             Some(cached) => cached,
                             None => {
-                                if let Ok(content) = self.read_attachment(&mcid).await {
+                                let result = if let Ok(content) = self.read_attachment(&mcid).await {
                                     safe_extract_text(&content, mime_type)
                                 } else {
                                     ExtractionResult::Unsupported
+                                };
+                                // Cache the result in the blockstore for next time.
+                                match &result {
+                                    ExtractionResult::Ok(text) => {
+                                        let et = memvault_extract::ExtractedText {
+                                            source: mcid.clone(),
+                                            extractor: "memvault-extract".to_string(),
+                                            extractor_version: env!("CARGO_PKG_VERSION").to_string(),
+                                            extracted_at_ns: memvault_core::wall_ns(),
+                                            text: text.clone(),
+                                            page_breaks: vec![],
+                                            warnings: vec![],
+                                        };
+                                        if let Ok(et_bytes) = serde_json::to_vec(&et) {
+                                            let et_cid = cid_from_bytes(&et_bytes);
+                                            let _ = self.store.put_block(&et_cid.to_bytes(), &et_bytes);
+                                            self.store_manifest_update(&mcid, Some(et_cid.to_bytes()), None);
+                                        }
+                                    }
+                                    ExtractionResult::Failed(err) => {
+                                        self.store_manifest_update(&mcid, None, Some(err));
+                                    }
+                                    ExtractionResult::Unsupported => {}
                                 }
+                                result
                             }
                         };
                         let text = match &extraction {
