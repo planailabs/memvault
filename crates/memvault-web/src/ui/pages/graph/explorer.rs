@@ -419,6 +419,8 @@ pub fn GraphExplorer() -> Element {
 
 #[component]
 fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
+    // Build the simulation graph structure without running physics.
+    // Physics only runs client-side in use_effect below.
     let mut sim = use_signal(|| {
         let mut s = ForceSimulation::new();
         for node in &initial_nodes {
@@ -432,14 +434,16 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                 }
             }
         }
+        // Don't run physics here — use_signal runs on both server (SSR)
+        // and client (hydration). Physics runs only client-side below.
         s
     });
 
     let mut selected = use_signal(|| None::<String>);
     let mut viewport = use_signal(Viewport::default);
-    let mut viewport_initialized = use_signal(|| false);
+    let mut sim_ran = use_signal(|| false);
     let mut dragging_node = use_signal(|| None::<usize>);
-    let mut did_drag = use_signal(|| false); // true if mouse moved during a node drag
+    let mut did_drag = use_signal(|| false);
     let mut panning = use_signal(|| false);
     let mut pan_start = use_signal(|| (0.0f64, 0.0f64));
     let mut sidebar_search = use_signal(String::new);
@@ -447,28 +451,18 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut focus_node = use_signal(|| None::<String>);
     let mut detail = use_signal(|| None::<NodeDetail>);
 
-    // Run the simulation to settle on initial load, then auto-fit viewport.
-    // After settling, we leave alpha at alpha_min so re-runs (hydration) are a no-op.
+    // Run simulation client-side only (use_effect doesn't fire during SSR).
     use_effect(move || {
-        let mut s = sim.write();
-        if s.is_settled() {
-            // Already settled (e.g. hydration re-run) — just fit viewport if needed.
-            if !*viewport_initialized.read() {
-                viewport.set(Viewport::fit_to_nodes(&s.nodes));
-                viewport_initialized.set(true);
-            }
+        if *sim_ran.read() {
             return;
         }
+        sim_ran.set(true);
+        let mut s = sim.write();
         for _ in 0..300 {
-            if s.is_settled() {
-                break;
-            }
+            if s.is_settled() { break; }
             s.tick();
         }
-        if !*viewport_initialized.read() {
-            viewport.set(Viewport::fit_to_nodes(&s.nodes));
-            viewport_initialized.set(true);
-        }
+        viewport.set(Viewport::fit_to_nodes(&s.nodes));
     });
 
     let s = sim.read();
