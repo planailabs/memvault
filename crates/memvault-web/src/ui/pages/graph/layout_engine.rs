@@ -1,6 +1,8 @@
-//! Force-directed graph layout engine.
+//! Force-directed graph layout engine with clustering.
 //!
 //! Pure Rust, WASM-compatible. Runs tick-by-tick in a Dioxus `use_effect`.
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -127,12 +129,9 @@ impl ForceSimulation {
         }
 
         // ── Many-body repulsion (Coulomb-like, N^2) ───────────────────
-        // Repulsion is NOT scaled by alpha — it provides a constant structural
-        // force that keeps nodes apart. Only the spring and centering forces
-        // decay with alpha so the layout converges without collapsing.
+        // Constant structural force that keeps nodes apart.
         let repulsion_strength = -2000.0;
-        // Minimum separation to avoid division-by-zero and extreme forces.
-        let min_dist_sq = 900.0; // = 30px minimum distance
+        let min_dist_sq = 900.0; // 30px minimum distance
         for i in 0..n {
             for j in (i + 1)..n {
                 let dx = self.nodes[j].x - self.nodes[i].x;
@@ -149,9 +148,30 @@ impl ForceSimulation {
             }
         }
 
+        // ── Clustering force ─────────────────────────────────────────
+        // Pulls nodes toward the centroid of their kind-group.
+        // Creates visual clusters without preventing cross-kind edges.
+        let cluster_strength = 0.15 * self.alpha;
+        let mut centroids: HashMap<String, (f64, f64, usize)> = HashMap::new();
+        for node in &self.nodes {
+            let entry = centroids.entry(node.kind.clone()).or_insert((0.0, 0.0, 0));
+            entry.0 += node.x;
+            entry.1 += node.y;
+            entry.2 += 1;
+        }
+        for node in &mut self.nodes {
+            if let Some(&(cx, cy, count)) = centroids.get(&node.kind) {
+                if count > 1 {
+                    let avg_x = cx / count as f64;
+                    let avg_y = cy / count as f64;
+                    node.vx += (avg_x - node.x) * cluster_strength;
+                    node.vy += (avg_y - node.y) * cluster_strength;
+                }
+            }
+        }
+
         // ── Link spring force ─────────────────────────────────────────
         // Pulls connected nodes toward link_distance apart.
-        // Scaled by alpha so it weakens as the system cools.
         let link_distance = 200.0;
         let link_strength = 0.08;
         for edge in &self.edges {
@@ -169,8 +189,6 @@ impl ForceSimulation {
         }
 
         // ── Centering force ───────────────────────────────────────────
-        // Very gentle pull toward the origin to keep the graph on-screen.
-        // Only affects the center of mass, not individual node separation.
         let center_strength = 0.01 * self.alpha;
         for node in &mut self.nodes {
             node.vx -= node.x * center_strength;
@@ -178,7 +196,6 @@ impl ForceSimulation {
         }
 
         // ── Collision avoidance ───────────────────────────────────────
-        // Push overlapping nodes apart based on their radii.
         for i in 0..n {
             for j in (i + 1)..n {
                 let dx = self.nodes[j].x - self.nodes[i].x;
@@ -204,7 +221,6 @@ impl ForceSimulation {
                 node.vx = 0.0;
             } else {
                 node.vx *= self.velocity_decay;
-                // Cap velocity to prevent explosions.
                 node.vx = node.vx.clamp(-50.0, 50.0);
                 node.x += node.vx;
             }
