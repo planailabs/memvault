@@ -78,8 +78,43 @@ async fn resolve_node(
     client: &std::sync::Arc<dyn memvault_api::MemvaultClient>,
     node_tag: &str,
 ) -> (String, Option<AuditLink>) {
-    let label = client.resolve_label(node_tag).await.unwrap_or(None);
-    let display = label.unwrap_or_else(|| short_id(node_tag));
+    // Try text index first (fast).
+    if let Ok(Some(label)) = client.resolve_label(node_tag).await {
+        let link = audit_link_from_tag(node_tag, &label);
+        return (label, link);
+    }
+    // Also try with legacy "attachment:" prefix if "file:" lookup failed.
+    if node_tag.starts_with("file:") {
+        let legacy = format!("attachment:{}", &node_tag[5..]);
+        if let Ok(Some(label)) = client.resolve_label(&legacy).await {
+            let link = audit_link_from_tag(node_tag, &label);
+            return (label, link);
+        }
+    }
+    // Fall back to fetching the actual object for its name.
+    if let Some(node_ref) = memvault_core::NodeRef::from_tag_label(node_tag) {
+        let label = match &node_ref {
+            memvault_core::NodeRef::Doc(did) => {
+                client.get_doc(did).await.ok().flatten()
+                    .and_then(|d| d.frontmatter.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            }
+            memvault_core::NodeRef::Entity(eid) => {
+                client.get_entity(eid).await.ok().flatten()
+                    .and_then(|e| e.props.get("name").or_else(|| e.props.get("title"))
+                        .and_then(|v| v.as_str()).map(|s| s.to_string()))
+            }
+            memvault_core::NodeRef::Attachment(cid) => {
+                client.get_file_manifest(cid).await.ok().flatten()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|v| v.get("filename").and_then(|f| f.as_str()).map(|s| s.to_string()))
+            }
+        };
+        if let Some(name) = label {
+            let link = audit_link_from_tag(node_tag, &name);
+            return (name, link);
+        }
+    }
+    let display = short_id(node_tag);
     let link = audit_link_from_tag(node_tag, &display);
     (display, link)
 }
