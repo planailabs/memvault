@@ -59,7 +59,9 @@ pub fn query_audit(
     let cids = if let Some(author) = &query.author {
         store.query_by_author(author, after, limit)?
     } else {
-        store.query_by_time(after, before, limit)?
+        // Newest first so recent operations show up even when there are
+        // many older annotations/edges that would fill the limit.
+        store.query_by_time_desc(after, before, limit)?
     };
 
     let mut records = Vec::new();

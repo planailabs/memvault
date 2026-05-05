@@ -119,4 +119,35 @@ impl MemvaultStore {
         }
         Ok(results)
     }
+
+    /// Query CIDs by time range, newest first (descending), up to `limit` results.
+    pub fn query_by_time_desc(
+        &self,
+        after_ns: u64,
+        before_ns: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TIME)?;
+
+        let start = keys::pack_time_key(after_ns, &[]);
+        let end = keys::pack_time_key(before_ns, &[]);
+
+        let mut results = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())?;
+        // Collect then reverse — redb ranges are always ascending.
+        // For bounded limits this is fine; for very large tables we'd
+        // want a proper reverse iterator but redb doesn't support that
+        // on ranges easily.
+        let entries: Vec<_> = range.collect();
+        for entry in entries.into_iter().rev() {
+            let (key, _) = entry?;
+            let cid = keys::unpack_time_cid(key.value())?;
+            results.push(cid.to_vec());
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
 }
