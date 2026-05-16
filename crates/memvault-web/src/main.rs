@@ -42,18 +42,8 @@ fn main() {
         });
     }
 
-    #[cfg(all(not(feature = "server"), not(feature = "web-embedded")))]
+    #[cfg(not(feature = "server"))]
     {
         dioxus::launch(memvault_web::ui::app::App);
-    }
-
-    // Embedded daemon mode: dioxus-web without hydrate feature.
-    #[cfg(feature = "web-embedded")]
-    {
-        dioxus_web::launch::launch(
-            memvault_web::ui::app::App,
-            vec![],
-            vec![],
-        );
     }
 }

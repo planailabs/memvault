@@ -15,9 +15,6 @@ required-features = ["webui"]
 [features]
 default = ["web", "server"]
 web = ["webui", "dioxus/web", "dep:getrandom"]
-# Embedded daemon mode: dioxus-web WITHOUT hydrate, dioxus-fullstack WITH web
-# (browser fetch). Use with `dx build --skip-platform-features`.
-web-embedded = ["webui", "dep:dioxus-web", "dep:dioxus-fullstack", "dioxus/fullstack", "dioxus/router", "dep:getrandom"]
 webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid", "dep:gloo-timers"]
 server = [
     "webui", "dioxus/server",
@@ -53,9 +50,6 @@ thiserror = { version = "2", optional = true }
 
 # UI dependencies (behind webui feature)
 dioxus = { version = "0.7.9", features = ["fullstack", "router"], optional = true }
-# Direct deps for web-embedded: dioxus-web without hydrate, dioxus-fullstack with browser fetch
-dioxus-web = { version = "0.7.9", default-features = false, features = ["document", "mounted", "devtools"], optional = true }
-dioxus-fullstack = { version = "0.7.9", default-features = false, features = ["web"], optional = true }
 wasm-bindgen = { version = "=0.2.114", optional = true }
 web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "Event", "KeyboardEvent", "Window", "Location"], optional = true }
 js-sys = { version = "0.3", optional = true }
