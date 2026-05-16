@@ -142,7 +142,7 @@ pub fn CommandPalette() -> Element {
             {
                 gloo_timers::future::TimeoutFuture::new(500).await;
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
             {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }

@@ -6,11 +6,11 @@
 //! gated behind the `server` feature so the crate compiles cleanly as a
 //! WASM client when built with `--features web`.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 pub mod api;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 pub mod components;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 pub mod error;
 
 #[cfg(feature = "webui")]
@@ -21,7 +21,7 @@ pub use plan_ai_design as design;
 
 // ── Server-only exports ────────────────────────────────────────────────
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 mod server_router {
     use std::sync::Arc;
 
@@ -137,7 +137,7 @@ mod server_router {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "server")]
 pub use server_router::*;
 
 #[cfg(test)]
