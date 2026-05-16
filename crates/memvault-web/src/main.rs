@@ -42,8 +42,19 @@ fn main() {
         });
     }
 
-    #[cfg(not(feature = "server"))]
+    #[cfg(all(not(feature = "server"), not(feature = "web-embedded")))]
     {
         dioxus::launch(memvault_web::ui::app::App);
+    }
+
+    // Embedded daemon mode: launch via dioxus-web directly WITHOUT hydrate
+    // feature to avoid hydration mismatches from separately-built WASM.
+    #[cfg(feature = "web-embedded")]
+    {
+        dioxus_web::launch::launch(
+            memvault_web::ui::app::App,
+            vec![],
+            vec![],
+        );
     }
 }
