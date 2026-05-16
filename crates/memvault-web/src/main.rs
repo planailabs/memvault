@@ -42,28 +42,8 @@ fn main() {
         });
     }
 
-    #[cfg(all(not(feature = "server"), not(feature = "web-embedded")))]
+    #[cfg(not(feature = "server"))]
     {
         dioxus::launch(memvault_web::ui::app::App);
-    }
-
-    // Embedded daemon mode: launch via dioxus-web directly WITHOUT hydrate
-    // feature to avoid hydration mismatches from separately-built WASM.
-    // SSR content remains visible until this point (fast initial paint), then
-    // the client takes over with a fresh render.
-    #[cfg(feature = "web-embedded")]
-    {
-        // Clear SSR content before fresh render to avoid duplicate DOM nodes.
-        if let Some(el) = web_sys::window()
-            .and_then(|w| w.document())
-            .and_then(|d| d.get_element_by_id("main"))
-        {
-            el.set_inner_html("");
-        }
-        dioxus_web::launch::launch(
-            memvault_web::ui::app::App,
-            vec![],
-            vec![],
-        );
     }
 }

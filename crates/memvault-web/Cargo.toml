@@ -15,10 +15,6 @@ required-features = ["webui"]
 [features]
 default = ["web", "server"]
 web = ["webui", "dioxus/web", "dep:getrandom"]
-# Client-only render: pulls in dioxus-web WITHOUT the hydrate feature so the
-# WASM does a fresh render instead of trying to hydrate SSR content. This
-# avoids hydration mismatches when the WASM is built separately from the server.
-web-embedded = ["webui", "dep:dioxus-web", "dioxus/fullstack", "dioxus/router", "dep:getrandom"]
 webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid", "dep:gloo-timers"]
 server = [
     "webui", "dioxus/server",
@@ -54,8 +50,6 @@ thiserror = { version = "2", optional = true }
 
 # UI dependencies (behind webui feature)
 dioxus = { version = "0.7", features = ["fullstack", "router"], optional = true }
-# Direct dioxus-web dep for web-embedded: document + mounted but NO hydrate.
-dioxus-web = { version = "0.7", default-features = false, features = ["document", "mounted", "devtools"], optional = true }
 wasm-bindgen = { version = "=0.2.114", optional = true }
 web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "Event", "KeyboardEvent", "Window", "Location"], optional = true }
 js-sys = { version = "0.3", optional = true }
