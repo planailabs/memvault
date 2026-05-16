@@ -107,39 +107,33 @@ mod server_router {
     where
         F: Fn(&str) -> Option<axum::response::Response> + Clone + Send + Sync + 'static,
     {
-        use axum::extract::State;
         use axum::http::Request;
         use axum::body::Body;
-        use dioxus::server::{DioxusRouterExt, FullstackState, ServeConfig};
+        use axum::middleware;
+        use dioxus::server::{DioxusRouterExt, ServeConfig};
 
         // API routes (already stateless — .with_state() called inside).
         let api = Router::new().nest("/api/v1", super::api::routes(state));
 
-        // Combined fallback: try embedded asset first, then SSR.
-        let try_asset_clone = try_asset.clone();
-        let combined_fallback = move |State(ssr_state): State<FullstackState>,
-                                      request: Request<Body>| {
-            let try_asset = try_asset_clone.clone();
+        // Dioxus server functions + SSR (GET-only fallback, matching standard
+        // serve_api_application pattern to avoid hydration mismatches).
+        let dioxus = Router::new()
+            .serve_api_application(ServeConfig::new(), super::ui::app::App);
+
+        // Layer that intercepts requests for embedded static assets before they
+        // reach the Dioxus SSR handler.
+        let asset_layer = middleware::from_fn(move |request: Request<Body>, next: middleware::Next| {
+            let try_asset = try_asset.clone();
             async move {
                 let path = request.uri().path().trim_start_matches('/');
-                // Serve embedded static assets (wasm, js, css).
                 if let Some(response) = try_asset(path) {
                     return response;
                 }
-                // SSR: render HTML with hydration data.
-                axum::response::IntoResponse::into_response(
-                    FullstackState::render_handler(State(ssr_state), request).await
-                )
+                next.run(request).await
             }
-        };
+        });
 
-        // Dioxus server functions + SSR with combined fallback.
-        let dioxus = Router::<FullstackState>::new()
-            .register_server_functions()
-            .fallback(combined_fallback)
-            .with_state(FullstackState::new(ServeConfig::new(), super::ui::app::App));
-
-        api.merge(dioxus)
+        api.merge(dioxus).layer(asset_layer)
     }
 }
 
