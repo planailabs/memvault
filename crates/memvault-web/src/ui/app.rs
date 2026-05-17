@@ -95,6 +95,7 @@ pub fn App() -> Element {
 
     rsx! {
         script { dangerous_inner_html: THEME_INIT_SCRIPT }
+        document::Stylesheet { href: asset!("/public/tailwind.css") }
 
         div { id: "wasm-loading",
             style: WASM_LOADING_STYLE,
