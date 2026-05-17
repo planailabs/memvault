@@ -19,6 +19,12 @@ pub mod ui;
 /// Re-export the shared design system for consumers.
 pub use plan_ai_design as design;
 
+/// Client-side (WASM) entry point — launches the dioxus web app with hydration.
+#[cfg(feature = "webui")]
+pub fn launch_client() {
+    dioxus::launch(ui::app::App);
+}
+
 // ── Server-only exports ────────────────────────────────────────────────
 
 #[cfg(feature = "server")]
@@ -66,74 +72,23 @@ mod server_router {
         Router::new().nest("/api/v1", super::api::routes(state))
     }
 
-    /// Minimal index.html for Dioxus SSR.  Includes the WASM script tag and
-    /// Tailwind CSS link.  Dioxus injects hydration data at render time.
-    const INDEX_HTML: &str = r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>memvault</title>
-    <link rel="stylesheet" href="/tailwind.css">
-</head>
-<body>
-    <div id="main"></div>
-    <script type="module" src="/wasm/memvault-web.js"></script>
-</body>
-</html>"#;
-
-    /// Tailwind CSS — bundled at compile time from the public/ directory.
-    const TAILWIND_CSS: &[u8] = include_bytes!("../public/tailwind.css");
-
-    /// Write index.html and tailwind.css to a temp dir and set `DIOXUS_PUBLIC_PATH`
-    /// so `ServeConfig::new()` picks them up.
-    /// Must be called **before** `build_fullstack_router` or `dioxus::serve`.
-    #[cfg(feature = "server")]
-    pub fn prepare_public_dir() {
-        let dir = std::env::temp_dir().join("memvault-web-public");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("index.html"), INDEX_HTML);
-        let _ = std::fs::write(dir.join("tailwind.css"), TAILWIND_CSS);
-        // SAFETY: called before the router is built.
-        unsafe { std::env::set_var("DIOXUS_PUBLIC_PATH", &dir) };
-    }
-
-    /// Build a fullstack router: API + Dioxus server fns + SSR + embedded assets.
+    /// Build a fullstack router: API + Dioxus SSR + static assets.
     ///
-    /// `try_asset` serves embedded static files (wasm, js, css).
-    /// The Dioxus SSR handler renders HTML pages with hydration data.
-    #[cfg(feature = "server")]
-    pub fn build_fullstack_router<F>(state: Arc<AppState>, try_asset: F) -> Router
-    where
-        F: Fn(&str) -> Option<axum::response::Response> + Clone + Send + Sync + 'static,
-    {
-        use axum::http::Request;
-        use axum::body::Body;
-        use axum::middleware;
+    /// Uses `serve_dioxus_application` (the standard dioxus fullstack pattern)
+    /// which handles SSR, hydration data injection, and static file serving
+    /// from `DIOXUS_PUBLIC_PATH`. The caller must ensure that directory contains
+    /// the WASM client assets before calling this.
+    pub fn build_fullstack_router(state: Arc<AppState>) -> Router<()> {
         use dioxus::server::{DioxusRouterExt, ServeConfig};
 
-        // API routes (already stateless — .with_state() called inside).
+        // API routes
         let api = Router::new().nest("/api/v1", super::api::routes(state));
 
-        // Dioxus server functions + SSR (GET-only fallback, matching standard
-        // serve_api_application pattern to avoid hydration mismatches).
+        // Dioxus fullstack: server fns + SSR + static assets (same as main.rs)
         let dioxus = Router::new()
-            .serve_api_application(ServeConfig::new(), super::ui::app::App);
+            .serve_dioxus_application(ServeConfig::new(), super::ui::app::App);
 
-        // Layer that intercepts requests for embedded static assets before they
-        // reach the Dioxus SSR handler.
-        let asset_layer = middleware::from_fn(move |request: Request<Body>, next: middleware::Next| {
-            let try_asset = try_asset.clone();
-            async move {
-                let path = request.uri().path().trim_start_matches('/');
-                if let Some(response) = try_asset(path) {
-                    return response;
-                }
-                next.run(request).await
-            }
-        });
-
-        api.merge(dioxus).layer(asset_layer)
+        api.merge(dioxus)
     }
 }
 
