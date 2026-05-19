@@ -16,6 +16,7 @@ required-features = ["webui"]
 default = ["web", "server"]
 web = ["webui", "dioxus/web", "dep:getrandom"]
 webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid", "dep:gloo-timers"]
+embed = ["dioxus?/embed"]
 server = [
     "webui", "dioxus/server",
     "dep:memvault-api", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth", "dep:memvault-store",
