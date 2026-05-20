@@ -526,16 +526,105 @@ pub async fn run(cli: Cli) -> Result<()> {
             client.save_index(&cache_path).await?;
             println!("  Index cache saved to {}", cache_path.display());
 
-            // Phase 3: Repair VFS tree — ensure all vfs:dir entities are reachable from the root
-            println!("Phase 3: Checking VFS tree integrity...");
+            // Phase 3: Scan for double-prefixed entity IDs in edge envelopes.
+            // A prior bug in the VFS/MCP layer could produce "entity:entity:<hex>"
+            // node references. The HTTP API rejects these, so they shouldn't exist
+            // in the blockstore, but we validate defensively.
+            println!("Phase 3: Scanning for double-prefixed entity IDs...");
+            let blocks_scan = store.iter_blocks()?;
+            let mut double_prefix_count = 0usize;
+            for (_cid, data) in &blocks_scan {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                    if let Some(tags) = val.get("tags").and_then(|v| v.as_array()) {
+                        for tag in tags {
+                            if let Some(arr) = tag.as_array() {
+                                if let Some(label) = arr.get(1).and_then(|v| v.as_str()) {
+                                    if label.starts_with("entity:entity:") {
+                                        double_prefix_count += 1;
+                                        eprintln!("  Found double-prefixed tag: {label}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if double_prefix_count > 0 {
+                eprintln!("  WARNING: {double_prefix_count} envelope(s) have double-prefixed entity IDs");
+                eprintln!("  Run Phase 1 rebuild (already done above) to clean secondary indexes");
+            } else {
+                println!("  No double-prefixed entity IDs found (data clean)");
+            }
+
+            // Phase 4: Repair VFS tree — ensure all vfs:dir entities are reachable from the root
+            println!("Phase 4: Checking VFS tree integrity...");
             let vfs_repaired = repair_vfs_tree(&client).await?;
             if vfs_repaired > 0 {
                 println!("  Linked {vfs_repaired} orphaned directory/ies to VFS root");
-                // Re-save index cache (Phase 3 may have retracted entities).
+                // Re-save index cache (Phase 4 may have retracted entities).
                 client.save_index(&cache_path).await?;
                 println!("  Index cache re-saved");
             } else {
                 println!("  VFS tree OK (no orphans)");
+            }
+
+            // Phase 5: Migrate entities tagged vfs_status:pending_repair.
+            // After the double-prefix fix, VFS operations work again. Link pending
+            // entities at their intended VFS paths and update their status tag.
+            println!("Phase 5: Migrating pending VFS entries...");
+            let pending_cids = store.query_by_tag("vfs_status", "pending_repair", 0, 10_000)?;
+            let mut migrated_vfs = 0usize;
+            let mut migration_errors = 0usize;
+            for cid in &pending_cids {
+                if let Some(data) = store.get_block(cid)? {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                        // Find the entity this envelope belongs to.
+                        let entity_tag = val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
+                            tags.iter().find_map(|t| {
+                                let arr = t.as_array()?;
+                                let scope = arr.first()?.as_str()?;
+                                let label = arr.get(1)?.as_str()?;
+                                if scope == "entity" { Some(label.to_string()) } else { None }
+                            })
+                        });
+                        let intended_path = val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
+                            tags.iter().find_map(|t| {
+                                let arr = t.as_array()?;
+                                let scope = arr.first()?.as_str()?;
+                                let label = arr.get(1)?.as_str()?;
+                                if scope == "vfs_intended_path" { Some(label.to_string()) } else { None }
+                            })
+                        });
+                        if let (Some(entity_hex), Some(path)) = (entity_tag, intended_path) {
+                            let node_ref = format!("entity:{entity_hex}");
+                            // Ensure parent dirs exist, then link.
+                            match crate::vfs::link_node_at_path(&client, &path, &node_ref).await {
+                                Ok(_) => {
+                                    // Update status tag: pending_repair → linked.
+                                    let _ = client.remove_tags(&node_ref, vec![("vfs_status".into(), "pending_repair".into())]).await;
+                                    let _ = client.add_tags(&node_ref, vec![("vfs_status".into(), "linked".into())]).await;
+                                    println!("  Linked {node_ref} at {path}");
+                                    migrated_vfs += 1;
+                                }
+                                Err(e) => {
+                                    eprintln!("  Failed to link {node_ref} at {path}: {e}");
+                                    migration_errors += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if migrated_vfs > 0 || migration_errors > 0 {
+                println!("  {migrated_vfs} migrated, {migration_errors} errors");
+                if migrated_vfs > 0 {
+                    client.save_index(&cache_path).await?;
+                    println!("  Index cache re-saved");
+                }
+            } else if pending_cids.is_empty() {
+                println!("  No pending VFS entries found");
+            } else {
+                println!("  {} pending entries found but none had vfs_intended_path", pending_cids.len());
             }
             println!("Repair complete.");
         }
