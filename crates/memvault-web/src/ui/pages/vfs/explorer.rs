@@ -57,26 +57,30 @@ async fn list_vfs_entries(path: String) -> Result<Vec<VfsRow>, ServerFnError> {
     let edges = client.edges_of(&current).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let mut entries = Vec::new();
+    // Collect entries, deduplicating by name (keep smallest edge ID on conflict).
+    let mut seen: std::collections::BTreeMap<String, (memvault_core::NodeRef, [u8; 32])> = std::collections::BTreeMap::new();
     for (src, edge) in &edges {
-        // Only outgoing edges (source == current dir); edges_of returns both directions.
-        if src != &current {
-            continue;
-        }
-        if edge.relation != VFS_CHILD_REL {
+        if src != &current || edge.relation != VFS_CHILD_REL {
             continue;
         }
         let name = edge.props.get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("?")
             .to_string();
-        let node_id = edge.target.tag_label();
-        let node_type = vfs_resolve_type(&*client, &edge.target).await;
+        match seen.get(&name) {
+            Some((_, eid)) if *eid <= edge.id.0 => {}
+            _ => { seen.insert(name, (edge.target.clone(), edge.id.0)); }
+        }
+    }
+    let mut entries = Vec::new();
+    for (name, (target, eid)) in &seen {
+        let node_id = target.tag_label();
+        let node_type = vfs_resolve_type(&*client, target).await;
         entries.push(VfsRow {
-            name,
+            name: name.clone(),
             node_id,
             node_type,
-            edge_id: hex::encode(edge.id.0),
+            edge_id: hex::encode(eid),
         });
     }
     entries.sort_by(|a, b| {
@@ -102,8 +106,18 @@ async fn vfs_mkdir(path: String) -> Result<String, ServerFnError> {
             None => {
                 let id = vfs_create_dir(&*client, component).await?;
                 let child = NodeRef::Entity(id);
-                vfs_create_edge(&*client, &current, &child, component).await?;
-                current = child;
+                match vfs_create_edge(&*client, &current, &child, component).await {
+                    Ok(_) => current = child,
+                    Err(_) => {
+                        // Race: another writer created this entry concurrently.
+                        match vfs_find_named_child(&*client, &current, component).await? {
+                            Some(existing) => current = existing,
+                            None => return Err(ServerFnError::new(
+                                format!("failed to create directory component '{component}'"),
+                            )),
+                        }
+                    }
+                }
             }
         }
     }
@@ -248,6 +262,11 @@ async fn vfs_create_edge(
     use memvault_core::{EdgeId, Visibility};
     use memvault_doc::Edge;
     use std::collections::BTreeMap;
+
+    // Prevent duplicate entries with the same name under the same parent.
+    if vfs_find_named_child(client, parent, name).await?.is_some() {
+        return Err(ServerFnError::new(format!("entry '{name}' already exists in directory")));
+    }
 
     let mut props = BTreeMap::new();
     props.insert("name".to_string(), serde_json::Value::String(name.to_string()));

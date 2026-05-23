@@ -61,12 +61,14 @@ pub async fn ensure_root(client: &dyn MemvaultClient) -> Result<EntityId> {
 }
 
 /// List all vfs:child entries under a parent node (outgoing edges only).
+/// When duplicate edges share the same name (CRDT conflict), only the
+/// canonical entry (smallest EdgeId) is returned.
 pub async fn list_children(
     client: &dyn MemvaultClient,
     parent: &NodeRef,
 ) -> Result<Vec<(String, NodeRef, EdgeId)>> {
     let edges = client.edges_of(parent).await?;
-    let mut children = Vec::new();
+    let mut seen: BTreeMap<String, (NodeRef, EdgeId)> = BTreeMap::new();
     for (src, edge) in &edges {
         if src != parent || edge.relation != VFS_CHILD_REL {
             continue;
@@ -75,9 +77,13 @@ pub async fn list_children(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        children.push((name, edge.target.clone(), EdgeId(edge.id.0)));
+        let eid = EdgeId(edge.id.0);
+        match seen.get(&name) {
+            Some((_, existing)) if existing.0 <= eid.0 => {}
+            _ => { seen.insert(name, (edge.target.clone(), eid)); }
+        }
     }
-    Ok(children)
+    Ok(seen.into_iter().map(|(name, (target, eid))| (name, target, eid)).collect())
 }
 
 /// Find a named child under a parent. If multiple edges match (CRDT conflict),
@@ -178,18 +184,20 @@ pub async fn ensure_dir_path(
             None => {
                 let id = create_dir(client, component).await?;
                 let child = NodeRef::Entity(id);
-                // Don't check for collision — we already checked via find_named_child.
-                let mut props = BTreeMap::new();
-                props.insert("name".to_string(), serde_json::Value::String(component.to_string()));
-                let edge = Edge {
-                    id: EdgeId::random(),
-                    relation: VFS_CHILD_REL.to_string(),
-                    target: child.clone(),
-                    weight: None,
-                    props,
-                    provenance: None,
-                };
-                client.add_link(&current, edge, Visibility::Internal).await?;
+                match create_child_edge(client, &current, &child, component).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        // Race: another writer created this entry concurrently.
+                        // Use the existing one instead of our orphaned dir.
+                        if let Some((existing, _)) = find_named_child(client, &current, component).await? {
+                            current = existing;
+                            continue;
+                        }
+                        return Err(crate::error::ApiError::Other(
+                            format!("failed to create directory component '{component}'"),
+                        ));
+                    }
+                }
                 current = child;
             }
         }

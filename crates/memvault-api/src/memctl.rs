@@ -890,7 +890,42 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         }
     }
 
-    // 4. Walk tree from canonical root to find all reachable dirs.
+    // 4. Deduplicate same-name entries within each directory.
+    {
+        let mut dedup_stack: Vec<NodeRef> = vec![root_ref.clone()];
+        let mut visited: HashSet<[u8; 32]> = HashSet::new();
+        visited.insert(root_bytes);
+        while let Some(current) = dedup_stack.pop() {
+            let edges = client.edges_of(&current).await.unwrap_or_default();
+            // Group vfs:child edges by name, keeping smallest EdgeId as canonical.
+            let mut by_name: std::collections::BTreeMap<String, Vec<([u8; 32], NodeRef)>> = std::collections::BTreeMap::new();
+            for (src, edge) in &edges {
+                if *src != current || edge.relation != VFS_CHILD_REL { continue; }
+                let name = edge.props.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                by_name.entry(name).or_default().push((edge.id.0, edge.target.clone()));
+            }
+            for (name, mut entries) in by_name {
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                // Queue canonical entry for recursive dedup.
+                if let Some((_, target)) = entries.first() {
+                    if let NodeRef::Entity(eid) = target {
+                        if visited.insert(eid.0) {
+                            dedup_stack.push(target.clone());
+                        }
+                    }
+                }
+                // Retract duplicate edges (all except the first/smallest).
+                for (dup_eid, _) in &entries[1..] {
+                    if client.remove_link_from(&current, &EdgeId(*dup_eid)).await.is_ok() {
+                        println!("  Retracted duplicate edge for \"{name}\" (edge {})", hex::encode(dup_eid));
+                        actions += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Walk tree from canonical root to find all reachable dirs.
     let mut reachable: HashSet<[u8; 32]> = HashSet::new();
     reachable.insert(root_bytes);
     let mut stack: Vec<NodeRef> = vec![root_ref.clone()];
@@ -906,7 +941,7 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         }
     }
 
-    // 5. Link genuinely orphaned dirs to root (not duplicates, not already reachable).
+    // 6. Link genuinely orphaned dirs to root (not duplicates, not already reachable).
     let retracted: HashSet<[u8; 32]> = root_candidates[1..].iter().copied().collect();
     for (id, name) in &all_dirs {
         if reachable.contains(id) || retracted.contains(id) { continue; }
