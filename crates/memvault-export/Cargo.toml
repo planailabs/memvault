@@ -1,0 +1,32 @@
+[package]
+name = "memvault-export"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memvault-core = { path = "../memvault-core" }
+memvault-doc = { path = "../memvault-doc" }
+memvault-api = { path = "../memvault-api" }
+memvault-query = { path = "../memvault-query" }
+memvault-store = { path = "../memvault-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+anyhow = "1"
+tracing = "0.1"
+hex = "0.4"
+tar = "0.4"
+flate2 = "1"
+regex = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+
+[[bin]]
+name = "memvault-export"
+path = "src/bin/memvault-export.rs"
+
+[dev-dependencies]
+tempfile = "3"
