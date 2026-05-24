@@ -23,21 +23,12 @@ pub use memvault_import;
 #[derive(Parser, Debug)]
 #[command(name = "memctl", about = "Memvault management CLI")]
 pub struct Cli {
-    /// Data directory
+    /// Data directory (fallback when --db is not set)
     #[arg(long, env = "MEMVAULT_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
-    /// Path to the redb database file directly (alternative to --data-dir)
-    #[arg(long, env = "MEMVAULT_DB")]
-    pub db: Option<PathBuf>,
-
-    /// Memvault HTTP API URL (used when --db is not set)
-    #[arg(long, env = "MEMVAULT_URL")]
-    pub url: Option<String>,
-
-    /// Bearer token file (HTTP mode)
-    #[arg(long, env = "MEMVAULT_TOKEN_FILE")]
-    pub token_file: Option<PathBuf>,
+    #[command(flatten)]
+    pub client: memvault_api::ClientArgs,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -285,35 +276,26 @@ fn parse_entity_id(hex_str: &str) -> Result<EntityId> {
 /// Run the memctl CLI with the given parsed arguments.
 pub async fn run(cli: Cli) -> Result<()> {
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
-    let db_override = cli.db.clone();
-    let url = cli.url.clone();
-    let token_file = cli.token_file.clone();
+    let client_args = cli.client;
 
+    // For commands that need direct store access (RepairIndex, FixClusterId, etc.),
+    // use the db path from client_args or fall back to data_dir.
     let make_store = || -> Result<Arc<MemvaultStore>> {
-        if let Some(ref db_path) = db_override {
+        if let Some(ref db_path) = client_args.db {
             open_store_at(db_path)
         } else {
             open_store(&data_dir)
         }
     };
 
-    // Helper to create unified connect options.
-    let make_connect_opts = || -> memvault_api::ConnectOptions {
-        let db_for_connect = db_override.clone().or_else(|| {
-            if url.is_none() {
-                Some(data_dir.join("blocks.redb"))
-            } else {
-                None
-            }
-        });
-        let token = token_file.as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.trim().to_string());
-        memvault_api::ConnectOptions {
-            db: db_for_connect,
-            url: url.clone(),
-            token,
+    // For commands that work via MemvaultClient (local or HTTP).
+    let connect = || {
+        let mut args = client_args.clone();
+        // If no --db was given and no explicit --url, default to data_dir/blocks.redb
+        if args.db.is_none() && args.url == "http://127.0.0.1:8401" {
+            args.db = Some(data_dir.join("blocks.redb"));
         }
+        args
     };
 
     match cli.command {
@@ -563,7 +545,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let (doc_count, entity_count, attachment_count) = client.populate_index().await?;
             println!("  {doc_count} docs, {entity_count} entities, {attachment_count} attachments");
 
-            let cache_path = if let Some(ref db_path) = db_override {
+            let cache_path = if let Some(ref db_path) = client_args.db {
                 db_path.with_extension("text_index.json")
             } else {
                 data_dir.join("text_index.json")
@@ -704,7 +686,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("Indexed {patched} envelopes into CLUSTER_ORIGIN ({skipped} non-envelope blocks skipped).");
         }
         Commands::Export { output, tar, gzip, history, no_vfs, tag, view } => {
-            let client = memvault_api::connect(make_connect_opts()).await?;
+            let client = connect().connect().await?;
             let tag_filter = tag.as_deref().and_then(|t| {
                 let parts: Vec<&str> = t.splitn(2, ':').collect();
                 if parts.len() == 2 {
@@ -728,13 +710,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             );
         }
         Commands::ImportFiles { path, vfs, tag, visibility } => {
-            let client = memvault_api::connect(make_connect_opts()).await?;
+            let client = connect().connect().await?;
             let tags = memvault_api::docs::parse_tags(&tag);
             let imported = memvault_import::import_files(&*client, &path, vfs.as_deref(), &tags, &visibility).await?;
             println!("Imported {imported} file(s).");
         }
         Commands::ImportDocs { path, vfs, tag, visibility } => {
-            let client = memvault_api::connect(make_connect_opts()).await?;
+            let client = connect().connect().await?;
             let tags = memvault_api::docs::parse_tags(&tag);
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));
             let imported = memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis).await?;

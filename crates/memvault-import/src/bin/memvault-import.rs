@@ -8,17 +8,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "memvault-import", about = "Import files and documents into memvault")]
 struct Cli {
-    /// Path to redb database (local mode)
-    #[arg(long, env = "MEMVAULT_DB")]
-    db: Option<PathBuf>,
-
-    /// Memvault HTTP API URL (used when --db is not set)
-    #[arg(long, env = "MEMVAULT_URL", default_value = "http://127.0.0.1:8401")]
-    url: String,
-
-    /// Bearer token file (HTTP mode)
-    #[arg(long, env = "MEMVAULT_TOKEN_FILE")]
-    token_file: Option<PathBuf>,
+    #[command(flatten)]
+    client: memvault_api::ClientArgs,
 
     #[command(subcommand)]
     command: Commands,
@@ -66,20 +57,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-
-    // Import requires local mode (file uploads go through LocalClient)
-    if cli.db.is_none() {
-        anyhow::bail!("--db is required for import (file uploads require local access)");
-    }
-
-    let token = cli.token_file.as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string());
-    let client = memvault_api::connect(memvault_api::ConnectOptions {
-        db: cli.db,
-        url: Some(cli.url),
-        token,
-    }).await?;
+    let client = cli.client.connect().await?;
 
     match cli.command {
         Commands::Files { path, vfs, tag, visibility } => {

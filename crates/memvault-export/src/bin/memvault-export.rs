@@ -10,6 +10,9 @@ use memvault_export::{create_sink, run_export, ExportOptions};
 #[derive(Parser)]
 #[command(name = "memvault-export", about = "Export memvault content to directory or tar archive")]
 struct Cli {
+    #[command(flatten)]
+    client: memvault_api::ClientArgs,
+
     /// Output path (directory or .tar/.tar.gz file)
     #[arg(short, long, default_value = "./memvault-export")]
     output: PathBuf,
@@ -37,18 +40,6 @@ struct Cli {
     /// Filter by view name
     #[arg(long)]
     view: Option<String>,
-
-    /// Path to redb database (local mode)
-    #[arg(long, env = "MEMVAULT_DB")]
-    db: Option<PathBuf>,
-
-    /// Memvault HTTP API URL (used when --db is not set)
-    #[arg(long, env = "MEMVAULT_URL", default_value = "http://127.0.0.1:8401")]
-    url: String,
-
-    /// Bearer token file (HTTP mode)
-    #[arg(long, env = "MEMVAULT_TOKEN_FILE")]
-    token_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -78,15 +69,7 @@ async fn main() -> Result<()> {
         view_filter: cli.view,
     };
 
-    let token = cli.token_file.as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string());
-    let client = memvault_api::connect(memvault_api::ConnectOptions {
-        db: cli.db,
-        url: Some(cli.url),
-        token,
-    }).await?;
-
+    let client = cli.client.connect().await?;
     let sink = create_sink(&cli.output, cli.tar, cli.gzip)?;
     let stats = run_export(&*client, sink, opts).await?;
 
