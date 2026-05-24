@@ -3,12 +3,14 @@
 //! This crate provides the core export logic used by both the CLI binary and MCP tools.
 
 pub mod export;
+pub mod node;
 pub mod plan;
 pub mod sink;
 pub mod title;
 pub mod vfs_tree;
 
 pub use export::{run_export, export_single_doc, export_single_entity, export_single_file, ExportStats};
+pub use node::{export_node, NodeExportResult};
 pub use plan::ExportPlan;
 pub use sink::{create_sink, DirSink, ExportSink, TarSink};
 
