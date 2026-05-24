@@ -3,12 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use memvault_api::LocalClient;
+use memvault_api::MemvaultClient;
 use memvault_core::Visibility;
 
 /// Import files recursively, optionally placing them in the VFS.
 pub async fn import_files(
-    client: &LocalClient,
+    client: &dyn MemvaultClient,
     path: &Path,
     vfs_folder: Option<&str>,
     tags: &[(String, String)],
@@ -46,7 +46,7 @@ pub async fn import_files(
 
 /// Import text/markdown files as documents, optionally placing them in the VFS.
 pub async fn import_docs(
-    client: &LocalClient,
+    client: &dyn MemvaultClient,
     path: &Path,
     vfs_folder: Option<&str>,
     tags: &[(String, String)],

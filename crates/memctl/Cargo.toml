@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 memvault-core = { path = "../memvault-core" }
 memvault-doc = { path = "../memvault-doc" }
-memvault-api = { path = "../memvault-api" }
+memvault-api = { path = "../memvault-api", features = ["http-client"] }
 memvault-store = { path = "../memvault-store" }
 memvault-query = { path = "../memvault-query" }
 memvault-auth = { path = "../memvault-auth" }

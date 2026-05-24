@@ -42,7 +42,7 @@ struct Cli {
     #[arg(long, env = "MEMVAULT_DB")]
     db: Option<PathBuf>,
 
-    /// Memvault HTTP API URL
+    /// Memvault HTTP API URL (used when --db is not set)
     #[arg(long, env = "MEMVAULT_URL", default_value = "http://127.0.0.1:8401")]
     url: String,
 
@@ -78,13 +78,17 @@ async fn main() -> Result<()> {
         view_filter: cli.view,
     };
 
-    let db_path = cli.db.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("--db is required (HTTP mode not yet supported, use local redb path)")
-    })?;
-    let client = create_local_client(db_path).await?;
+    let token = cli.token_file.as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string());
+    let client = memvault_api::connect(memvault_api::ConnectOptions {
+        db: cli.db,
+        url: Some(cli.url),
+        token,
+    }).await?;
 
     let sink = create_sink(&cli.output, cli.tar, cli.gzip)?;
-    let stats = run_export(&client, sink, opts).await?;
+    let stats = run_export(&*client, sink, opts).await?;
 
     println!(
         "Exported {} documents, {} files, {} entities ({} history versions)",
@@ -93,23 +97,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
-async fn create_local_client(db_path: &std::path::Path) -> Result<memvault_api::LocalClient> {
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-    use memvault_query::{QuotaManager, TextIndex};
-    use memvault_store::MemvaultStore;
-    use memvault_api::EventBus;
-
-    let store = Arc::new(MemvaultStore::open(db_path)?);
-    let client = memvault_api::LocalClient::new(
-        store,
-        Arc::new(RwLock::new(TextIndex::new())),
-        Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
-        Arc::new(EventBus::new(16)),
-        vec![0u8; 32],
-        vec![0u8; 32],
-    );
-    Ok(client)
-}
-

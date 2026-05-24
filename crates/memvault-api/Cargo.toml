@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 default = []
+http-client = ["dep:reqwest"]
 otel = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
 
 [dependencies]
@@ -27,6 +28,7 @@ dirs = "6"
 hex = "0.4"
 mime_guess = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { workspace = true, optional = true, features = ["multipart"] }
 opentelemetry = { version = "0.27", optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
 
