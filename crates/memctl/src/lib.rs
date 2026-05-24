@@ -1,4 +1,4 @@
-//! memctl CLI — can be invoked as a standalone binary or as a daemon subcommand.
+//! memctl — Memvault management CLI library.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,12 +8,17 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio::sync::RwLock;
 
-use crate::{EventBus, LocalClient, MemvaultClient};
+use memvault_api::{EventBus, LocalClient, MemvaultClient};
 use memvault_core::{ClusterId, DocId, EntityId, Visibility};
 use memvault_doc::{Edge, Entity};
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_auth::Role;
 use memvault_store::MemvaultStore;
+
+// Re-export for convenience
+pub use memvault_api;
+pub use memvault_export;
+pub use memvault_import;
 
 #[derive(Parser, Debug)]
 #[command(name = "memctl", about = "Memvault management CLI")]
@@ -176,6 +181,30 @@ pub enum Commands {
         /// Target peer ID (hex)
         peer_id: String,
     },
+    /// Export vault content to a directory or tar archive
+    Export {
+        /// Output path (directory or .tar/.tar.gz file)
+        #[arg(short, long, default_value = "./memvault-export")]
+        output: PathBuf,
+        /// Force tar output
+        #[arg(long)]
+        tar: bool,
+        /// Compress tar with gzip
+        #[arg(long)]
+        gzip: bool,
+        /// Include historical versions of documents
+        #[arg(long)]
+        history: bool,
+        /// Skip VFS symlink tree
+        #[arg(long)]
+        no_vfs: bool,
+        /// Filter by tag (scope:label format)
+        #[arg(long)]
+        tag: Option<String>,
+        /// Filter by view name
+        #[arg(long)]
+        view: Option<String>,
+    },
     /// Import files or folders into memvault, optionally placing them in the VFS
     ImportFiles {
         /// Path to file or folder to import
@@ -250,7 +279,6 @@ pub async fn run(cli: Cli) -> Result<()> {
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
     let db_override = cli.db;
 
-    // Helper: open the store using --db if provided, otherwise data_dir/blocks.redb.
     let make_store = || -> Result<Arc<MemvaultStore>> {
         if let Some(ref db_path) = db_override {
             open_store_at(db_path)
@@ -288,9 +316,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             let store = make_store()?;
             let client = create_client(store);
-            let tags = crate::docs::parse_tags(&tag);
-            let vis = crate::docs::parse_visibility(Some(&visibility));
-            let result = crate::docs::create_doc(&client, &text, title.as_deref(), None, tags, vis, None).await?;
+            let tags = memvault_api::docs::parse_tags(&tag);
+            let vis = memvault_api::docs::parse_visibility(Some(&visibility));
+            let result = memvault_api::docs::create_doc(&client, &text, title.as_deref(), None, tags, vis, None).await?;
             println!("{}", result.node_id);
         }
         Commands::Get { cid } => {
@@ -431,8 +459,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             let store = make_store()?;
 
             // Phase 0: Validate block CID integrity.
-            // Uses verify_cid which parses the multihash from the CID and
-            // recomputes the digest with the correct algorithm (Blake3, SHA2-256, etc.).
             println!("Phase 0: Validating block CIDs...");
             let blocks = store.iter_blocks()?;
             let mut cid_ok = 0usize;
@@ -440,16 +466,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             let mut cid_mismatch = 0usize;
             let mut cid_unchecked = 0usize;
             for (cid, data) in &blocks {
-                // Direct match: CID hash matches the stored block data.
                 match memvault_core::verify_cid(cid, data) {
                     Ok(true) => { cid_ok += 1; continue; }
                     Err(_) => { cid_unchecked += 1; continue; }
                     Ok(false) => {}
                 }
-                // Legacy op envelopes (pre-fix): CID was computed from the
-                // payload struct bytes, not the envelope. Can't verify since
-                // re-serializing the payload from Value reorders fields.
-                // New envelopes: CID = hash(envelope_bytes) — verified above.
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
                     if val.get("payload").is_some() {
                         cid_envelope += 1;
@@ -464,19 +485,15 @@ pub async fn run(cli: Cli) -> Result<()> {
                 eprintln!("  WARNING: {cid_mismatch} block(s) have CID mismatches (data corruption)");
             }
 
-            // Phase 0b: Migrate legacy envelopes from payload-derived CID to
-            // envelope-derived CID. This ensures CID = hash(block_bytes) so
-            // sync peers can verify blocks.
+            // Phase 0b: Migrate legacy envelopes
             if cid_envelope > 0 {
                 println!("Phase 0b: Migrating {cid_envelope} legacy envelope CIDs...");
                 let blocks = store.iter_blocks()?;
                 let mut migrated = 0usize;
                 for (old_cid, data) in &blocks {
-                    // Skip blocks that already verify.
                     if let Ok(true) = memvault_core::verify_cid(old_cid, data) {
                         continue;
                     }
-                    // Only migrate envelopes (blocks with a "payload" field).
                     let is_envelope = serde_json::from_slice::<serde_json::Value>(data)
                         .ok()
                         .and_then(|v| v.get("payload").map(|_| true))
@@ -487,7 +504,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     let new_cid = memvault_core::cid_from_bytes(data);
                     let new_cid_bytes = new_cid.to_bytes();
                     if new_cid_bytes == *old_cid {
-                        continue; // already correct
+                        continue;
                     }
                     store.put_block_unchecked(&new_cid_bytes, data)?;
                     store.delete_block(old_cid)?;
@@ -496,7 +513,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 println!("  Migrated {migrated} envelope(s) to content-addressed CIDs");
             }
 
-            // Phase 1: Rebuild store secondary indexes (BY_TAG, BY_AUTHOR, BY_TIME, etc.)
+            // Phase 1: Rebuild store secondary indexes
             println!("Phase 1: Clearing secondary index tables...");
             store.clear_secondary_indexes()?;
 
@@ -517,7 +534,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             let (doc_count, entity_count, attachment_count) = client.populate_index().await?;
             println!("  {doc_count} docs, {entity_count} entities, {attachment_count} attachments");
 
-            // Save the index cache to disk
             let cache_path = if let Some(ref db_path) = db_override {
                 db_path.with_extension("text_index.json")
             } else {
@@ -526,15 +542,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             client.save_index(&cache_path).await?;
             println!("  Index cache saved to {}", cache_path.display());
 
-            // Phase 3: Scan for double-prefixed entity IDs in edge envelopes.
-            // A prior bug in the VFS/MCP layer could produce "entity:entity:<hex>"
-            // node references. The HTTP API rejects these, so they shouldn't exist
-            // in the blockstore, but we validate defensively.
+            // Phase 3: Scan for double-prefixed entity IDs
             println!("Phase 3: Scanning for double-prefixed entity IDs...");
             let blocks_scan = store.iter_blocks()?;
             let mut double_prefix_count = 0usize;
             for (_cid, data) in &blocks_scan {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
                     if let Some(tags) = val.get("tags").and_then(|v| v.as_array()) {
                         for tag in tags {
                             if let Some(arr) = tag.as_array() {
@@ -551,26 +564,22 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             if double_prefix_count > 0 {
                 eprintln!("  WARNING: {double_prefix_count} envelope(s) have double-prefixed entity IDs");
-                eprintln!("  Run Phase 1 rebuild (already done above) to clean secondary indexes");
             } else {
                 println!("  No double-prefixed entity IDs found (data clean)");
             }
 
-            // Phase 4: Repair VFS tree — ensure all vfs:dir entities are reachable from the root
+            // Phase 4: Repair VFS tree
             println!("Phase 4: Checking VFS tree integrity...");
             let vfs_repaired = repair_vfs_tree(&client).await?;
             if vfs_repaired > 0 {
                 println!("  Linked {vfs_repaired} orphaned directory/ies to VFS root");
-                // Re-save index cache (Phase 4 may have retracted entities).
                 client.save_index(&cache_path).await?;
                 println!("  Index cache re-saved");
             } else {
                 println!("  VFS tree OK (no orphans)");
             }
 
-            // Phase 5: Migrate entities tagged vfs_status:pending_repair.
-            // After the double-prefix fix, VFS operations work again. Link pending
-            // entities at their intended VFS paths and update their status tag.
+            // Phase 5: Migrate pending VFS entries
             println!("Phase 5: Migrating pending VFS entries...");
             let pending_cids = store.query_by_tag("vfs_status", "pending_repair", 0, 10_000)?;
             let mut migrated_vfs = 0usize;
@@ -578,7 +587,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             for cid in &pending_cids {
                 if let Some(data) = store.get_block(cid)? {
                     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
-                        // Find the entity this envelope belongs to.
                         let entity_tag = val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
                             tags.iter().find_map(|t| {
                                 let arr = t.as_array()?;
@@ -597,10 +605,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                         });
                         if let (Some(entity_hex), Some(path)) = (entity_tag, intended_path) {
                             let node_ref = format!("entity:{entity_hex}");
-                            // Ensure parent dirs exist, then link.
-                            match crate::vfs::link_node_at_path(&client, &path, &node_ref).await {
+                            match memvault_api::vfs::link_node_at_path(&client, &path, &node_ref).await {
                                 Ok(_) => {
-                                    // Update status tag: pending_repair → linked.
                                     let _ = client.remove_tags(&node_ref, vec![("vfs_status".into(), "pending_repair".into())]).await;
                                     let _ = client.add_tags(&node_ref, vec![("vfs_status".into(), "linked".into())]).await;
                                     println!("  Linked {node_ref} at {path}");
@@ -630,7 +636,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::RenewAttestation { peer_id } => { println!("Attestation renewal for {peer_id}: not yet implemented in standalone mode"); }
         Commands::FixClusterId => {
-            // Read current cluster_id from disk.
             let id_path = data_dir.join("cluster_id");
             let id_hex = std::fs::read_to_string(&id_path)
                 .map_err(|e| anyhow::anyhow!("Cannot read {}: {e}. Run 'genesis' first.", id_path.display()))?;
@@ -648,46 +653,60 @@ pub async fn run(cli: Cli) -> Result<()> {
                     Ok(v) => v,
                     Err(_) => { skipped += 1; continue; }
                 };
-
-                // Check if this looks like an envelope.
                 let is_envelope = val.get("wall_ns").is_some() || val.get("author").is_some();
                 if !is_envelope {
                     skipped += 1;
                     continue;
                 }
-
-                // Check if cluster_id is null or missing.
                 let needs_fix = match val.get("cluster_id") {
                     None => true,
                     Some(serde_json::Value::Null) => true,
                     Some(serde_json::Value::Array(arr)) if arr.is_empty() => true,
                     _ => false,
                 };
-
                 if !needs_fix {
                     continue;
                 }
-
                 let wall_ns: u64 = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                // Don't mutate the block — blocks are content-addressed, so
-                // changing bytes would break the CID invariant. Instead, just
-                // add the missing CLUSTER_ORIGIN index entry.
                 store.index_cluster_origin(cid, &cluster_bytes, wall_ns)?;
-
                 patched += 1;
             }
 
             println!("Indexed {patched} envelopes into CLUSTER_ORIGIN ({skipped} non-envelope blocks skipped).");
         }
+        Commands::Export { output, tar, gzip, history, no_vfs, tag, view } => {
+            let store = make_store()?;
+            let client = create_client(store);
+            client.populate_index().await?;
+            let tag_filter = tag.as_deref().and_then(|t| {
+                let parts: Vec<&str> = t.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    Some((parts[0].to_string(), parts[1].to_string()))
+                } else {
+                    None
+                }
+            });
+            let opts = memvault_export::ExportOptions {
+                history,
+                include_vfs: !no_vfs,
+                tag_filter,
+                view_filter: view,
+            };
+            let sink = memvault_export::create_sink(&output, tar, gzip)?;
+            let stats = memvault_export::run_export(&client, sink, opts).await?;
+            println!(
+                "Exported {} documents, {} files, {} entities ({} history versions) to {}",
+                stats.documents, stats.files, stats.entities, stats.history_versions,
+                output.display()
+            );
+        }
         Commands::ImportFiles { path, vfs, tag, visibility } => {
             let store = make_store()?;
             let client = create_client(store.clone());
-            // Rebuild index so VFS operations work.
             client.populate_index().await?;
 
-            let tags = crate::docs::parse_tags(&tag);
-            let imported = import_files(&client, &path, vfs.as_deref(), &tags, &visibility).await?;
+            let tags = memvault_api::docs::parse_tags(&tag);
+            let imported = memvault_import::import_files(&client, &path, vfs.as_deref(), &tags, &visibility).await?;
             println!("Imported {imported} file(s).");
         }
         Commands::ImportDocs { path, vfs, tag, visibility } => {
@@ -695,9 +714,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             let client = create_client(store.clone());
             client.populate_index().await?;
 
-            let tags = crate::docs::parse_tags(&tag);
-            let vis = crate::docs::parse_visibility(Some(&visibility));
-            let imported = import_docs(&client, &path, vfs.as_deref(), &tags, vis).await?;
+            let tags = memvault_api::docs::parse_tags(&tag);
+            let vis = memvault_api::docs::parse_visibility(Some(&visibility));
+            let imported = memvault_import::import_docs(&client, &path, vfs.as_deref(), &tags, vis).await?;
             println!("Imported {imported} document(s).");
         }
     }
@@ -705,130 +724,12 @@ pub async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// Import files recursively, optionally placing them in the VFS.
-async fn import_files(
-    client: &LocalClient,
-    path: &Path,
-    vfs_folder: Option<&str>,
-    tags: &[(String, String)],
-    visibility: &str,
-) -> Result<usize> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    if path.is_file() {
-        files.push(path.to_path_buf());
-    } else if path.is_dir() {
-        collect_files_recursive(path, &mut files, None)?;
-    } else {
-        anyhow::bail!("path does not exist: {}", path.display());
-    }
-    if files.is_empty() {
-        println!("No files found at {}", path.display());
-        return Ok(0);
-    }
-
-    let base_dir = if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) };
-    let mut count = 0usize;
-
-    for file_path in &files {
-        let data = std::fs::read(file_path)?;
-        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unnamed");
-        let mime = crate::files::detect_mime(file_path);
-        let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
-        let (_cid, node_id) = crate::files::upload_file(
-            client, &data, Some(filename), mime, tags.to_vec(), visibility, vfs_path.as_deref(),
-        ).await?;
-        println!("  {} -> {node_id}", file_path.display());
-        count += 1;
-    }
-    Ok(count)
-}
-
-/// Import text/markdown files as documents, optionally placing them in the VFS.
-async fn import_docs(
-    client: &LocalClient,
-    path: &Path,
-    vfs_folder: Option<&str>,
-    tags: &[(String, String)],
-    vis: Visibility,
-) -> Result<usize> {
-    let doc_extensions = &["md", "txt", "markdown", "text", "rst"];
-    let mut files: Vec<PathBuf> = Vec::new();
-    if path.is_file() {
-        files.push(path.to_path_buf());
-    } else if path.is_dir() {
-        collect_files_recursive(path, &mut files, Some(doc_extensions))?;
-    } else {
-        anyhow::bail!("path does not exist: {}", path.display());
-    }
-    if files.is_empty() {
-        println!("No document files found at {}", path.display());
-        return Ok(0);
-    }
-
-    let base_dir = if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) };
-    let mut count = 0usize;
-
-    for file_path in &files {
-        let body = std::fs::read_to_string(file_path)?;
-        let title = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
-        let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
-        let result = crate::docs::create_doc(
-            client, &body, title.as_deref(), None, tags.to_vec(), vis, vfs_path.as_deref(),
-        ).await?;
-        println!("  {} -> {}", file_path.display(), result.node_id);
-        count += 1;
-    }
-    Ok(count)
-}
-
-/// Compute the VFS path for a file being imported.
-fn compute_vfs_path(vfs_folder: &str, base_dir: &Path, file_path: &Path, is_dir_import: bool) -> String {
-    let folder = vfs_folder.trim_end_matches('/');
-    if is_dir_import {
-        let rel = file_path.strip_prefix(base_dir).unwrap_or(file_path);
-        let rel_str = rel.to_string_lossy();
-        format!("{folder}/{rel_str}")
-    } else {
-        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unnamed");
-        format!("{folder}/{filename}")
-    }
-}
-
-/// Collect files recursively, skipping hidden entries.
-/// If `extensions` is Some, only includes files with matching extensions.
-fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>, extensions: Option<&[&str]>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with('.') {
-            continue;
-        }
-        if path.is_file() {
-            if let Some(exts) = extensions {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !exts.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
-                    continue;
-                }
-            }
-            out.push(path);
-        } else if path.is_dir() {
-            collect_files_recursive(&path, out, extensions)?;
-        }
-    }
-    Ok(())
-}
-
-/// Repair the VFS tree:
-/// 1. Find the canonical root (smallest-ID entity with name="/").
-/// 2. Retract all duplicate "/" entities after re-parenting their children.
-/// 3. Link any remaining orphaned vfs:dir entities to the root.
+/// Repair the VFS tree.
 async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
     use memvault_core::{EdgeId, NodeRef};
+    use memvault_api::vfs::{VFS_DIR_KIND, VFS_CHILD_REL};
     use std::collections::HashSet;
-    use crate::vfs::{VFS_DIR_KIND, VFS_CHILD_REL};
 
-    // 1. Collect all vfs:dir entities.
     let entities = client.list_entities(10_000).await?;
     let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
     for e in &entities {
@@ -841,7 +742,6 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         return Ok(0);
     }
 
-    // 2. Pick canonical root — smallest ID among name="/" entities.
     let mut root_candidates: Vec<[u8; 32]> = all_dirs.iter()
         .filter(|(_, name)| name == "/")
         .map(|(id, _)| *id)
@@ -851,21 +751,18 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         Some(id) => *id,
         None => return Ok(0),
     };
-    // Ensure root is tagged.
     let root_node_id = format!("entity:{}", hex::encode(root_bytes));
     let _ = client.add_tags(&root_node_id, vec![("vfs".into(), "root".into())]).await;
     let root_ref = NodeRef::Entity(EntityId(root_bytes));
 
     let mut actions = 0usize;
 
-    // 3. Retract duplicate "/" entities, re-parenting their children first.
     for &dup_bytes in &root_candidates[1..] {
         let dup_ref = NodeRef::Entity(EntityId(dup_bytes));
         let edges = client.edges_of(&dup_ref).await.unwrap_or_default();
         for (src, edge) in &edges {
             if *src != dup_ref || edge.relation != VFS_CHILD_REL { continue; }
             let child_name = edge.props.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-            // Skip if root already has this child name.
             let root_edges = client.edges_of(&root_ref).await.unwrap_or_default();
             let exists = root_edges.iter().any(|(s, e)| {
                 *s == root_ref && e.relation == VFS_CHILD_REL
@@ -890,15 +787,14 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         }
     }
 
-    // 4. Deduplicate same-name entries within each directory.
+    // Deduplicate same-name entries within each directory.
     {
         let mut dedup_stack: Vec<NodeRef> = vec![root_ref.clone()];
         let mut visited: HashSet<[u8; 32]> = HashSet::new();
         visited.insert(root_bytes);
         while let Some(current) = dedup_stack.pop() {
             let edges = client.edges_of(&current).await.unwrap_or_default();
-            // Group vfs:child edges by name, keeping smallest EdgeId as canonical.
-            let mut by_name: std::collections::BTreeMap<String, Vec<([u8; 32], NodeRef)>> = std::collections::BTreeMap::new();
+            let mut by_name: BTreeMap<String, Vec<([u8; 32], NodeRef)>> = BTreeMap::new();
             for (src, edge) in &edges {
                 if *src != current || edge.relation != VFS_CHILD_REL { continue; }
                 let name = edge.props.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -906,7 +802,6 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
             }
             for (name, mut entries) in by_name {
                 entries.sort_by(|a, b| a.0.cmp(&b.0));
-                // Queue canonical entry for recursive dedup.
                 if let Some((_, target)) = entries.first() {
                     if let NodeRef::Entity(eid) = target {
                         if visited.insert(eid.0) {
@@ -914,7 +809,6 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
                         }
                     }
                 }
-                // Retract duplicate edges (all except the first/smallest).
                 for (dup_eid, _) in &entries[1..] {
                     if client.remove_link_from(&current, &EdgeId(*dup_eid)).await.is_ok() {
                         println!("  Retracted duplicate edge for \"{name}\" (edge {})", hex::encode(dup_eid));
@@ -925,7 +819,7 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         }
     }
 
-    // 5. Walk tree from canonical root to find all reachable dirs.
+    // Walk tree from root to find all reachable dirs.
     let mut reachable: HashSet<[u8; 32]> = HashSet::new();
     reachable.insert(root_bytes);
     let mut stack: Vec<NodeRef> = vec![root_ref.clone()];
@@ -941,8 +835,8 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
         }
     }
 
-    // 6. Link genuinely orphaned dirs to root (not duplicates, not already reachable).
-    let retracted: HashSet<[u8; 32]> = root_candidates[1..].iter().copied().collect();
+    // Link orphaned dirs to root.
+    let retracted: std::collections::HashSet<[u8; 32]> = root_candidates[1..].iter().copied().collect();
     for (id, name) in &all_dirs {
         if reachable.contains(id) || retracted.contains(id) { continue; }
         let entry_name = if name.is_empty() { hex::encode(id)[..8].to_string() } else { name.clone() };

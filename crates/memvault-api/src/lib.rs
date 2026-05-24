@@ -6,7 +6,6 @@ pub mod error;
 pub mod files;
 pub mod health;
 pub mod local;
-pub mod memctl;
 pub mod metrics;
 pub mod otel;
 pub mod quotas;

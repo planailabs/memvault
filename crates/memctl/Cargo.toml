@@ -1,0 +1,30 @@
+[package]
+name = "memctl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memvault-core = { path = "../memvault-core" }
+memvault-doc = { path = "../memvault-doc" }
+memvault-api = { path = "../memvault-api" }
+memvault-store = { path = "../memvault-store" }
+memvault-query = { path = "../memvault-query" }
+memvault-auth = { path = "../memvault-auth" }
+memvault-export = { path = "../memvault-export" }
+memvault-import = { path = "../memvault-import" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+dirs = "6"
+
+[lib]
+name = "memctl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "memctl"
+path = "src/main.rs"

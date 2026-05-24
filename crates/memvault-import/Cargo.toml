@@ -1,0 +1,11 @@
+[package]
+name = "memvault-import"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memvault-core = { path = "../memvault-core" }
+memvault-doc = { path = "../memvault-doc" }
+memvault-api = { path = "../memvault-api" }
+anyhow = "1"
+tracing = "0.1"

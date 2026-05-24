@@ -30,9 +30,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry = { version = "0.27", optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
 
-[[bin]]
-name = "memctl"
-path = "src/bin/memctl.rs"
 
 [dev-dependencies]
 tempfile = "3"
