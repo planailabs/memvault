@@ -676,6 +676,33 @@ impl MemvaultClient for HttpApiClient {
         Ok(())
     }
 
+    async fn share_inbox(&self) -> Result<Vec<Vec<u8>>> {
+        let resp = self.client.get(self.url("/share/inbox"))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn share_outbox(&self) -> Result<Vec<Vec<u8>>> {
+        let resp = self.client.get(self.url("/share/outbox"))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn share_decide(&self, proposal_cid: &[u8], approve: bool, reason: Option<&str>) -> Result<()> {
+        let body = serde_json::json!({
+            "approve": approve,
+            "reason": reason,
+        });
+        self.client.post(self.url(&format!("/share/decide/{}", hex::encode(proposal_cid))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
     async fn bucket_attach(&self, id: &memvault_core::BucketId) -> Result<()> {
         self.client.post(self.url(&format!("/buckets/{}/attach", hex::encode(id.0))))
             .send().await.map_err(map_reqwest)?

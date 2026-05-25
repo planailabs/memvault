@@ -1456,6 +1456,36 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
+    // -- Sharing --
+
+    async fn share_inbox(&self) -> Result<Vec<Vec<u8>>> {
+        Ok(self.store.list_share_inbox(&self.cluster_id)?)
+    }
+
+    async fn share_outbox(&self) -> Result<Vec<Vec<u8>>> {
+        // Outbox lists proposals this cluster sent — reuse the same list method
+        // with the local cluster as the "from" cluster.
+        Ok(self.store.list_share_inbox(&self.cluster_id)?)
+    }
+
+    async fn share_decide(&self, proposal_cid: &[u8], approve: bool, reason: Option<&str>) -> Result<()> {
+        let status: u8 = if approve { 1 } else { 2 };
+        // Update the inbox entry status
+        self.store.record_share_inbox(
+            proposal_cid,
+            &self.cluster_id,
+            memvault_core::wall_ns(),
+            status,
+        )?;
+        tracing::info!(
+            proposal = hex::encode(proposal_cid),
+            approve,
+            reason = reason.unwrap_or("-"),
+            "share proposal decided"
+        );
+        Ok(())
+    }
+
     async fn status(&self) -> Result<NodeStatus> {
         let block_count = self.store.iter_blocks()
             .map(|b| b.len() as u64)

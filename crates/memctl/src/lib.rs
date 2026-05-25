@@ -235,6 +235,23 @@ pub enum Commands {
         #[arg(short, long, default_value = "internal")]
         visibility: String,
     },
+    /// List share inbox (proposals received)
+    ShareInbox,
+    /// List share outbox (proposals sent)
+    ShareOutbox,
+    /// Approve a share proposal
+    ShareApprove {
+        /// Hex-encoded proposal CID
+        cid: String,
+    },
+    /// Reject a share proposal
+    ShareReject {
+        /// Hex-encoded proposal CID
+        cid: String,
+        /// Reason for rejection
+        #[arg(short, long)]
+        reason: String,
+    },
     /// Create a new bucket
     BucketNew {
         /// Bucket name
@@ -805,6 +822,38 @@ pub async fn run(cli: Cli) -> Result<()> {
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));
             let imported = memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis).await?;
             println!("Imported {imported} document(s).");
+        }
+        Commands::ShareInbox => {
+            let client = connect().connect().await?;
+            let proposals = client.share_inbox().await?;
+            if proposals.is_empty() {
+                println!("No pending share proposals.");
+            }
+            for cid in proposals {
+                println!("{}", hex::encode(&cid));
+            }
+        }
+        Commands::ShareOutbox => {
+            let client = connect().connect().await?;
+            let proposals = client.share_outbox().await?;
+            if proposals.is_empty() {
+                println!("No outbound share proposals.");
+            }
+            for cid in proposals {
+                println!("{}", hex::encode(&cid));
+            }
+        }
+        Commands::ShareApprove { cid } => {
+            let cid_bytes = hex::decode(&cid)?;
+            let client = connect().connect().await?;
+            client.share_decide(&cid_bytes, true, None).await?;
+            println!("Share proposal approved.");
+        }
+        Commands::ShareReject { cid, reason } => {
+            let cid_bytes = hex::decode(&cid)?;
+            let client = connect().connect().await?;
+            client.share_decide(&cid_bytes, false, Some(&reason)).await?;
+            println!("Share proposal rejected.");
         }
         Commands::BucketNew { name, desc, visibility, classification } => {
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));

@@ -114,6 +114,17 @@ pub trait MemvaultClient: Send + Sync {
     /// Attach a private bucket to the cluster (flips private_to_peer to None, triggers gossip).
     async fn bucket_attach(&self, id: &BucketId) -> Result<()>;
 
+    // -- Sharing --
+
+    /// List share proposals received by this cluster.
+    async fn share_inbox(&self) -> Result<Vec<Vec<u8>>>;
+
+    /// List share proposals sent by this cluster.
+    async fn share_outbox(&self) -> Result<Vec<Vec<u8>>>;
+
+    /// Decide a share proposal (approve or reject).
+    async fn share_decide(&self, proposal_cid: &[u8], approve: bool, reason: Option<&str>) -> Result<()>;
+
     // -- Status --
     async fn status(&self) -> Result<NodeStatus>;
 }

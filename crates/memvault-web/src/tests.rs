@@ -253,6 +253,9 @@ impl MemvaultClient for MockClient {
     async fn bucket_rename(&self, _id: &memvault_core::BucketId, _name: &str) -> memvault_api::Result<()> { Ok(()) }
     async fn bucket_bind(&self, _bucket: &memvault_core::BucketId, _cluster: &memvault_core::ClusterId, _default: bool) -> memvault_api::Result<()> { Ok(()) }
     async fn bucket_attach(&self, _id: &memvault_core::BucketId) -> memvault_api::Result<()> { Ok(()) }
+    async fn share_inbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> { Ok(vec![]) }
+    async fn share_outbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> { Ok(vec![]) }
+    async fn share_decide(&self, _cid: &[u8], _approve: bool, _reason: Option<&str>) -> memvault_api::Result<()> { Ok(()) }
 }
 
 fn make_app() -> axum::Router {
