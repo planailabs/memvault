@@ -40,6 +40,10 @@ fn main() {
         // 1. dx serve launched us → public/ exists → use dioxus::serve()
         // 2. bare `cargo run` → no public/ → fall through to daemon command
 
+        // With embed feature, assets are in the binary — no filesystem check needed.
+        #[cfg(feature = "embed")]
+        let has_assets = true;
+        #[cfg(not(feature = "embed"))]
         let has_assets = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("public").exists()))

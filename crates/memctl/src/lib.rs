@@ -1129,6 +1129,10 @@ pub async fn run(cli: Cli) -> Result<()> {
 
                 // Start the web server. Use fullstack (SSR + UI) if assets
                 // exist, otherwise API-only to avoid a panic from Dioxus.
+                // With embed feature, assets are baked in — always fullstack.
+                #[cfg(feature = "embed")]
+                let public_exists = true;
+                #[cfg(not(feature = "embed"))]
                 let public_exists = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.join("public").exists()))
