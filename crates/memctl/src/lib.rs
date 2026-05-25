@@ -456,10 +456,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Create or bind the default bucket
             let store = make_store()?;
 
-            // Generate a local PeerId and persist both identifiers in the store
-            let mut peer_id_bytes = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut peer_id_bytes);
-            store.set_local_peer_id(&peer_id_bytes)?;
+            // Persist cluster_id in the store. PeerId is set by the daemon
+            // on first start (from the libp2p keypair).
             store.set_local_cluster_id(&cluster_id.0)?;
 
             let client = create_client(store.clone());
