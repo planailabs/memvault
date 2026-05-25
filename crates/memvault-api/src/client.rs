@@ -114,6 +114,9 @@ pub trait MemvaultClient: Send + Sync {
     /// Attach a private bucket to the cluster (flips private_to_peer to None, triggers gossip).
     async fn bucket_attach(&self, id: &BucketId) -> Result<()>;
 
+    /// Archive a bucket (soft-remove: new writes are refused, reads continue, data preserved).
+    async fn bucket_archive(&self, id: &BucketId, reason: &str) -> Result<()>;
+
     // -- Sharing --
 
     /// List share proposals received by this cluster.

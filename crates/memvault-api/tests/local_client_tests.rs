@@ -261,3 +261,179 @@ async fn quota_manager_integration() {
         assert!(q.check_write(&agent, 100).is_ok());
     }
 }
+
+// ── Bucket lifecycle tests ──────────────────────────────────────────
+
+#[tokio::test]
+async fn bucket_create_and_list() {
+    let (_dir, client) = make_client();
+
+    // Initially no buckets
+    let buckets = client.bucket_list().await.unwrap();
+    assert!(buckets.is_empty());
+
+    // Create a bucket
+    let bucket_id = client.bucket_create(
+        "test-bucket",
+        Some("A test bucket"),
+        Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    // List should return it
+    let buckets = client.bucket_list().await.unwrap();
+    assert_eq!(buckets.len(), 1);
+    assert_eq!(buckets[0].name, "test-bucket");
+    assert_eq!(buckets[0].id, bucket_id);
+    assert!(!buckets[0].is_attached); // private by default
+    assert!(buckets[0].cluster_id.is_none()); // not bound to any cluster
+}
+
+#[tokio::test]
+async fn bucket_get_by_id() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "alpha", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    let info = client.bucket_get(&bucket_id).await.unwrap();
+    assert!(info.is_some());
+    let info = info.unwrap();
+    assert_eq!(info.name, "alpha");
+    assert_eq!(info.id, bucket_id);
+}
+
+#[tokio::test]
+async fn bucket_get_nonexistent_returns_none() {
+    let (_dir, client) = make_client();
+    let fake_id = memvault_core::BucketId([99u8; 32]);
+    let info = client.bucket_get(&fake_id).await.unwrap();
+    assert!(info.is_none());
+}
+
+#[tokio::test]
+async fn bucket_rename() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "old-name", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    client.bucket_rename(&bucket_id, "new-name").await.unwrap();
+
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert_eq!(info.name, "new-name");
+}
+
+#[tokio::test]
+async fn bucket_bind_to_cluster() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "bindable", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    let cluster_id = memvault_core::ClusterId([1u8; 32]);
+    client.bucket_bind(&bucket_id, &cluster_id, true).await.unwrap();
+
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert_eq!(info.cluster_id, Some(cluster_id));
+    assert!(info.is_default);
+}
+
+#[tokio::test]
+async fn bucket_attach_flips_private() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "private-bucket", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    // Initially private
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert!(!info.is_attached);
+
+    // Attach
+    client.bucket_attach(&bucket_id).await.unwrap();
+
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert!(info.is_attached);
+
+    // Idempotent
+    client.bucket_attach(&bucket_id).await.unwrap();
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert!(info.is_attached);
+}
+
+#[tokio::test]
+async fn bucket_archive() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "archivable", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    client.bucket_archive(&bucket_id, "no longer needed").await.unwrap();
+
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert!(info.name.contains("[ARCHIVED]"));
+    assert!(info.description.unwrap_or_default().contains("no longer needed"));
+}
+
+#[tokio::test]
+async fn bucket_create_multiple_and_list() {
+    let (_dir, client) = make_client();
+
+    let _b1 = client.bucket_create("alpha", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal).await.unwrap();
+    let _b2 = client.bucket_create("beta", None, Visibility::Federated,
+        memvault_core::classification::Classification::Public).await.unwrap();
+    let _b3 = client.bucket_create("gamma", None, Visibility::Public,
+        memvault_core::classification::Classification::Confidential).await.unwrap();
+
+    let buckets = client.bucket_list().await.unwrap();
+    assert_eq!(buckets.len(), 3);
+
+    let names: Vec<&str> = buckets.iter().map(|b| b.name.as_str()).collect();
+    assert!(names.contains(&"alpha"));
+    assert!(names.contains(&"beta"));
+    assert!(names.contains(&"gamma"));
+}
+
+// ── PeerId persistence tests ────────────────────────────────────────
+
+#[test]
+fn store_peer_id_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemvaultStore::open(dir.path().join("test.redb")).unwrap();
+
+    // Initially no peer_id
+    assert!(store.get_local_peer_id().unwrap().is_none());
+
+    // Set it
+    let peer_id = vec![42u8; 32];
+    store.set_local_peer_id(&peer_id).unwrap();
+
+    // Read it back
+    assert_eq!(store.get_local_peer_id().unwrap().unwrap(), peer_id);
+
+    // Setting the same value again is OK (idempotent)
+    store.set_local_peer_id(&peer_id).unwrap();
+
+    // Setting a different value fails
+    let other_peer_id = vec![99u8; 32];
+    assert!(store.set_local_peer_id(&other_peer_id).is_err());
+}
+
+#[test]
+fn store_cluster_id_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemvaultStore::open(dir.path().join("test.redb")).unwrap();
+
+    assert!(store.get_local_cluster_id().unwrap().is_none());
+
+    let cluster_id = vec![7u8; 32];
+    store.set_local_cluster_id(&cluster_id).unwrap();
+    assert_eq!(store.get_local_cluster_id().unwrap().unwrap(), cluster_id);
+}

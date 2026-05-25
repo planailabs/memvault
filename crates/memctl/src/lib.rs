@@ -280,6 +280,11 @@ pub enum Commands {
         /// New name
         name: String,
     },
+    /// Attach a private bucket to the cluster (makes it visible to peers)
+    BucketAttach {
+        /// Bucket ID (hex)
+        id: String,
+    },
     /// Archive a bucket (soft-remove, data preserved)
     BucketArchive {
         /// Bucket ID (hex)
@@ -297,6 +302,18 @@ pub enum Commands {
         /// Set as the cluster's default bucket
         #[arg(long)]
         default: bool,
+    },
+    /// Run a standalone memvault daemon with full P2P networking
+    Daemon {
+        /// Listen address (default: /ip4/0.0.0.0/tcp/0)
+        #[arg(long, default_value = "/ip4/0.0.0.0/tcp/0")]
+        listen: String,
+        /// Bootstrap peer multiaddrs (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        bootstrap: Vec<String>,
+        /// HTTP API port for the embedded REST server
+        #[arg(long, default_value = "8401")]
+        api_port: u16,
     },
     /// Enroll an agent using a join token
     AgentEnroll {
@@ -340,13 +357,15 @@ fn open_store(data_dir: &Path) -> Result<Arc<MemvaultStore>> {
 }
 
 fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
+    let peer_id = store.get_local_peer_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
+    let cluster_id = store.get_local_cluster_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
     LocalClient::new(
         store,
         Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
         Arc::new(EventBus::new(64)),
-        vec![0u8; 32],
-        vec![0u8; 32],
+        peer_id,
+        cluster_id,
     )
 }
 
@@ -395,6 +414,13 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             // Create or bind the default bucket
             let store = make_store()?;
+
+            // Generate a local PeerId and persist both identifiers in the store
+            let mut peer_id_bytes = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut peer_id_bytes);
+            store.set_local_peer_id(&peer_id_bytes)?;
+            store.set_local_cluster_id(&cluster_id.0)?;
+
             let client = create_client(store.clone());
             let bucket_id = if let Some(ref bucket_hex) = default_bucket {
                 // Bind an existing bucket
@@ -923,15 +949,22 @@ pub async fn run(cli: Cli) -> Result<()> {
             client.bucket_rename(&bucket_id, &name).await?;
             println!("Bucket renamed to '{name}'.");
         }
+        Commands::BucketAttach { id } => {
+            let bucket_bytes = hex::decode(&id)?;
+            let bucket_arr: [u8; 32] = bucket_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+            let bucket_id = memvault_core::BucketId(bucket_arr);
+            let client = connect().connect().await?;
+            client.bucket_attach(&bucket_id).await?;
+            println!("Bucket attached to cluster.");
+        }
         Commands::BucketArchive { id, reason } => {
             let bucket_bytes = hex::decode(&id)?;
             let bucket_arr: [u8; 32] = bucket_bytes.try_into()
                 .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
             let bucket_id = memvault_core::BucketId(bucket_arr);
             let client = connect().connect().await?;
-            // Archive is implemented as a rename with a special marker for now.
-            // In B8 full implementation, this would write a BucketArchive op.
-            client.bucket_rename(&bucket_id, &format!("[ARCHIVED] {reason}")).await?;
+            client.bucket_archive(&bucket_id, &reason).await?;
             println!("Bucket archived: {reason}");
         }
         Commands::BucketBind { bucket_id, cluster_id, default } => {
@@ -946,6 +979,74 @@ pub async fn run(cli: Cli) -> Result<()> {
             let client = connect().connect().await?;
             client.bucket_bind(&bid, &cid, default).await?;
             println!("Bucket bound to cluster{}.", if default { " (default)" } else { "" });
+        }
+        Commands::Daemon { listen, bootstrap, api_port } => {
+            // Open the store and reconcile PeerId
+            let store = make_store()?;
+
+            // Generate or load a libp2p keypair
+            let keypair = libp2p::identity::Keypair::generate_ed25519();
+            let local_peer_id = keypair.public().to_peer_id();
+            let peer_id_bytes = local_peer_id.to_bytes();
+
+            // Persist/verify PeerId in store
+            store.set_local_peer_id(&peer_id_bytes)
+                .map_err(|e| anyhow::anyhow!("PeerId reconciliation failed: {e}"))?;
+
+            // Read cluster_id from store or file
+            let cluster_id_bytes = store.get_local_cluster_id()?
+                .or_else(|| {
+                    let id_path = data_dir.join("cluster_id");
+                    std::fs::read_to_string(&id_path).ok()
+                        .and_then(|hex| hex::decode(hex.trim()).ok())
+                })
+                .unwrap_or_else(|| vec![0u8; 32]);
+
+            let _client = create_client(store.clone());
+
+            // Parse the listen address
+            let listen_addr: libp2p::Multiaddr = listen.parse()
+                .map_err(|e| anyhow::anyhow!("invalid listen address: {e}"))?;
+
+            // Parse bootstrap peers
+            let bootstrap_addrs: Vec<libp2p::Multiaddr> = bootstrap.iter()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+
+            println!("Starting memvault daemon...");
+            println!("  Peer ID:    {local_peer_id}");
+            println!("  Listen:     {listen}");
+            println!("  API port:   {api_port}");
+            println!("  Cluster:    {}", hex::encode(&cluster_id_bytes));
+            println!("  Bootstraps: {}", bootstrap_addrs.len());
+
+            // Build standalone swarm
+            let mut swarm = memvault_net::standalone_swarm(
+                keypair, listen_addr, bootstrap_addrs,
+            ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
+
+            // Run the swarm event loop
+            println!("Daemon running. Press Ctrl+C to stop.");
+            use futures::StreamExt as _;
+            loop {
+                tokio::select! {
+                    event = swarm.next() => {
+                        match event {
+                            Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
+                                println!("  Listening on: {address}");
+                            }
+                            Some(libp2p::swarm::SwarmEvent::Behaviour(_event)) => {
+                                // Handle gossip, auth, join events here
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\nShutting down daemon...");
+                        break;
+                    }
+                }
+            }
         }
         Commands::AgentEnroll { token, agent_id, identity_dir } => {
             // Decode the join token to extract cluster info

@@ -710,6 +710,14 @@ impl MemvaultClient for HttpApiClient {
         Ok(())
     }
 
+    async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
+        let body = serde_json::json!({ "reason": reason });
+        self.client.post(self.url(&format!("/buckets/{}/archive", hex::encode(id.0))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
     // -- Rotation --
 
     async fn list_rotations(&self) -> Result<Vec<RotationInfo>> { Ok(vec![]) }

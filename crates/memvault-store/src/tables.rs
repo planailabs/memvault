@@ -64,3 +64,9 @@ pub const SHARE_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("sh
 
 /// Cross-cluster bucket trust: packed(bucket_id, from_cluster, to_cluster) -> trust_cid.
 pub const BUCKET_TRUST: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bucket_trust");
+
+// ── Identity tables ────────────────────────────────────────────────
+
+/// Local node identity: fixed key "peer_id" -> peer_id bytes.
+/// Written at genesis or first daemon start; verified against the swarm's PeerId.
+pub const LOCAL_IDENTITY: TableDefinition<&str, &[u8]> = TableDefinition::new("local_identity");

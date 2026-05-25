@@ -113,6 +113,17 @@ impl LocalClient {
         self.agent_identity.as_ref().map(|i| &i.agent_id)
     }
 
+    /// The effective author identity for write operations.
+    /// Uses the agent's peer ID (derived from its public key) if an agent
+    /// identity is set, otherwise falls back to the raw peer_id.
+    fn effective_author(&self) -> Vec<u8> {
+        if let Some(ref identity) = self.agent_identity {
+            identity.verifying_key.as_bytes().to_vec()
+        } else {
+            self.peer_id.clone()
+        }
+    }
+
     /// Build a BucketInfo from a bucket_id and its decl CID.
     fn build_bucket_info(
         &self,
@@ -327,7 +338,7 @@ impl LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&block_bytes);
         let meta = EnvelopeMeta {
-            author: self.peer_id.clone(),
+            author: self.effective_author(),
             tags: vec![("_ann".to_string(), target.to_string())],
             wall_ns: memvault_core::wall_ns(),
             causal: vec![],
@@ -497,7 +508,7 @@ impl LocalClient {
         let wall_ns = memvault_core::wall_ns();
 
         let meta = EnvelopeMeta {
-            author: self.peer_id.clone(),
+            author: self.effective_author(),
             tags: tags.to_vec(),
             wall_ns,
             causal: vec![],
@@ -734,7 +745,7 @@ impl MemvaultClient for LocalClient {
 
         // Store envelope metadata for the manifest
         let meta = EnvelopeMeta {
-            author: self.peer_id.clone(),
+            author: self.effective_author(),
             tags: tags.clone(),
             wall_ns: memvault_core::wall_ns(),
             causal: vec![],
@@ -1243,7 +1254,7 @@ impl MemvaultClient for LocalClient {
         let cid_bytes = cid.to_bytes();
         let cid_hex = hex::encode(&cid_bytes);
         let meta = EnvelopeMeta {
-            author: self.peer_id.clone(),
+            author: self.effective_author(),
             tags: vec![("view".to_string(), cid_hex)],
             wall_ns: view.created_ns,
             causal: vec![],
@@ -1312,7 +1323,7 @@ impl MemvaultClient for LocalClient {
 
         // Store the block
         let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.peer_id.clone(),
+            author: self.effective_author(),
             tags: vec![
                 ("kind".to_string(), "bucket-decl".to_string()),
                 ("bucket".to_string(), bucket_id.to_string()),
@@ -1366,7 +1377,7 @@ impl MemvaultClient for LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = memvault_core::cid_from_bytes(&block_bytes);
         let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.peer_id.clone(),
+            author: self.effective_author(),
             tags: vec![
                 ("kind".to_string(), "bucket-rename".to_string()),
                 ("bucket".to_string(), id.to_string()),
@@ -1388,7 +1399,7 @@ impl MemvaultClient for LocalClient {
                         .map_err(|e| ApiError::Serialization(e.to_string()))?;
                     let new_cid = memvault_core::cid_from_bytes(&new_bytes);
                     self.store.insert_envelope(&new_cid.to_bytes(), &new_bytes, &memvault_store::insert::EnvelopeMeta {
-                        author: self.peer_id.clone(),
+                        author: self.effective_author(),
                         tags: vec![
                             ("kind".to_string(), "bucket-decl".to_string()),
                             ("bucket".to_string(), id.to_string()),
@@ -1438,7 +1449,7 @@ impl MemvaultClient for LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let new_cid = memvault_core::cid_from_bytes(&new_bytes);
         let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.peer_id.clone(),
+            author: self.effective_author(),
             tags: vec![
                 ("kind".to_string(), "bucket-decl".to_string()),
                 ("bucket".to_string(), id.to_string()),
@@ -1456,6 +1467,65 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
+    async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
+        let now_ns = memvault_core::wall_ns();
+        let archive_block = serde_json::json!({
+            "op": "BucketArchive",
+            "bucket_id": id.0,
+            "reason": reason,
+            "archived_at_ns": now_ns,
+        });
+        let block_bytes = serde_json::to_vec(&archive_block)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = memvault_core::cid_from_bytes(&block_bytes);
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.effective_author(),
+            tags: vec![
+                ("kind".to_string(), "bucket-archive".to_string()),
+                ("bucket".to_string(), id.to_string()),
+            ],
+            wall_ns: now_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(id.0.to_vec()),
+        };
+        self.store.insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+
+        // Mark the bucket decl as archived by storing an updated decl
+        if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
+            if let Some(block) = self.store.get_block(&decl_cid)? {
+                if let Ok(mut decl) = serde_json::from_slice::<memvault_doc::BucketDecl>(&block) {
+                    decl.name = format!("[ARCHIVED] {}", decl.name);
+                    decl.description = Some(format!(
+                        "Archived: {}. {}",
+                        reason,
+                        decl.description.unwrap_or_default()
+                    ));
+                    let new_bytes = serde_json::to_vec(&decl)
+                        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+                    let new_cid = memvault_core::cid_from_bytes(&new_bytes);
+                    self.store.insert_envelope(&new_cid.to_bytes(), &new_bytes, &memvault_store::insert::EnvelopeMeta {
+                        author: self.effective_author(),
+                        tags: vec![
+                            ("kind".to_string(), "bucket-decl".to_string()),
+                            ("bucket".to_string(), id.to_string()),
+                        ],
+                        wall_ns: now_ns,
+                        causal: vec![decl_cid],
+                        provenance: vec![],
+                        cluster_id: Some(self.cluster_id.clone()),
+                        bucket_id: Some(id.0.to_vec()),
+                    })?;
+                    self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
+                }
+            }
+        }
+
+        tracing::info!(bucket = %id, reason, "bucket archived");
+        Ok(())
+    }
+
     // -- Sharing --
 
     async fn share_inbox(&self) -> Result<Vec<Vec<u8>>> {
@@ -1469,14 +1539,87 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn share_decide(&self, proposal_cid: &[u8], approve: bool, reason: Option<&str>) -> Result<()> {
+        let now_ns = memvault_core::wall_ns();
         let status: u8 = if approve { 1 } else { 2 };
+
         // Update the inbox entry status
         self.store.record_share_inbox(
             proposal_cid,
             &self.cluster_id,
-            memvault_core::wall_ns(),
+            now_ns,
             status,
         )?;
+
+        // If approved and we have an admin signing key, issue a BucketTrust
+        if approve {
+            if let Some(ref admin_key) = self.admin_signing_key {
+                // Load the proposal to get bucket/cluster info
+                if let Some(proposal_block) = self.store.get_block(proposal_cid)? {
+                    if let Ok(proposal) = serde_json::from_slice::<serde_json::Value>(&proposal_block) {
+                        let from_bucket: Option<Vec<u8>> = proposal.get("from_bucket")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok());
+                        let from_cluster: Option<Vec<u8>> = proposal.get("from_cluster")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                        if let (Some(bucket_bytes), Some(cluster_bytes)) = (from_bucket, from_cluster) {
+                            // Create and sign a BucketTrust
+                            let proposal_cid_obj = memvault_core::cid_from_bytes(proposal_cid);
+                            let reply_cid = memvault_core::cid_from_bytes(&now_ns.to_be_bytes());
+
+                            let trust = memvault_auth::BucketTrust {
+                                bucket_id: memvault_core::BucketId(bucket_bytes.clone().try_into().unwrap_or([0u8; 32])),
+                                from_cluster: memvault_core::ClusterId(cluster_bytes.clone().try_into().unwrap_or([0u8; 32])),
+                                to_cluster: memvault_core::ClusterId(self.cluster_id.clone().try_into().unwrap_or([0u8; 32])),
+                                actions: vec![memvault_auth::Action::Read],
+                                not_after_ns: now_ns + 7 * 24 * 3600 * 1_000_000_000, // 7 days default
+                                from_proposal: proposal_cid_obj,
+                                from_reply: reply_cid,
+                                signature: [0u8; 64],
+                            };
+
+                            match trust.sign(admin_key) {
+                                Ok(signed_trust) => {
+                                    let trust_bytes = serde_json::to_vec(&signed_trust)
+                                        .unwrap_or_default();
+                                    let trust_cid = memvault_core::cid_from_bytes(&trust_bytes);
+
+                                    // Store the trust in BUCKET_TRUST
+                                    let _ = self.store.record_bucket_trust(
+                                        &bucket_bytes,
+                                        &cluster_bytes,
+                                        &self.cluster_id,
+                                        &trust_cid.to_bytes(),
+                                    );
+
+                                    // Store the trust block itself
+                                    let meta = memvault_store::insert::EnvelopeMeta {
+                                        author: self.effective_author(),
+                                        tags: vec![("kind".to_string(), "bucket-trust".to_string())],
+                                        wall_ns: now_ns,
+                                        causal: vec![proposal_cid.to_vec()],
+                                        provenance: vec![],
+                                        cluster_id: Some(self.cluster_id.clone()),
+                                        bucket_id: Some(bucket_bytes),
+                                    };
+                                    let _ = self.store.insert_envelope(
+                                        &trust_cid.to_bytes(), &trust_bytes, &meta,
+                                    );
+
+                                    tracing::info!(
+                                        trust_cid = hex::encode(trust_cid.to_bytes()),
+                                        "issued BucketTrust for approved proposal"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!("failed to sign BucketTrust: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         tracing::info!(
             proposal = hex::encode(proposal_cid),
             approve,

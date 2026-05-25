@@ -46,10 +46,68 @@ impl MemvaultStore {
             txn.open_table(tables::CLUSTER_ORIGIN)?;
             txn.open_table(tables::CONSUMED_TOKENS)?;
             txn.open_table(tables::ROTATIONS)?;
+            // Bucket tables (B1)
+            txn.open_table(tables::BY_BUCKET)?;
+            txn.open_table(tables::BUCKETS)?;
+            txn.open_table(tables::BUCKET_CLUSTER)?;
+            txn.open_table(tables::CLUSTER_DEFAULT_BUCKET)?;
+            // Share tables (B5)
+            txn.open_table(tables::SHARE_INBOX)?;
+            txn.open_table(tables::SHARE_OUTBOX)?;
+            txn.open_table(tables::BUCKET_TRUST)?;
+            // Identity table
+            txn.open_table(tables::LOCAL_IDENTITY)?;
         }
         txn.commit()?;
 
         Ok(Self { db })
+    }
+
+    /// Get the stored local peer ID, if any.
+    pub fn get_local_peer_id(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(tables::LOCAL_IDENTITY)?;
+        Ok(table.get("peer_id")?.map(|v| v.value().to_vec()))
+    }
+
+    /// Store the local peer ID. Returns an error if a different peer_id is already stored.
+    pub fn set_local_peer_id(&self, peer_id: &[u8]) -> Result<(), StoreError> {
+        // Check for mismatch
+        if let Some(existing) = self.get_local_peer_id()? {
+            if existing != peer_id {
+                return Err(StoreError::Other(format!(
+                    "peer_id mismatch: store has {}, swarm has {}",
+                    hex::encode(&existing),
+                    hex::encode(peer_id),
+                )));
+            }
+            return Ok(()); // already stored and matches
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(tables::LOCAL_IDENTITY)?;
+            table.insert("peer_id", peer_id)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Get the stored cluster ID, if any.
+    pub fn get_local_cluster_id(&self) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(tables::LOCAL_IDENTITY)?;
+        Ok(table.get("cluster_id")?.map(|v| v.value().to_vec()))
+    }
+
+    /// Store the local cluster ID.
+    pub fn set_local_cluster_id(&self, cluster_id: &[u8]) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(tables::LOCAL_IDENTITY)?;
+            table.insert("cluster_id", cluster_id)?;
+        }
+        txn.commit()?;
+        Ok(())
     }
 }
 
