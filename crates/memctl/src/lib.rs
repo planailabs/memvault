@@ -357,6 +357,22 @@ pub enum Commands {
         /// Agent identifier
         agent_id: String,
     },
+    /// Seed the vault with random documents, entities, files, links and VFS entries
+    #[command(hide = true)]
+    Seed {
+        /// Number of documents to create
+        #[arg(long, default_value = "30")]
+        docs: usize,
+        /// Number of entities to create
+        #[arg(long, default_value = "20")]
+        entities: usize,
+        /// Number of files to create
+        #[arg(long, default_value = "10")]
+        files: usize,
+        /// Number of links between nodes
+        #[arg(long, default_value = "25")]
+        links: usize,
+    },
 }
 
 fn default_data_dir() -> PathBuf {
@@ -1438,8 +1454,216 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("  Expires:      {} ns", id.attestation.not_after_ns);
             println!("  Identity dir: {}", agent_dir.display());
         }
+        Commands::Seed { docs, entities, files, links } => {
+            let store = make_store()?;
+            let client = create_client(store);
+            run_seed(&client, docs, entities, files, links).await?;
+        }
     }
 
+    Ok(())
+}
+
+/// Seed the vault with random data for testing / demo purposes.
+async fn run_seed(
+    client: &LocalClient,
+    n_docs: usize,
+    n_entities: usize,
+    n_files: usize,
+    n_links: usize,
+) -> Result<()> {
+    use memvault_core::{EdgeId, NodeRef};
+    use rand::Rng;
+
+    let mut rng = rand::thread_rng();
+    let bucket = memvault_api::vfs::default_bucket(client).await;
+
+    // ── Vocabulary for generating plausible content ──────────────────
+    let topics = ["architecture", "deployment", "security", "performance", "testing",
+        "networking", "storage", "observability", "authentication", "CI/CD",
+        "database", "caching", "messaging", "containers", "serverless"];
+    let adjectives = ["distributed", "scalable", "resilient", "automated", "zero-trust",
+        "event-driven", "declarative", "immutable", "stateless", "real-time"];
+    let entity_kinds = ["person", "project", "service", "team", "tool",
+        "library", "server", "database", "topic", "standard"];
+    let names = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank",
+        "Grace", "Hector", "Iris", "Jack", "Kara", "Leo",
+        "Maya", "Nate", "Olivia", "Pablo", "Quinn", "Rosa"];
+    let project_names = ["memvault", "hermes", "openclaw", "atlas", "beacon",
+        "compass", "dynamo", "echo", "forge", "gateway",
+        "horizon", "ignite", "jetstream", "keystone", "lighthouse"];
+    let relations = ["works_on", "depends_on", "maintains", "reviewed_by",
+        "related_to", "part_of", "blocks", "extends"];
+    let file_exts = [("txt", "text/plain"), ("md", "text/markdown"),
+        ("json", "application/json"), ("csv", "text/csv"),
+        ("log", "text/plain"), ("yaml", "text/yaml")];
+    let vfs_dirs = ["/notes", "/projects", "/attachments", "/docs",
+        "/reports", "/specs", "/logs"];
+
+    // ── Ensure VFS directories exist ────────────────────────────────
+    for dir in &vfs_dirs {
+        let _ = memvault_api::vfs::ensure_dir_path(client, &bucket, dir).await;
+    }
+    println!("  VFS directories created: {}", vfs_dirs.len());
+
+    // Track all created node refs for linking later.
+    let mut all_nodes: Vec<NodeRef> = Vec::new();
+
+    // ── Documents ───────────────────────────────────────────────────
+    for i in 0..n_docs {
+        let topic = topics[rng.gen_range(0..topics.len())];
+        let adj = adjectives[rng.gen_range(0..adjectives.len())];
+        let title = format!("{} {} notes #{}", adj, topic, i + 1);
+        let paragraphs: usize = rng.gen_range(2..6);
+        let mut body = String::new();
+        for _ in 0..paragraphs {
+            let sentences: usize = rng.gen_range(2..5);
+            for _ in 0..sentences {
+                let t1 = topics[rng.gen_range(0..topics.len())];
+                let t2 = topics[rng.gen_range(0..topics.len())];
+                let a = adjectives[rng.gen_range(0..adjectives.len())];
+                body.push_str(&format!("The {} approach to {} integrates well with {}. ", a, t1, t2));
+            }
+            body.push('\n');
+        }
+        let mut fm = BTreeMap::new();
+        fm.insert("title".to_string(), serde_json::Value::String(title.clone()));
+        let doc = memvault_doc::Document::new(DocId::random(), body, fm);
+        let mut tags = vec![("topic".to_string(), topic.to_string())];
+        if rng.gen_bool(0.3) {
+            tags.push(("priority".to_string(), ["low", "medium", "high"][rng.gen_range(0..3)].to_string()));
+        }
+        let cid = client.put_doc(doc.clone(), tags, Visibility::Internal, None).await?;
+        all_nodes.push(NodeRef::Doc(doc.id.clone()));
+
+        // Place some docs in VFS
+        if rng.gen_bool(0.5) {
+            let dir = vfs_dirs[rng.gen_range(0..vfs_dirs.len())];
+            let slug: String = title.chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect::<String>()
+                .replace(' ', "-").to_lowercase();
+            let path = format!("{}/{}.md", dir, &slug[..slug.len().min(40)]);
+            let node_id = format!("doc:{}", hex::encode(doc.id.0));
+            let _ = memvault_api::vfs::link_node_at_path(client, &bucket, &path, &node_id).await;
+        }
+
+        if (i + 1) % 10 == 0 || i + 1 == n_docs {
+            println!("  Documents: {}/{}", i + 1, n_docs);
+        }
+        let _ = cid;
+    }
+
+    // ── Entities ────────────────────────────────────────────────────
+    for i in 0..n_entities {
+        let kind = entity_kinds[rng.gen_range(0..entity_kinds.len())];
+        let name = match kind {
+            "person" => names[rng.gen_range(0..names.len())].to_string(),
+            "project" | "service" | "tool" => project_names[rng.gen_range(0..project_names.len())].to_string(),
+            "team" => format!("team-{}", &["platform", "infra", "product", "security", "data"][rng.gen_range(0..5)]),
+            _ => format!("{}-{}", kind, rng.gen_range(1..100u32)),
+        };
+        let mut props = BTreeMap::new();
+        props.insert("name".to_string(), serde_json::json!(name));
+        if rng.gen_bool(0.4) {
+            props.insert("description".to_string(), serde_json::json!(
+                format!("A {} entity for {} purposes", adjectives[rng.gen_range(0..adjectives.len())],
+                    topics[rng.gen_range(0..topics.len())])
+            ));
+        }
+        if kind == "person" && rng.gen_bool(0.5) {
+            props.insert("role".to_string(), serde_json::json!(
+                ["engineer", "manager", "designer", "analyst", "lead"][rng.gen_range(0..5)]
+            ));
+        }
+        let entity = Entity { id: EntityId::random(), kind: kind.to_string(), props, edges_out: vec![] };
+        let eid = client.add_entity(entity.clone(), Visibility::Internal, None).await?;
+        all_nodes.push(NodeRef::Entity(eid));
+
+        if (i + 1) % 10 == 0 || i + 1 == n_entities {
+            println!("  Entities:  {}/{}", i + 1, n_entities);
+        }
+    }
+
+    // ── Files ───────────────────────────────────────────────────────
+    for i in 0..n_files {
+        let (ext, mime) = file_exts[rng.gen_range(0..file_exts.len())];
+        let topic = topics[rng.gen_range(0..topics.len())];
+        let filename = format!("{}-report-{}.{}", topic, rng.gen_range(1..999u32), ext);
+
+        // Generate plausible file content
+        let content = match ext {
+            "json" => serde_json::to_vec_pretty(&serde_json::json!({
+                "report": topic,
+                "generated": format!("{}ns", memvault_core::wall_ns()),
+                "metrics": {
+                    "latency_p99_ms": rng.gen_range(10..500),
+                    "throughput_rps": rng.gen_range(100..10000),
+                    "error_rate": format!("{:.2}%", rng.gen_range(0.0..5.0f64)),
+                },
+                "tags": [adjectives[rng.gen_range(0..adjectives.len())]],
+            })).unwrap_or_default(),
+            "csv" => {
+                let mut csv = "timestamp,metric,value\n".to_string();
+                for row in 0..rng.gen_range(5..20) {
+                    csv.push_str(&format!("2026-01-{:02}T00:00:00Z,{},{}\n",
+                        row + 1, topic, rng.gen_range(1..1000)));
+                }
+                csv.into_bytes()
+            }
+            _ => {
+                let mut text = String::new();
+                for _ in 0..rng.gen_range(3..10) {
+                    let t = topics[rng.gen_range(0..topics.len())];
+                    let a = adjectives[rng.gen_range(0..adjectives.len())];
+                    text.push_str(&format!("{} {} — details and analysis.\n", a, t));
+                }
+                text.into_bytes()
+            }
+        };
+
+        let cid = client.upload_file(&content, Some(&filename), mime, vec![], "internal", None).await?;
+        all_nodes.push(NodeRef::Attachment(cid.clone()));
+
+        // Place in VFS
+        if rng.gen_bool(0.7) {
+            let dir = vfs_dirs[rng.gen_range(0..vfs_dirs.len())];
+            let path = format!("{}/{}", dir, filename);
+            let node_id = format!("file:{}", hex::encode(&cid));
+            let _ = memvault_api::vfs::link_node_at_path(client, &bucket, &path, &node_id).await;
+        }
+
+        if (i + 1) % 5 == 0 || i + 1 == n_files {
+            println!("  Files:     {}/{}", i + 1, n_files);
+        }
+    }
+
+    // ── Links ───────────────────────────────────────────────────────
+    let mut link_count = 0;
+    for _ in 0..n_links * 3 {
+        if link_count >= n_links { break; }
+        if all_nodes.len() < 2 { break; }
+
+        let src = &all_nodes[rng.gen_range(0..all_nodes.len())];
+        let dst = &all_nodes[rng.gen_range(0..all_nodes.len())];
+        if src == dst { continue; }
+
+        let relation = relations[rng.gen_range(0..relations.len())];
+        let weight = if rng.gen_bool(0.5) { Some(rng.gen_range(0.1..1.0f32)) } else { None };
+        let edge = Edge {
+            id: EdgeId::random(),
+            relation: relation.to_string(),
+            target: dst.clone(),
+            weight,
+            props: BTreeMap::new(),
+            provenance: None,
+        };
+        if client.add_link(src, edge, Visibility::Internal).await.is_ok() {
+            link_count += 1;
+        }
+    }
+    println!("  Links:     {}/{}", link_count, n_links);
+
+    println!("\nSeed complete: {} docs, {} entities, {} files, {} links.",
+        n_docs, n_entities, n_files, link_count);
     Ok(())
 }
 
