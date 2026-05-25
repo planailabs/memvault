@@ -1419,6 +1419,43 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
+    async fn bucket_attach(&self, id: &memvault_core::BucketId) -> Result<()> {
+        // Load current decl, update private_to_peer to None, store new decl
+        let decl_cid = self.store.get_bucket(&id.0)?
+            .ok_or_else(|| ApiError::NotFound(format!("bucket {id}")))?;
+        let block = self.store.get_block(&decl_cid)?
+            .ok_or_else(|| ApiError::NotFound("bucket decl block".into()))?;
+        let mut decl: memvault_doc::BucketDecl = serde_json::from_slice(&block)
+            .map_err(|e| ApiError::Other(format!("failed to decode bucket decl: {e}")))?;
+
+        if decl.private_to_peer.is_none() {
+            // Already attached, idempotent
+            return Ok(());
+        }
+
+        decl.private_to_peer = None;
+        let new_bytes = serde_json::to_vec(&decl)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let new_cid = memvault_core::cid_from_bytes(&new_bytes);
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.peer_id.clone(),
+            tags: vec![
+                ("kind".to_string(), "bucket-decl".to_string()),
+                ("bucket".to_string(), id.to_string()),
+            ],
+            wall_ns: memvault_core::wall_ns(),
+            causal: vec![decl_cid],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(id.0.to_vec()),
+        };
+        self.store.insert_envelope(&new_cid.to_bytes(), &new_bytes, &meta)?;
+        self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
+
+        tracing::info!(bucket = %id, "bucket attached to cluster");
+        Ok(())
+    }
+
     async fn status(&self) -> Result<NodeStatus> {
         let block_count = self.store.iter_blocks()
             .map(|b| b.len() as u64)

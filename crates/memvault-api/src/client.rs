@@ -111,6 +111,9 @@ pub trait MemvaultClient: Send + Sync {
     /// Bind a bucket to a cluster. If `is_default`, set it as the cluster's default.
     async fn bucket_bind(&self, bucket_id: &BucketId, cluster_id: &ClusterId, is_default: bool) -> Result<()>;
 
+    /// Attach a private bucket to the cluster (flips private_to_peer to None, triggers gossip).
+    async fn bucket_attach(&self, id: &BucketId) -> Result<()>;
+
     // -- Status --
     async fn status(&self) -> Result<NodeStatus>;
 }

@@ -13,6 +13,9 @@ pub enum FederationAnnouncement {
         head_cid: Vec<u8>,
         visibility: Visibility,
         scope_tags: Vec<(String, String)>,
+        /// Bucket this head belongs to (added B3). None = default bucket.
+        #[serde(default)]
+        bucket_id: Option<Vec<u8>>,
     },
     /// A new grant was issued for cross-cluster access.
     GrantIssued { grant_cid: Vec<u8> },
@@ -22,6 +25,11 @@ pub enum FederationAnnouncement {
     TrustRevoked { revocation_cid: Vec<u8> },
     /// Admin key rotation in the originating cluster.
     AdminKeyRotated { rotation_cid: Vec<u8> },
+    // ── Bucket federation (added B3) ────────────────────────────
+    /// A cross-cluster BucketTrust was established.
+    BucketTrustEstablished { trust_cid: Vec<u8> },
+    /// A cross-cluster BucketTrust was revoked.
+    BucketTrustRevoked { revocation_cid: Vec<u8> },
 }
 
 /// Information about a trusted remote cluster.
@@ -132,6 +140,7 @@ mod tests {
                 head_cid: b"cid123".to_vec(),
                 visibility: Visibility::Federated,
                 scope_tags: vec![("ns".into(), "docs".into())],
+                bucket_id: None,
             },
             FederationAnnouncement::GrantIssued {
                 grant_cid: b"grant1".to_vec(),

@@ -54,6 +54,15 @@ pub enum AdminAnnouncement {
     RotationAborted(Vec<u8>),
     /// A membership was revoked (attestation CID bytes).
     Revoked(Vec<u8>),
+    // ── Bucket announcements (added B3) ─────────────────────────
+    /// A new bucket was created (BucketDecl envelope CID).
+    BucketCreated(Vec<u8>),
+    /// A bucket was attached to the cluster (BucketAttach op CID).
+    BucketAttached(Vec<u8>),
+    /// A bucket was archived (BucketArchive op CID).
+    BucketArchived(Vec<u8>),
+    /// A cross-cluster BucketTrust was established (BucketTrust envelope CID).
+    BucketTrustEstablished(Vec<u8>),
 }
 
 #[cfg(test)]

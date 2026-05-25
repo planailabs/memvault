@@ -676,6 +676,13 @@ impl MemvaultClient for HttpApiClient {
         Ok(())
     }
 
+    async fn bucket_attach(&self, id: &memvault_core::BucketId) -> Result<()> {
+        self.client.post(self.url(&format!("/buckets/{}/attach", hex::encode(id.0))))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
     // -- Rotation --
 
     async fn list_rotations(&self) -> Result<Vec<RotationInfo>> { Ok(vec![]) }
