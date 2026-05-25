@@ -4,9 +4,9 @@
 //! - mDNS peer discovery → dial + Kademlia
 //! - Identify → Kademlia address update
 //! - Gossipsub head announcements → block exchange for missing data
-//! - Block exchange server (serve blocks from store)
-//! - Block exchange client (store received blocks)
-//! - Initial sync on peer connect (announce recent heads)
+//! - Block exchange server (serve blocks + list recent heads)
+//! - Block exchange client (store received blocks, request missing)
+//! - Initial sync on peer connect via block exchange (not gossipsub)
 //! - Outbound head announcements from a channel
 //!
 //! Used by `memctl daemon` and potentially the mac-mgmt daemon.
@@ -28,10 +28,10 @@ use memvault_store::MemvaultStore;
 pub struct SyncConfig {
     /// Cluster ID for head announcements.
     pub cluster_id: Vec<u8>,
-    /// How far back (in nanoseconds) to announce heads on new peer connect.
+    /// How far back (in nanoseconds) to request heads on new peer connect.
     /// Default: 5 minutes.
     pub initial_sync_window_ns: u64,
-    /// Maximum number of recent heads to announce on connect.
+    /// Maximum number of recent heads to request on connect.
     pub initial_sync_max_heads: usize,
 }
 
@@ -55,12 +55,6 @@ pub struct OutboundHead {
 /// Run the swarm event loop with full block sync.
 ///
 /// This function blocks until ctrl+c is received.
-///
-/// # Arguments
-/// * `swarm` — the libp2p swarm (from `memvault_net::standalone_swarm`)
-/// * `store` — the block store for serving and storing blocks
-/// * `head_rx` — channel receiving CIDs to announce (from local writes)
-/// * `config` — sync configuration
 pub async fn run_sync_loop(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: Arc<MemvaultStore>,
@@ -77,11 +71,11 @@ pub async fn run_sync_loop(
                         println!("  Listening on: {address}");
                     }
 
-                    // ── New peer connected: announce recent heads ──
+                    // ── New peer connected: request their recent heads ──
                     Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                         tracing::info!(%peer_id, "peer connected");
                         if synced_peers.insert(peer_id) {
-                            announce_recent_heads(swarm, &store, &config);
+                            request_remote_heads(swarm, &config, peer_id);
                         }
                     }
 
@@ -148,7 +142,7 @@ pub async fn run_sync_loop(
                         serve_block_request(swarm, &store, peer, channel, request);
                     }
 
-                    // ── Block exchange: store responses ──
+                    // ── Block exchange: process responses ──
                     Some(SwarmEvent::Behaviour(
                         StandaloneMemvaultBehaviourEvent::BlockExchange(
                             libp2p::request_response::Event::Message {
@@ -160,7 +154,7 @@ pub async fn run_sync_loop(
                             }
                         )
                     )) => {
-                        store_received_blocks(&store, peer, response);
+                        handle_block_response(swarm, &store, peer, response);
                     }
 
                     // ── Block exchange: errors ──
@@ -209,12 +203,28 @@ pub async fn run_sync_loop(
 }
 
 /// Create a channel pair for outbound head announcements.
-/// The sender goes to the EventBus bridge; the receiver goes to `run_sync_loop`.
 pub fn head_channel() -> (mpsc::UnboundedSender<OutboundHead>, mpsc::UnboundedReceiver<OutboundHead>) {
     mpsc::unbounded_channel()
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
+
+/// On new peer connect, send a "list heads" BlockRequest via request-response
+/// (works immediately, unlike gossipsub which needs mesh formation).
+fn request_remote_heads(
+    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    config: &SyncConfig,
+    peer_id: libp2p::PeerId,
+) {
+    let cutoff = memvault_core::wall_ns().saturating_sub(config.initial_sync_window_ns);
+    let request = BlockRequest {
+        cids: vec![],
+        since_ns: Some(cutoff),
+        limit: Some(config.initial_sync_max_heads),
+    };
+    swarm.behaviour_mut().block_exchange.send_request(&peer_id, request);
+    tracing::debug!(%peer_id, "sent initial sync request");
+}
 
 fn publish_head(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
@@ -235,38 +245,6 @@ fn publish_head(
     }
 }
 
-fn announce_recent_heads(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
-    store: &MemvaultStore,
-    config: &SyncConfig,
-) {
-    let cutoff = memvault_core::wall_ns().saturating_sub(config.initial_sync_window_ns);
-    let recent_cids = match store.query_by_time(cutoff, u64::MAX, config.initial_sync_max_heads) {
-        Ok(cids) => cids,
-        Err(e) => {
-            tracing::warn!("failed to query recent heads: {e}");
-            return;
-        }
-    };
-    for cid in &recent_cids {
-        let ann = HeadAnnouncement {
-            cid: cid.clone(),
-            cluster_id: config.cluster_id.clone(),
-            wall_ns: memvault_core::wall_ns(),
-            bucket_id: None,
-        };
-        if let Ok(data) = serde_ipld_dagcbor::to_vec(&ann) {
-            let _ = swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(memvault_net::gossip::heads_topic(), data);
-        }
-    }
-    if !recent_cids.is_empty() {
-        tracing::info!(heads = recent_cids.len(), "announced recent heads to new peer");
-    }
-}
-
 fn handle_gossip_message(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: &MemvaultStore,
@@ -276,26 +254,22 @@ fn handle_gossip_message(
     let topic = message.topic.as_str();
     if topic == memvault_net::HEADS_TOPIC {
         if let Ok(ann) = serde_ipld_dagcbor::from_slice::<HeadAnnouncement>(&message.data) {
-            let have_it = store.get_block(&ann.cid).ok().flatten().is_some();
-            if !have_it {
-                tracing::debug!(
-                    cid = %hex::encode(&ann.cid),
-                    %source,
-                    "missing block, requesting from peer"
-                );
+            if store.get_block(&ann.cid).ok().flatten().is_none() {
+                tracing::debug!(cid = %hex::encode(&ann.cid), %source, "missing block from gossip");
                 swarm.behaviour_mut().block_exchange.send_request(
                     &source,
-                    BlockRequest { cids: vec![ann.cid] },
+                    BlockRequest { cids: vec![ann.cid], since_ns: None, limit: None },
                 );
             }
         }
     } else if topic == memvault_net::ADMIN_TOPIC {
         tracing::debug!(%source, len = message.data.len(), "admin announcement received");
-    } else {
-        tracing::debug!(%source, topic, "gossip on unknown topic");
     }
 }
 
+/// Serve a block exchange request. Two modes:
+/// - **Fetch** (cids non-empty): return block data for each CID.
+/// - **List heads** (cids empty, since_ns set): return recent CIDs (no data).
 fn serve_block_request(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: &MemvaultStore,
@@ -303,52 +277,86 @@ fn serve_block_request(
     channel: libp2p::request_response::ResponseChannel<BlockResponse>,
     request: BlockRequest,
 ) {
-    tracing::debug!(%peer, cids = request.cids.len(), "block request received");
-    let mut entries = Vec::with_capacity(request.cids.len());
-    for cid in &request.cids {
-        match store.get_block(cid) {
-            Ok(Some(data)) => entries.push(BlockEntry {
-                cid: cid.clone(),
-                data,
-                found: true,
-            }),
-            _ => entries.push(BlockEntry {
-                cid: cid.clone(),
-                data: vec![],
-                found: false,
-            }),
+    let entries = if !request.cids.is_empty() {
+        // Fetch mode: return block data.
+        tracing::debug!(%peer, cids = request.cids.len(), "block fetch request");
+        request.cids.iter().map(|cid| {
+            match store.get_block(cid) {
+                Ok(Some(data)) => BlockEntry { cid: cid.clone(), data, found: true },
+                _ => BlockEntry { cid: cid.clone(), data: vec![], found: false },
+            }
+        }).collect()
+    } else if let Some(since_ns) = request.since_ns {
+        // List-heads mode: return recent CIDs without data.
+        let limit = request.limit.unwrap_or(500);
+        tracing::debug!(%peer, since_ns, limit, "list-heads request");
+        match store.query_by_time(since_ns, u64::MAX, limit) {
+            Ok(cids) => cids.into_iter().map(|cid| {
+                BlockEntry { cid, data: vec![], found: true }
+            }).collect(),
+            Err(e) => {
+                tracing::warn!(%peer, %e, "failed to query recent heads");
+                vec![]
+            }
         }
-    }
+    } else {
+        vec![]
+    };
+
     let found = entries.iter().filter(|e| e.found).count();
-    tracing::debug!(%peer, found, total = entries.len(), "serving blocks");
+    tracing::debug!(%peer, found, total = entries.len(), "serving block response");
     let _ = swarm
         .behaviour_mut()
         .block_exchange
         .send_response(channel, BlockResponse { blocks: entries });
 }
 
-fn store_received_blocks(
+/// Handle a block exchange response. Two cases:
+/// - Blocks with data → store them locally.
+/// - CID-only entries (from list-heads) → request the ones we're missing.
+fn handle_block_response(
+    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     response: BlockResponse,
 ) {
     let mut stored = 0usize;
+    let mut missing_cids: Vec<Vec<u8>> = Vec::new();
+
     for entry in &response.blocks {
-        if !entry.found || entry.data.is_empty() {
+        if !entry.found {
             continue;
         }
-        if store.get_block(&entry.cid).ok().flatten().is_some() {
-            continue;
+        if entry.data.is_empty() {
+            // CID-only entry (from list-heads): check if we need it.
+            if store.get_block(&entry.cid).ok().flatten().is_none() {
+                missing_cids.push(entry.cid.clone());
+            }
+        } else {
+            // Full block: store it.
+            if store.get_block(&entry.cid).ok().flatten().is_some() {
+                continue; // already have it
+            }
+            if let Err(e) = store.put_block_unchecked(&entry.cid, &entry.data) {
+                tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
+                continue;
+            }
+            let _ = store.reindex_block(&entry.cid, &entry.data);
+            stored += 1;
+            tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
         }
-        if let Err(e) = store.put_block_unchecked(&entry.cid, &entry.data) {
-            tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
-            continue;
-        }
-        let _ = store.reindex_block(&entry.cid, &entry.data);
-        stored += 1;
-        tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
     }
+
     if stored > 0 {
-        tracing::info!(%peer, stored, total = response.blocks.len(), "blocks synced from peer");
+        tracing::info!(%peer, stored, "blocks synced from peer");
+    }
+
+    // Follow up: fetch the blocks we're missing (from a list-heads response).
+    if !missing_cids.is_empty() {
+        tracing::info!(%peer, missing = missing_cids.len(), "requesting missing blocks from peer");
+        swarm.behaviour_mut().block_exchange.send_request(
+            &peer,
+            BlockRequest { cids: missing_cids, since_ns: None, limit: None },
+        );
     }
 }
