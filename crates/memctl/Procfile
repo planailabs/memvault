@@ -4,9 +4,11 @@
 # source tree fight over cargo build locks, WASM output, and file watchers.
 #
 # Instead: build once, then run two daemon instances with different data dirs.
-#   1. Build:    cd memvault/crates/memctl && dx build  (or cargo build -p memctl)
-#   2. Run:      overmind start  (or foreman start)
+#   1. Build WASM assets (optional, for web UI):
+#        cd memvault/crates/memctl && dx build
+#   2. Run:  overmind start  (or foreman start)
 #
+# Without `dx build`, nodes start in API-only mode (no web UI, REST API works).
 # For hot-reload development on a single node, use `dx serve --port 8080` directly.
 
 node_a: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a cargo run -p memctl -- daemon --api-port 8080 --listen /ip4/127.0.0.1/tcp/9001
