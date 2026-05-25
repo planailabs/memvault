@@ -3,18 +3,10 @@
 #
 # Prerequisites:
 #   1. Run genesis-node-a.sh first
-#   2. Start node_a's daemon (so it can issue tokens)
-#
-# This script:
-#   1. Reads node_a's cluster_id
-#   2. Issues a join token from node_a
-#   3. Enrolls node_b as an agent using that token
 set -euo pipefail
 
 NODE_A_DIR="${NODE_A_DATA_DIR:-$HOME/.local/share/memvault.a}"
 NODE_B_DIR="${MEMVAULT_DATA_DIR:-$HOME/.local/share/memvault.b}"
-NODE_A_DB="$NODE_A_DIR/blocks.redb"
-NODE_B_DB="$NODE_B_DIR/blocks.redb"
 
 echo "=== Join node_b to node_a's cluster ==="
 echo "  Node A data: $NODE_A_DIR"
@@ -31,38 +23,27 @@ echo "  Cluster ID: $CLUSTER_ID"
 # Issue a join token from node_a
 echo ""
 echo "Issuing join token from node_a..."
-TOKEN=$(cargo run -p memctl --features daemon -- \
-    --data-dir "$NODE_A_DIR" \
-    --db "$NODE_A_DB" \
-    token-issue --role agent-host --label "node-b" --ttl 3600)
+TOKEN=$(MEMVAULT_DATA_DIR="$NODE_A_DIR" MEMVAULT_DB="$NODE_A_DIR/blocks.redb" \
+    cargo run -p memctl --features daemon -- token-issue --role agent-host --label "node-b" --ttl 3600)
 echo "  Token: ${TOKEN:0:30}..."
 
-# Initialize node_b's data dir if needed
+# Copy cluster_id to node_b
 mkdir -p "$NODE_B_DIR"
-
-# Copy cluster_id to node_b (so it knows which cluster to join)
 cp "$NODE_A_DIR/cluster_id" "$NODE_B_DIR/cluster_id"
 
-# Run genesis on node_b with the same cluster ID... actually no.
-# node_b should run its own genesis OR join via the token.
-# For now: run genesis on node_b to set up the store, then the daemon
-# will connect to node_a via P2P.
-if [ ! -f "$NODE_B_DB" ]; then
+# Run genesis on node_b if store doesn't exist
+if [ ! -f "$NODE_B_DIR/blocks.redb" ]; then
     echo ""
     echo "Running genesis on node_b..."
-    cargo run -p memctl --features daemon -- \
-        --data-dir "$NODE_B_DIR" \
-        --db "$NODE_B_DB" \
-        genesis
+    MEMVAULT_DATA_DIR="$NODE_B_DIR" MEMVAULT_DB="$NODE_B_DIR/blocks.redb" \
+        cargo run -p memctl --features daemon -- genesis
 fi
 
 # Enroll node_b as an agent
 echo ""
 echo "Enrolling node_b agent..."
-cargo run -p memctl --features daemon -- \
-    --data-dir "$NODE_B_DIR" \
-    --db "$NODE_B_DB" \
-    agent-enroll --token "$TOKEN" --agent-id "node-b"
+MEMVAULT_DATA_DIR="$NODE_B_DIR" MEMVAULT_DB="$NODE_B_DIR/blocks.redb" \
+    cargo run -p memctl --features daemon -- agent-enroll --token "$TOKEN" --agent-id "node-b"
 
 echo ""
 echo "=== Done ==="

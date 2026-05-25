@@ -20,7 +20,19 @@ fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    let has_subcommand = args.len() > 1 && !args[1].starts_with('-');
+    // Check if any arg matches a known subcommand name.
+    const SUBCOMMANDS: &[&str] = &[
+        "genesis", "put", "get", "search", "list", "audit", "history",
+        "retract", "token-issue", "token-list", "token-revoke", "rotations",
+        "status", "graph-add", "graph-link", "graph-query", "gc", "peers",
+        "repair-index", "fix-cluster-id", "renew-attestation", "export",
+        "import-files", "import-docs", "share-inbox", "share-outbox",
+        "share-approve", "share-reject", "bucket-new", "bucket-list",
+        "bucket-show", "bucket-rename", "bucket-attach", "bucket-archive",
+        "bucket-bind", "daemon", "agent-enroll", "agent-list", "agent-show",
+        "help",
+    ];
+    let has_subcommand = args.iter().skip(1).any(|a| SUBCOMMANDS.contains(&a.as_str()));
 
     if has_subcommand {
         // CLI mode: create a tokio runtime for async commands.

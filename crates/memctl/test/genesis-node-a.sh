@@ -4,16 +4,12 @@
 set -euo pipefail
 
 export MEMVAULT_DATA_DIR="${MEMVAULT_DATA_DIR:-$HOME/.local/share/memvault.a}"
-DB="$MEMVAULT_DATA_DIR/blocks.redb"
+export MEMVAULT_DB="$MEMVAULT_DATA_DIR/blocks.redb"
 
 echo "=== Genesis for node_a ==="
 echo "  Data dir: $MEMVAULT_DATA_DIR"
 
-# Run genesis — creates cluster_id, default bucket, persists identifiers in store
-cargo run -p memctl --features daemon -- \
-    --data-dir "$MEMVAULT_DATA_DIR" \
-    --db "$DB" \
-    genesis
+cargo run -p memctl --features daemon -- genesis
 
 echo ""
 echo "Cluster ID: $(cat "$MEMVAULT_DATA_DIR/cluster_id")"
