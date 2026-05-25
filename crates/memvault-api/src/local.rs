@@ -1237,6 +1237,10 @@ impl MemvaultClient for LocalClient {
         let mut views = Vec::new();
         for label in &labels {
             let cid_bytes = hex::decode(label).unwrap_or_default();
+            // Skip retracted views
+            if self.store.is_retracted(&cid_bytes).unwrap_or(false) {
+                continue;
+            }
             if let Some(data) = self.store.get_block(&cid_bytes)? {
                 if let Ok(mut view) = serde_json::from_slice::<crate::types::View>(&data) {
                     view.cid = label.clone();
