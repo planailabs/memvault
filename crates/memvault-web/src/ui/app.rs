@@ -17,6 +17,8 @@ use super::pages::notes::detail::NoteDetail;
 use super::pages::notes::form::{NoteEdit, NoteForm};
 use super::pages::notes::history::NoteHistory;
 use super::pages::notes::list::NoteList;
+use super::pages::buckets::detail::BucketDetail;
+use super::pages::buckets::list::BucketList;
 use super::pages::vfs::explorer::VfsExplorer;
 use super::pages::views::ViewManager;
 
@@ -47,6 +49,10 @@ pub enum Route {
     VfsExplorer {},
     #[route("/views")]
     ViewManager {},
+    #[route("/buckets")]
+    BucketList {},
+    #[route("/buckets/:id")]
+    BucketDetail { id: String },
     #[route("/audit")]
     AuditLog {},
     #[route("/admin")]

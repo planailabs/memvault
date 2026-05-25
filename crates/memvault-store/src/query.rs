@@ -312,12 +312,39 @@ impl MemvaultStore {
     }
 
     /// Bind a bucket to a cluster. If `is_default`, also set it as the cluster's default.
+    /// Bind a bucket to a cluster. If `is_default`, also set it as the cluster's default.
+    ///
+    /// A bucket can only be bound to exactly one cluster (its home). Attempting
+    /// to bind a bucket that is already bound to a *different* cluster returns
+    /// an error. Re-binding to the same cluster is idempotent.
     pub fn bind_bucket(
         &self,
         bucket_id: &[u8],
         cluster_id: &[u8],
         is_default: bool,
     ) -> Result<(), StoreError> {
+        // Check existing binding
+        if let Some(existing) = self.get_bucket_cluster(bucket_id)? {
+            if existing != cluster_id {
+                return Err(StoreError::Other(format!(
+                    "bucket {} is already bound to cluster {}, cannot rebind to {}",
+                    hex::encode(bucket_id),
+                    hex::encode(&existing),
+                    hex::encode(cluster_id),
+                )));
+            }
+            // Already bound to same cluster — just update default if needed
+            if is_default {
+                let txn = self.db.begin_write()?;
+                {
+                    let mut cdb = txn.open_table(CLUSTER_DEFAULT_BUCKET)?;
+                    cdb.insert(cluster_id, bucket_id)?;
+                }
+                txn.commit()?;
+            }
+            return Ok(());
+        }
+
         let txn = self.db.begin_write()?;
         {
             let mut bc = txn.open_table(BUCKET_CLUSTER)?;
@@ -330,5 +357,19 @@ impl MemvaultStore {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Bind all unbound buckets to the given cluster.
+    /// Called during genesis or cluster join to adopt orphaned local buckets.
+    pub fn bind_unbound_buckets(&self, cluster_id: &[u8]) -> Result<usize, StoreError> {
+        let all_buckets = self.list_buckets()?;
+        let mut count = 0;
+        for (bucket_id, _decl_cid) in all_buckets {
+            if self.get_bucket_cluster(&bucket_id)?.is_none() {
+                self.bind_bucket(&bucket_id, cluster_id, false)?;
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }

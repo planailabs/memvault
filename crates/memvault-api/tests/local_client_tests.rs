@@ -10,6 +10,7 @@ use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity};
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_store::MemvaultStore;
+use rand::RngCore;
 
 fn make_client() -> (tempfile::TempDir, Arc<LocalClient>) {
     let dir = tempfile::tempdir().unwrap();
@@ -436,4 +437,230 @@ fn store_cluster_id_persistence() {
     let cluster_id = vec![7u8; 32];
     store.set_local_cluster_id(&cluster_id).unwrap();
     assert_eq!(store.get_local_cluster_id().unwrap().unwrap(), cluster_id);
+}
+
+// ── Exclusive cluster binding tests ─────────────────────────────
+
+#[tokio::test]
+async fn bucket_bind_exclusive_to_one_cluster() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "exclusive", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    let cluster_a = memvault_core::ClusterId([1u8; 32]);
+    let cluster_b = memvault_core::ClusterId([2u8; 32]);
+
+    // Bind to cluster A succeeds
+    client.bucket_bind(&bucket_id, &cluster_a, false).await.unwrap();
+
+    // Rebind to same cluster A is idempotent
+    client.bucket_bind(&bucket_id, &cluster_a, false).await.unwrap();
+
+    // Bind to different cluster B fails
+    let result = client.bucket_bind(&bucket_id, &cluster_b, false).await;
+    assert!(result.is_err(), "should refuse rebinding to a different cluster");
+}
+
+#[tokio::test]
+async fn bucket_bind_idempotent_same_cluster() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "idem", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+
+    let cluster = memvault_core::ClusterId([5u8; 32]);
+
+    // Bind as non-default
+    client.bucket_bind(&bucket_id, &cluster, false).await.unwrap();
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert!(!info.is_default);
+
+    // Rebind same cluster as default
+    client.bucket_bind(&bucket_id, &cluster, true).await.unwrap();
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert!(info.is_default);
+}
+
+#[test]
+fn store_bind_unbound_buckets() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemvaultStore::open(dir.path().join("test.redb")).unwrap();
+
+    // Create 3 buckets in the store directly
+    for i in 0..3u8 {
+        let bucket_id = [i + 10; 32];
+        let decl_cid = [i + 100; 32];
+        store.put_bucket(&bucket_id, &decl_cid).unwrap();
+    }
+
+    // Bind one to a cluster
+    let cluster_id = [1u8; 32];
+    store.bind_bucket(&[10; 32], &cluster_id, false).unwrap();
+
+    // bind_unbound_buckets should bind the other 2
+    let count = store.bind_unbound_buckets(&cluster_id).unwrap();
+    assert_eq!(count, 2);
+
+    // Now all 3 should be bound
+    for i in 0..3u8 {
+        let bucket_id = [i + 10; 32];
+        assert!(store.get_bucket_cluster(&bucket_id).unwrap().is_some());
+    }
+
+    // Running again should bind 0
+    let count = store.bind_unbound_buckets(&cluster_id).unwrap();
+    assert_eq!(count, 0);
+}
+
+// ── Share decide tests ──────────────────────────────────────────
+
+#[tokio::test]
+async fn share_inbox_initially_empty() {
+    let (_dir, client) = make_client();
+    let inbox = client.share_inbox().await.unwrap();
+    assert!(inbox.is_empty());
+}
+
+// ── Auth validation tests ───────────────────────────────────────
+
+#[test]
+fn agent_identity_requires_all_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity_dir = dir.path().join("incomplete-agent");
+    std::fs::create_dir_all(&identity_dir).unwrap();
+
+    // Missing files should fail to load
+    assert!(!memvault_api::agent_identity::AgentIdentity::exists(&identity_dir));
+
+    let result = memvault_api::agent_identity::AgentIdentity::load(&identity_dir);
+    assert!(result.is_err());
+}
+
+#[test]
+fn join_token_roundtrip_with_verify() {
+    use memvault_auth::{decode_token_string, encode_token_string, JoinToken, Role};
+    use memvault_core::{ClusterId, PeerId};
+    use ed25519_dalek::{SigningKey, Signer};
+
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let sk = SigningKey::from_bytes(&secret);
+    let vk = sk.verifying_key();
+    let peer_id = PeerId(vk.as_bytes().to_vec());
+    let cluster_id = ClusterId::random();
+
+    let token = JoinToken {
+        issuer: peer_id.clone(),
+        cluster_id: cluster_id.clone(),
+        role: Role::AgentHost,
+        initial_grants: vec![],
+        not_before_ns: 0,
+        not_after_ns: u64::MAX,
+        max_uses: 5,
+        nonce: [42u8; 16],
+        label: Some("test".into()),
+        signature: [0u8; 64],
+    };
+
+    // Sign
+    let signing_bytes = token.signing_bytes().unwrap();
+    let sig = sk.sign(&signing_bytes);
+    let signed_token = JoinToken { signature: sig.to_bytes(), ..token };
+
+    // Encode + decode
+    let encoded = encode_token_string(&signed_token).unwrap();
+    assert!(encoded.starts_with("mvjoin1:"));
+
+    let decoded = decode_token_string(&encoded).unwrap();
+    assert_eq!(decoded.max_uses, 5);
+    assert_eq!(decoded.label, Some("test".into()));
+
+    // Verify
+    decoded.verify_signature(&vk).unwrap();
+    decoded.verify_time_bounds(1000).unwrap();
+
+    // Expired token fails
+    let expired = JoinToken { not_after_ns: 500, ..decoded };
+    assert!(expired.verify_time_bounds(1000).is_err());
+}
+
+// ── Envelope v1/v2 roundtrip tests ──────────────────────────────
+
+#[test]
+fn envelope_v1_no_bucket_roundtrip() {
+    use memvault_core::{PeerId, Signed, Visibility, BucketId};
+    use memvault_core::tags::Tag;
+
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let sk = ed25519_dalek::SigningKey::from_bytes(&secret);
+    let vk = sk.verifying_key();
+
+    let envelope = Signed::sign(
+        "v1 content".to_string(),
+        &sk,
+        PeerId(vk.as_bytes().to_vec()),
+        vec![], vec![],
+        vec![Tag::new("classification", "internal")],
+        Visibility::Internal, 1, 1000, None,
+        None, // no bucket = v1
+    ).unwrap();
+
+    assert_eq!(envelope.version, 1);
+    assert!(envelope.bucket_id.is_none());
+    envelope.verify(&vk).unwrap();
+}
+
+#[test]
+fn envelope_v2_with_bucket_roundtrip() {
+    use memvault_core::{PeerId, Signed, Visibility, BucketId};
+    use memvault_core::tags::Tag;
+
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let sk = ed25519_dalek::SigningKey::from_bytes(&secret);
+    let vk = sk.verifying_key();
+    let bucket = BucketId::random();
+
+    let envelope = Signed::sign(
+        "v2 content".to_string(),
+        &sk,
+        PeerId(vk.as_bytes().to_vec()),
+        vec![], vec![],
+        vec![Tag::new("classification", "internal")],
+        Visibility::Internal, 1, 1000, None,
+        Some(bucket.clone()),
+    ).unwrap();
+
+    assert_eq!(envelope.version, 2);
+    assert_eq!(envelope.bucket_id, Some(bucket));
+    envelope.verify(&vk).unwrap();
+}
+
+#[test]
+fn envelope_v2_tampered_bucket_fails_verify() {
+    use memvault_core::{PeerId, Signed, Visibility, BucketId};
+    use memvault_core::tags::Tag;
+
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let sk = ed25519_dalek::SigningKey::from_bytes(&secret);
+    let vk = sk.verifying_key();
+
+    let mut envelope = Signed::sign(
+        "tamper test".to_string(),
+        &sk,
+        PeerId(vk.as_bytes().to_vec()),
+        vec![], vec![],
+        vec![Tag::new("classification", "internal")],
+        Visibility::Internal, 1, 1000, None,
+        Some(BucketId::random()),
+    ).unwrap();
+
+    // Tamper with the bucket_id
+    envelope.bucket_id = Some(BucketId::random());
+    assert!(envelope.verify(&vk).is_err());
 }

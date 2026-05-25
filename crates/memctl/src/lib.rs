@@ -441,6 +441,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             store.bind_bucket(&bucket_id.0, &cluster_id.0, true)?;
 
+            // Rebind any pre-existing unbound buckets to this cluster
+            let rebound = store.bind_unbound_buckets(&cluster_id.0)?;
+            if rebound > 0 {
+                println!("  Rebound {rebound} pre-existing bucket(s) to new cluster.");
+            }
+
             println!("Cluster genesis complete.");
             println!("  Cluster ID:      {id_hex}");
             println!("  Default bucket:  {}", hex::encode(bucket_id.0));
