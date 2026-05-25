@@ -41,6 +41,21 @@ pub fn admin_topic() -> IdentTopic {
     IdentTopic::new(ADMIN_TOPIC)
 }
 
+/// A head announcement: tells peers about a new block in the store.
+/// Published on the `HEADS_TOPIC` gossipsub topic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeadAnnouncement {
+    /// CID of the new block.
+    pub cid: Vec<u8>,
+    /// Cluster that produced it.
+    pub cluster_id: Vec<u8>,
+    /// Wall-clock timestamp (nanoseconds).
+    pub wall_ns: u64,
+    /// Optional bucket this block belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<Vec<u8>>,
+}
+
 /// Admin announcements broadcast over gossipsub.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AdminAnnouncement {

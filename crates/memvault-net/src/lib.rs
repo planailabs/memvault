@@ -6,6 +6,7 @@
 
 pub mod auth_proto;
 pub mod behaviour;
+pub mod block_proto;
 pub mod conn_state;
 pub mod error;
 pub mod federation;
@@ -17,11 +18,12 @@ pub mod visibility;
 
 pub use auth_proto::{AuthCodec, AuthRequest, AuthResponse, AUTH_PROTOCOL};
 pub use behaviour::MemvaultBehaviour;
+pub use block_proto::{BlockCodec, BlockEntry, BlockRequest, BlockResponse, BLOCK_PROTOCOL};
 pub use conn_state::{ConnectionRegistry, ConnectionState};
 pub use error::NetError;
 pub use federation::{FederationAnnouncement, FederationState, TrustedClusterInfo};
 pub use gossip::{
-    AdminAnnouncement, federation_ident_topic, federation_topic, ADMIN_TOPIC,
+    AdminAnnouncement, HeadAnnouncement, federation_ident_topic, federation_topic, ADMIN_TOPIC,
     FEDERATION_TOPIC_PREFIX, HEADS_TOPIC,
 };
 pub use join_proto::{

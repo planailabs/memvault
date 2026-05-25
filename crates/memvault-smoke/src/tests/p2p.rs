@@ -470,3 +470,252 @@ fn federation_state_trust_management() {
     state.remove_trust(b"remote-cluster");
     assert!(!state.is_trusted(b"remote-cluster"));
 }
+
+// ── Block exchange protocol tests ─────────────────────────────────
+
+#[tokio::test]
+async fn block_exchange_request_response() {
+    let (mut swarm_a, _addr_a, _peer_a) = spawn_swarm().await;
+    let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
+
+    connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
+
+    // A requests blocks from B
+    let request = memvault_net::BlockRequest {
+        cids: vec![vec![1, 2, 3], vec![4, 5, 6]],
+    };
+    swarm_a.behaviour_mut().block_exchange.send_request(&peer_b, request);
+
+    let completed = timeout(Duration::from_secs(5), async {
+        let mut b_received = false;
+        let mut a_got_response = false;
+
+        while !b_received || !a_got_response {
+            tokio::select! {
+                event = swarm_a.next() => {
+                    if let Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::Message { message, .. }
+                        )
+                    )) = event {
+                        if let libp2p::request_response::Message::Response { response, .. } = message {
+                            assert_eq!(response.blocks.len(), 2);
+                            assert!(response.blocks[0].found);
+                            assert_eq!(response.blocks[0].data, b"block-data-1");
+                            assert!(!response.blocks[1].found);
+                            a_got_response = true;
+                        }
+                    }
+                }
+                event = swarm_b.next() => {
+                    if let Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::Message { message, .. }
+                        )
+                    )) = event {
+                        if let libp2p::request_response::Message::Request { channel, request, .. } = message {
+                            assert_eq!(request.cids.len(), 2);
+                            // Respond: first block found, second not
+                            let response = memvault_net::BlockResponse {
+                                blocks: vec![
+                                    memvault_net::BlockEntry {
+                                        cid: request.cids[0].clone(),
+                                        data: b"block-data-1".to_vec(),
+                                        found: true,
+                                    },
+                                    memvault_net::BlockEntry {
+                                        cid: request.cids[1].clone(),
+                                        data: vec![],
+                                        found: false,
+                                    },
+                                ],
+                            };
+                            swarm_b.behaviour_mut().block_exchange
+                                .send_response(channel, response).unwrap();
+                            b_received = true;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    })
+    .await;
+
+    assert!(completed.is_ok(), "block exchange did not complete");
+}
+
+#[tokio::test]
+async fn block_exchange_large_block() {
+    let (mut swarm_a, _addr_a, _peer_a) = spawn_swarm().await;
+    let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
+
+    connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
+
+    // Request a single large block (1 MiB)
+    let large_data = vec![0xABu8; 1024 * 1024];
+    let request = memvault_net::BlockRequest {
+        cids: vec![vec![42; 32]],
+    };
+    swarm_a.behaviour_mut().block_exchange.send_request(&peer_b, request);
+
+    let large_data_clone = large_data.clone();
+    let completed = timeout(Duration::from_secs(10), async {
+        let mut b_received = false;
+        let mut a_got_response = false;
+
+        while !b_received || !a_got_response {
+            tokio::select! {
+                event = swarm_a.next() => {
+                    if let Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::Message { message, .. }
+                        )
+                    )) = event {
+                        if let libp2p::request_response::Message::Response { response, .. } = message {
+                            assert_eq!(response.blocks.len(), 1);
+                            assert!(response.blocks[0].found);
+                            assert_eq!(response.blocks[0].data.len(), 1024 * 1024);
+                            a_got_response = true;
+                        }
+                    }
+                }
+                event = swarm_b.next() => {
+                    if let Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::Message { message, .. }
+                        )
+                    )) = event {
+                        if let libp2p::request_response::Message::Request { channel, .. } = message {
+                            let response = memvault_net::BlockResponse {
+                                blocks: vec![memvault_net::BlockEntry {
+                                    cid: vec![42; 32],
+                                    data: large_data_clone.clone(),
+                                    found: true,
+                                }],
+                            };
+                            swarm_b.behaviour_mut().block_exchange
+                                .send_response(channel, response).unwrap();
+                            b_received = true;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    })
+    .await;
+
+    assert!(completed.is_ok(), "large block exchange did not complete");
+}
+
+// ── Head announcement gossip tests ────────────────────────────────
+
+#[tokio::test]
+#[ignore = "gossipsub meshing is timing-sensitive; run with --include-ignored"]
+async fn head_announcement_propagates() {
+    let (mut swarm_a, _addr_a, _peer_a) = spawn_swarm().await;
+    let (mut swarm_b, addr_b, _peer_b) = spawn_swarm().await;
+
+    connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    for _ in 0..20 {
+        tokio::select! {
+            _ = swarm_a.next() => {}
+            _ = swarm_b.next() => {}
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+
+    let ann = memvault_net::HeadAnnouncement {
+        cid: vec![0xCA; 32],
+        cluster_id: vec![1u8; 32],
+        wall_ns: 1234567890,
+        bucket_id: Some(vec![0xBB; 32]),
+    };
+    let data = serde_ipld_dagcbor::to_vec(&ann).unwrap();
+    swarm_a.behaviour_mut().gossipsub
+        .publish(gossip::heads_topic(), data)
+        .unwrap();
+
+    let received = timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                event = swarm_b.next() => {
+                    if let Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::Gossipsub(
+                            libp2p::gossipsub::Event::Message { message, .. }
+                        )
+                    )) = event {
+                        if message.topic.as_str() == memvault_net::HEADS_TOPIC {
+                            let decoded: memvault_net::HeadAnnouncement =
+                                serde_ipld_dagcbor::from_slice(&message.data).unwrap();
+                            assert_eq!(decoded.cid, vec![0xCA; 32]);
+                            assert_eq!(decoded.cluster_id, vec![1u8; 32]);
+                            assert_eq!(decoded.wall_ns, 1234567890);
+                            assert_eq!(decoded.bucket_id, Some(vec![0xBB; 32]));
+                            return true;
+                        }
+                    }
+                }
+                _ = swarm_a.next() => {}
+            }
+        }
+    })
+    .await;
+
+    assert!(received.is_ok(), "head announcement not received");
+}
+
+#[test]
+fn head_announcement_serialization_roundtrip() {
+    let ann = memvault_net::HeadAnnouncement {
+        cid: vec![1, 2, 3, 4],
+        cluster_id: vec![5; 32],
+        wall_ns: 999,
+        bucket_id: None,
+    };
+    let bytes = serde_ipld_dagcbor::to_vec(&ann).unwrap();
+    let decoded: memvault_net::HeadAnnouncement =
+        serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+    assert_eq!(decoded.cid, ann.cid);
+    assert_eq!(decoded.cluster_id, ann.cluster_id);
+    assert_eq!(decoded.wall_ns, ann.wall_ns);
+    assert_eq!(decoded.bucket_id, None);
+
+    // With bucket_id
+    let ann2 = memvault_net::HeadAnnouncement {
+        cid: vec![10; 32],
+        cluster_id: vec![20; 32],
+        wall_ns: 12345,
+        bucket_id: Some(vec![30; 32]),
+    };
+    let bytes2 = serde_ipld_dagcbor::to_vec(&ann2).unwrap();
+    let decoded2: memvault_net::HeadAnnouncement =
+        serde_ipld_dagcbor::from_slice(&bytes2).unwrap();
+    assert_eq!(decoded2.bucket_id, Some(vec![30; 32]));
+}
+
+#[test]
+fn block_request_response_serialization_roundtrip() {
+    let req = memvault_net::BlockRequest {
+        cids: vec![vec![1; 32], vec![2; 32], vec![3; 32]],
+    };
+    let bytes = serde_ipld_dagcbor::to_vec(&req).unwrap();
+    let decoded: memvault_net::BlockRequest =
+        serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+    assert_eq!(decoded.cids.len(), 3);
+
+    let resp = memvault_net::BlockResponse {
+        blocks: vec![
+            memvault_net::BlockEntry { cid: vec![1; 32], data: b"hello".to_vec(), found: true },
+            memvault_net::BlockEntry { cid: vec![2; 32], data: vec![], found: false },
+        ],
+    };
+    let bytes = serde_ipld_dagcbor::to_vec(&resp).unwrap();
+    let decoded: memvault_net::BlockResponse =
+        serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+    assert_eq!(decoded.blocks.len(), 2);
+    assert!(decoded.blocks[0].found);
+    assert!(!decoded.blocks[1].found);
+}

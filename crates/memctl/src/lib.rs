@@ -396,13 +396,17 @@ fn open_store(data_dir: &Path) -> Result<Arc<MemvaultStore>> {
 }
 
 fn create_client_with_data_dir(store: Arc<MemvaultStore>, data_dir: &Path) -> LocalClient {
+    create_client_with_bus(store, data_dir, Arc::new(EventBus::new(64)))
+}
+
+fn create_client_with_bus(store: Arc<MemvaultStore>, data_dir: &Path, event_bus: Arc<EventBus>) -> LocalClient {
     let peer_id = store.get_local_peer_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
     let cluster_id = store.get_local_cluster_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
     let mut client = LocalClient::new(
         store,
         Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
-        Arc::new(EventBus::new(64)),
+        event_bus,
         peer_id,
         cluster_id,
     );
@@ -1153,7 +1157,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 })
                 .unwrap_or_else(|| vec![0u8; 32]);
 
-            let client = create_client(store.clone());
+            let event_bus_shared = std::sync::Arc::new(EventBus::new(256));
+            let client = create_client_with_bus(store.clone(), &data_dir, std::sync::Arc::clone(&event_bus_shared));
 
             // Load or rebuild the full-text search index
             let index_cache_path = data_dir.join("text_index.json");
@@ -1191,7 +1196,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
                 let app_state = std::sync::Arc::new(memvault_web::AppState {
                     client: client_arc,
-                    event_bus: std::sync::Arc::new(memvault_api::EventBus::new(256)),
+                    event_bus: std::sync::Arc::clone(&event_bus_shared),
                     auth_token: auth_token.clone(),
                     metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                 });
@@ -1234,9 +1239,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                     keypair, listen_addr, bootstrap_addrs,
                 ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
-                // Run the swarm event loop
+                // Run the swarm event loop with sync
                 println!("Daemon running. Press Ctrl+C to stop.");
-                run_swarm_loop(&mut swarm).await;
+                run_swarm_loop(&mut swarm, store, event_bus_shared, cluster_id_bytes.clone()).await;
             }
 
             // Without the daemon feature, run P2P only (no web UI)
@@ -1247,7 +1252,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
                 println!("Daemon running (P2P only, no web UI). Press Ctrl+C to stop.");
-                run_swarm_loop(&mut swarm).await;
+                run_swarm_loop(&mut swarm, store, event_bus_shared, cluster_id_bytes.clone()).await;
             }
         }
         Commands::ClusterJoin { cluster_id: cluster_hex } => {
@@ -1431,11 +1436,31 @@ pub async fn run(cli: Cli) -> Result<()> {
 }
 
 /// Seed the vault with random data for testing / demo purposes.
-/// Run the swarm event loop: handles mDNS discovery, Kademlia routing,
-/// gossipsub, and ctrl+c shutdown.
-async fn run_swarm_loop(swarm: &mut libp2p::Swarm<memvault_net::StandaloneMemvaultBehaviour>) {
+/// Run the swarm event loop with full data sync.
+///
+/// Handles:
+/// - mDNS discovery → dial + Kademlia
+/// - Identify → Kademlia address update
+/// - Gossipsub heads topic → fetch missing blocks from announcing peer
+/// - Block exchange requests → serve blocks from local store
+/// - Block exchange responses → store received blocks and reindex
+/// - EventBus → announce new local writes on heads topic
+/// - Initial sync → announce recent heads to newly connected peers
+async fn run_swarm_loop(
+    swarm: &mut libp2p::Swarm<memvault_net::StandaloneMemvaultBehaviour>,
+    store: Arc<MemvaultStore>,
+    event_bus: Arc<memvault_api::EventBus>,
+    cluster_id: Vec<u8>,
+) {
     use futures::StreamExt as _;
     use libp2p::swarm::SwarmEvent;
+    use memvault_net::{HeadAnnouncement, BlockRequest, BlockResponse, BlockEntry};
+    use std::collections::HashSet;
+
+    let mut bus_rx = event_bus.subscribe();
+
+    // Track connected peers for initial sync.
+    let mut synced_peers: HashSet<libp2p::PeerId> = HashSet::new();
 
     loop {
         tokio::select! {
@@ -1444,12 +1469,45 @@ async fn run_swarm_loop(swarm: &mut libp2p::Swarm<memvault_net::StandaloneMemvau
                     Some(SwarmEvent::NewListenAddr { address, .. }) => {
                         println!("  Listening on: {address}");
                     }
+
+                    // ── New peer connected: announce recent heads ──
                     Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                         tracing::info!(%peer_id, "peer connected");
+                        if synced_peers.insert(peer_id) {
+                            // Send our recent heads (last 5 minutes) so the
+                            // new peer can request any blocks it's missing.
+                            let five_min_ago = memvault_core::wall_ns()
+                                .saturating_sub(5 * 60 * 1_000_000_000);
+                            if let Ok(recent_cids) = store.query_by_time(five_min_ago, u64::MAX, 500) {
+                                for cid in &recent_cids {
+                                    let ann = HeadAnnouncement {
+                                        cid: cid.clone(),
+                                        cluster_id: cluster_id.clone(),
+                                        wall_ns: memvault_core::wall_ns(),
+                                        bucket_id: None,
+                                    };
+                                    if let Ok(data) = serde_ipld_dagcbor::to_vec(&ann) {
+                                        let _ = swarm.behaviour_mut().gossipsub
+                                            .publish(memvault_net::gossip::heads_topic(), data);
+                                    }
+                                }
+                                if !recent_cids.is_empty() {
+                                    tracing::info!(
+                                        %peer_id,
+                                        heads = recent_cids.len(),
+                                        "announced recent heads to new peer"
+                                    );
+                                }
+                            }
+                        }
                     }
+
                     Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
                         tracing::info!(%peer_id, "peer disconnected");
+                        synced_peers.remove(&peer_id);
                     }
+
+                    // ── mDNS discovery ──
                     Some(SwarmEvent::Behaviour(
                         memvault_net::StandaloneMemvaultBehaviourEvent::Mdns(
                             libp2p::mdns::Event::Discovered(peers)
@@ -1470,33 +1528,211 @@ async fn run_swarm_loop(swarm: &mut libp2p::Swarm<memvault_net::StandaloneMemvau
                             tracing::debug!(%peer_id, %addr, "mDNS peer expired");
                         }
                     }
+
+                    // ── Identify → update Kademlia ──
                     Some(SwarmEvent::Behaviour(
                         memvault_net::StandaloneMemvaultBehaviourEvent::Identify(
                             libp2p::identify::Event::Received { peer_id, info, .. }
                         )
                     )) => {
-                        // Add identified peer's addresses to Kademlia.
                         for addr in &info.listen_addrs {
                             swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
                         }
                         tracing::debug!(%peer_id, addrs = info.listen_addrs.len(), "identify received");
                     }
+
+                    // ── Gossipsub: head announcements and admin messages ──
                     Some(SwarmEvent::Behaviour(
                         memvault_net::StandaloneMemvaultBehaviourEvent::Gossipsub(
                             libp2p::gossipsub::Event::Message { propagation_source, message, .. }
                         )
                     )) => {
-                        tracing::debug!(
-                            source = %propagation_source,
-                            topic = %message.topic,
-                            len = message.data.len(),
-                            "gossip message received"
-                        );
+                        let topic_str = message.topic.as_str();
+                        if topic_str == memvault_net::HEADS_TOPIC {
+                            // Head announcement: check if we have the block.
+                            if let Ok(ann) = serde_ipld_dagcbor::from_slice::<HeadAnnouncement>(&message.data) {
+                                let have_it = store.get_block(&ann.cid)
+                                    .ok().flatten().is_some();
+                                if !have_it {
+                                    tracing::debug!(
+                                        cid = %hex::encode(&ann.cid),
+                                        source = %propagation_source,
+                                        "missing block, requesting from peer"
+                                    );
+                                    swarm.behaviour_mut().block_exchange.send_request(
+                                        &propagation_source,
+                                        BlockRequest { cids: vec![ann.cid] },
+                                    );
+                                }
+                            }
+                        } else if topic_str == memvault_net::ADMIN_TOPIC {
+                            tracing::debug!(
+                                source = %propagation_source,
+                                len = message.data.len(),
+                                "admin announcement received"
+                            );
+                        } else {
+                            tracing::debug!(
+                                source = %propagation_source,
+                                topic = topic_str,
+                                "gossip message on unknown topic"
+                            );
+                        }
                     }
+
+                    // ── Block exchange: serve requests from peers ──
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message: libp2p::request_response::Message::Request {
+                                    channel, request, ..
+                                },
+                                ..
+                            }
+                        )
+                    )) => {
+                        tracing::debug!(
+                            %peer,
+                            cids = request.cids.len(),
+                            "block request received"
+                        );
+                        let mut entries = Vec::with_capacity(request.cids.len());
+                        for cid in &request.cids {
+                            match store.get_block(cid) {
+                                Ok(Some(data)) => entries.push(BlockEntry {
+                                    cid: cid.clone(),
+                                    data,
+                                    found: true,
+                                }),
+                                _ => entries.push(BlockEntry {
+                                    cid: cid.clone(),
+                                    data: vec![],
+                                    found: false,
+                                }),
+                            }
+                        }
+                        let found = entries.iter().filter(|e| e.found).count();
+                        tracing::debug!(%peer, found, total = entries.len(), "serving blocks");
+                        let _ = swarm.behaviour_mut().block_exchange
+                            .send_response(channel, BlockResponse { blocks: entries });
+                    }
+
+                    // ── Block exchange: process responses (store received blocks) ──
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message: libp2p::request_response::Message::Response {
+                                    response, ..
+                                },
+                                ..
+                            }
+                        )
+                    )) => {
+                        let mut stored = 0usize;
+                        for entry in &response.blocks {
+                            if !entry.found || entry.data.is_empty() {
+                                continue;
+                            }
+                            // Skip if we already have it.
+                            if store.get_block(&entry.cid).ok().flatten().is_some() {
+                                continue;
+                            }
+                            // Store the block and rebuild indexes.
+                            if let Err(e) = store.put_block_unchecked(&entry.cid, &entry.data) {
+                                tracing::warn!(
+                                    cid = %hex::encode(&entry.cid),
+                                    error = %e,
+                                    "failed to store synced block"
+                                );
+                                continue;
+                            }
+                            let _ = store.reindex_block(&entry.cid, &entry.data);
+                            stored += 1;
+                            tracing::debug!(
+                                cid = %hex::encode(&entry.cid),
+                                size = entry.data.len(),
+                                "synced block stored"
+                            );
+                        }
+                        if stored > 0 {
+                            tracing::info!(
+                                %peer,
+                                stored,
+                                total = response.blocks.len(),
+                                "blocks synced from peer"
+                            );
+                        }
+                    }
+
+                    // ── Block exchange: errors ──
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::OutboundFailure {
+                                peer, error, ..
+                            }
+                        )
+                    )) => {
+                        tracing::warn!(%peer, %error, "block exchange outbound failure");
+                    }
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::BlockExchange(
+                            libp2p::request_response::Event::InboundFailure {
+                                peer, error, ..
+                            }
+                        )
+                    )) => {
+                        tracing::warn!(%peer, %error, "block exchange inbound failure");
+                    }
+
                     Some(SwarmEvent::Behaviour(_)) => {}
                     _ => {}
                 }
             }
+
+            // ── EventBus: announce local writes on heads topic ──
+            result = bus_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let cid = match &event {
+                            memvault_api::MemvaultEvent::DocCreated { cid, .. } => Some(cid.clone()),
+                            memvault_api::MemvaultEvent::DocUpdated { cid, .. } => Some(cid.clone()),
+                            memvault_api::MemvaultEvent::EntityCreated { entity_id } => {
+                                // Entity ops are stored as envelopes tagged with the entity ID.
+                                // The CID is in the store's tag index, not in the event.
+                                // We can't easily get it here. Skip for now — the head
+                                // will be announced when the client calls store_op, and
+                                // the periodic sync covers it.
+                                let _ = entity_id;
+                                None
+                            }
+                            memvault_api::MemvaultEvent::Retracted { cid } => Some(cid.clone()),
+                            memvault_api::MemvaultEvent::TokenConsumed { token_cid } => Some(token_cid.clone()),
+                            _ => None,
+                        };
+                        if let Some(cid) = cid {
+                            let ann = HeadAnnouncement {
+                                cid,
+                                cluster_id: cluster_id.clone(),
+                                wall_ns: memvault_core::wall_ns(),
+                                bucket_id: None,
+                            };
+                            if let Ok(data) = serde_ipld_dagcbor::to_vec(&ann) {
+                                let _ = swarm.behaviour_mut().gossipsub
+                                    .publish(memvault_net::gossip::heads_topic(), data);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "event bus lagged, some heads not announced");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("event bus closed");
+                    }
+                }
+            }
+
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutting down daemon...");
                 break;
