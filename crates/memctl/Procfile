@@ -1,15 +1,13 @@
-# Multi-node memvault development cluster.
+# Multi-node memvault development cluster with hot-reload.
 #
-# DO NOT use `dx serve` for both nodes — two dx instances sharing the same
-# source tree fight over cargo build locks, WASM output, and file watchers.
+# Uses separate CARGO_TARGET_DIR per node to avoid build lock conflicts.
+# Both nodes share the same WASM output (public/) since it's identical code.
 #
-# Instead: build once, then run two daemon instances with different data dirs.
-#   1. Build WASM assets (optional, for web UI):
-#        cd memvault/crates/memctl && dx build
-#   2. Run:  overmind start  (or foreman start)
+# Prerequisites:
+#   cd memvault/crates/memctl   (this directory)
+#   overmind start              (or foreman start)
 #
-# Without `dx build`, nodes start in API-only mode (no web UI, REST API works).
-# For hot-reload development on a single node, use `dx serve --port 8080` directly.
+# For a single node with hot-reload: dx serve --port 8080
 
-node_a: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a cargo run -p memctl -- daemon --api-port 8080 --listen /ip4/127.0.0.1/tcp/9001
-node_b: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b cargo run -p memctl -- daemon --api-port 8090 --listen /ip4/127.0.0.1/tcp/9002 --bootstrap /ip4/127.0.0.1/tcp/9001
+node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a dx serve --port 8080
+node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b dx serve --port 8090

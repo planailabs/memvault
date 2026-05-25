@@ -1075,20 +1075,27 @@ pub async fn run(cli: Cli) -> Result<()> {
                     auth_token: auth_token.clone(),
                     metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                 });
-                // Use fullstack router (API + web UI) if WASM assets are available,
-                // otherwise fall back to API-only mode. Assets are built by `dx build`
-                // and placed next to the binary at `<binary_dir>/public/`.
-                let has_assets = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("public").exists()))
-                    .unwrap_or(false);
-
-                let router = if has_assets {
-                    tracing::info!("web UI assets found, serving fullstack");
-                    memvault_web::build_fullstack_router(app_state)
-                } else {
-                    tracing::info!("no web UI assets (run `dx build` first for web UI), serving API only");
-                    memvault_web::build_router(app_state).into()
+                // Choose router mode:
+                // - With `embed` feature: assets are baked into the binary, always fullstack.
+                // - Without `embed`: check if `public/` exists next to binary (from `dx build`).
+                //   If missing, fall back to API-only (no panic).
+                #[cfg(feature = "embed")]
+                let (router, has_webui) = {
+                    (memvault_web::build_fullstack_router(app_state), true)
+                };
+                #[cfg(not(feature = "embed"))]
+                let (router, has_webui) = {
+                    let public_exists = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.join("public").exists()))
+                        .unwrap_or(false);
+                    if public_exists {
+                        tracing::info!("web UI assets found, serving fullstack");
+                        (memvault_web::build_fullstack_router(app_state), true)
+                    } else {
+                        tracing::info!("no web UI assets (run `dx build` or use --features embed), API only");
+                        (memvault_web::build_router(app_state).into(), false)
+                    }
                 };
 
                 let addr = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
@@ -1101,10 +1108,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                         }
                     };
                     tracing::info!(port = api_port, "memvault API started");
-                    println!("  Web UI:     {}", if has_assets {
+                    println!("  Web UI:     {}", if has_webui {
                         format!("http://127.0.0.1:{api_port}")
                     } else {
-                        format!("disabled (run `dx build` for web UI)")
+                        "disabled (run `dx build` or use --features embed)".to_string()
                     });
                     if let Err(e) = axum::serve(listener, router).await {
                         tracing::error!("web server error: {e}");
