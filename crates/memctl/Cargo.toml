@@ -35,6 +35,7 @@ memvault-auth = { path = "../memvault-auth" }
 memvault-export = { path = "../memvault-export" }
 memvault-import = { path = "../memvault-import" }
 memvault-net = { path = "../memvault-net" }
+memvault-swarm = { path = "../memvault-swarm" }
 libp2p = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -43,7 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 hex = "0.4"
 futures = "0.3"
-serde_ipld_dagcbor = "0.6"
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["serde"] }
 dirs = "6"
