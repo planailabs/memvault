@@ -1,10 +1,7 @@
-# Multi-node memvault development cluster.
+# Multi-node memvault development cluster with hot-reload.
 #
-# node_a: dx serve for hot-reload web UI development (uses dioxus::serve via main.rs)
-# node_b: cargo run daemon for P2P networking + API (uses axum::serve via lib.rs)
-#
-# For production builds with embedded assets:
-#   dx build --embed @client --platform web --no-default-features --features web @server --platform server
+# Uses separate CARGO_TARGET_DIR per node to avoid build lock conflicts.
+# @client/@server split features so WASM doesn't pull tokio/mio.
 
 node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a dx serve --port 8080 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-a.log
-node_b: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b cargo run -p memctl --features daemon -- daemon --api-port 8090 --listen /ip4/127.0.0.1/tcp/9001 | tee /tmp/memvault-node-b.log
+node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b dx serve --port 8090 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-b.log

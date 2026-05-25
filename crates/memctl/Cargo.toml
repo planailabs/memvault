@@ -8,7 +8,7 @@ edition = "2024"
 # dx must be invoked with: @client --no-default-features --features web @server
 # This avoids pulling tokio/mio into the WASM target.
 default = ["daemon"]
-daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum"]
+daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum", "dep:dioxus"]
 embed = ["memvault-web?/embed"]
 # WASM client for the web UI — built by dx for embedding.
 # dioxus must be a direct dep so dx detects this as a Dioxus fullstack app.
