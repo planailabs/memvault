@@ -1,7 +1,7 @@
-# Multi-node memvault development cluster with hot-reload.
+# Multi-node memvault development cluster.
 #
-# Uses separate CARGO_TARGET_DIR per node to avoid build lock conflicts.
-# @client/@server split features so WASM doesn't pull tokio/mio.
+# Each node gets its own data dir, API port, and P2P listen address.
+# The swarm + web UI + API all run together via Commands::Daemon.
 
-node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a dx serve --port 8080 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-a.log
-node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b dx serve --port 8090 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-b.log
+node_a: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a MEMVAULT_API_PORT=8401 cargo run -p memctl --features daemon -- daemon --listen /ip4/127.0.0.1/tcp/9001 | tee /tmp/memvault-node-a.log
+node_b: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b MEMVAULT_API_PORT=8402 cargo run -p memctl --features daemon -- daemon --listen /ip4/127.0.0.1/tcp/9002 --bootstrap /ip4/127.0.0.1/tcp/9001 | tee /tmp/memvault-node-b.log
