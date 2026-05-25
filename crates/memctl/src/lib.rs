@@ -1127,32 +1127,48 @@ pub async fn run(cli: Cli) -> Result<()> {
                 });
                 println!("  API token:  {}", &auth_token[..8]);
 
-                // Build standalone swarm in a background task
+                // Start the web server (API + fullstack UI if assets exist)
+                let router = memvault_web::build_fullstack_router(app_state);
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
+                tokio::spawn(async move {
+                    let listener = match tokio::net::TcpListener::bind(addr).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::error!("failed to bind API port {api_port}: {e}");
+                            return;
+                        }
+                    };
+                    tracing::info!(port = api_port, "memvault web UI + API started");
+                    if let Err(e) = axum::serve(listener, router).await {
+                        tracing::error!("web server error: {e}");
+                    }
+                });
+
+                // Build standalone swarm
                 let mut swarm = memvault_net::standalone_swarm(
                     keypair, listen_addr, bootstrap_addrs,
                 ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
-                println!("Daemon running.");
+                // Run the swarm event loop
+                println!("Daemon running. Press Ctrl+C to stop.");
                 use futures::StreamExt as _;
-                tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            event = swarm.next() => {
-                                match event {
-                                    Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
-                                        tracing::info!(%address, "P2P listening");
-                                    }
-                                    Some(libp2p::swarm::SwarmEvent::Behaviour(_)) => {}
-                                    _ => {}
+                loop {
+                    tokio::select! {
+                        event = swarm.next() => {
+                            match event {
+                                Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
+                                    println!("  Listening on: {address}");
                                 }
+                                Some(libp2p::swarm::SwarmEvent::Behaviour(_)) => {}
+                                _ => {}
                             }
                         }
+                        _ = tokio::signal::ctrl_c() => {
+                            println!("\nShutting down daemon...");
+                            break;
+                        }
                     }
-                });
-
-                // serve_app() uses dioxus::serve() internally — handles port
-                // negotiation with dx serve and runs the axum server. Does not return.
-                memvault_web::serve_app(app_state);
+                }
             }
 
             // Without the daemon feature, run P2P only (no web UI)

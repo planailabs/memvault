@@ -1,13 +1,10 @@
 # Multi-node memvault development cluster.
 #
-# Uses separate CARGO_TARGET_DIR per node to avoid build lock conflicts.
-# dx serve with @client/@server separates features:
-#   @client: --no-default-features --features web (WASM only, no mio)
-#   @server: uses defaults (daemon feature, full native stack)
+# node_a: dx serve for hot-reload web UI development (uses dioxus::serve via main.rs)
+# node_b: cargo run daemon for P2P networking + API (uses axum::serve via lib.rs)
 #
-# Prerequisites:
-#   cd memvault/crates/memctl   (this directory)
-#   overmind start              (or foreman start)
+# For production builds with embedded assets:
+#   dx build --embed @client --platform web --no-default-features --features web @server --platform server
 
-node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a MEMVAULT_API_PORT=8401 dx serve --port 8080 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-a.log
-node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b MEMVAULT_API_PORT=8402 dx serve --port 8090 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-b.log
+node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a dx serve --port 8080 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-a.log
+node_b: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b cargo run -p memctl --features daemon -- daemon --api-port 8090 --listen /ip4/127.0.0.1/tcp/9001 | tee /tmp/memvault-node-b.log
