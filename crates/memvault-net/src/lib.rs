@@ -27,7 +27,7 @@ pub use gossip::{
 pub use join_proto::{
     JoinCodec, JoinRefuseReason, JoinRequest, JoinResponse, JoinResult, JOIN_PROTOCOL,
 };
-pub use standalone::{standalone_swarm, StandaloneMemvaultBehaviour};
+pub use standalone::{standalone_swarm, StandaloneMemvaultBehaviour, StandaloneMemvaultBehaviourEvent};
 pub use share_proto::{
     ShareCodec, ShareRequest, ShareResponse, ShareResult, SHARE_PROTOCOL,
 };
