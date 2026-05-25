@@ -321,6 +321,11 @@ pub enum Commands {
         #[arg(long, env = "MEMVAULT_API_PORT", default_value = "8401")]
         api_port: u16,
     },
+    /// Join an existing cluster (sets cluster_id, creates default bucket)
+    ClusterJoin {
+        /// Cluster ID to join (hex)
+        cluster_id: String,
+    },
     /// Enroll an agent using a join token
     AgentEnroll {
         /// Join token string (mvjoin1:...)
@@ -1249,6 +1254,56 @@ pub async fn run(cli: Cli) -> Result<()> {
                     }
                 }
             }
+        }
+        Commands::ClusterJoin { cluster_id: cluster_hex } => {
+            let cluster_bytes = hex::decode(&cluster_hex)?;
+            let cluster_arr: [u8; 32] = cluster_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("cluster_id must be 32 bytes"))?;
+            let cluster_id = ClusterId(cluster_arr);
+
+            let store = make_store()?;
+
+            // Set cluster_id in the store
+            store.set_local_cluster_id(&cluster_id.0)?;
+
+            // Write cluster_id file (for compat)
+            let id_path = data_dir.join("cluster_id");
+            std::fs::create_dir_all(&data_dir)?;
+            std::fs::write(&id_path, cluster_hex.as_bytes())?;
+
+            // Create a default bucket bound to this cluster if none exists
+            let has_default = store.get_default_bucket(&cluster_id.0)?.is_some();
+            if !has_default {
+                let client = create_client(store.clone());
+                use memvault_core::Visibility;
+                use memvault_core::classification::Classification;
+                let bucket_id = client.bucket_create("default", None, Visibility::Internal, Classification::Internal).await?;
+                store.bind_bucket(&bucket_id.0, &cluster_id.0, true)?;
+                println!("Created default bucket: {}", hex::encode(bucket_id.0));
+            }
+
+            // Bind any unbound buckets to this cluster
+            let rebound = store.bind_unbound_buckets(&cluster_id.0)?;
+            if rebound > 0 {
+                println!("Rebound {rebound} existing bucket(s) to cluster.");
+            }
+
+            // Generate admin key if missing (so this node can issue tokens)
+            let admin_key_path = data_dir.join("identity").join("admin.key");
+            if !admin_key_path.exists() {
+                std::fs::create_dir_all(admin_key_path.parent().unwrap())?;
+                let mut seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+                std::fs::write(&admin_key_path, &seed)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&admin_key_path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+
+            println!("Joined cluster {cluster_hex}");
+            println!("  Data dir:  {}", data_dir.display());
         }
         Commands::AgentEnroll { token, agent_id, identity_dir } => {
             // Decode the join token to extract cluster info
