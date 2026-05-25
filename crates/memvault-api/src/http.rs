@@ -12,7 +12,7 @@ use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 
 use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
-use crate::types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View};
+use crate::types::{BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View};
 
 /// HTTP client that implements MemvaultClient by talking to the daemon's REST API.
 pub struct HttpApiClient {
@@ -607,6 +607,72 @@ impl MemvaultClient for HttpApiClient {
             .map_err(map_reqwest)?
             .error_for_status()
             .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    // -- Buckets --
+
+    async fn bucket_create(
+        &self, name: &str, description: Option<&str>,
+        default_visibility: memvault_core::Visibility,
+        default_classification: memvault_core::classification::Classification,
+    ) -> Result<memvault_core::BucketId> {
+        let body = serde_json::json!({
+            "name": name,
+            "description": description,
+            "default_visibility": default_visibility,
+            "default_classification": default_classification,
+        });
+        let resp: serde_json::Value = self.client
+            .post(self.url("/buckets"))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        let id_bytes: Vec<u8> = serde_json::from_value(resp["id"].clone())
+            .map_err(|e| ApiError::Other(format!("missing bucket id: {e}")))?;
+        let arr: [u8; 32] = id_bytes.try_into()
+            .map_err(|_| ApiError::Other("bucket id must be 32 bytes".into()))?;
+        Ok(memvault_core::BucketId(arr))
+    }
+
+    async fn bucket_list(&self) -> Result<Vec<BucketInfo>> {
+        let resp = self.client.get(self.url("/buckets"))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn bucket_get(&self, id: &memvault_core::BucketId) -> Result<Option<BucketInfo>> {
+        let resp = self.client.get(self.url(&format!("/buckets/{}", hex::encode(id.0))))
+            .send().await.map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let info = resp.error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(Some(info))
+    }
+
+    async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {
+        let body = serde_json::json!({ "name": new_name });
+        self.client.patch(self.url(&format!("/buckets/{}", hex::encode(id.0))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn bucket_bind(
+        &self, bucket_id: &memvault_core::BucketId,
+        cluster_id: &memvault_core::ClusterId, is_default: bool,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "cluster_id": cluster_id.0,
+            "is_default": is_default,
+        });
+        self.client.post(self.url(&format!("/buckets/{}/bind", hex::encode(bucket_id.0))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
         Ok(())
     }
 

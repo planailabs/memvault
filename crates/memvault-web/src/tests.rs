@@ -244,6 +244,14 @@ impl MemvaultClient for MockClient {
             uptime_secs: 3600,
         })
     }
+
+    async fn bucket_create(&self, _name: &str, _description: Option<&str>, _vis: memvault_core::Visibility, _class: memvault_core::classification::Classification) -> memvault_api::Result<memvault_core::BucketId> {
+        Ok(memvault_core::BucketId([0u8; 32]))
+    }
+    async fn bucket_list(&self) -> memvault_api::Result<Vec<memvault_api::types::BucketInfo>> { Ok(vec![]) }
+    async fn bucket_get(&self, _id: &memvault_core::BucketId) -> memvault_api::Result<Option<memvault_api::types::BucketInfo>> { Ok(None) }
+    async fn bucket_rename(&self, _id: &memvault_core::BucketId, _name: &str) -> memvault_api::Result<()> { Ok(()) }
+    async fn bucket_bind(&self, _bucket: &memvault_core::BucketId, _cluster: &memvault_core::ClusterId, _default: bool) -> memvault_api::Result<()> { Ok(()) }
 }
 
 fn make_app() -> axum::Router {

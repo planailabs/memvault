@@ -238,3 +238,42 @@ pub fn unpack_rotation_key(key: &[u8]) -> Result<(Vec<u8>, u64), StoreError> {
     let wall_ns = u64::from_be_bytes(key[ts_start..ts_start + 8].try_into().unwrap());
     Ok((rotation_id, wall_ns))
 }
+
+// ── Bucket keys (added B1) ─────────────────────────────────────────
+
+/// Pack a bucket index key: [bucket_id (32 bytes)][wall_ns:u64][cid]
+///
+/// Bucket IDs are fixed-size (32 bytes), so no length prefix is needed.
+pub fn pack_bucket_key(bucket_id: &[u8], wall_ns: u64, cid: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + 8 + cid.len());
+    buf.extend_from_slice(bucket_id);
+    buf.extend_from_slice(&wall_ns.to_be_bytes());
+    buf.extend_from_slice(cid);
+    buf
+}
+
+/// Build a bucket prefix for range scanning: [bucket_id][after_ns]
+pub fn pack_bucket_prefix(bucket_id: &[u8], after_ns: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + 8);
+    buf.extend_from_slice(bucket_id);
+    buf.extend_from_slice(&after_ns.to_be_bytes());
+    buf
+}
+
+/// Build a bucket upper bound: [bucket_id][u64::MAX][0xFF]
+pub fn pack_bucket_prefix_end(bucket_id: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + 8 + 1);
+    buf.extend_from_slice(bucket_id);
+    buf.extend_from_slice(&u64::MAX.to_be_bytes());
+    buf.push(0xFF);
+    buf
+}
+
+/// Extract the CID from a bucket index key.
+pub fn unpack_bucket_cid(key: &[u8]) -> Result<&[u8], StoreError> {
+    let cid_start = 32 + 8; // bucket_id + wall_ns
+    if key.len() < cid_start {
+        return Err(StoreError::KeyEncoding("bucket key too short for cid".into()));
+    }
+    Ok(&key[cid_start..])
+}

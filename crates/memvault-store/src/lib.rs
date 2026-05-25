@@ -97,6 +97,7 @@ mod tests {
             causal: vec![],
             provenance: vec![],
             cluster_id: None,
+            bucket_id: None,
         };
         store.insert_envelope(cid, b"envelope-data", &meta).unwrap();
 
@@ -121,6 +122,7 @@ mod tests {
             causal: vec![],
             provenance: vec![],
             cluster_id: None,
+            bucket_id: None,
         };
         store.insert_envelope(cid, b"data", &meta).unwrap();
 
@@ -142,6 +144,7 @@ mod tests {
                 causal: vec![],
                 provenance: vec![],
                 cluster_id: None,
+                bucket_id: None,
             };
             store.insert_envelope(cid.as_bytes(), b"data", &meta).unwrap();
         }
@@ -227,6 +230,7 @@ mod tests {
             causal: vec![parent_cid.to_vec()],
             provenance: vec![parent_cid.to_vec()],
             cluster_id: Some(b"cluster-1".to_vec()),
+            bucket_id: None,
         };
         store.insert_envelope(child_cid, b"child-data", &meta).unwrap();
 
@@ -248,6 +252,7 @@ mod tests {
                 causal: vec![],
                 provenance: vec![],
                 cluster_id: None,
+                bucket_id: None,
             };
             store.insert_envelope(cid.as_bytes(), b"data", &meta).unwrap();
         }

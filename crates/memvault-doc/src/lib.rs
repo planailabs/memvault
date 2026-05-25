@@ -2,6 +2,7 @@
 mod tests;
 
 pub mod apply;
+pub mod bucket;
 pub mod crdt;
 pub mod compaction;
 pub mod document;
@@ -24,5 +25,6 @@ pub use graph::{Edge, Entity};
 pub use head::DocumentHead;
 pub use history::{doc_at_op, doc_diff};
 pub use log::{OpEntry, OpLog};
+pub use bucket::{BucketBinding, BucketDecl};
 pub use op::{Op, TextOp, TextPatch};
 pub use snapshot::Snapshot;

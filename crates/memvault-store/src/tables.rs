@@ -38,3 +38,18 @@ pub const CONSUMED_TOKENS: TableDefinition<&[u8], &[u8]> = TableDefinition::new(
 
 /// Rotations: packed(rotation_id, wall_ns) -> rotation_block_cid.
 pub const ROTATIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rotations");
+
+// ── Bucket tables (added B1) ───────────────────────────────────────────
+
+/// Index by bucket: packed(bucket_id, wall_ns, cid) -> ().
+pub const BY_BUCKET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("by_bucket");
+
+/// Bucket metadata: bucket_id -> bucket_decl_cid (most-recent BucketDecl op CID).
+pub const BUCKETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("buckets");
+
+/// Bucket → cluster binding: bucket_id -> cluster_id.
+/// A bucket with no entry here is unbound (pre-genesis or standalone).
+pub const BUCKET_CLUSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bucket_cluster");
+
+/// Cluster → default bucket: cluster_id -> bucket_id.
+pub const CLUSTER_DEFAULT_BUCKET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cluster_default_bucket");

@@ -14,6 +14,8 @@ pub struct EnvelopeMeta {
     pub causal: Vec<Vec<u8>>,
     pub provenance: Vec<Vec<u8>>,
     pub cluster_id: Option<Vec<u8>>,
+    /// Bucket this envelope belongs to (extracted from the envelope's bucket_id field).
+    pub bucket_id: Option<Vec<u8>>,
 }
 
 impl MemvaultStore {
@@ -37,6 +39,8 @@ impl MemvaultStore {
             let mut t = txn.open_table(CLUSTER_ORIGIN)?;
             while let Some(entry) = t.pop_first()? { drop(entry); }
             let mut t = txn.open_table(EDGES)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(BY_BUCKET)?;
             while let Some(entry) = t.pop_first()? { drop(entry); }
         }
         txn.commit()?;
@@ -78,6 +82,8 @@ impl MemvaultStore {
             .unwrap_or_default();
         let cluster_id: Option<Vec<u8>> = val.get("cluster_id")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let bucket_id: Option<Vec<u8>> = val.get("bucket_id")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         if wall_ns == 0 && author.is_empty() && tags.is_empty() {
             return Ok(false); // not an envelope
@@ -90,6 +96,7 @@ impl MemvaultStore {
             causal,
             provenance,
             cluster_id,
+            bucket_id,
         };
 
         // Write index entries (without re-inserting the block itself)
@@ -127,6 +134,12 @@ impl MemvaultStore {
                 let mut cluster_table = txn.open_table(CLUSTER_ORIGIN)?;
                 let cluster_key = keys::pack_cluster_key(cluster_id, meta.wall_ns, cid_bytes);
                 cluster_table.insert(cluster_key.as_slice(), &[] as &[u8])?;
+            }
+
+            if let Some(bucket_id) = &meta.bucket_id {
+                let mut bucket_table = txn.open_table(BY_BUCKET)?;
+                let bucket_key = keys::pack_bucket_key(bucket_id, meta.wall_ns, cid_bytes);
+                bucket_table.insert(bucket_key.as_slice(), &[] as &[u8])?;
             }
         }
         txn.commit()?;
@@ -202,6 +215,13 @@ impl MemvaultStore {
                 let mut cluster_table = txn.open_table(CLUSTER_ORIGIN)?;
                 let cluster_key = keys::pack_cluster_key(cluster_id, meta.wall_ns, cid_bytes);
                 cluster_table.insert(cluster_key.as_slice(), &[] as &[u8])?;
+            }
+
+            // Bucket index
+            if let Some(bucket_id) = &meta.bucket_id {
+                let mut bucket_table = txn.open_table(BY_BUCKET)?;
+                let bucket_key = keys::pack_bucket_key(bucket_id, meta.wall_ns, cid_bytes);
+                bucket_table.insert(bucket_key.as_slice(), &[] as &[u8])?;
             }
         }
         txn.commit()?;

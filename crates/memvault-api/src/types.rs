@@ -1,6 +1,7 @@
 //! Request/response types for the memvault API.
 
-use memvault_core::{DocId, EdgeId, EntityId, NodeRef};
+use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::classification::Classification;
 use memvault_auth::Role;
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +66,26 @@ pub struct View {
     /// Block CID (hex). Set after storage, empty on input.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cid: String,
+}
+
+/// Information about a bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketInfo {
+    pub id: BucketId,
+    pub name: String,
+    pub description: Option<String>,
+    pub owner_agent: Option<memvault_core::AgentId>,
+    /// Which cluster this bucket is bound to (None if unbound/standalone).
+    pub cluster_id: Option<ClusterId>,
+    /// Whether this bucket is the cluster's default.
+    pub is_default: bool,
+    /// Whether this bucket is attached to the cluster (private_to_peer is None).
+    pub is_attached: bool,
+    pub default_visibility: Visibility,
+    pub default_classification: Classification,
+    pub created_ns: u64,
+    /// Number of envelopes in this bucket.
+    pub envelope_count: u64,
 }
 
 /// Node status information.

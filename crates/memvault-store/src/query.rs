@@ -1,4 +1,6 @@
-//! Query by tag, author, time range, causal/provenance links.
+//! Query by tag, author, time range, causal/provenance links, and buckets.
+
+use redb::ReadableTable;
 
 use crate::error::StoreError;
 use crate::keys;
@@ -149,5 +151,98 @@ impl MemvaultStore {
             }
         }
         Ok(results)
+    }
+
+    // ── Bucket queries (added B1) ───────────────────────────────────
+
+    /// Query CIDs by bucket, starting after `after_ns`, up to `limit` results.
+    pub fn query_by_bucket(
+        &self,
+        bucket_id: &[u8],
+        after_ns: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_BUCKET)?;
+
+        let start = keys::pack_bucket_prefix(bucket_id, after_ns);
+        let end = keys::pack_bucket_prefix_end(bucket_id);
+
+        let mut results = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())?;
+        for entry in range {
+            let (key, _) = entry?;
+            let cid = keys::unpack_bucket_cid(key.value())?;
+            results.push(cid.to_vec());
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    /// List all buckets (returns bucket_id → decl_cid pairs from the BUCKETS table).
+    pub fn list_buckets(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BUCKETS)?;
+        let mut results = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            results.push((key.value().to_vec(), value.value().to_vec()));
+        }
+        Ok(results)
+    }
+
+    /// Get the BucketDecl CID for a bucket.
+    pub fn get_bucket(&self, bucket_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BUCKETS)?;
+        Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Get the cluster a bucket is bound to.
+    pub fn get_bucket_cluster(&self, bucket_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BUCKET_CLUSTER)?;
+        Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Get the default bucket for a cluster.
+    pub fn get_default_bucket(&self, cluster_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(CLUSTER_DEFAULT_BUCKET)?;
+        Ok(table.get(cluster_id)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Store a bucket declaration CID in the BUCKETS table.
+    pub fn put_bucket(&self, bucket_id: &[u8], decl_cid: &[u8]) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(BUCKETS)?;
+            table.insert(bucket_id, decl_cid)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Bind a bucket to a cluster. If `is_default`, also set it as the cluster's default.
+    pub fn bind_bucket(
+        &self,
+        bucket_id: &[u8],
+        cluster_id: &[u8],
+        is_default: bool,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut bc = txn.open_table(BUCKET_CLUSTER)?;
+            bc.insert(bucket_id, cluster_id)?;
+
+            if is_default {
+                let mut cdb = txn.open_table(CLUSTER_DEFAULT_BUCKET)?;
+                cdb.insert(cluster_id, bucket_id)?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
     }
 }

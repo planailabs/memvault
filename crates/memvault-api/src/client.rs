@@ -1,13 +1,14 @@
 //! The MemvaultClient trait — the full API surface.
 
 use async_trait::async_trait;
-use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::classification::Classification;
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 use memvault_auth::Role;
 
 use crate::error::Result;
-use crate::types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
+use crate::types::{BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
 
 /// The complete memvault API surface.
 #[async_trait]
@@ -87,6 +88,28 @@ pub trait MemvaultClient: Send + Sync {
 
     // -- Rotation --
     async fn list_rotations(&self) -> Result<Vec<RotationInfo>>;
+
+    // -- Buckets --
+    /// Create a new bucket. Does NOT require a cluster — creates a standalone bucket.
+    async fn bucket_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        default_visibility: Visibility,
+        default_classification: Classification,
+    ) -> Result<BucketId>;
+
+    /// List all buckets in the store.
+    async fn bucket_list(&self) -> Result<Vec<BucketInfo>>;
+
+    /// Get a single bucket's info by ID.
+    async fn bucket_get(&self, id: &BucketId) -> Result<Option<BucketInfo>>;
+
+    /// Rename a bucket (writes a BucketRename op, LWW by lamport).
+    async fn bucket_rename(&self, id: &BucketId, new_name: &str) -> Result<()>;
+
+    /// Bind a bucket to a cluster. If `is_default`, set it as the cluster's default.
+    async fn bucket_bind(&self, bucket_id: &BucketId, cluster_id: &ClusterId, is_default: bool) -> Result<()>;
 
     // -- Status --
     async fn status(&self) -> Result<NodeStatus>;

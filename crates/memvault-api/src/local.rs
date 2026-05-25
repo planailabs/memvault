@@ -113,6 +113,54 @@ impl LocalClient {
         self.agent_identity.as_ref().map(|i| &i.agent_id)
     }
 
+    /// Build a BucketInfo from a bucket_id and its decl CID.
+    fn build_bucket_info(
+        &self,
+        bucket_id_bytes: &[u8],
+        decl_cid: &[u8],
+    ) -> Result<Option<crate::types::BucketInfo>> {
+        let block = match self.store.get_block(decl_cid)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let decl: memvault_doc::BucketDecl = match serde_json::from_slice(&block) {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+
+        let cluster_bytes = self.store.get_bucket_cluster(bucket_id_bytes)?;
+        let cluster_id = cluster_bytes.and_then(|b| {
+            let arr: [u8; 32] = b.try_into().ok()?;
+            Some(memvault_core::ClusterId(arr))
+        });
+
+        let is_default = if let Some(ref cid) = cluster_id {
+            self.store.get_default_bucket(&cid.0)?
+                .map(|b| b == bucket_id_bytes)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let envelope_count = self.store.query_by_bucket(bucket_id_bytes, 0, usize::MAX)?
+            .len() as u64;
+
+        Ok(Some(crate::types::BucketInfo {
+            id: decl.bucket_id,
+            name: decl.name,
+            description: decl.description,
+            owner_agent: decl.owner_agent,
+            cluster_id,
+            is_default,
+            is_attached: decl.private_to_peer.is_none(),
+            default_visibility: decl.default_visibility,
+            default_classification: decl.default_classification,
+            created_ns: decl.created_ns,
+            envelope_count,
+        }))
+    }
+
     /// Load the TextIndex from a cache file, or rebuild from the blockstore if
     /// the cache is missing/stale. Saves the rebuilt index afterward.
     /// Call this after construction to make search work for pre-existing data.
@@ -285,6 +333,7 @@ impl LocalClient {
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: None,
         };
         self.store.insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
         Ok(())
@@ -454,6 +503,7 @@ impl LocalClient {
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: None,
         };
 
         // CID is computed from the full envelope bytes so any peer
@@ -690,6 +740,7 @@ impl MemvaultClient for LocalClient {
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: None,
         };
         let envelope = serde_json::json!({
             "version": 1,
@@ -1198,6 +1249,7 @@ impl MemvaultClient for LocalClient {
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: None,
         };
         self.store.insert_envelope(&cid_bytes, &view_bytes, &meta)?;
         tracing::info!(name = %view.name, tag_count = view.tags.len(), "view created");
@@ -1225,6 +1277,146 @@ impl MemvaultClient for LocalClient {
         // Scan all views and find by name.
         let views = self.list_views().await?;
         Ok(views.into_iter().find(|v| v.name == name))
+    }
+
+    // -- Buckets --
+
+    async fn bucket_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        default_visibility: Visibility,
+        default_classification: memvault_core::classification::Classification,
+    ) -> Result<memvault_core::BucketId> {
+        use memvault_doc::BucketDecl;
+
+        let bucket_id = memvault_core::BucketId::random();
+        let now_ns = memvault_core::wall_ns();
+
+        let decl = BucketDecl {
+            bucket_id: bucket_id.clone(),
+            name: name.to_string(),
+            description: description.map(|s| s.to_string()),
+            owner_agent: self.agent_identity.as_ref().map(|i| i.agent_id.clone()),
+            default_visibility,
+            default_classification,
+            created_ns: now_ns,
+            private_to_peer: Some(memvault_core::PeerId(self.peer_id.clone())),
+        };
+
+        // Serialize the BucketDecl as the block
+        let decl_bytes = serde_json::to_vec(&decl)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = memvault_core::cid_from_bytes(&decl_bytes);
+        let cid_bytes = cid.to_bytes();
+
+        // Store the block
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.peer_id.clone(),
+            tags: vec![
+                ("kind".to_string(), "bucket-decl".to_string()),
+                ("bucket".to_string(), bucket_id.to_string()),
+            ],
+            wall_ns: now_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(bucket_id.0.to_vec()),
+        };
+        self.store.insert_envelope(&cid_bytes, &decl_bytes, &meta)?;
+
+        // Record in BUCKETS table
+        self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
+
+        tracing::info!(bucket = %bucket_id, name, "bucket created");
+        Ok(bucket_id)
+    }
+
+    async fn bucket_list(&self) -> Result<Vec<crate::types::BucketInfo>> {
+        let buckets = self.store.list_buckets()?;
+        let mut infos = Vec::new();
+
+        for (bucket_id_bytes, decl_cid) in buckets {
+            let info = self.build_bucket_info(&bucket_id_bytes, &decl_cid)?;
+            if let Some(info) = info {
+                infos.push(info);
+            }
+        }
+
+        Ok(infos)
+    }
+
+    async fn bucket_get(&self, id: &memvault_core::BucketId) -> Result<Option<crate::types::BucketInfo>> {
+        let decl_cid = match self.store.get_bucket(&id.0)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        self.build_bucket_info(&id.0, &decl_cid)
+    }
+
+    async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {
+        // Store a rename operation as a block
+        let rename = serde_json::json!({
+            "op": "BucketRename",
+            "bucket_id": id.0,
+            "new_name": new_name,
+            "wall_ns": memvault_core::wall_ns(),
+        });
+        let block_bytes = serde_json::to_vec(&rename)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = memvault_core::cid_from_bytes(&block_bytes);
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.peer_id.clone(),
+            tags: vec![
+                ("kind".to_string(), "bucket-rename".to_string()),
+                ("bucket".to_string(), id.to_string()),
+            ],
+            wall_ns: memvault_core::wall_ns(),
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(id.0.to_vec()),
+        };
+        self.store.insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+
+        // Update the name in the bucket decl by storing a new decl with the updated name
+        if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
+            if let Some(block) = self.store.get_block(&decl_cid)? {
+                if let Ok(mut decl) = serde_json::from_slice::<memvault_doc::BucketDecl>(&block) {
+                    decl.name = new_name.to_string();
+                    let new_bytes = serde_json::to_vec(&decl)
+                        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+                    let new_cid = memvault_core::cid_from_bytes(&new_bytes);
+                    self.store.insert_envelope(&new_cid.to_bytes(), &new_bytes, &memvault_store::insert::EnvelopeMeta {
+                        author: self.peer_id.clone(),
+                        tags: vec![
+                            ("kind".to_string(), "bucket-decl".to_string()),
+                            ("bucket".to_string(), id.to_string()),
+                        ],
+                        wall_ns: memvault_core::wall_ns(),
+                        causal: vec![decl_cid],
+                        provenance: vec![],
+                        cluster_id: Some(self.cluster_id.clone()),
+                        bucket_id: Some(id.0.to_vec()),
+                    })?;
+                    self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
+                }
+            }
+        }
+
+        tracing::info!(bucket = %id, new_name, "bucket renamed");
+        Ok(())
+    }
+
+    async fn bucket_bind(
+        &self,
+        bucket_id: &memvault_core::BucketId,
+        cluster_id: &memvault_core::ClusterId,
+        is_default: bool,
+    ) -> Result<()> {
+        self.store.bind_bucket(&bucket_id.0, &cluster_id.0, is_default)?;
+        tracing::info!(bucket = %bucket_id, cluster = %cluster_id, is_default, "bucket bound to cluster");
+        Ok(())
     }
 
     async fn status(&self) -> Result<NodeStatus> {

@@ -41,6 +41,9 @@ pub enum Commands {
         /// Path to admin key file (Ed25519 public key)
         #[arg(long)]
         admin_key: Option<PathBuf>,
+        /// Bind an existing bucket as the cluster's default (hex or bs58)
+        #[arg(long)]
+        default_bucket: Option<String>,
     },
     /// Store a memory
     Put {
@@ -232,6 +235,44 @@ pub enum Commands {
         #[arg(short, long, default_value = "internal")]
         visibility: String,
     },
+    /// Create a new bucket
+    BucketNew {
+        /// Bucket name
+        name: String,
+        /// Description
+        #[arg(long)]
+        desc: Option<String>,
+        /// Visibility (internal, federated, public)
+        #[arg(long, default_value = "internal")]
+        visibility: String,
+        /// Classification (public, internal, confidential)
+        #[arg(long, default_value = "internal")]
+        classification: String,
+    },
+    /// List buckets
+    BucketList,
+    /// Show bucket details
+    BucketShow {
+        /// Bucket ID (hex)
+        id: String,
+    },
+    /// Rename a bucket
+    BucketRename {
+        /// Bucket ID (hex)
+        id: String,
+        /// New name
+        name: String,
+    },
+    /// Bind a bucket to a cluster
+    BucketBind {
+        /// Bucket ID (hex)
+        bucket_id: String,
+        /// Cluster ID (hex)
+        cluster_id: String,
+        /// Set as the cluster's default bucket
+        #[arg(long)]
+        default: bool,
+    },
     /// Enroll an agent using a join token
     AgentEnroll {
         /// Join token string (mvjoin1:...)
@@ -318,7 +359,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.command {
-        Commands::Genesis { admin_key } => {
+        Commands::Genesis { admin_key, default_bucket } => {
             std::fs::create_dir_all(&data_dir)?;
             let cluster_id = ClusterId::random();
             let id_hex = hex::encode(cluster_id.0);
@@ -326,11 +367,35 @@ pub async fn run(cli: Cli) -> Result<()> {
             std::fs::write(&id_path, id_hex.as_bytes())?;
             std::fs::create_dir_all(data_dir.join("identity"))?;
             std::fs::create_dir_all(data_dir.join("trust"))?;
+
+            // Create or bind the default bucket
+            let store = make_store()?;
+            let client = create_client(store.clone());
+            let bucket_id = if let Some(ref bucket_hex) = default_bucket {
+                // Bind an existing bucket
+                let bucket_bytes = hex::decode(bucket_hex)?;
+                let bucket_arr: [u8; 32] = bucket_bytes.try_into()
+                    .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+                let bid = memvault_core::BucketId(bucket_arr);
+                // Verify it exists
+                if store.get_bucket(&bid.0)?.is_none() {
+                    anyhow::bail!("bucket {} not found in store", bucket_hex);
+                }
+                bid
+            } else {
+                // Create a new default bucket
+                use memvault_core::Visibility;
+                use memvault_core::classification::Classification;
+                client.bucket_create("default", None, Visibility::Internal, Classification::Internal).await?
+            };
+            store.bind_bucket(&bucket_id.0, &cluster_id.0, true)?;
+
             println!("Cluster genesis complete.");
-            println!("  Cluster ID: {id_hex}");
-            println!("  Data dir:   {}", data_dir.display());
+            println!("  Cluster ID:      {id_hex}");
+            println!("  Default bucket:  {}", hex::encode(bucket_id.0));
+            println!("  Data dir:        {}", data_dir.display());
             if let Some(key_path) = admin_key {
-                println!("  Admin key:  {}", key_path.display());
+                println!("  Admin key:       {}", key_path.display());
             }
             println!("\nCluster ID written to {}", id_path.display());
         }
@@ -740,6 +805,79 @@ pub async fn run(cli: Cli) -> Result<()> {
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));
             let imported = memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis).await?;
             println!("Imported {imported} document(s).");
+        }
+        Commands::BucketNew { name, desc, visibility, classification } => {
+            let vis = memvault_api::docs::parse_visibility(Some(&visibility));
+            let class = match classification.as_str() {
+                "public" => memvault_core::classification::Classification::Public,
+                "confidential" => memvault_core::classification::Classification::Confidential,
+                _ => memvault_core::classification::Classification::Internal,
+            };
+            let client = connect().connect().await?;
+            let bucket_id = client.bucket_create(&name, desc.as_deref(), vis, class).await?;
+            println!("Bucket created: {}", hex::encode(bucket_id.0));
+        }
+        Commands::BucketList => {
+            let client = connect().connect().await?;
+            let buckets = client.bucket_list().await?;
+            if buckets.is_empty() {
+                println!("No buckets.");
+            }
+            for b in buckets {
+                let status = if !b.is_attached { "private" }
+                    else if b.cluster_id.is_none() { "unbound" }
+                    else { "attached" };
+                let default_marker = if b.is_default { " [default]" } else { "" };
+                println!("{} {} [{}]{} items={}",
+                    hex::encode(b.id.0), b.name, status, default_marker, b.envelope_count);
+            }
+        }
+        Commands::BucketShow { id } => {
+            let bucket_bytes = hex::decode(&id)?;
+            let bucket_arr: [u8; 32] = bucket_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+            let bucket_id = memvault_core::BucketId(bucket_arr);
+            let client = connect().connect().await?;
+            match client.bucket_get(&bucket_id).await? {
+                Some(b) => {
+                    println!("Bucket: {}", b.name);
+                    println!("  ID:             {}", hex::encode(b.id.0));
+                    println!("  Description:    {}", b.description.unwrap_or_else(|| "-".into()));
+                    println!("  Owner:          {}", b.owner_agent.map(|a| a.0).unwrap_or_else(|| "cluster".into()));
+                    println!("  Cluster:        {}", b.cluster_id.map(|c| hex::encode(c.0)).unwrap_or_else(|| "unbound".into()));
+                    println!("  Default:        {}", b.is_default);
+                    println!("  Attached:       {}", b.is_attached);
+                    println!("  Visibility:     {:?}", b.default_visibility);
+                    println!("  Classification: {:?}", b.default_classification);
+                    println!("  Created:        {} ns", b.created_ns);
+                    println!("  Envelopes:      {}", b.envelope_count);
+                }
+                None => {
+                    println!("Bucket not found: {id}");
+                }
+            }
+        }
+        Commands::BucketRename { id, name } => {
+            let bucket_bytes = hex::decode(&id)?;
+            let bucket_arr: [u8; 32] = bucket_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+            let bucket_id = memvault_core::BucketId(bucket_arr);
+            let client = connect().connect().await?;
+            client.bucket_rename(&bucket_id, &name).await?;
+            println!("Bucket renamed to '{name}'.");
+        }
+        Commands::BucketBind { bucket_id, cluster_id, default } => {
+            let bucket_bytes = hex::decode(&bucket_id)?;
+            let bucket_arr: [u8; 32] = bucket_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+            let bid = memvault_core::BucketId(bucket_arr);
+            let cluster_bytes = hex::decode(&cluster_id)?;
+            let cluster_arr: [u8; 32] = cluster_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("cluster id must be 32 bytes"))?;
+            let cid = ClusterId(cluster_arr);
+            let client = connect().connect().await?;
+            client.bucket_bind(&bid, &cid, default).await?;
+            println!("Bucket bound to cluster{}.", if default { " (default)" } else { "" });
         }
         Commands::AgentEnroll { token, agent_id, identity_dir } => {
             // Decode the join token to extract cluster info

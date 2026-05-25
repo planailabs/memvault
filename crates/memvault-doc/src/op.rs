@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use memvault_core::{DocId, EdgeId, EntityId, NodeRef};
+use memvault_core::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef};
+use memvault_auth::Action;
 use serde::{Deserialize, Serialize};
 
+use crate::bucket::BucketDecl;
 use crate::graph::{Edge, Entity};
 
 /// CRDT operation — the unit of change.
@@ -51,6 +53,44 @@ pub enum Op {
         source: NodeRef,
         edge_id: EdgeId,
         props: BTreeMap<String, serde_json::Value>,
+    },
+
+    // Bucket ops — appended, never inserted in the middle.
+    // added B1, removable never
+    BucketCreate {
+        decl: BucketDecl,
+    },
+    // added B1, removable never
+    BucketBind {
+        bucket_id: BucketId,
+        cluster_id: ClusterId,
+        is_default: bool,
+    },
+    // added B1, removable never
+    BucketRename {
+        bucket_id: BucketId,
+        new_name: String,
+    },
+    // added B1, removable never
+    BucketArchive {
+        bucket_id: BucketId,
+        reason: String,
+    },
+    // added B1, removable never
+    BucketAttach {
+        bucket_id: BucketId,
+        attached_at_ns: u64,
+    },
+    // added B1, removable never
+    BucketGrantAgent {
+        bucket_id: BucketId,
+        agent: AgentId,
+        actions: Vec<Action>,
+    },
+    // added B1, removable never
+    BucketRevokeAgent {
+        bucket_id: BucketId,
+        agent: AgentId,
     },
 }
 

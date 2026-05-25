@@ -16,6 +16,10 @@ pub struct EntityId(pub [u8; 32]);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EdgeId(pub [u8; 32]);
 
+/// Bucket identifier — random 32 bytes, independent of any cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BucketId(pub [u8; 32]);
+
 /// Agent identifier (human-readable string).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub String);
@@ -56,6 +60,14 @@ impl EdgeId {
     }
 }
 
+impl BucketId {
+    pub fn random() -> Self {
+        let mut buf = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
+        Self(buf)
+    }
+}
+
 impl std::fmt::Display for ClusterId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", bs58::encode(&self.0).into_string())
@@ -63,6 +75,12 @@ impl std::fmt::Display for ClusterId {
 }
 
 impl std::fmt::Display for DocId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", bs58::encode(&self.0).into_string())
+    }
+}
+
+impl std::fmt::Display for BucketId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", bs58::encode(&self.0).into_string())
     }
