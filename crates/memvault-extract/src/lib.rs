@@ -12,8 +12,7 @@ pub use wasm_host::{ResourceLimits, WasmExtractor};
 
 /// Embedded built-in extractor WASM module.
 /// Built from memvault-extract-guest targeting wasm32-unknown-unknown.
-const BUILTIN_WASM: &[u8] =
-    include_bytes!("../../memvault-extract-guest/target/wasm32-unknown-unknown/release/memvault_extract_guest.wasm");
+const BUILTIN_WASM: &[u8] = include_bytes!(env!("MEMVAULT_EXTRACT_GUEST_WASM"));
 
 #[cfg(test)]
 mod tests {
