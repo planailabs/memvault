@@ -3,6 +3,13 @@ name = "memctl"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["daemon"]
+daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum"]
+embed = ["memvault-web?/embed"]
+# WASM client for the web UI — built by dx for embedding.
+web = ["dep:memvault-web", "memvault-web/web", "getrandom_wasm/wasm_js"]
+
 [dependencies]
 memvault-core = { path = "../memvault-core" }
 memvault-doc = { path = "../memvault-doc" }
@@ -15,16 +22,27 @@ memvault-import = { path = "../memvault-import" }
 memvault-net = { path = "../memvault-net" }
 libp2p = { workspace = true }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 dirs = "6"
+serde = { version = "1", features = ["derive"] }
+
+# Optional WASM dependencies
+memvault-web = { path = "../memvault-web", optional = true, default-features = false }
+getrandom_wasm = { package = "getrandom", version = "0.4", optional = true }
+
+# Native-only dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["serde"] }
+axum = { version = "0.8", optional = true }
+
+[dev-dependencies]
 
 [lib]
 name = "memctl"

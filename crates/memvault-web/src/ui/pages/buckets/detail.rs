@@ -70,11 +70,8 @@ async fn rename_bucket(id: String, new_name: String) -> Result<(), ServerFnError
         .try_into()
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
-
     let client = crate::ui::state::client()?;
-    client
-        .bucket_rename(&bucket_id, &new_name)
-        .await
+    client.bucket_rename(&bucket_id, &new_name).await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
@@ -85,11 +82,8 @@ async fn attach_bucket(id: String) -> Result<(), ServerFnError> {
         .try_into()
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
-
     let client = crate::ui::state::client()?;
-    client
-        .bucket_attach(&bucket_id)
-        .await
+    client.bucket_attach(&bucket_id).await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
@@ -100,168 +94,122 @@ async fn archive_bucket(id: String, reason: String) -> Result<(), ServerFnError>
         .try_into()
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
-
     let client = crate::ui::state::client()?;
-    client
-        .bucket_archive(&bucket_id, &reason)
-        .await
+    client.bucket_archive(&bucket_id, &reason).await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
 #[component]
 pub fn BucketDetail(id: String) -> Element {
     use_topbar("Bucket Detail");
-    let bucket_id = id.clone();
+    let fetch_id = id.clone();
     let bucket = use_server_future(move || {
-        let id = bucket_id.clone();
+        let id = fetch_id.clone();
         async move { get_bucket(id).await }
     })?;
-    let mut editing_name = use_signal(|| false);
-    let mut name_input = use_signal(String::new);
-    let mut archive_reason = use_signal(String::new);
-    let mut show_archive = use_signal(|| false);
 
-    match &*bucket.read() {
-        Some(Ok(Some(b))) => {
-            let status_variant = match b.status.as_str() {
-                "unbound" => PillVariant::Muted,
-                "private" => PillVariant::Warn,
-                "attached" => PillVariant::Ok,
-                "archived" => PillVariant::Bad,
-                _ => PillVariant::Muted,
+    let data = match &*bucket.read() {
+        Some(Ok(Some(b))) => b.clone(),
+        Some(Ok(None)) => {
+            return rsx! {
+                PageHeader { "Bucket not found" }
+                p { class: "text-fg-muted", "The bucket with ID {id} does not exist." }
             };
+        }
+        Some(Err(e)) => {
+            return rsx! { p { class: "text-danger", "Error: {e}" } };
+        }
+        None => {
+            return rsx! { p { class: "text-fg-muted", "Loading..." } };
+        }
+    };
 
-            rsx! {
-                div { class: "space-y-4",
-                    div { class: "flex items-center gap-3",
-                        PageHeader { class: "mb-0",
-                            if *editing_name.read() {
-                                input {
-                                    class: "input input-sm",
-                                    r#type: "text",
-                                    value: "{name_input}",
-                                    oninput: move |e: Event<FormData>| name_input.set(e.value()),
-                                    onkeypress: {
-                                        let bid = id.clone();
-                                        move |e: Event<KeyboardData>| {
-                                            if e.key() == Key::Enter {
-                                                let new_name = name_input.read().trim().to_string();
-                                                let bid = bid.clone();
-                                                spawn(async move {
-                                                    let _ = rename_bucket(bid, new_name).await;
-                                                    editing_name.set(false);
-                                                });
-                                            }
-                                        }
-                                    },
-                                }
-                            } else {
-                                span {
-                                    class: "cursor-pointer",
-                                    onclick: move |_| {
-                                        name_input.set(b.name.clone());
-                                        editing_name.set(true);
-                                    },
-                                    "{b.name}"
-                                }
-                            }
-                        }
-                        Pill { variant: status_variant, "{b.status}" }
-                        if b.is_default {
-                            Pill { variant: PillVariant::Info, "default" }
-                        }
+    let status_variant = match data.status.as_str() {
+        "unbound" => PillVariant::Muted,
+        "private" => PillVariant::Warn,
+        "attached" => PillVariant::Ok,
+        "archived" => PillVariant::Bad,
+        _ => PillVariant::Muted,
+    };
+
+    let cluster_display = if data.cluster_hex.is_empty() {
+        "unbound".to_string()
+    } else {
+        data.cluster_hex.clone()
+    };
+
+    rsx! {
+        div { class: "space-y-4",
+            div { class: "flex items-center gap-3",
+                PageHeader { class: "mb-0", "{data.name}" }
+                Pill { variant: status_variant, "{data.status}" }
+                if data.is_default {
+                    Pill { variant: PillVariant::Info, "default" }
+                }
+            }
+
+            // Metadata card
+            Card {
+                div { class: "p-5 space-y-2",
+                    SectionHeading { "Metadata" }
+                    div { class: "grid grid-cols-2 gap-2 text-sm",
+                        span { class: "text-fg-muted", "ID" }
+                        span { class: "font-mono text-xs", "{data.id_hex}" }
+                        span { class: "text-fg-muted", "Owner" }
+                        span { "{data.owner}" }
+                        span { class: "text-fg-muted", "Visibility" }
+                        span { "{data.visibility}" }
+                        span { class: "text-fg-muted", "Classification" }
+                        span { "{data.classification}" }
+                        span { class: "text-fg-muted", "Cluster" }
+                        span { class: "font-mono text-xs", "{cluster_display}" }
+                        span { class: "text-fg-muted", "Envelopes" }
+                        span { class: "tabular-nums", "{data.envelope_count}" }
                     }
+                    if !data.description.is_empty() {
+                        p { class: "text-sm text-fg-muted mt-2", "{data.description}" }
+                    }
+                }
+            }
 
-                    // Metadata card
-                    Card {
-                        div { class: "p-5 space-y-2",
-                            SectionHeading { "Metadata" }
-                            div { class: "grid grid-cols-2 gap-2 text-sm",
-                                span { class: "text-fg-muted", "ID" }
-                                span { class: "font-mono text-xs", "{b.id_hex}" }
-                                span { class: "text-fg-muted", "Owner" }
-                                span { "{b.owner}" }
-                                span { class: "text-fg-muted", "Visibility" }
-                                span { "{b.visibility}" }
-                                span { class: "text-fg-muted", "Classification" }
-                                span { "{b.classification}" }
-                                span { class: "text-fg-muted", "Cluster" }
-                                span { class: "font-mono text-xs",
-                                    if b.cluster_hex.is_empty() { "unbound" } else { &b.cluster_hex }
-                                }
-                                span { class: "text-fg-muted", "Envelopes" }
-                                span { class: "tabular-nums", "{b.envelope_count}" }
-                            }
-                            if !b.description.is_empty() {
-                                p { class: "text-sm text-fg-muted mt-2", "{b.description}" }
+            // Actions card
+            Card {
+                div { class: "p-5 space-y-3",
+                    SectionHeading { "Actions" }
+                    div { class: "flex flex-wrap gap-2",
+                        if !data.is_attached && data.status != "archived" {
+                            Button {
+                                variant: ButtonVariant::Primary,
+                                onclick: {
+                                    let bid = id.clone();
+                                    move |_| {
+                                        let bid = bid.clone();
+                                        spawn(async move {
+                                            let _ = attach_bucket(bid).await;
+                                        });
+                                    }
+                                },
+                                "Attach to Cluster"
                             }
                         }
-                    }
-
-                    // Actions card
-                    Card {
-                        div { class: "p-5 space-y-3",
-                            SectionHeading { "Actions" }
-                            div { class: "flex flex-wrap gap-2",
-                                if !b.is_attached && b.status != "archived" {
-                                    Button {
-                                        variant: ButtonVariant::Primary,
-                                        onclick: {
-                                            let bid = id.clone();
-                                            move |_| {
-                                                let bid = bid.clone();
-                                                spawn(async move {
-                                                    let _ = attach_bucket(bid).await;
-                                                });
-                                            }
-                                        },
-                                        "Attach to Cluster"
+                        if data.status != "archived" {
+                            Button {
+                                variant: ButtonVariant::Danger,
+                                onclick: {
+                                    let bid = id.clone();
+                                    move |_| {
+                                        let bid = bid.clone();
+                                        spawn(async move {
+                                            let _ = archive_bucket(bid, "archived via web UI".to_string()).await;
+                                        });
                                     }
-                                }
-                                if b.status != "archived" {
-                                    Button {
-                                        variant: ButtonVariant::Danger,
-                                        onclick: move |_| show_archive.set(true),
-                                        "Archive"
-                                    }
-                                }
-                            }
-                            if *show_archive.read() {
-                                div { class: "flex gap-2 mt-2",
-                                    input {
-                                        class: "input input-sm flex-1",
-                                        r#type: "text",
-                                        placeholder: "Reason for archiving...",
-                                        value: "{archive_reason}",
-                                        oninput: move |e: Event<FormData>| archive_reason.set(e.value()),
-                                    }
-                                    Button {
-                                        variant: ButtonVariant::Danger,
-                                        onclick: {
-                                            let bid = id.clone();
-                                            move |_| {
-                                                let reason = archive_reason.read().clone();
-                                                let bid = bid.clone();
-                                                spawn(async move {
-                                                    let _ = archive_bucket(bid, reason).await;
-                                                    show_archive.set(false);
-                                                });
-                                            }
-                                        },
-                                        "Confirm Archive"
-                                    }
-                                }
+                                },
+                                "Archive"
                             }
                         }
                     }
                 }
             }
         }
-        Some(Ok(None)) => rsx! {
-            PageHeader { "Bucket not found" }
-            p { class: "text-fg-muted", "The bucket with ID {id} does not exist." }
-        },
-        Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-        None => rsx! { p { class: "text-fg-muted", "Loading..." } },
     }
 }

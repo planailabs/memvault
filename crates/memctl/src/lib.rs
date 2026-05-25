@@ -1039,7 +1039,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 })
                 .unwrap_or_else(|| vec![0u8; 32]);
 
-            let _client = create_client(store.clone());
+            let client = create_client(store.clone());
+
+            // Load or rebuild the full-text search index
+            let index_cache_path = data_dir.join("text_index.json");
+            match client.load_or_rebuild_index(&index_cache_path).await {
+                Ok((d, e, a)) => tracing::info!("text index ready: {d} docs, {e} entities, {a} attachments"),
+                Err(e) => tracing::warn!("failed to populate text index: {e}"),
+            }
 
             // Parse the listen address
             let listen_addr: libp2p::Multiaddr = listen.parse()
@@ -1056,6 +1063,36 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("  API port:   {api_port}");
             println!("  Cluster:    {}", hex::encode(&cluster_id_bytes));
             println!("  Bootstraps: {}", bootstrap_addrs.len());
+
+            // Start the web API + UI server
+            #[cfg(feature = "daemon")]
+            {
+                let auth_token = memvault_web::load_or_generate_token(&data_dir)
+                    .map_err(|e| anyhow::anyhow!("failed to load/generate API token: {e}"))?;
+                let app_state = std::sync::Arc::new(memvault_web::AppState {
+                    client: std::sync::Arc::new(client) as std::sync::Arc<dyn memvault_api::MemvaultClient>,
+                    event_bus: std::sync::Arc::new(memvault_api::EventBus::new(256)),
+                    auth_token: auth_token.clone(),
+                    metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
+                });
+                let router = memvault_web::build_fullstack_router(app_state);
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
+                tokio::spawn(async move {
+                    let listener = match tokio::net::TcpListener::bind(addr).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::error!("failed to bind API port {api_port}: {e}");
+                            return;
+                        }
+                    };
+                    tracing::info!(port = api_port, "memvault web UI + API started");
+                    println!("  Web UI:     http://127.0.0.1:{api_port}");
+                    if let Err(e) = axum::serve(listener, router).await {
+                        tracing::error!("web server error: {e}");
+                    }
+                });
+                println!("  API token:  {}", &auth_token[..8]);
+            }
 
             // Build standalone swarm
             let mut swarm = memvault_net::standalone_swarm(

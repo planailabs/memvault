@@ -163,7 +163,14 @@ pub fn BucketList() -> Element {
                                             td { {pill_for_status(&b.status)} }
                                             td {
                                                 class: "text-fg-muted text-xs font-mono",
-                                                if b.cluster_hex.is_empty() { "—" } else { &b.cluster_hex[..8] }
+                                                {
+                                                    let cluster_short = if b.cluster_hex.is_empty() {
+                                                        "\u{2014}".to_string()
+                                                    } else {
+                                                        b.cluster_hex.chars().take(8).collect::<String>()
+                                                    };
+                                                    rsx! { "{cluster_short}" }
+                                                }
                                             }
                                             td { class: "text-right tabular-nums", "{b.envelope_count}" }
                                         }

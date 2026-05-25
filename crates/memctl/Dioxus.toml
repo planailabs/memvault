@@ -1,0 +1,3 @@
+[application]
+name = "memctl"
+public_dir = "../memvault-web/public"
