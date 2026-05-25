@@ -1,4 +1,10 @@
 //! memctl — Memvault management CLI library.
+//!
+//! All CLI/daemon logic is native-only. The WASM build only uses main.rs
+//! to launch the Dioxus web client.
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1446,3 +1452,8 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
 
     Ok(actions)
 }
+
+} // mod native
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::*;

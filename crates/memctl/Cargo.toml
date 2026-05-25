@@ -11,7 +11,21 @@ embed = ["memvault-web?/embed"]
 # dioxus must be a direct dep so dx detects this as a Dioxus fullstack app.
 web = ["dep:memvault-web", "memvault-web/web", "dep:dioxus", "getrandom_wasm/wasm_js"]
 
+# Dependencies needed for both native and WASM builds
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+tracing = "0.1"
+anyhow = "1"
+
+# Optional WASM/UI dependencies
+memvault-web = { path = "../memvault-web", optional = true, default-features = false }
+dioxus = { version = "0.8.0-alpha.0", features = ["fullstack", "router"], optional = true }
+getrandom_wasm = { package = "getrandom", version = "0.4", optional = true }
+
+# Native-only dependencies (not compiled for WASM)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memvault-core = { path = "../memvault-core" }
 memvault-doc = { path = "../memvault-doc" }
 memvault-api = { path = "../memvault-api", features = ["http-client"] }
@@ -22,26 +36,13 @@ memvault-export = { path = "../memvault-export" }
 memvault-import = { path = "../memvault-import" }
 memvault-net = { path = "../memvault-net" }
 libp2p = { workspace = true }
-serde_json = "1"
-anyhow = "1"
-tracing = "0.1"
-hex = "0.4"
-dirs = "6"
-serde = { version = "1", features = ["derive"] }
-
-# Optional WASM dependencies
-memvault-web = { path = "../memvault-web", optional = true, default-features = false }
-dioxus = { version = "0.8.0-alpha.0", features = ["fullstack", "router"], optional = true }
-getrandom_wasm = { package = "getrandom", version = "0.4", optional = true }
-
-# Native-only dependencies
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["serde"] }
+dirs = "6"
 axum = { version = "0.8", optional = true }
 
 [dev-dependencies]
