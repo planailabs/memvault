@@ -1311,11 +1311,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to decode token: {e}"))?;
 
             let identity_dir = identity_dir.unwrap_or_else(|| {
-                dirs::data_local_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("memvault")
-                    .join("agents")
-                    .join(&agent_id)
+                data_dir.join("agents").join(&agent_id)
             });
 
             if memvault_api::agent_identity::AgentIdentity::exists(&identity_dir) {
