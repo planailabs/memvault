@@ -14,6 +14,7 @@ mod tests {
     pub mod graph;
     pub mod identity;
     pub mod lifecycle;
+    pub mod migrations;
     pub mod sharing;
     pub mod tokens;
     pub mod views;
