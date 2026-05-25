@@ -1,16 +1,13 @@
 # Multi-node memvault development cluster.
 #
-# Uses dx serve from the memvault-web crate (which handles the server-dev
-# WASM step correctly). memctl daemon mode is used for standalone/production.
-#
-# For production builds with embedded assets:
-#   dx build --package memctl --embed @client --no-default-features --features web @server
+# Uses separate CARGO_TARGET_DIR per node to avoid build lock conflicts.
+# dx serve with @client/@server separates features:
+#   @client: --no-default-features --features web (WASM only, no mio)
+#   @server: uses defaults (daemon feature, full native stack)
 #
 # Prerequisites:
 #   cd memvault/crates/memctl   (this directory)
 #   overmind start              (or foreman start)
 
-# Dev mode: use memvault-web's dx serve for web UI with hot-reload.
-# The web UI connects to the memvault store directly (no daemon needed).
-node_a: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a CARGO_TARGET_DIR=../../target/node_a dx serve --package memvault-web --port 8080 | tee /tmp/memvault-node-a.log
-node_b: env MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b CARGO_TARGET_DIR=../../target/node_b dx serve --package memvault-web --port 8090 | tee /tmp/memvault-node-b.log
+node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a MEMVAULT_API_PORT=8401 dx serve --port 8080 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-a.log
+node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b MEMVAULT_API_PORT=8402 dx serve --port 8090 @client --platform web --no-default-features --features web @server --platform server | tee /tmp/memvault-node-b.log
