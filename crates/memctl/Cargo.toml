@@ -8,7 +8,8 @@ default = ["daemon"]
 daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum"]
 embed = ["memvault-web?/embed"]
 # WASM client for the web UI — built by dx for embedding.
-web = ["dep:memvault-web", "memvault-web/web", "getrandom_wasm/wasm_js"]
+# dioxus must be a direct dep so dx detects this as a Dioxus fullstack app.
+web = ["dep:memvault-web", "memvault-web/web", "dep:dioxus", "getrandom_wasm/wasm_js"]
 
 [dependencies]
 memvault-core = { path = "../memvault-core" }
@@ -30,6 +31,7 @@ serde = { version = "1", features = ["derive"] }
 
 # Optional WASM dependencies
 memvault-web = { path = "../memvault-web", optional = true, default-features = false }
+dioxus = { version = "0.8.0-alpha.0", features = ["fullstack", "router"], optional = true }
 getrandom_wasm = { package = "getrandom", version = "0.4", optional = true }
 
 # Native-only dependencies

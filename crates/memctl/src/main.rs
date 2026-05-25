@@ -1,9 +1,8 @@
 // When compiled for wasm32 (by dx), this is the WASM client entry point.
 // Both this and the daemon mode's SSR compile the same App component from
-// memvault-web, ensuring hydration works correctly.
+// memvault-web, ensuring hydration entry ordering matches perfectly.
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    #[cfg(feature = "web")]
     memvault_web::launch_client();
 }
 
