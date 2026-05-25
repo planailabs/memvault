@@ -312,7 +312,7 @@ pub enum Commands {
         #[arg(long, value_delimiter = ',')]
         bootstrap: Vec<String>,
         /// HTTP API port for the embedded REST server
-        #[arg(long, default_value = "8401")]
+        #[arg(long, env = "MEMVAULT_API_PORT", default_value = "8401")]
         api_port: u16,
     },
     /// Enroll an agent using a join token
@@ -370,23 +370,32 @@ fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
 }
 
 /// Load a libp2p Ed25519 keypair from disk, or generate and save a new one.
+///
+/// Stores the 32-byte Ed25519 secret seed (not the 64-byte expanded keypair)
+/// so that `Keypair::ed25519_from_bytes` can reload it.
 fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
     if key_path.exists() {
-        let key_bytes = std::fs::read(key_path)?;
+        let mut key_bytes = std::fs::read(key_path)?;
+        // ed25519_from_bytes expects the 32-byte seed. If we accidentally
+        // saved 64 bytes (seed + public), truncate to the seed portion.
+        if key_bytes.len() == 64 {
+            key_bytes.truncate(32);
+        }
         let kp = libp2p::identity::Keypair::ed25519_from_bytes(key_bytes)
             .map_err(|e| anyhow::anyhow!("failed to load keypair from {}: {e}", key_path.display()))?;
         return Ok(kp);
     }
 
-    // Generate new keypair
+    // Generate new keypair and save the 32-byte secret seed.
     let kp = libp2p::identity::Keypair::generate_ed25519();
     if let Some(parent) = key_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Extract the raw Ed25519 secret key bytes and save them
     let ed_kp = kp.clone().try_into_ed25519()
         .map_err(|e| anyhow::anyhow!("keypair is not ed25519: {e}"))?;
-    std::fs::write(key_path, ed_kp.to_bytes())?;
+    let full_bytes = ed_kp.to_bytes();
+    // Save only the 32-byte seed (first half of the 64-byte keypair)
+    std::fs::write(key_path, &full_bytes[..32])?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

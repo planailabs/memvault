@@ -2,6 +2,7 @@
 #
 # Uses separate CARGO_TARGET_DIR per node to avoid build lock conflicts.
 # Both nodes share the same WASM output (public/) since it's identical code.
+# MEMVAULT_API_PORT sets the REST/web UI port (--api-port via env).
 #
 # Prerequisites:
 #   cd memvault/crates/memctl   (this directory)
@@ -9,5 +10,5 @@
 #
 # For a single node with hot-reload: dx serve --port 8080
 
-node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a dx serve --port 8080 | tee /tmp/memvault-node-a.log
-node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b dx serve --port 8090 | tee /tmp/memvault-node-b.log
+node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a MEMVAULT_API_PORT=8080 dx serve --port 8080 | tee /tmp/memvault-node-a.log
+node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b MEMVAULT_API_PORT=8090 dx serve --port 8090 | tee /tmp/memvault-node-b.log
