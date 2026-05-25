@@ -75,3 +75,25 @@ mod inner {
 
 #[cfg(feature = "server")]
 pub use inner::*;
+
+/// Server-side storage for the API auth token, used to generate session tokens
+/// for the web UI to call the REST API directly.
+#[cfg(feature = "server")]
+mod token_store {
+    use std::sync::OnceLock;
+
+    static API_TOKEN: OnceLock<String> = OnceLock::new();
+
+    /// Set the API auth token (called during server startup).
+    pub fn set_api_token(token: String) {
+        let _ = API_TOKEN.set(token);
+    }
+
+    /// Get the API auth token for session-token generation.
+    pub fn api_token() -> Option<&'static str> {
+        API_TOKEN.get().map(|s| s.as_str())
+    }
+}
+
+#[cfg(feature = "server")]
+pub use token_store::*;

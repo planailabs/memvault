@@ -680,6 +680,37 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             println!("  {indexed_envelopes}/{total_blocks} blocks re-indexed into store tables");
 
+            // Phase 1b: Rebuild BUCKETS table from BucketDecl blocks
+            println!("Phase 1b: Rebuilding bucket metadata from blocks...");
+            let mut bucket_count = 0usize;
+            for (cid, data) in &blocks {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                    // Check if this block has a kind:bucket-decl tag
+                    let is_bucket_decl = val.get("tags")
+                        .and_then(|v| v.as_array())
+                        .map(|tags| tags.iter().any(|t| {
+                            if let Some(arr) = t.as_array() {
+                                arr.first().and_then(|v| v.as_str()) == Some("kind")
+                                    && arr.get(1).and_then(|v| v.as_str()) == Some("bucket-decl")
+                            } else {
+                                false
+                            }
+                        }))
+                        .unwrap_or(false);
+
+                    if is_bucket_decl {
+                        // Try to parse bucket_id from the block
+                        if let Some(bucket_id) = val.get("bucket_id").and_then(|v| {
+                            serde_json::from_value::<[u8; 32]>(v.clone()).ok()
+                        }) {
+                            store.put_bucket(&bucket_id, cid)?;
+                            bucket_count += 1;
+                        }
+                    }
+                }
+            }
+            println!("  {bucket_count} bucket declaration(s) rebuilt");
+
             // Phase 2: Rebuild full-text search index
             println!("Phase 2: Rebuilding full-text search index...");
             let client = create_client(store.clone());

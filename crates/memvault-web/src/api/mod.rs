@@ -1,6 +1,7 @@
 //! API route registration.
 
 pub mod admin;
+pub mod buckets;
 pub mod files;
 pub mod audit;
 pub mod auth;
@@ -16,7 +17,7 @@ pub mod views;
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 
 use crate::AppState;
@@ -84,6 +85,15 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/admin/tokens", post(admin::issue_token).get(admin::list_tokens))
         .route("/admin/tokens/{cid}", delete(admin::revoke_token))
         .route("/admin/rotations", get(admin::list_rotations))
+
+        // ── Buckets ────────────────────────────────────────────────
+        .route("/buckets", get(buckets::list_buckets).post(buckets::create_bucket))
+        .route("/buckets/{id}", get(buckets::get_bucket).patch(buckets::rename_bucket))
+        .route("/buckets/{id}/attach", post(buckets::attach_bucket))
+        .route("/buckets/{id}/archive", post(buckets::archive_bucket))
+
+        // ── Auth (session token for web UI) ───────────────────────
+        .route("/auth/session-token", get(auth::get_session_token))
 
         // ── Events & Ops ───────────────────────────────────────────
         .route("/events", get(events::events_stream))

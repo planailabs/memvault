@@ -6,11 +6,7 @@ edition = "2024"
 [dependencies]
 memvault-core = { path = "../memvault-core" }
 memvault-auth = { path = "../memvault-auth" }
-libp2p = { version = "0.56", default-features = false, features = [
-    "tokio", "noise", "yamux", "quic", "tcp",
-    "mdns", "request-response", "identify", "ping",
-    "gossipsub", "kad", "macros", "serde",
-] }
+libp2p = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_ipld_dagcbor = "0.6"
 tokio = { version = "1", features = ["full"] }

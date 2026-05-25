@@ -1,7 +1,6 @@
 //! Bucket list page — shows all buckets with status, actions.
 
 use dioxus::prelude::*;
-use dioxus_i18n::t;
 use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant};
 use serde::{Deserialize, Serialize};
 
