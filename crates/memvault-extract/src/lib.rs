@@ -1,16 +1,19 @@
-pub mod async_queue;
 pub mod error;
-pub mod extracted;
-pub mod extractor;
-pub mod extractors;
 pub mod registry;
+pub mod wasm_host;
 
-pub use async_queue::{ExtractionJob, ExtractionQueue, ASYNC_THRESHOLD_BYTES};
 pub use error::ExtractError;
-pub use extracted::{ExtractedText, PiiFindingsBlock};
-pub use extractor::{ExtractionHints, Extractor};
-pub use memvault_policy::PiiFinding;
+pub use memvault_extract_abi::{
+    ExtractionHints, ExtractionResponse, ExtractedText, ExtractorCapability, MatchRule,
+    PluginCapabilities,
+};
 pub use registry::ExtractionRegistry;
+pub use wasm_host::{ResourceLimits, WasmExtractor};
+
+/// Embedded built-in extractor WASM module.
+/// Built from memvault-extract-guest targeting wasm32-unknown-unknown.
+const BUILTIN_WASM: &[u8] =
+    include_bytes!("../../memvault-extract-guest/target/wasm32-unknown-unknown/release/memvault_extract_guest.wasm");
 
 #[cfg(test)]
 mod tests {
@@ -41,7 +44,8 @@ mod tests {
     #[test]
     fn markdown_strips_formatting() {
         let reg = ExtractionRegistry::with_defaults();
-        let input = "Intro paragraph.\n\n# Title\n\nSome **bold** text and [a link](http://example.com).\n";
+        let input =
+            "Intro paragraph.\n\n# Title\n\nSome **bold** text and [a link](http://example.com).\n";
         let result = reg
             .extract(input.as_bytes(), "text/markdown", &ExtractionHints::default())
             .unwrap();
@@ -91,30 +95,14 @@ mod tests {
     }
 
     #[test]
-    fn extraction_queue_fifo() {
-        let mut queue = ExtractionQueue::new();
-        assert_eq!(queue.pending_count(), 0);
-        assert!(queue.dequeue().is_none());
-
-        queue.enqueue(ExtractionJob {
-            manifest_cid: vec![1],
-            mime_type: "text/plain".into(),
-            content_size: 100,
-            queued_at_ns: 1000,
-        });
-        queue.enqueue(ExtractionJob {
-            manifest_cid: vec![2],
-            mime_type: "text/html".into(),
-            content_size: 200,
-            queued_at_ns: 2000,
-        });
-
-        assert_eq!(queue.pending_count(), 2);
-        let first = queue.dequeue().unwrap();
-        assert_eq!(first.manifest_cid, vec![1]);
-        let second = queue.dequeue().unwrap();
-        assert_eq!(second.manifest_cid, vec![2]);
-        assert!(queue.dequeue().is_none());
+    fn registry_can_extract_extension() {
+        let reg = ExtractionRegistry::with_defaults();
+        assert!(reg.can_extract_extension("txt"));
+        assert!(reg.can_extract_extension("md"));
+        assert!(reg.can_extract_extension("html"));
+        assert!(reg.can_extract_extension("pdf"));
+        assert!(reg.can_extract_extension("docx"));
+        assert!(!reg.can_extract_extension("exe"));
     }
 
     #[test]
@@ -129,5 +117,16 @@ mod tests {
             .extract(input.as_bytes(), "text/plain", &hints)
             .unwrap();
         assert_eq!(result.text.len(), 100);
+    }
+
+    #[test]
+    fn extract_by_extension() {
+        let reg = ExtractionRegistry::with_defaults();
+        let input = "# Hello\n\nWorld";
+        let result = reg
+            .extract_by_extension(input.as_bytes(), "md", &ExtractionHints::default())
+            .unwrap();
+        assert!(result.text.contains("Hello"));
+        assert!(result.text.contains("World"));
     }
 }

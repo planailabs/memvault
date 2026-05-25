@@ -5,6 +5,9 @@ pub enum ExtractError {
     #[error("unsupported MIME type: {0}")]
     UnsupportedMime(String),
 
+    #[error("unsupported extension: {0}")]
+    UnsupportedExtension(String),
+
     #[error("extraction failed: {0}")]
     ExtractionFailed(String),
 
@@ -16,4 +19,7 @@ pub enum ExtractError {
 
     #[error("invalid content: {0}")]
     InvalidContent(String),
+
+    #[error("plugin error: {0}")]
+    PluginError(String),
 }

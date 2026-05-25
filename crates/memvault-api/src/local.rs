@@ -296,7 +296,17 @@ impl LocalClient {
         // Cache the result.
         match &result {
             ExtractionResult::Ok(text) => {
-                let et = memvault_extract::ExtractedText {
+                #[derive(serde::Serialize)]
+                struct CachedExtraction {
+                    source: Vec<u8>,
+                    extractor: String,
+                    extractor_version: String,
+                    extracted_at_ns: u64,
+                    text: String,
+                    page_breaks: Vec<u32>,
+                    warnings: Vec<String>,
+                }
+                let et = CachedExtraction {
                     source: manifest_cid.to_vec(),
                     extractor: "memvault-extract".to_string(),
                     extractor_version: env!("CARGO_PKG_VERSION").to_string(),
