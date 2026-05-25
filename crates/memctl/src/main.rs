@@ -4,6 +4,13 @@ fn main() {
     memvault_web::launch_client();
 }
 
+// Native entry point.
+//
+// Two modes:
+//   - Zero args: `dioxus::serve()` for dx serve hot-reload dev mode.
+//     No P2P swarm — this is frontend development only.
+//   - Has subcommand: CLI mode (`memctl daemon`, `memctl genesis`, etc.).
+//     `memctl daemon` runs the full node (web UI + P2P swarm).
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     use clap::Parser;
@@ -16,9 +23,8 @@ fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    let has_subcommand = args.len() > 1;
 
-    if has_subcommand {
+    if args.len() > 1 {
         // CLI mode: create a tokio runtime for async commands.
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -31,10 +37,9 @@ fn main() {
                 std::process::exit(1);
             }
         });
-    } else if std::env::var("DIOXUS_DEVSERVER_ADDR").is_ok() {
-        // Launched by `dx serve` — use dioxus::serve() so the dx dev
-        // proxy can connect. This path is dev-only (hot-reload).
-        // No swarm — dx serve mode is frontend development only.
+    } else {
+        // Zero args → dioxus::serve() (used by dx serve for hot-reload).
+        // For production with P2P, use `memctl daemon` instead.
         #[cfg(feature = "daemon")]
         {
             use std::sync::Arc;
@@ -73,20 +78,11 @@ fn main() {
                 }
             });
         }
-    } else {
-        // No subcommand, not dx serve → run as daemon (web UI + P2P swarm).
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime");
-        rt.block_on(async {
-            let mut injected = args;
-            injected.insert(1, "daemon".to_string());
-            let cli = memctl::Cli::parse_from(injected);
-            if let Err(e) = memctl::run(cli).await {
-                eprintln!("Error: {e:#}");
-                std::process::exit(1);
-            }
-        });
+
+        #[cfg(not(feature = "daemon"))]
+        {
+            eprintln!("No subcommand given and daemon feature disabled. Run `memctl --help`.");
+            std::process::exit(1);
+        }
     }
 }
