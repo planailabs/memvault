@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Join node_b to node_a's cluster.
+# Join node_b to node_a's CLUSTER (node-level operation).
+#
+# This makes node_b a peer in the cluster — it will participate in
+# P2P gossip, bitswap, and serve the REST API independently.
+#
+# This is DIFFERENT from agent enrollment:
+#   - cluster-join: node joins the P2P cluster (replicates data)
+#   - agent-enroll: agent gets API credentials (consumes data via HTTP)
 #
 # Prerequisites:
 #   1. Run genesis-node-a.sh first
-#
-# This script does NOT run genesis on node_b. Instead:
-#   1. Issues a join token from node_a
-#   2. Runs `cluster-join` on node_b (sets cluster_id, creates default bucket)
-#   3. Enrolls node_b as an agent
 set -euo pipefail
 
 NODE_A_DIR="${NODE_A_DATA_DIR:-$HOME/.local/share/memvault.a}"
 NODE_B_DIR="${MEMVAULT_DATA_DIR:-$HOME/.local/share/memvault.b}"
 
-echo "=== Join node_b to node_a's cluster ==="
+echo "=== Join node_b to node_a's cluster (node-level) ==="
 echo "  Node A data: $NODE_A_DIR"
 echo "  Node B data: $NODE_B_DIR"
 
@@ -25,28 +27,17 @@ fi
 CLUSTER_ID=$(cat "$NODE_A_DIR/cluster_id")
 echo "  Cluster ID: $CLUSTER_ID"
 
-# Issue a join token from node_a
+# Join the cluster on node_b (node-level — sets cluster_id, creates default bucket)
 echo ""
-echo "Issuing join token from node_a..."
-TOKEN=$(MEMVAULT_DATA_DIR="$NODE_A_DIR" MEMVAULT_DB="$NODE_A_DIR/blocks.redb" \
-    cargo run -p memctl --features daemon -- token-issue --role agent-host --label "node-b" --ttl 3600)
-echo "  Token: ${TOKEN:0:30}..."
-
-# Join the cluster on node_b (sets cluster_id, creates default bucket)
-echo ""
-echo "Joining cluster on node_b..."
+echo "Joining cluster on node_b (node-level)..."
 MEMVAULT_DATA_DIR="$NODE_B_DIR" MEMVAULT_DB="$NODE_B_DIR/blocks.redb" \
     cargo run -p memctl --features daemon -- cluster-join "$CLUSTER_ID"
 
-# Enroll node_b as an agent
 echo ""
-echo "Enrolling node_b agent..."
-MEMVAULT_DATA_DIR="$NODE_B_DIR" MEMVAULT_DB="$NODE_B_DIR/blocks.redb" \
-    cargo run -p memctl --features daemon -- agent-enroll --token "$TOKEN" --agent-id "node-b"
-
+echo "=== Node joined ==="
 echo ""
-echo "=== Done ==="
+echo "Node_b is now a cluster peer. Start it with:"
+echo "  MEMVAULT_DATA_DIR=$NODE_B_DIR cargo run -p memctl --features daemon -- daemon --api-port 8402 --listen /ip4/127.0.0.1/tcp/9002 --bootstrap /ip4/127.0.0.1/tcp/9001"
 echo ""
-echo "Start both nodes:"
-echo "  Node A: MEMVAULT_DATA_DIR=$NODE_A_DIR cargo run -p memctl --features daemon -- daemon --api-port 8401 --listen /ip4/127.0.0.1/tcp/9001"
-echo "  Node B: MEMVAULT_DATA_DIR=$NODE_B_DIR cargo run -p memctl --features daemon -- daemon --api-port 8402 --listen /ip4/127.0.0.1/tcp/9002 --bootstrap /ip4/127.0.0.1/tcp/9001"
+echo "To enroll an agent (e.g. openclaw) on this node, run:"
+echo "  ./test/enroll-agent.sh"

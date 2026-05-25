@@ -309,7 +309,10 @@ pub enum Commands {
         #[arg(long)]
         default: bool,
     },
-    /// Run a standalone memvault daemon with full P2P networking
+    /// Run a standalone memvault cluster node with P2P networking + API
+    ///
+    /// A cluster node participates in gossip, bitswap, and serves the REST API.
+    /// This is different from an agent — nodes replicate data, agents consume it.
     Daemon {
         /// Listen address (default: /ip4/0.0.0.0/tcp/0)
         #[arg(long, default_value = "/ip4/0.0.0.0/tcp/0")]
@@ -321,24 +324,33 @@ pub enum Commands {
         #[arg(long, env = "MEMVAULT_API_PORT", default_value = "8401")]
         api_port: u16,
     },
-    /// Join an existing cluster (sets cluster_id, creates default bucket)
+    /// Join this node to an existing cluster
+    ///
+    /// Sets the cluster_id and creates a default bucket. This is a NODE-level
+    /// operation — it makes this memvault instance part of the P2P cluster.
+    /// For enrolling an AGENT (like openclaw), use `agent-enroll` instead.
     ClusterJoin {
         /// Cluster ID to join (hex)
         cluster_id: String,
     },
-    /// Enroll an agent using a join token
+    /// Enroll an agent (e.g. openclaw, hermes) for API access
+    ///
+    /// Agents are CLIENTS that connect to a cluster node's HTTP API.
+    /// They have their own Ed25519 identity for signing operations.
+    /// This is different from cluster nodes — agents don't participate
+    /// in P2P gossip/bitswap; they just read and write via the API.
     AgentEnroll {
         /// Join token string (mvjoin1:...)
         #[arg(long)]
         token: String,
-        /// Agent identifier (e.g. "openclaw")
+        /// Agent identifier (e.g. "openclaw", "hermes")
         #[arg(long)]
         agent_id: String,
-        /// Identity directory (default: ~/.local/share/memvault/agents/<agent-id>/)
+        /// Identity directory (default: <data-dir>/agents/<agent-id>/)
         #[arg(long)]
         identity_dir: Option<PathBuf>,
     },
-    /// List enrolled agents
+    /// List enrolled agents on this node
     AgentList,
     /// Show an agent's enrollment details
     AgentShow {
