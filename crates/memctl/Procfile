@@ -5,13 +5,17 @@
 #
 # dx serve --port sets the PUBLIC dev proxy port (what you open in browser).
 # MEMVAULT_API_PORT sets the INTERNAL server port (dx proxies to it).
-# These must differ — dx binds the public port, our binary binds the API port.
+# Server features ("daemon") are specified in Dioxus.toml [application.features].
 #
 # Prerequisites:
 #   cd memvault/crates/memctl   (this directory)
 #   overmind start              (or foreman start)
 #
-# For a single node with hot-reload: MEMVAULT_API_PORT=8401 dx serve --port 8080
+# For direct cargo run (no hot-reload):
+#   cargo run -p memctl --features daemon -- daemon --api-port 8401
+#
+# For a single node with hot-reload:
+#   MEMVAULT_API_PORT=8401 dx serve --port 8080
 
 node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a MEMVAULT_API_PORT=8401 dx serve --port 8080 | tee /tmp/memvault-node-a.log
 node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b MEMVAULT_API_PORT=8402 dx serve --port 8090 | tee /tmp/memvault-node-b.log

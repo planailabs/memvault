@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["daemon"]
+# No defaults — dx serve uses `web` for WASM client and passes `--features daemon`
+# for the server build. For direct `cargo run`, use `--features daemon`.
+default = []
 daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum"]
 embed = ["memvault-web?/embed"]
 # WASM client for the web UI — built by dx for embedding.

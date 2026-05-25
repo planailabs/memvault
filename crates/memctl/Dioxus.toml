@@ -1,6 +1,11 @@
 [application]
 name = "memctl"
 public_dir = "../memvault-web/public"
+default_platform = "fullstack"
 
 [web.app]
 title = "memvault"
+
+# Features for the server (native) build — must include "daemon" for web UI
+[application.features]
+server = ["daemon"]
