@@ -6,6 +6,7 @@ use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant,
 use serde::{Deserialize, Serialize};
 
 use crate::ui::components::cid_display::CidDisplay;
+use crate::ui::components::sandboxed_content::SandboxedContent;
 use crate::ui::topbar::use_topbar;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,19 +238,35 @@ fn FileView(data: FileData) -> Element {
                 }
             }
 
-            // Extracted text
+            // Extracted text (rendered in sandboxed iframe for isolation)
             if let Some(text) = &data.extracted_text {
                 Card {
                     div { class: "p-5",
                         SectionHeading { {t!("file-section-text")} }
-                        pre { class: "mt-2 text-sm text-fg-muted bg-surface-2 p-3 rounded overflow-x-auto max-h-[400px] overflow-y-auto",
-                            "{text}"
+                        SandboxedContent {
+                            html: format!("<pre style=\"white-space:pre-wrap;word-break:break-word;margin:0;font-size:0.8125rem;color:rgba(0,0,0,0.6)\">{}</pre>", html_escape_text(text)),
+                            class: "mt-2 max-h-[400px] overflow-y-auto".to_string(),
                         }
                     }
                 }
             }
         }
     }
+}
+
+fn html_escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[server]

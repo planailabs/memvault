@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::ui::app::Route;
+use crate::ui::components::sandboxed_content::SandboxedContent;
 use crate::ui::components::tag_pills::TagPills;
 use crate::ui::components::visibility_pill::VisibilityPill;
 use crate::ui::topbar::use_topbar;
@@ -241,10 +242,10 @@ fn NoteView(data: NoteData) -> Element {
                 }
             }
 
-            // Body
+            // Body (rendered in sandboxed iframe to prevent XSS from markdown content)
             Card {
-                div { class: "p-5 prose prose-sm max-w-none dark:prose-invert",
-                    dangerous_inner_html: "{data.body_html}",
+                div { class: "p-5",
+                    SandboxedContent { html: data.body_html.clone() }
                 }
                 if !data.tags.is_empty() {
                     div { class: "px-5 pb-4 border-t border-line pt-3",
