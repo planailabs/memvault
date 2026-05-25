@@ -7,10 +7,9 @@ fn main() {
 // Native entry point.
 //
 // Two modes:
-//   - Zero args: `dioxus::serve()` for dx serve hot-reload dev mode.
-//     No P2P swarm — this is frontend development only.
+//   - Zero args (dx serve or bare invocation): dioxus::serve() with a
+//     P2P swarm running on a background thread.
 //   - Has subcommand: CLI mode (`memctl daemon`, `memctl genesis`, etc.).
-//     `memctl daemon` runs the full node (web UI + P2P swarm).
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     use clap::Parser;
@@ -38,18 +37,11 @@ fn main() {
             }
         });
     } else {
-        // Zero args → dioxus::serve() (used by dx serve for hot-reload).
-        // For production with P2P, use `memctl daemon` instead.
+        // Zero args → dioxus::serve() + swarm on background thread.
         #[cfg(feature = "daemon")]
         {
             use std::sync::Arc;
             use dioxus::server::{DioxusRouterExt, ServeConfig};
-
-            memvault_web::ui::state::set_client({
-                let c = memvault_web::ui::state::client()
-                    .expect("failed to initialize memvault client");
-                c
-            });
 
             let data_dir = std::env::var("MEMVAULT_DATA_DIR")
                 .map(std::path::PathBuf::from)
@@ -58,12 +50,48 @@ fn main() {
                         .unwrap_or_else(|| std::path::PathBuf::from("."))
                         .join("memvault")
                 });
+
+            // Shared EventBus: the client publishes events, the swarm
+            // thread subscribes and announces heads over gossipsub.
+            let event_bus = Arc::new(memvault_api::EventBus::new(256));
+
+            // Spawn P2P swarm on a background thread (its own tokio runtime).
+            // Returns the store so we can share it with the web client
+            // (redb only allows one open handle per database file).
+            let store = match memctl::spawn_swarm_background(&data_dir, Arc::clone(&event_bus)) {
+                Ok((store, _handle)) => {
+                    tracing::info!("P2P swarm spawned on background thread");
+                    Some(store)
+                }
+                Err(e) => {
+                    tracing::warn!("failed to start P2P swarm: {e} (continuing without sync)");
+                    None
+                }
+            };
+
+            // Build LocalClient using the shared store + event bus, then
+            // set it BEFORE dioxus::serve() so server functions find it.
+            if let Some(store) = store {
+                let client: Arc<dyn memvault_api::MemvaultClient> = Arc::new(
+                    memctl::create_client_with_bus(
+                        store,
+                        &data_dir,
+                        Arc::clone(&event_bus),
+                    )
+                );
+                memvault_web::ui::state::set_client(Arc::clone(&client));
+            }
+            // If swarm failed, let client() do its lazy init (opens its own store).
+
             let auth_token = memvault_web::load_or_generate_token(&data_dir)
                 .unwrap_or_default();
 
+            let client_arc = memvault_web::ui::state::client()
+                .expect("failed to initialize memvault client");
+
             let app_state = Arc::new(memvault_web::AppState {
-                client: memvault_web::ui::state::client().unwrap(),
-                event_bus: Arc::new(memvault_api::EventBus::new(256)),
+                client: client_arc,
+                event_bus,
                 auth_token,
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
             });

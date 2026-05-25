@@ -399,7 +399,7 @@ fn create_client_with_data_dir(store: Arc<MemvaultStore>, data_dir: &Path) -> Lo
     create_client_with_bus(store, data_dir, Arc::new(EventBus::new(64)))
 }
 
-fn create_client_with_bus(store: Arc<MemvaultStore>, data_dir: &Path, event_bus: Arc<EventBus>) -> LocalClient {
+pub fn create_client_with_bus(store: Arc<MemvaultStore>, data_dir: &Path, event_bus: Arc<EventBus>) -> LocalClient {
     let peer_id = store.get_local_peer_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
     let cluster_id = store.get_local_cluster_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
     let mut client = LocalClient::new(
@@ -434,6 +434,72 @@ fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
                 .join("memvault")
         });
     create_client_with_data_dir(store, &data_dir)
+}
+
+/// Spawn the P2P swarm on a background thread with its own tokio runtime.
+///
+/// This is used by the `dioxus::serve()` path so the swarm runs alongside
+/// the dioxus dev server. The swarm thread gets its own runtime because
+/// `dioxus::serve()` creates its own and they can't share.
+///
+/// Returns the store (for sharing with the web client) and thread handle.
+pub fn spawn_swarm_background(
+    data_dir: &Path,
+    event_bus: Arc<EventBus>,
+) -> Result<(Arc<MemvaultStore>, std::thread::JoinHandle<()>)> {
+    let data_dir = data_dir.to_path_buf();
+
+    // Open the store (shared with the dioxus web client).
+    let store = open_store(&data_dir)?;
+
+    // Load or generate keypair.
+    let key_path = data_dir.join("identity").join("libp2p.key");
+    let keypair = load_or_generate_keypair(&key_path)?;
+    let peer_id_bytes = keypair.public().to_peer_id().to_bytes();
+    store.set_local_peer_id(&peer_id_bytes)
+        .map_err(|e| anyhow::anyhow!("PeerId reconciliation: {e}"))?;
+
+    // Read cluster_id.
+    let cluster_id = store.get_local_cluster_id()?
+        .or_else(|| {
+            let id_path = data_dir.join("cluster_id");
+            std::fs::read_to_string(&id_path).ok()
+                .and_then(|hex| hex::decode(hex.trim()).ok())
+        })
+        .unwrap_or_else(|| vec![0u8; 32]);
+
+    let sync_config = memvault_swarm::SyncConfig {
+        cluster_id,
+        ..Default::default()
+    };
+
+    let store_ret = Arc::clone(&store);
+    let handle = std::thread::Builder::new()
+        .name("memvault-swarm".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("swarm runtime");
+            rt.block_on(async move {
+                // Bridge EventBus → head announcements (must be inside a runtime).
+                let (head_tx, head_rx) = memvault_swarm::head_channel();
+                spawn_event_bridge(event_bus, head_tx);
+
+                let listen: libp2p::Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+                let mut swarm = match memvault_net::standalone_swarm(keypair, listen, vec![]).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("failed to start swarm: {e}");
+                        return;
+                    }
+                };
+                tracing::info!("P2P swarm started on background thread");
+                memvault_swarm::run_sync_loop(&mut swarm, store, head_rx, sync_config).await;
+            });
+        })?;
+
+    Ok((store_ret, handle))
 }
 
 /// Load a libp2p Ed25519 keypair from disk, or generate and save a new one.
