@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# daemon is default so `cargo run` and `dx serve` server builds get the web UI.
-# dx fullstack strips server features for the WASM client build automatically.
-# Native-only deps are target-gated so they don't compile on wasm32.
+# Server build uses defaults (daemon). WASM client uses only `web`.
+# dx must be invoked with: @client --no-default-features --features web @server
+# This avoids pulling tokio/mio into the WASM target.
 default = ["daemon"]
-daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum", "dep:dioxus"]
+daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum"]
 embed = ["memvault-web?/embed"]
 # WASM client for the web UI — built by dx for embedding.
 # dioxus must be a direct dep so dx detects this as a Dioxus fullstack app.

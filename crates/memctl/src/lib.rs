@@ -1109,12 +1109,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("  Bootstraps: {}", bootstrap_addrs.len());
 
             // Start the web API + UI server.
-            // Uses dioxus::serve() which handles port negotiation with dx serve
-            // automatically, and also works standalone.
+            // Uses memvault_web::serve_app() which wraps dioxus::serve() —
+            // handles port negotiation with dx serve automatically.
             #[cfg(feature = "daemon")]
             {
-                use dioxus::server::{DioxusRouterExt, ServeConfig};
-
                 let auth_token = memvault_web::load_or_generate_token(&data_dir)
                     .map_err(|e| anyhow::anyhow!("failed to load/generate API token: {e}"))?;
 
@@ -1152,17 +1150,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                     }
                 });
 
-                // dioxus::serve is the main driver — it handles port negotiation
-                // with dx serve and runs the axum server.
-                dioxus::serve(move || {
-                    let state = std::sync::Arc::clone(&app_state);
-                    async move {
-                        let router = axum::Router::new()
-                            .serve_dioxus_application(ServeConfig::new(), memvault_web::ui::app::App)
-                            .nest("/api/v1", memvault_web::api::routes(state));
-                        Ok(router)
-                    }
-                });
+                // serve_app() uses dioxus::serve() internally — handles port
+                // negotiation with dx serve and runs the axum server. Does not return.
+                memvault_web::serve_app(app_state);
             }
 
             // Without the daemon feature, run P2P only (no web UI)
