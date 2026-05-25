@@ -6,13 +6,14 @@ use dioxus_i18n::t;
 use super::cmd_k::{CommandPalette, PaletteOpen};
 use super::events::use_event_bus_provider;
 use super::navbar::Sidebar;
-use super::topbar::{ActiveView, ActiveViewSignal, Topbar, TopbarMeta};
+use super::topbar::{ActiveBucket, ActiveBucketSignal, ActiveView, ActiveViewSignal, Topbar, TopbarMeta};
 
 #[component]
 pub fn Layout() -> Element {
     use_context_provider::<Signal<TopbarMeta>>(|| Signal::new(TopbarMeta::default()));
     use_context_provider::<PaletteOpen>(|| Signal::new(false));
     use_context_provider::<ActiveViewSignal>(|| Signal::new(ActiveView::default()));
+    use_context_provider::<ActiveBucketSignal>(|| Signal::new(ActiveBucket::default()));
     let _event_bus = use_event_bus_provider();
 
     rsx! {

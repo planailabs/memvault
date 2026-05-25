@@ -23,6 +23,16 @@ pub struct ActiveView {
 /// Shared signal for the active view.
 pub type ActiveViewSignal = Signal<ActiveView>;
 
+/// The active bucket filter — None means "All buckets" (no filter).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActiveBucket {
+    pub id: Option<String>,   // hex-encoded bucket_id
+    pub name: Option<String>, // display name
+}
+
+/// Shared signal for the active bucket.
+pub type ActiveBucketSignal = Signal<ActiveBucket>;
+
 /// Set the topbar title for the current page.
 pub fn use_topbar(title: &str) {
     let mut meta = use_context::<Signal<TopbarMeta>>();
@@ -38,6 +48,23 @@ pub fn use_topbar(title: &str) {
 struct ViewOption {
     name: String,
     tag_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct BucketOption {
+    id_hex: String,
+    name: String,
+}
+
+#[server]
+async fn fetch_buckets() -> Result<Vec<BucketOption>, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let buckets = client.bucket_list().await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(buckets.iter().map(|b| BucketOption {
+        id_hex: hex::encode(b.id.0),
+        name: b.name.clone(),
+    }).collect())
 }
 
 #[server]
@@ -57,9 +84,12 @@ pub fn Topbar() -> Element {
     let title = meta.read().title.clone();
     let mut palette_open = use_context::<PaletteOpen>();
     let mut active_view = use_context::<ActiveViewSignal>();
+    let mut active_bucket = use_context::<ActiveBucketSignal>();
     let views_res = use_server_future(fetch_views)?;
+    let buckets_res = use_server_future(fetch_buckets)?;
 
     let current_name = active_view.read().name.clone().unwrap_or_else(|| "All".to_string());
+    let current_bucket = active_bucket.read().name.clone().unwrap_or_else(|| "All".to_string());
 
     let on_view_change = move |e: Event<FormData>| {
         let name = e.value();
@@ -84,6 +114,35 @@ pub fn Topbar() -> Element {
                 h1 { class: "text-lg font-semibold text-fg-strong truncate", "{title}" }
 
                 div { class: "flex items-center gap-1 ml-auto",
+                    // Bucket selector
+                    select {
+                        class: "input input-sm text-sm w-auto",
+                        value: "{current_bucket}",
+                        onchange: move |e: Event<FormData>| {
+                            let val = e.value();
+                            if val == "All" || val.is_empty() {
+                                active_bucket.set(ActiveBucket::default());
+                            } else {
+                                // val is "id_hex:name"
+                                let (id_hex, name) = val.split_once(':').unwrap_or((&val, &val));
+                                active_bucket.set(ActiveBucket {
+                                    id: Some(id_hex.to_string()),
+                                    name: Some(name.to_string()),
+                                });
+                            }
+                        },
+                        option { value: "All", selected: active_bucket.read().id.is_none(), "All buckets" }
+                        if let Some(Ok(buckets)) = &*buckets_res.read() {
+                            for b in buckets {
+                                {
+                                    let val = format!("{}:{}", b.id_hex, b.name);
+                                    let selected = active_bucket.read().id.as_deref() == Some(b.id_hex.as_str());
+                                    rsx! { option { value: "{val}", selected: selected, "{b.name}" } }
+                                }
+                            }
+                        }
+                    }
+                    // View selector
                     select {
                         class: "input input-sm text-sm w-auto",
                         value: "{current_name}",
