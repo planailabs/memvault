@@ -76,11 +76,13 @@ async fn rename_bucket_multiple_times() {
 }
 
 #[tokio::test]
-async fn bucket_initially_private() {
+async fn bucket_auto_attached_when_cluster_exists() {
+    // When a node has a cluster, buckets are auto-attached (visible to peers)
     let node = TestNode::new();
-    let id = node.client.bucket_create("private", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node.client.bucket_create("auto-attached", None, Visibility::Internal, Classification::Internal).await.unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
-    assert!(!info.is_attached);
+    assert!(info.is_attached, "bucket should be auto-attached when cluster exists");
+    assert_eq!(info.cluster_id, Some(node.cluster_id.clone()), "bucket should be auto-bound to cluster");
 }
 
 #[tokio::test]
@@ -154,11 +156,12 @@ async fn bucket_rebind_same_cluster_ok() {
 }
 
 #[tokio::test]
-async fn bucket_unbound_initially() {
+async fn bucket_auto_bound_to_cluster() {
+    // Buckets created on a clustered node are auto-bound
     let node = TestNode::new();
-    let id = node.client.bucket_create("unbound", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node.client.bucket_create("auto-bound", None, Visibility::Internal, Classification::Internal).await.unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
-    assert!(info.cluster_id.is_none());
+    assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
 }
 
 #[tokio::test]

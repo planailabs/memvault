@@ -87,18 +87,12 @@ async fn bucket_lifecycle_full() {
     let id = node.client.bucket_create("lifecycle", Some("full test"),
         Visibility::Federated, Classification::Internal).await.unwrap();
 
-    // Verify initial state
+    // Auto-attached and auto-bound since node has a cluster
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
-    assert!(!info.is_attached);
-    assert!(info.cluster_id.is_none());
-
-    // Bind
-    node.client.bucket_bind(&id, &node.cluster_id, false).await.unwrap();
-    let info = node.client.bucket_get(&id).await.unwrap().unwrap();
+    assert!(info.is_attached);
     assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
-    assert!(!info.is_default);
 
-    // Attach
+    // Attach again (idempotent)
     node.client.bucket_attach(&id).await.unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert!(info.is_attached);

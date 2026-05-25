@@ -1308,6 +1308,9 @@ impl MemvaultClient for LocalClient {
         let bucket_id = memvault_core::BucketId::random();
         let now_ns = memvault_core::wall_ns();
 
+        // Auto-attach to cluster if the node has one (non-zero cluster_id).
+        // Buckets are only private when created before genesis (no cluster yet).
+        let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
         let decl = BucketDecl {
             bucket_id: bucket_id.clone(),
             name: name.to_string(),
@@ -1316,7 +1319,7 @@ impl MemvaultClient for LocalClient {
             default_visibility,
             default_classification,
             created_ns: now_ns,
-            private_to_peer: Some(memvault_core::PeerId(self.peer_id.clone())),
+            private_to_peer: if has_cluster { None } else { Some(memvault_core::PeerId(self.peer_id.clone())) },
         };
 
         // Serialize the BucketDecl as the block
@@ -1343,7 +1346,12 @@ impl MemvaultClient for LocalClient {
         // Record in BUCKETS table
         self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
 
-        tracing::info!(bucket = %bucket_id, name, "bucket created");
+        // Auto-bind to cluster if one exists
+        if has_cluster {
+            let _ = self.store.bind_bucket(&bucket_id.0, &self.cluster_id, false);
+        }
+
+        tracing::info!(bucket = %bucket_id, name, has_cluster, "bucket created");
         Ok(bucket_id)
     }
 
