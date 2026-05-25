@@ -35,7 +35,7 @@ async fn save_view(name: String, tags: Vec<(String, String)>) -> Result<(), Serv
     let view = memvault_api::View {
         name,
         tags,
-        created_ns: memvault_core::wall_ns(), cid: String::new(),
+        created_ns: memvault_core::wall_ns(), cid: String::new(), bucket_id: None,
     };
     // Use update_view which does delete + create.
     client

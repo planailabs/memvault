@@ -66,6 +66,11 @@ pub struct View {
     /// Block CID (hex). Set after storage, empty on input.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cid: String,
+    /// When set, the view only returns items in this bucket.
+    /// None = fan out across all accessible buckets (legacy behavior).
+    /// Added in B4. Old views deserialize with None via #[serde(default)].
+    #[serde(default)]
+    pub bucket_id: Option<BucketId>,
 }
 
 /// Options for write operations, allowing callers to specify a target bucket.

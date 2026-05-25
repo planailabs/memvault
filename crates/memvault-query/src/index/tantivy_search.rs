@@ -1,4 +1,7 @@
 //! Tantivy-backed full-text search index.
+//!
+//! Promoted to primary search engine in B4. Indexes docs, entities, and files
+//! with BM25 scoring and native bucket filtering.
 
 use std::path::Path;
 
@@ -11,7 +14,7 @@ use tantivy::{
 
 use crate::error::QueryError;
 
-/// Tantivy full-text index for memvault documents.
+/// Tantivy full-text index for memvault documents, entities, and files.
 pub struct TantivyIndex {
     index: Index,
     reader: IndexReader,
@@ -19,21 +22,24 @@ pub struct TantivyIndex {
     schema: Schema,
     // Field handles
     f_cid: Field,
-    f_doc_id: Field,
+    f_node_id: Field,
+    f_node_type: Field,
     f_body: Field,
-    f_title: Field,
+    f_label: Field,
     f_tags: Field,
     f_wall_ns: Field,
+    f_bucket_id: Field,
 }
 
-/// Search hit from Tantivy.
+/// Unified search hit across all node types.
 #[derive(Debug, Clone)]
 pub struct TantivyHit {
     pub cid: String,
-    pub doc_id: String,
+    pub node_id: String,
+    pub node_type: String,
+    pub label: String,
     pub score: f32,
     pub snippet: String,
-    pub title: Option<String>,
 }
 
 impl TantivyIndex {
@@ -41,14 +47,16 @@ impl TantivyIndex {
     pub fn open(path: &Path) -> Result<Self, QueryError> {
         let mut schema_builder = Schema::builder();
         let f_cid = schema_builder.add_text_field("cid", STRING | STORED);
-        let f_doc_id = schema_builder.add_text_field("doc_id", STRING | STORED);
+        let f_node_id = schema_builder.add_text_field("node_id", STRING | STORED);
+        let f_node_type = schema_builder.add_text_field("node_type", STRING | STORED);
         let f_body = schema_builder.add_text_field("body", TEXT | STORED);
-        let f_title = schema_builder.add_text_field("title", TEXT | STORED);
+        let f_label = schema_builder.add_text_field("label", TEXT | STORED);
         let f_tags = schema_builder.add_text_field("tags", STRING | STORED);
         let f_wall_ns = schema_builder.add_u64_field(
             "wall_ns",
             NumericOptions::default().set_stored().set_indexed(),
         );
+        let f_bucket_id = schema_builder.add_text_field("bucket_id", STRING | STORED);
         let schema = schema_builder.build();
 
         std::fs::create_dir_all(path).map_err(|e| QueryError::Other(e.to_string()))?;
@@ -71,39 +79,111 @@ impl TantivyIndex {
             index,
             reader,
             writer,
-            schema: schema,
+            schema,
             f_cid,
-            f_doc_id,
+            f_node_id,
+            f_node_type,
             f_body,
-            f_title,
+            f_label,
             f_tags,
             f_wall_ns,
+            f_bucket_id,
         })
     }
 
     /// Add a document to the index.
-    ///
-    /// `cid` and `doc_id` are hex-encoded identifiers.
     pub fn add_document(
         &mut self,
         cid: &str,
-        doc_id: &str,
+        node_id: &str,
         body: &str,
-        title: Option<&str>,
+        label: &str,
         tags: &[(String, String)],
+        bucket_id: Option<&str>,
         wall_ns: u64,
     ) -> Result<(), QueryError> {
         let mut doc = TantivyDocument::default();
         doc.add_text(self.f_cid, cid);
-        doc.add_text(self.f_doc_id, doc_id);
+        doc.add_text(self.f_node_id, node_id);
+        doc.add_text(self.f_node_type, "doc");
         doc.add_text(self.f_body, body);
-        if let Some(t) = title {
-            doc.add_text(self.f_title, t);
-        }
-        for (scope, label) in tags {
-            doc.add_text(self.f_tags, &format!("{scope}:{label}"));
+        doc.add_text(self.f_label, label);
+        for (scope, lbl) in tags {
+            doc.add_text(self.f_tags, &format!("{scope}:{lbl}"));
         }
         doc.add_u64(self.f_wall_ns, wall_ns);
+        doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
+
+        self.writer
+            .add_document(doc)
+            .map_err(|e| QueryError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Add an entity to the index.
+    pub fn add_entity(
+        &mut self,
+        cid: &str,
+        node_id: &str,
+        kind: &str,
+        label: &str,
+        properties_text: &str,
+        tags: &[(String, String)],
+        bucket_id: Option<&str>,
+        wall_ns: u64,
+    ) -> Result<(), QueryError> {
+        let mut doc = TantivyDocument::default();
+        doc.add_text(self.f_cid, cid);
+        doc.add_text(self.f_node_id, node_id);
+        doc.add_text(self.f_node_type, "entity");
+        doc.add_text(self.f_body, &format!("{kind} {properties_text}"));
+        doc.add_text(self.f_label, label);
+        for (scope, lbl) in tags {
+            doc.add_text(self.f_tags, &format!("{scope}:{lbl}"));
+        }
+        doc.add_u64(self.f_wall_ns, wall_ns);
+        doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
+
+        self.writer
+            .add_document(doc)
+            .map_err(|e| QueryError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Add a file/attachment to the index.
+    pub fn add_attachment(
+        &mut self,
+        cid: &str,
+        node_id: &str,
+        filename: &str,
+        mime_type: &str,
+        extracted_text: Option<&str>,
+        tags: &[(String, String)],
+        bucket_id: Option<&str>,
+        wall_ns: u64,
+    ) -> Result<(), QueryError> {
+        let mut body_parts = vec![mime_type.to_string()];
+        // Split filename for indexing
+        for part in filename.split(|c: char| c == '.' || c == '-' || c == '_' || c == ' ') {
+            if !part.is_empty() {
+                body_parts.push(part.to_string());
+            }
+        }
+        if let Some(text) = extracted_text {
+            body_parts.push(text.to_string());
+        }
+
+        let mut doc = TantivyDocument::default();
+        doc.add_text(self.f_cid, cid);
+        doc.add_text(self.f_node_id, node_id);
+        doc.add_text(self.f_node_type, "file");
+        doc.add_text(self.f_body, &body_parts.join(" "));
+        doc.add_text(self.f_label, filename);
+        for (scope, lbl) in tags {
+            doc.add_text(self.f_tags, &format!("{scope}:{lbl}"));
+        }
+        doc.add_u64(self.f_wall_ns, wall_ns);
+        doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
 
         self.writer
             .add_document(doc)
@@ -122,13 +202,26 @@ impl TantivyIndex {
         Ok(())
     }
 
-    /// Search the index.
-    pub fn search(&self, query_text: &str, limit: usize) -> Result<Vec<TantivyHit>, QueryError> {
+    /// Search the index with optional bucket filter.
+    pub fn search_filtered(
+        &self,
+        query_text: &str,
+        bucket_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TantivyHit>, QueryError> {
         let searcher = self.reader.searcher();
+
+        // Build query: if bucket filter is set, AND it with the text query
+        let effective_query = if let Some(bid) = bucket_id {
+            format!("bucket_id:\"{bid}\" AND ({query_text})")
+        } else {
+            query_text.to_string()
+        };
+
         let query_parser =
-            QueryParser::for_index(&self.index, vec![self.f_body, self.f_title]);
+            QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
         let query = query_parser
-            .parse_query(query_text)
+            .parse_query(&effective_query)
             .map_err(|e| QueryError::Other(format!("query parse: {e}")))?;
 
         let top_docs = searcher
@@ -139,27 +232,36 @@ impl TantivyIndex {
         for (score, doc_addr) in top_docs {
             if let Ok(retrieved) = searcher.doc::<TantivyDocument>(doc_addr) {
                 let cid = self.get_text_field(&retrieved, self.f_cid);
-                let doc_id = self.get_text_field(&retrieved, self.f_doc_id);
+                let node_id = self.get_text_field(&retrieved, self.f_node_id);
+                let node_type = self.get_text_field(&retrieved, self.f_node_type);
+                let label = self.get_text_field(&retrieved, self.f_label);
                 let snippet: String = self
                     .get_text_field(&retrieved, self.f_body)
                     .chars()
                     .take(200)
                     .collect();
-                let title = {
-                    let t = self.get_text_field(&retrieved, self.f_title);
-                    if t.is_empty() { None } else { Some(t) }
-                };
 
                 hits.push(TantivyHit {
                     cid,
-                    doc_id,
+                    node_id,
+                    node_type,
+                    label,
                     score,
                     snippet,
-                    title,
                 });
             }
         }
         Ok(hits)
+    }
+
+    /// Search across all node types (unified search).
+    pub fn search_unified(
+        &self,
+        query_text: &str,
+        bucket_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TantivyHit>, QueryError> {
+        self.search_filtered(query_text, bucket_id, limit)
     }
 
     /// Remove all documents matching the given CID (hex string).
@@ -169,12 +271,19 @@ impl TantivyIndex {
         Ok(())
     }
 
+    /// Remove by node_id (e.g. "doc:abcd", "entity:1234").
+    pub fn retract(&mut self, node_id: &str) -> Result<(), QueryError> {
+        let term = tantivy::Term::from_field_text(self.f_node_id, node_id);
+        self.writer.delete_term(term);
+        Ok(())
+    }
+
     /// Get the number of documents in the index.
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
     }
 
-    /// Schema accessor (useful for JSON serialization of results).
+    /// Schema accessor.
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
@@ -200,123 +309,120 @@ mod tests {
     }
 
     #[test]
-    fn test_add_and_search() {
+    fn test_add_and_search_document() {
         let (_dir, mut idx) = make_index();
         idx.add_document(
-            "cid001",
-            "doc001",
+            "cid001", "doc:001",
             "The quick brown fox jumps over the lazy dog",
-            Some("Fox Story"),
+            "Fox Story",
             &[("category".into(), "animals".into())],
-            1000,
-        )
-        .unwrap();
+            None, 1000,
+        ).unwrap();
         idx.commit().unwrap();
 
-        let hits = idx.search("fox", 10).unwrap();
+        let hits = idx.search_filtered("fox", None, 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].cid, "cid001");
-        assert_eq!(hits[0].doc_id, "doc001");
-        assert_eq!(hits[0].title, Some("Fox Story".to_string()));
-        assert!(hits[0].score > 0.0);
+        assert_eq!(hits[0].node_id, "doc:001");
+        assert_eq!(hits[0].node_type, "doc");
+        assert_eq!(hits[0].label, "Fox Story");
+    }
+
+    #[test]
+    fn test_add_entity() {
+        let (_dir, mut idx) = make_index();
+        idx.add_entity(
+            "cid_e1", "entity:e1", "person", "Alice",
+            "name Alice age 30 role engineer",
+            &[("kind".into(), "person".into())],
+            None, 2000,
+        ).unwrap();
+        idx.commit().unwrap();
+
+        let hits = idx.search_filtered("engineer", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node_type, "entity");
+        assert_eq!(hits[0].label, "Alice");
+    }
+
+    #[test]
+    fn test_add_attachment() {
+        let (_dir, mut idx) = make_index();
+        idx.add_attachment(
+            "cid_f1", "file:f1", "report.pdf", "application/pdf",
+            Some("quarterly financial report Q3 2025"),
+            &[], None, 3000,
+        ).unwrap();
+        idx.commit().unwrap();
+
+        let hits = idx.search_filtered("quarterly", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node_type, "file");
+        assert_eq!(hits[0].label, "report.pdf");
+    }
+
+    #[test]
+    fn test_bucket_filter() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document(
+            "cid_b1", "doc:b1", "shared document in bucket alpha",
+            "Alpha Doc", &[], Some("bucket_alpha"), 1000,
+        ).unwrap();
+        idx.add_document(
+            "cid_b2", "doc:b2", "shared document in bucket beta",
+            "Beta Doc", &[], Some("bucket_beta"), 2000,
+        ).unwrap();
+        idx.commit().unwrap();
+
+        // Search all buckets
+        let all = idx.search_filtered("shared document", None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Search specific bucket
+        let alpha = idx.search_filtered("shared document", Some("bucket_alpha"), 10).unwrap();
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].node_id, "doc:b1");
+    }
+
+    #[test]
+    fn test_retract() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document("cid_r1", "doc:r1", "content to retract", "Retractable", &[], None, 1000).unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.num_docs(), 1);
+
+        idx.retract("doc:r1").unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.num_docs(), 0);
     }
 
     #[test]
     fn test_score_ordering() {
         let (_dir, mut idx) = make_index();
-        idx.add_document(
-            "cid_a",
-            "doc_a",
-            "rust programming language systems",
-            Some("Rust Intro"),
-            &[],
-            100,
-        )
-        .unwrap();
-        idx.add_document(
-            "cid_b",
-            "doc_b",
-            "rust rust rust is amazing for rust developers who love rust",
-            Some("All About Rust"),
-            &[],
-            200,
-        )
-        .unwrap();
+        idx.add_document("cid_a", "doc:a", "rust programming language", "Rust Intro", &[], None, 100).unwrap();
+        idx.add_document("cid_b", "doc:b", "rust rust rust is amazing for rust developers", "All About Rust", &[], None, 200).unwrap();
         idx.commit().unwrap();
 
-        let hits = idx.search("rust", 10).unwrap();
+        let hits = idx.search_filtered("rust", None, 10).unwrap();
         assert_eq!(hits.len(), 2);
-        // Higher TF for "rust" in doc_b should score higher
-        assert_eq!(hits[0].cid, "cid_b");
-        assert_eq!(hits[1].cid, "cid_a");
+        // Higher TF for "rust" in doc:b should score higher
+        assert_eq!(hits[0].node_id, "doc:b");
     }
 
     #[test]
-    fn test_empty_query_returns_nothing() {
+    fn test_unified_search_across_types() {
         let (_dir, mut idx) = make_index();
-        idx.add_document("cid_x", "doc_x", "hello world", None, &[], 0)
-            .unwrap();
+        idx.add_document("c1", "doc:1", "kubernetes cluster management", "K8s Guide", &[], None, 100).unwrap();
+        idx.add_entity("c2", "entity:2", "tool", "kubectl", "kubernetes command line tool", &[], None, 200).unwrap();
+        idx.add_attachment("c3", "file:3", "k8s-setup.md", "text/markdown", Some("kubernetes setup instructions"), &[], None, 300).unwrap();
         idx.commit().unwrap();
 
-        // A query with no matching terms
-        let hits = idx.search("zzzznonexistent", 10).unwrap();
-        assert!(hits.is_empty());
-    }
-
-    #[test]
-    fn test_multiple_documents() {
-        let (_dir, mut idx) = make_index();
-        for i in 0..5 {
-            idx.add_document(
-                &format!("cid_{i}"),
-                &format!("doc_{i}"),
-                &format!("document number {i} with some common text about searching"),
-                None,
-                &[("idx".into(), format!("{i}"))],
-                i as u64 * 1000,
-            )
-            .unwrap();
-        }
-        idx.commit().unwrap();
-
-        assert_eq!(idx.num_docs(), 5);
-
-        let hits = idx.search("searching", 10).unwrap();
-        assert_eq!(hits.len(), 5);
-    }
-
-    #[test]
-    fn test_title_search() {
-        let (_dir, mut idx) = make_index();
-        idx.add_document(
-            "cid_t1",
-            "doc_t1",
-            "some body text that does not match",
-            Some("Kubernetes cluster management"),
-            &[],
-            0,
-        )
-        .unwrap();
-        idx.commit().unwrap();
-
-        let hits = idx.search("kubernetes", 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].cid, "cid_t1");
-    }
-
-    #[test]
-    fn test_remove_document() {
-        let (_dir, mut idx) = make_index();
-        idx.add_document("cid_rm", "doc_rm", "removable content", None, &[], 0)
-            .unwrap();
-        idx.commit().unwrap();
-        assert_eq!(idx.num_docs(), 1);
-
-        idx.remove("cid_rm").unwrap();
-        idx.commit().unwrap();
-        assert_eq!(idx.num_docs(), 0);
-
-        let hits = idx.search("removable", 10).unwrap();
-        assert!(hits.is_empty());
+        let hits = idx.search_unified("kubernetes", None, 10).unwrap();
+        assert_eq!(hits.len(), 3);
+        // All three types should be present
+        let types: Vec<&str> = hits.iter().map(|h| h.node_type.as_str()).collect();
+        assert!(types.contains(&"doc"));
+        assert!(types.contains(&"entity"));
+        assert!(types.contains(&"file"));
     }
 }

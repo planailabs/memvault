@@ -77,7 +77,7 @@ pub async fn create_view(
     let view = memvault_api::View {
         name: req.name.clone(),
         tags: req.tags,
-        created_ns: memvault_core::wall_ns(), cid: String::new(),
+        created_ns: memvault_core::wall_ns(), cid: String::new(), bucket_id: None,
     };
     state.client.create_view(view).await?;
     tracing::info!(name = %req.name, "API: view created");
@@ -104,7 +104,7 @@ pub async fn update_view(
     let view = memvault_api::View {
         name: name.clone(),
         tags: req.tags,
-        created_ns: memvault_core::wall_ns(), cid: String::new(),
+        created_ns: memvault_core::wall_ns(), cid: String::new(), bucket_id: None,
     };
     state.client.update_view(view).await?;
     Ok(Json(serde_json::json!({ "name": name, "status": "updated" })))
