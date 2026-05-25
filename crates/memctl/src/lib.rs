@@ -1108,86 +1108,87 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("  Cluster:    {}", hex::encode(&cluster_id_bytes));
             println!("  Bootstraps: {}", bootstrap_addrs.len());
 
-            // Start the web API + UI server
+            // Start the web API + UI server.
+            // Uses dioxus::serve() which handles port negotiation with dx serve
+            // automatically, and also works standalone.
             #[cfg(feature = "daemon")]
             {
+                use dioxus::server::{DioxusRouterExt, ServeConfig};
+
                 let auth_token = memvault_web::load_or_generate_token(&data_dir)
                     .map_err(|e| anyhow::anyhow!("failed to load/generate API token: {e}"))?;
+
+                let client_arc = std::sync::Arc::new(client) as std::sync::Arc<dyn memvault_api::MemvaultClient>;
+                memvault_web::ui::state::set_client(std::sync::Arc::clone(&client_arc));
+
                 let app_state = std::sync::Arc::new(memvault_web::AppState {
-                    client: std::sync::Arc::new(client) as std::sync::Arc<dyn memvault_api::MemvaultClient>,
+                    client: client_arc,
                     event_bus: std::sync::Arc::new(memvault_api::EventBus::new(256)),
                     auth_token: auth_token.clone(),
                     metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                 });
-                // Choose router mode:
-                // - With `embed` feature: assets are baked into the binary, always fullstack.
-                // - Without `embed`: check if `public/` exists next to binary (from `dx build`).
-                //   If missing, fall back to API-only (no panic).
-                #[cfg(feature = "embed")]
-                let (router, has_webui) = {
-                    (memvault_web::build_fullstack_router(app_state), true)
-                };
-                #[cfg(not(feature = "embed"))]
-                let (router, has_webui) = {
-                    let public_exists = std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|d| d.join("public").exists()))
-                        .unwrap_or(false);
-                    if public_exists {
-                        tracing::info!("web UI assets found, serving fullstack");
-                        (memvault_web::build_fullstack_router(app_state), true)
-                    } else {
-                        tracing::info!("no web UI assets (run `dx build` or use --features embed), API only");
-                        (memvault_web::build_router(app_state).into(), false)
-                    }
-                };
+                println!("  API token:  {}", &auth_token[..8]);
 
-                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
+                // Build standalone swarm in a background task
+                let mut swarm = memvault_net::standalone_swarm(
+                    keypair, listen_addr, bootstrap_addrs,
+                ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
+
+                println!("Daemon running.");
+                use futures::StreamExt as _;
                 tokio::spawn(async move {
-                    let listener = match tokio::net::TcpListener::bind(addr).await {
-                        Ok(l) => l,
-                        Err(e) => {
-                            tracing::error!("failed to bind API port {api_port}: {e}");
-                            return;
+                    loop {
+                        tokio::select! {
+                            event = swarm.next() => {
+                                match event {
+                                    Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
+                                        tracing::info!(%address, "P2P listening");
+                                    }
+                                    Some(libp2p::swarm::SwarmEvent::Behaviour(_)) => {}
+                                    _ => {}
+                                }
+                            }
                         }
-                    };
-                    tracing::info!(port = api_port, "memvault API started");
-                    println!("  Web UI:     {}", if has_webui {
-                        format!("http://127.0.0.1:{api_port}")
-                    } else {
-                        "disabled (run `dx build` or use --features embed)".to_string()
-                    });
-                    if let Err(e) = axum::serve(listener, router).await {
-                        tracing::error!("web server error: {e}");
                     }
                 });
-                println!("  API token:  {}", &auth_token[..8]);
+
+                // dioxus::serve is the main driver — it handles port negotiation
+                // with dx serve and runs the axum server.
+                dioxus::serve(move || {
+                    let state = std::sync::Arc::clone(&app_state);
+                    async move {
+                        let router = axum::Router::new()
+                            .serve_dioxus_application(ServeConfig::new(), memvault_web::ui::app::App)
+                            .nest("/api/v1", memvault_web::api::routes(state));
+                        Ok(router)
+                    }
+                });
             }
 
-            // Build standalone swarm
-            let mut swarm = memvault_net::standalone_swarm(
-                keypair, listen_addr, bootstrap_addrs,
-            ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
+            // Without the daemon feature, run P2P only (no web UI)
+            #[cfg(not(feature = "daemon"))]
+            {
+                let mut swarm = memvault_net::standalone_swarm(
+                    keypair, listen_addr, bootstrap_addrs,
+                ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
-            // Run the swarm event loop
-            println!("Daemon running. Press Ctrl+C to stop.");
-            use futures::StreamExt as _;
-            loop {
-                tokio::select! {
-                    event = swarm.next() => {
-                        match event {
-                            Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
-                                println!("  Listening on: {address}");
+                println!("Daemon running (P2P only, no web UI). Press Ctrl+C to stop.");
+                use futures::StreamExt as _;
+                loop {
+                    tokio::select! {
+                        event = swarm.next() => {
+                            match event {
+                                Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
+                                    println!("  Listening on: {address}");
+                                }
+                                Some(libp2p::swarm::SwarmEvent::Behaviour(_)) => {}
+                                _ => {}
                             }
-                            Some(libp2p::swarm::SwarmEvent::Behaviour(_event)) => {
-                                // Handle gossip, auth, join events here
-                            }
-                            _ => {}
                         }
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        println!("\nShutting down daemon...");
-                        break;
+                        _ = tokio::signal::ctrl_c() => {
+                            println!("\nShutting down daemon...");
+                            break;
+                        }
                     }
                 }
             }
