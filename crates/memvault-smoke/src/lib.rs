@@ -7,6 +7,7 @@ pub mod harness;
 
 #[cfg(test)]
 mod tests {
+    pub mod bucket_sync;
     pub mod buckets;
     pub mod docs;
     pub mod entities;
