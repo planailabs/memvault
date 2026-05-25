@@ -1236,24 +1236,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
                 // Run the swarm event loop
                 println!("Daemon running. Press Ctrl+C to stop.");
-                use futures::StreamExt as _;
-                loop {
-                    tokio::select! {
-                        event = swarm.next() => {
-                            match event {
-                                Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
-                                    println!("  Listening on: {address}");
-                                }
-                                Some(libp2p::swarm::SwarmEvent::Behaviour(_)) => {}
-                                _ => {}
-                            }
-                        }
-                        _ = tokio::signal::ctrl_c() => {
-                            println!("\nShutting down daemon...");
-                            break;
-                        }
-                    }
-                }
+                run_swarm_loop(&mut swarm).await;
             }
 
             // Without the daemon feature, run P2P only (no web UI)
@@ -1264,24 +1247,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 ).await.map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
                 println!("Daemon running (P2P only, no web UI). Press Ctrl+C to stop.");
-                use futures::StreamExt as _;
-                loop {
-                    tokio::select! {
-                        event = swarm.next() => {
-                            match event {
-                                Some(libp2p::swarm::SwarmEvent::NewListenAddr { address, .. }) => {
-                                    println!("  Listening on: {address}");
-                                }
-                                Some(libp2p::swarm::SwarmEvent::Behaviour(_)) => {}
-                                _ => {}
-                            }
-                        }
-                        _ = tokio::signal::ctrl_c() => {
-                            println!("\nShutting down daemon...");
-                            break;
-                        }
-                    }
-                }
+                run_swarm_loop(&mut swarm).await;
             }
         }
         Commands::ClusterJoin { cluster_id: cluster_hex } => {
@@ -1465,6 +1431,80 @@ pub async fn run(cli: Cli) -> Result<()> {
 }
 
 /// Seed the vault with random data for testing / demo purposes.
+/// Run the swarm event loop: handles mDNS discovery, Kademlia routing,
+/// gossipsub, and ctrl+c shutdown.
+async fn run_swarm_loop(swarm: &mut libp2p::Swarm<memvault_net::StandaloneMemvaultBehaviour>) {
+    use futures::StreamExt as _;
+    use libp2p::swarm::SwarmEvent;
+
+    loop {
+        tokio::select! {
+            event = swarm.next() => {
+                match event {
+                    Some(SwarmEvent::NewListenAddr { address, .. }) => {
+                        println!("  Listening on: {address}");
+                    }
+                    Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                        tracing::info!(%peer_id, "peer connected");
+                    }
+                    Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                        tracing::info!(%peer_id, "peer disconnected");
+                    }
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::Mdns(
+                            libp2p::mdns::Event::Discovered(peers)
+                        )
+                    )) => {
+                        for (peer_id, addr) in peers {
+                            tracing::info!(%peer_id, %addr, "mDNS discovered peer");
+                            swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                            let _ = swarm.dial(addr);
+                        }
+                    }
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::Mdns(
+                            libp2p::mdns::Event::Expired(peers)
+                        )
+                    )) => {
+                        for (peer_id, addr) in peers {
+                            tracing::debug!(%peer_id, %addr, "mDNS peer expired");
+                        }
+                    }
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::Identify(
+                            libp2p::identify::Event::Received { peer_id, info, .. }
+                        )
+                    )) => {
+                        // Add identified peer's addresses to Kademlia.
+                        for addr in &info.listen_addrs {
+                            swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                        }
+                        tracing::debug!(%peer_id, addrs = info.listen_addrs.len(), "identify received");
+                    }
+                    Some(SwarmEvent::Behaviour(
+                        memvault_net::StandaloneMemvaultBehaviourEvent::Gossipsub(
+                            libp2p::gossipsub::Event::Message { propagation_source, message, .. }
+                        )
+                    )) => {
+                        tracing::debug!(
+                            source = %propagation_source,
+                            topic = %message.topic,
+                            len = message.data.len(),
+                            "gossip message received"
+                        );
+                    }
+                    Some(SwarmEvent::Behaviour(_)) => {}
+                    _ => {}
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nShutting down daemon...");
+                break;
+            }
+        }
+    }
+}
+
 async fn run_seed(
     client: &LocalClient,
     n_docs: usize,
