@@ -76,7 +76,7 @@ pub async fn list_docs(
     };
     let limit = params.limit.unwrap_or(100);
 
-    let docs = state.client.list_docs(tag_filter, limit).await?;
+    let docs = state.client.list_docs(tag_filter, limit, None).await?;
 
     let results: Vec<DocSummaryResponse> = docs
         .into_iter()
@@ -109,6 +109,7 @@ pub async fn create_doc(
         req.tags.clone(),
         vis,
         req.vfs_path.as_deref(),
+        None,
     ).await?;
     tracing::info!(doc_id = %result.node_id, "API: doc created");
 

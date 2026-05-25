@@ -138,7 +138,7 @@ async fn vfs_ensure_root(
     use memvault_doc::Entity;
     use std::collections::BTreeMap;
 
-    let entities = client.list_entities(500).await
+    let entities = client.list_entities(500, None).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // Pass 1: find roots by vfs:root tag (from text index).
@@ -180,7 +180,7 @@ async fn vfs_ensure_root(
         props,
         edges_out: vec![],
     };
-    let id = client.add_entity(entity, Visibility::Internal).await
+    let id = client.add_entity(entity, Visibility::Internal, None).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await
@@ -252,7 +252,7 @@ async fn vfs_create_dir(
         props,
         edges_out: vec![],
     };
-    client.add_entity(entity, Visibility::Internal).await
+    client.add_entity(entity, Visibility::Internal, None).await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 

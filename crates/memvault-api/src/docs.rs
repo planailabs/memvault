@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use memvault_core::{DocId, Visibility};
+use memvault_core::{BucketId, DocId, Visibility};
 use memvault_doc::Document;
 
 use crate::error::Result;
@@ -36,6 +36,7 @@ pub async fn create_doc(
     tags: Vec<(String, String)>,
     vis: Visibility,
     vfs_path: Option<&str>,
+    bucket: Option<&BucketId>,
 ) -> Result<CreateDocResult> {
     let doc_id = DocId::random();
     let mut fm = frontmatter.unwrap_or_default();
@@ -44,12 +45,15 @@ pub async fn create_doc(
             .or_insert_with(|| serde_json::Value::String(t.to_string()));
     }
     let doc = Document::new(doc_id.clone(), body.to_string(), fm.clone());
-    let cid = client.put_doc(doc, tags, vis).await?;
+    let cid = client.put_doc(doc, tags, vis, bucket).await?;
     let node_id = format!("doc:{}", hex::encode(doc_id.0));
 
     if let Some(path) = vfs_path {
-        let bucket = crate::vfs::default_bucket(client).await;
-        if let Err(e) = crate::vfs::link_node_at_path(client, &bucket, path, &node_id).await {
+        let bucket_id = match bucket {
+            Some(b) => b.clone(),
+            None => client.default_bucket_id().await.unwrap_or(BucketId([0u8; 32])),
+        };
+        if let Err(e) = crate::vfs::link_node_at_path(client, &bucket_id, path, &node_id).await {
             tracing::warn!(path, error = %e, "VFS link failed after doc creation");
         }
     }

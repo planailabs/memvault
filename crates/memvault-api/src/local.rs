@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use memvault_core::{cid_from_bytes, DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{cid_from_bytes, BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{
     Document, Edge, Entity, Op, TextPatch,
 };
@@ -513,8 +513,29 @@ impl LocalClient {
         vec![]
     }
 
-    fn store_op(&self, op: &Op, tags: &[(String, String)], vis: &Visibility) -> Result<Vec<u8>> {
+    /// Resolve a bucket_id: use explicit if given, otherwise cluster default.
+    fn resolve_bucket(&self, explicit: Option<&BucketId>) -> Option<Vec<u8>> {
+        if let Some(b) = explicit {
+            return Some(b.0.to_vec());
+        }
+        // Try cluster's default bucket from the store
+        if self.cluster_id.iter().any(|&b| b != 0) {
+            if let Ok(Some(default_bytes)) = self.store.get_default_bucket(&self.cluster_id) {
+                return Some(default_bytes);
+            }
+        }
+        // Try first available bucket
+        if let Ok(buckets) = self.store.list_buckets() {
+            if let Some((bucket_id_bytes, _)) = buckets.first() {
+                return Some(bucket_id_bytes.clone());
+            }
+        }
+        None
+    }
+
+    fn store_op(&self, op: &Op, tags: &[(String, String)], vis: &Visibility, bucket: Option<&BucketId>) -> Result<Vec<u8>> {
         let wall_ns = memvault_core::wall_ns();
+        let bucket_id = self.resolve_bucket(bucket);
 
         let meta = EnvelopeMeta {
             author: self.effective_author(),
@@ -523,7 +544,7 @@ impl LocalClient {
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: None,
+            bucket_id,
         };
 
         // CID is computed from the full envelope bytes so any peer
@@ -559,6 +580,7 @@ impl MemvaultClient for LocalClient {
         doc: Document,
         tags: Vec<(String, String)>,
         vis: Visibility,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         let op = Op::DocCreate {
             doc_id: doc.id.clone(),
@@ -569,7 +591,7 @@ impl MemvaultClient for LocalClient {
         let mut all_tags = tags.clone();
         all_tags.push(Self::doc_tag(&doc.id));
 
-        let cid_bytes = self.store_op(&op, &all_tags, &vis)?;
+        let cid_bytes = self.store_op(&op, &all_tags, &vis, bucket)?;
         tracing::info!(doc_id = %hex::encode(doc.id.0), "doc created");
 
         // Index for search
@@ -636,7 +658,7 @@ impl MemvaultClient for LocalClient {
         };
 
         let tags = vec![Self::doc_tag(id)];
-        let cid_bytes = self.store_op(&op, &tags, &Visibility::Internal)?;
+        let cid_bytes = self.store_op(&op, &tags, &Visibility::Internal, None)?;
 
         self.event_bus.publish(MemvaultEvent::DocUpdated {
             doc_id: id.clone(),
@@ -650,6 +672,7 @@ impl MemvaultClient for LocalClient {
         &self,
         tag_filter: Option<(String, String)>,
         limit: usize,
+        _bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
         // Use the "doc" tag index to find DocCreate envelopes directly,
         // rather than scanning all envelopes by time (which can miss docs
@@ -717,6 +740,7 @@ impl MemvaultClient for LocalClient {
         mime_type: &str,
         tags: Vec<(String, String)>,
         visibility: &str,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         // Chunk file into blocks using memvault-attach
         let (root_cid, blocks) = memvault_attach::chunk_file(data)?;
@@ -753,6 +777,7 @@ impl MemvaultClient for LocalClient {
         self.store.put_block(&manifest_cid_bytes, &manifest_bytes)?;
 
         // Store envelope metadata for the manifest
+        let bucket_id = self.resolve_bucket(bucket);
         let meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: tags.clone(),
@@ -760,7 +785,7 @@ impl MemvaultClient for LocalClient {
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: None,
+            bucket_id,
         };
         let envelope = serde_json::json!({
             "version": 1,
@@ -883,7 +908,7 @@ impl MemvaultClient for LocalClient {
         Ok(data)
     }
 
-    async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId> {
+    async fn add_entity(&self, entity: Entity, vis: Visibility, bucket: Option<&BucketId>) -> Result<EntityId> {
         let entity_id = entity.id.clone();
         let op = Op::EntityCreate {
             entity: entity.clone(),
@@ -891,7 +916,7 @@ impl MemvaultClient for LocalClient {
 
         let entity_label: String = entity_id.0.iter().map(|b| format!("{b:02x}")).collect();
         let tags = vec![("entity".to_string(), entity_label)];
-        self.store_op(&op, &tags, &vis)?;
+        self.store_op(&op, &tags, &vis, bucket)?;
         tracing::info!(entity_id = %hex::encode(entity_id.0), kind = %entity.kind, "entity created");
 
         // Index for unified search
@@ -953,7 +978,7 @@ impl MemvaultClient for LocalClient {
         Ok(records)
     }
 
-    async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>> {
+    async fn list_entities(&self, limit: usize, _bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
         let labels = self.store.query_unique_labels("entity", limit)?;
         let mut entities = Vec::new();
         for label in labels {
@@ -993,7 +1018,7 @@ impl MemvaultClient for LocalClient {
             let entity_label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
             tags.push(("entity".to_string(), entity_label));
         }
-        self.store_op(&op, &tags, &vis)?;
+        self.store_op(&op, &tags, &vis, None)?;
         tracing::info!(source = %source.tag_label(), target = %op_edge_target_label(&op).unwrap_or_default(), "link created");
 
         Ok(edge_id)
@@ -1013,7 +1038,7 @@ impl MemvaultClient for LocalClient {
             let entity_label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
             tags.push(("entity".to_string(), entity_label));
         }
-        self.store_op(&op, &tags, &Visibility::Internal)?;
+        self.store_op(&op, &tags, &Visibility::Internal, None)?;
         Ok(())
     }
 
@@ -1489,6 +1514,15 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
+        // Prevent archiving the cluster's default bucket.
+        if let Ok(Some(cluster_bytes)) = self.store.get_bucket_cluster(&id.0) {
+            if let Ok(Some(default_bytes)) = self.store.get_default_bucket(&cluster_bytes) {
+                if default_bytes == id.0 {
+                    return Err(ApiError::Other("cannot archive the cluster's default bucket".into()));
+                }
+            }
+        }
+
         let now_ns = memvault_core::wall_ns();
         let archive_block = serde_json::json!({
             "op": "BucketArchive",
@@ -1666,5 +1700,16 @@ impl MemvaultClient for LocalClient {
             peer_count: 1,
             uptime_secs: self.start_time.elapsed().as_secs(),
         })
+    }
+
+    async fn default_bucket_id(&self) -> Result<BucketId> {
+        if let Some(bytes) = self.resolve_bucket(None) {
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                return Ok(BucketId(arr));
+            }
+        }
+        Ok(BucketId([0u8; 32]))
     }
 }

@@ -11,7 +11,7 @@ async fn upload_and_read_file() {
     let data = b"Hello file content!";
     let cid = node.client.upload_file(
         data, Some("hello.txt"), "text/plain",
-        vec![("type".into(), "document".into())], "internal",
+        vec![("type".into(), "document".into())], "internal", None,
     ).await.unwrap();
     assert!(!cid.is_empty());
 
@@ -25,7 +25,7 @@ async fn upload_binary_file() {
     let data: Vec<u8> = (0..256).map(|i| i as u8).collect();
     let cid = node.client.upload_file(
         &data, Some("binary.bin"), "application/octet-stream",
-        vec![], "internal",
+        vec![], "internal", None,
     ).await.unwrap();
 
     let content = node.client.read_file(&cid).await.unwrap();
@@ -38,7 +38,7 @@ async fn upload_large_file() {
     let data = vec![0xABu8; 100_000]; // 100KB
     let cid = node.client.upload_file(
         &data, Some("large.dat"), "application/octet-stream",
-        vec![], "internal",
+        vec![], "internal", None,
     ).await.unwrap();
 
     let content = node.client.read_file(&cid).await.unwrap();
@@ -51,7 +51,7 @@ async fn file_manifest() {
     let data = b"manifest test";
     let cid = node.client.upload_file(
         data, Some("test.md"), "text/markdown",
-        vec![], "internal",
+        vec![], "internal", None,
     ).await.unwrap();
 
     let manifest = node.client.get_file_manifest(&cid).await.unwrap();
@@ -64,7 +64,7 @@ async fn read_file_range() {
     let data = b"0123456789ABCDEF";
     let cid = node.client.upload_file(
         data, Some("range.txt"), "text/plain",
-        vec![], "internal",
+        vec![], "internal", None,
     ).await.unwrap();
 
     let range = node.client.read_file_range(&cid, 4, 8).await.unwrap();
@@ -77,7 +77,7 @@ async fn extract_text_from_plaintext() {
     let data = b"This is extractable text.";
     let cid = node.client.upload_file(
         data, Some("extract.txt"), "text/plain",
-        vec![], "internal",
+        vec![], "internal", None,
     ).await.unwrap();
 
     let text = node.client.read_extracted_text(&cid).await.unwrap();

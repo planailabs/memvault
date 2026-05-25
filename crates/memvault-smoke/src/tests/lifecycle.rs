@@ -20,7 +20,7 @@ async fn full_genesis_workflow() {
     // Create docs
     for i in 0..10 {
         let doc = Document::new(DocId::random(), format!("Note #{i}"), Default::default());
-        node.client.put_doc(doc, vec![("kind".into(), "note".into())], Visibility::Internal).await.unwrap();
+        node.client.put_doc(doc, vec![("kind".into(), "note".into())], Visibility::Internal, None).await.unwrap();
     }
 
     // Create entities
@@ -28,7 +28,7 @@ async fn full_genesis_workflow() {
         let mut props = BTreeMap::new();
         props.insert("name".to_string(), serde_json::json!(name));
         let e = Entity { id: EntityId::random(), kind: "person".into(), props, edges_out: vec![] };
-        node.client.add_entity(e, Visibility::Internal).await.unwrap();
+        node.client.add_entity(e, Visibility::Internal, None).await.unwrap();
     }
 
     // Verify counts
@@ -36,7 +36,7 @@ async fn full_genesis_workflow() {
     assert_eq!(status.doc_count, 10);
     assert!(status.block_count >= 10);
 
-    let entities = node.client.list_entities(100).await.unwrap();
+    let entities = node.client.list_entities(100, None).await.unwrap();
     assert_eq!(entities.len(), 3);
 
     let buckets = node.client.bucket_list().await.unwrap();
@@ -61,13 +61,13 @@ async fn two_node_independent_workflow() {
     // Node A writes docs
     for i in 0..20 {
         let doc = Document::new(DocId::random(), format!("A-{i}"), Default::default());
-        node_a.client.put_doc(doc, vec![("source".into(), "a".into())], Visibility::Internal).await.unwrap();
+        node_a.client.put_doc(doc, vec![("source".into(), "a".into())], Visibility::Internal, None).await.unwrap();
     }
 
     // Node B writes docs
     for i in 0..15 {
         let doc = Document::new(DocId::random(), format!("B-{i}"), Default::default());
-        node_b.client.put_doc(doc, vec![("source".into(), "b".into())], Visibility::Internal).await.unwrap();
+        node_b.client.put_doc(doc, vec![("source".into(), "b".into())], Visibility::Internal, None).await.unwrap();
     }
 
     // Verify isolation
@@ -117,17 +117,17 @@ async fn knowledge_graph_workflow() {
     alice_props.insert("name".to_string(), serde_json::json!("Alice"));
     alice_props.insert("role".to_string(), serde_json::json!("engineer"));
     let alice = Entity { id: EntityId::random(), kind: "person".into(), props: alice_props, edges_out: vec![] };
-    let alice_id = node.client.add_entity(alice, Visibility::Internal).await.unwrap();
+    let alice_id = node.client.add_entity(alice, Visibility::Internal, None).await.unwrap();
 
     let mut rust_props = BTreeMap::new();
     rust_props.insert("name".to_string(), serde_json::json!("Rust"));
     let rust = Entity { id: EntityId::random(), kind: "language".into(), props: rust_props, edges_out: vec![] };
-    let rust_id = node.client.add_entity(rust, Visibility::Internal).await.unwrap();
+    let rust_id = node.client.add_entity(rust, Visibility::Internal, None).await.unwrap();
 
     let mut project_props = BTreeMap::new();
     project_props.insert("name".to_string(), serde_json::json!("memvault"));
     let project = Entity { id: EntityId::random(), kind: "project".into(), props: project_props, edges_out: vec![] };
-    let project_id = node.client.add_entity(project, Visibility::Internal).await.unwrap();
+    let project_id = node.client.add_entity(project, Visibility::Internal, None).await.unwrap();
 
     // Link: Alice --works_on--> memvault
     let edge1 = Edge {
@@ -162,7 +162,7 @@ async fn knowledge_graph_workflow() {
 async fn tags_workflow() {
     let node = TestNode::new();
     let doc = Document::new(DocId::random(), "taggable".into(), Default::default());
-    node.client.put_doc(doc.clone(), vec![("initial".into(), "tag".into())], Visibility::Internal).await.unwrap();
+    node.client.put_doc(doc.clone(), vec![("initial".into(), "tag".into())], Visibility::Internal, None).await.unwrap();
 
     let node_id = format!("doc:{}", hex::encode(doc.id.0));
 
@@ -187,7 +187,7 @@ async fn tags_workflow() {
 async fn retraction_workflow() {
     let node = TestNode::new();
     let doc = Document::new(DocId::random(), "retractable".into(), Default::default());
-    let cid = node.client.put_doc(doc.clone(), vec![], Visibility::Internal).await.unwrap();
+    let cid = node.client.put_doc(doc.clone(), vec![], Visibility::Internal, None).await.unwrap();
 
     // Retract
     let tombstone = node.client.retract(&cid, "published by mistake").await.unwrap();
@@ -195,7 +195,7 @@ async fn retraction_workflow() {
 
     // Retract by node_id
     let doc2 = Document::new(DocId::random(), "also retractable".into(), Default::default());
-    node.client.put_doc(doc2.clone(), vec![], Visibility::Internal).await.unwrap();
+    node.client.put_doc(doc2.clone(), vec![], Visibility::Internal, None).await.unwrap();
     let node_id = format!("doc:{}", hex::encode(doc2.id.0));
     node.client.retract_node(&node_id, "cleanup").await.unwrap();
 }
@@ -209,7 +209,7 @@ async fn status_counts_accurate() {
 
     for i in 0..7 {
         let doc = Document::new(DocId::random(), format!("doc-{i}"), Default::default());
-        node.client.put_doc(doc, vec![], Visibility::Internal).await.unwrap();
+        node.client.put_doc(doc, vec![], Visibility::Internal, None).await.unwrap();
     }
 
     let s1 = node.client.status().await.unwrap();

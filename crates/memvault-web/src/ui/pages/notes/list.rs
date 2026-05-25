@@ -48,7 +48,7 @@ async fn list_notes(view: Option<String>) -> Result<Vec<NoteRow>, ServerFnError>
             .collect());
     }
 
-    let docs = client.list_docs(None, 500).await
+    let docs = client.list_docs(None, 500, None).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(docs.into_iter()
         .map(|d| NoteRow {

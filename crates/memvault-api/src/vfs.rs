@@ -14,18 +14,10 @@ use crate::MemvaultClient;
 pub const VFS_DIR_KIND: &str = "vfs:dir";
 pub const VFS_CHILD_REL: &str = "vfs:child";
 
-/// Get the default bucket for VFS operations. Uses the first bucket from the list.
+/// Get the default bucket for VFS operations.
 /// Returns a zero BucketId as fallback if no buckets exist (pre-genesis).
 pub async fn default_bucket(client: &dyn MemvaultClient) -> BucketId {
-    if let Ok(buckets) = client.bucket_list().await {
-        if let Some(b) = buckets.iter().find(|b| b.is_default) {
-            return b.id.clone();
-        }
-        if let Some(b) = buckets.first() {
-            return b.id.clone();
-        }
-    }
-    BucketId([0u8; 32])
+    client.default_bucket_id().await.unwrap_or(BucketId([0u8; 32]))
 }
 
 /// Find or create the VFS root entity for a specific bucket.
@@ -34,7 +26,7 @@ pub async fn default_bucket(client: &dyn MemvaultClient) -> BucketId {
 /// Creates a new root if none exists for this bucket.
 pub async fn ensure_root(client: &dyn MemvaultClient, bucket_id: &BucketId) -> Result<EntityId> {
     let bucket_hex = hex::encode(bucket_id.0);
-    let entities = client.list_entities(500).await?;
+    let entities = client.list_entities(500, None).await?;
     let mut candidates: Vec<[u8; 32]> = Vec::new();
 
     for e in &entities {
@@ -64,7 +56,7 @@ pub async fn ensure_root(client: &dyn MemvaultClient, bucket_id: &BucketId) -> R
         props,
         edges_out: vec![],
     };
-    let id = client.add_entity(entity, Visibility::Internal).await?;
+    let id = client.add_entity(entity, Visibility::Internal, None).await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     client.add_tags(&node_id, vec![
         ("vfs".into(), "root".into()),
@@ -155,7 +147,7 @@ pub async fn create_dir(client: &dyn MemvaultClient, name: &str) -> Result<Entit
         props,
         edges_out: vec![],
     };
-    client.add_entity(entity, Visibility::Internal).await
+    client.add_entity(entity, Visibility::Internal, None).await
 }
 
 /// Create a vfs:child edge from parent to child with a name prop.

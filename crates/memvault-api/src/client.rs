@@ -11,17 +11,20 @@ use crate::error::Result;
 use crate::types::{BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
 
 /// The complete memvault API surface.
+///
+/// All write and list operations accept an optional `bucket` parameter.
+/// When `None`, implementations should resolve the cluster's default bucket.
 #[async_trait]
 pub trait MemvaultClient: Send + Sync {
     // -- Documents --
-    async fn put_doc(&self, doc: Document, tags: Vec<(String, String)>, vis: Visibility) -> Result<Vec<u8>>;
+    async fn put_doc(&self, doc: Document, tags: Vec<(String, String)>, vis: Visibility, bucket: Option<&BucketId>) -> Result<Vec<u8>>;
     async fn get_doc(&self, id: &DocId) -> Result<Option<Document>>;
     async fn edit_doc(&self, id: &DocId, patch: TextPatch) -> Result<Vec<u8>>;
-    async fn list_docs(&self, tag_filter: Option<(String, String)>, limit: usize) -> Result<Vec<DocSummary>>;
+    async fn list_docs(&self, tag_filter: Option<(String, String)>, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<DocSummary>>;
 
     // -- Files --
     async fn upload_file(&self, data: &[u8], filename: Option<&str>, mime_type: &str,
-                         tags: Vec<(String, String)>, visibility: &str) -> Result<Vec<u8>>;
+                         tags: Vec<(String, String)>, visibility: &str, bucket: Option<&BucketId>) -> Result<Vec<u8>>;
     async fn read_file(&self, manifest_cid: &[u8]) -> Result<Vec<u8>>;
     async fn read_file_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>>;
     async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>>;
@@ -31,9 +34,9 @@ pub trait MemvaultClient: Send + Sync {
     async fn get_file_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>>;  // returns JSON
 
     // -- Graph --
-    async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId>;
+    async fn add_entity(&self, entity: Entity, vis: Visibility, bucket: Option<&BucketId>) -> Result<EntityId>;
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>>;
-    async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>>;
+    async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>>;
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>>;
 
     // -- Links (cross-type edges) --
@@ -72,6 +75,9 @@ pub trait MemvaultClient: Send + Sync {
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>>;
     /// Resolve a node_id (tag_label like "entity:<hex>") to a human-readable label.
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>>;
+
+    /// Resolve the default bucket for this client (cluster default or first available).
+    async fn default_bucket_id(&self) -> Result<BucketId>;
 
     // -- History & Audit --
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>>;

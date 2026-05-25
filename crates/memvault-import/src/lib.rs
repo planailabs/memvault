@@ -36,7 +36,7 @@ pub async fn import_files(
         let mime = memvault_api::files::detect_mime(file_path);
         let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
         let (_cid, node_id) = memvault_api::files::upload_file(
-            client, &data, Some(filename), mime, tags.to_vec(), visibility, vfs_path.as_deref(),
+            client, &data, Some(filename), mime, tags.to_vec(), visibility, vfs_path.as_deref(), None,
         ).await?;
         println!("  {} -> {node_id}", file_path.display());
         count += 1;
@@ -74,7 +74,7 @@ pub async fn import_docs(
         let title = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
         let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
         let result = memvault_api::docs::create_doc(
-            client, &body, title.as_deref(), None, tags.to_vec(), vis, vfs_path.as_deref(),
+            client, &body, title.as_deref(), None, tags.to_vec(), vis, vfs_path.as_deref(), None,
         ).await?;
         println!("  {} -> {}", file_path.display(), result.node_id);
         count += 1;

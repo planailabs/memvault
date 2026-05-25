@@ -39,6 +39,7 @@ impl MemvaultClient for MockClient {
         doc: Document,
         _tags: Vec<(String, String)>,
         _vis: Visibility,
+        _bucket: Option<&memvault_core::BucketId>,
     ) -> memvault_api::Result<Vec<u8>> {
         let id = doc.id.0;
         *self.doc.write().await = Some(doc);
@@ -57,6 +58,7 @@ impl MemvaultClient for MockClient {
         &self,
         _tag_filter: Option<(String, String)>,
         _limit: usize,
+        _bucket: Option<&memvault_core::BucketId>,
     ) -> memvault_api::Result<Vec<memvault_api::DocSummary>> {
         let guard = self.doc.read().await;
         if let Some(doc) = guard.as_ref() {
@@ -80,6 +82,7 @@ impl MemvaultClient for MockClient {
         _mime_type: &str,
         _tags: Vec<(String, String)>,
         _visibility: &str,
+        _bucket: Option<&memvault_core::BucketId>,
     ) -> memvault_api::Result<Vec<u8>> {
         Ok(vec![0xAB; 32])
     }
@@ -116,6 +119,7 @@ impl MemvaultClient for MockClient {
         &self,
         _entity: Entity,
         _vis: Visibility,
+        _bucket: Option<&memvault_core::BucketId>,
     ) -> memvault_api::Result<EntityId> {
         Ok(EntityId::random())
     }
@@ -129,7 +133,7 @@ impl MemvaultClient for MockClient {
         }))
     }
 
-    async fn list_entities(&self, _limit: usize) -> memvault_api::Result<Vec<Entity>> {
+    async fn list_entities(&self, _limit: usize, _bucket: Option<&memvault_core::BucketId>) -> memvault_api::Result<Vec<Entity>> {
         Ok(vec![])
     }
 
@@ -257,6 +261,10 @@ impl MemvaultClient for MockClient {
     async fn share_inbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> { Ok(vec![]) }
     async fn share_outbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> { Ok(vec![]) }
     async fn share_decide(&self, _cid: &[u8], _approve: bool, _reason: Option<&str>) -> memvault_api::Result<()> { Ok(()) }
+
+    async fn default_bucket_id(&self) -> memvault_api::Result<memvault_core::BucketId> {
+        Ok(memvault_core::BucketId([0u8; 32]))
+    }
 }
 
 fn make_app() -> axum::Router {

@@ -67,7 +67,7 @@ pub async fn create_entity(
         edges_out: vec![],
     };
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
-    let id = state.client.add_entity(entity, vis).await?;
+    let id = state.client.add_entity(entity, vis, None).await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
 

@@ -165,7 +165,7 @@ async fn vfs_double_prefix_entity_id_handled() {
         props,
         edges_out: vec![],
     };
-    let eid = node.client.add_entity(entity, Visibility::Internal).await.unwrap();
+    let eid = node.client.add_entity(entity, Visibility::Internal, None).await.unwrap();
 
     // Construct both formats
     let hex_id = hex::encode(eid.0);

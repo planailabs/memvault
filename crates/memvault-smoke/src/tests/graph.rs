@@ -16,8 +16,8 @@ fn person(name: &str) -> Entity {
 #[tokio::test]
 async fn add_link_between_entities() {
     let node = TestNode::new();
-    let a = node.client.add_entity(person("Alice"), Visibility::Internal).await.unwrap();
-    let b = node.client.add_entity(person("Bob"), Visibility::Internal).await.unwrap();
+    let a = node.client.add_entity(person("Alice"), Visibility::Internal, None).await.unwrap();
+    let b = node.client.add_entity(person("Bob"), Visibility::Internal, None).await.unwrap();
 
     let edge = Edge {
         id: EdgeId::random(),
@@ -33,9 +33,9 @@ async fn add_link_between_entities() {
 #[tokio::test]
 async fn list_edges_of_entity() {
     let node = TestNode::new();
-    let a = node.client.add_entity(person("Alice"), Visibility::Internal).await.unwrap();
-    let b = node.client.add_entity(person("Bob"), Visibility::Internal).await.unwrap();
-    let c = node.client.add_entity(person("Charlie"), Visibility::Internal).await.unwrap();
+    let a = node.client.add_entity(person("Alice"), Visibility::Internal, None).await.unwrap();
+    let b = node.client.add_entity(person("Bob"), Visibility::Internal, None).await.unwrap();
+    let c = node.client.add_entity(person("Charlie"), Visibility::Internal, None).await.unwrap();
 
     for target in [&b, &c] {
         let edge = Edge {
@@ -55,8 +55,8 @@ async fn list_edges_of_entity() {
 #[tokio::test]
 async fn remove_link() {
     let node = TestNode::new();
-    let a = node.client.add_entity(person("Alice"), Visibility::Internal).await.unwrap();
-    let b = node.client.add_entity(person("Bob"), Visibility::Internal).await.unwrap();
+    let a = node.client.add_entity(person("Alice"), Visibility::Internal, None).await.unwrap();
+    let b = node.client.add_entity(person("Bob"), Visibility::Internal, None).await.unwrap();
 
     let edge_id = EdgeId::random();
     let edge = Edge {
@@ -76,8 +76,8 @@ async fn remove_link() {
 #[tokio::test]
 async fn traverse_graph() {
     let node = TestNode::new();
-    let a = node.client.add_entity(person("Alice"), Visibility::Internal).await.unwrap();
-    let b = node.client.add_entity(person("Bob"), Visibility::Internal).await.unwrap();
+    let a = node.client.add_entity(person("Alice"), Visibility::Internal, None).await.unwrap();
+    let b = node.client.add_entity(person("Bob"), Visibility::Internal, None).await.unwrap();
 
     let edge = Edge {
         id: EdgeId::random(),

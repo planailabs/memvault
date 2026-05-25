@@ -564,7 +564,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let client = create_client(store);
             let tags = memvault_api::docs::parse_tags(&tag);
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));
-            let result = memvault_api::docs::create_doc(&client, &text, title.as_deref(), None, tags, vis, None).await?;
+            let result = memvault_api::docs::create_doc(&client, &text, title.as_deref(), None, tags, vis, None, None).await?;
             println!("{}", result.node_id);
         }
         Commands::Get { cid } => {
@@ -591,7 +591,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let store = make_store()?;
             let client = create_client(store);
             let tag_filter = scope.map(|s| (s, "*".to_string()));
-            let docs = client.list_docs(tag_filter, limit).await?;
+            let docs = client.list_docs(tag_filter, limit, None).await?;
             for doc in docs {
                 let title = doc.title.unwrap_or_else(|| "(untitled)".into());
                 println!("{} -- {}", hex::encode(&doc.cid), title);
@@ -675,7 +675,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .filter_map(|p| { let (k, v) = p.split_once('=')?; Some((k.to_string(), serde_json::Value::String(v.to_string()))) })
                 .collect();
             let entity = Entity { id: EntityId::random(), kind, props, edges_out: vec![] };
-            let id = client.add_entity(entity, Visibility::Internal).await?;
+            let id = client.add_entity(entity, Visibility::Internal, None).await?;
             println!("{}", hex::encode(id.0));
         }
         Commands::GraphLink { source, target, relation, weight } => {
@@ -1449,7 +1449,7 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
     use memvault_api::vfs::{VFS_DIR_KIND, VFS_CHILD_REL};
     use std::collections::HashSet;
 
-    let entities = client.list_entities(10_000).await?;
+    let entities = client.list_entities(10_000, None).await?;
     let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
     for e in &entities {
         if e.kind == VFS_DIR_KIND {

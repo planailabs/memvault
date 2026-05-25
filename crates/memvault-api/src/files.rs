@@ -2,6 +2,8 @@
 //!
 //! Used by: HTTP API, web UI server functions, MCP tools, CLI.
 
+use memvault_core::BucketId;
+
 use crate::error::Result;
 use crate::MemvaultClient;
 
@@ -17,13 +19,17 @@ pub async fn upload_file(
     tags: Vec<(String, String)>,
     visibility: &str,
     vfs_path: Option<&str>,
+    bucket: Option<&BucketId>,
 ) -> Result<(Vec<u8>, String)> {
-    let cid = client.upload_file(data, filename, mime_type, tags, visibility).await?;
+    let cid = client.upload_file(data, filename, mime_type, tags, visibility, bucket).await?;
     let node_id = format!("file:{}", hex::encode(&cid));
 
     if let Some(path) = vfs_path {
-        let bucket = crate::vfs::default_bucket(client).await;
-        if let Err(e) = crate::vfs::link_node_at_path(client, &bucket, path, &node_id).await {
+        let bucket_id = match bucket {
+            Some(b) => b.clone(),
+            None => client.default_bucket_id().await.unwrap_or(BucketId([0u8; 32])),
+        };
+        if let Err(e) = crate::vfs::link_node_at_path(client, &bucket_id, path, &node_id).await {
             tracing::warn!(path, error = %e, "VFS link failed after file upload");
         }
     }

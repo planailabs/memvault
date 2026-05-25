@@ -44,7 +44,7 @@ async fn create_note(
     let tags = parse_tags_str(&tags_str);
     let vis = crate::api::docs::parse_visibility_str(Some(&visibility));
     client
-        .put_doc(doc, tags, vis)
+        .put_doc(doc, tags, vis, None)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 

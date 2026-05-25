@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 
-use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_auth::Role;
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
@@ -72,6 +72,7 @@ impl MemvaultClient for HttpApiClient {
         doc: Document,
         tags: Vec<(String, String)>,
         vis: Visibility,
+        _bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         let resp: serde_json::Value = self
             .client
@@ -136,6 +137,7 @@ impl MemvaultClient for HttpApiClient {
         &self,
         tag_filter: Option<(String, String)>,
         limit: usize,
+        _bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
         let mut url = format!("{}?limit={limit}", self.url("/docs"));
         if let Some((scope, label)) = &tag_filter {
@@ -186,6 +188,7 @@ impl MemvaultClient for HttpApiClient {
         mime_type: &str,
         _tags: Vec<(String, String)>,
         _visibility: &str,
+        _bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         let fname = filename.unwrap_or("unnamed");
         let part = reqwest::multipart::Part::bytes(data.to_vec())
@@ -254,7 +257,7 @@ impl MemvaultClient for HttpApiClient {
 
     // -- Graph --
 
-    async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId> {
+    async fn add_entity(&self, entity: Entity, vis: Visibility, _bucket: Option<&BucketId>) -> Result<EntityId> {
         let resp: serde_json::Value = self
             .client
             .post(self.url("/entities"))
@@ -300,7 +303,7 @@ impl MemvaultClient for HttpApiClient {
         Ok(Some(Entity { id: id.clone(), kind, props, edges_out: vec![] }))
     }
 
-    async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>> {
+    async fn list_entities(&self, limit: usize, _bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
         let resp: serde_json::Value = self
             .client
             .get(self.url(&format!("/nodes?limit={limit}&type=entity")))
@@ -744,5 +747,16 @@ impl MemvaultClient for HttpApiClient {
             peer_count: resp["peer_count"].as_u64().unwrap_or(0) as u32,
             uptime_secs: resp["uptime_secs"].as_u64().unwrap_or(0),
         })
+    }
+
+    async fn default_bucket_id(&self) -> Result<BucketId> {
+        let buckets = self.bucket_list().await?;
+        if let Some(b) = buckets.iter().find(|b| b.is_default) {
+            return Ok(b.id.clone());
+        }
+        if let Some(b) = buckets.first() {
+            return Ok(b.id.clone());
+        }
+        Ok(BucketId([0u8; 32]))
     }
 }

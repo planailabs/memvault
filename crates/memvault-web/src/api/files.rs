@@ -46,7 +46,7 @@ pub async fn upload_doc_file(
 
     let cid = state
         .client
-        .upload_file(&data, Some(&name), &content_type, vec![], "internal")
+        .upload_file(&data, Some(&name), &content_type, vec![], "internal", None)
         .await?;
 
     Ok((
@@ -102,7 +102,7 @@ pub async fn upload_file(
 
     let (_cid, node_id) = memvault_api::files::upload_file(
         state.client.as_ref(), &data, Some(&name), &content_type,
-        vec![], "internal", query.vfs_path.as_deref(),
+        vec![], "internal", query.vfs_path.as_deref(), None,
     ).await?;
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
 

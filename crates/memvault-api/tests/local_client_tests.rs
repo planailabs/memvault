@@ -18,13 +18,18 @@ fn make_client() -> (tempfile::TempDir, Arc<LocalClient>) {
     let index = Arc::new(RwLock::new(TextIndex::new()));
     let quotas = Arc::new(RwLock::new(QuotaManager::default()));
     let event_bus = Arc::new(EventBus::new(64));
+    // Use proper 32-byte IDs so bucket auto-bind works correctly.
+    let mut peer_id = [0u8; 32];
+    peer_id[..6].copy_from_slice(b"peer-1");
+    let mut cluster_id = [0u8; 32];
+    cluster_id[..9].copy_from_slice(b"cluster-1");
     let client = Arc::new(LocalClient::new(
         store,
         index,
         quotas,
         event_bus,
-        b"peer-1".to_vec(),
-        b"cluster-1".to_vec(),
+        peer_id.to_vec(),
+        cluster_id.to_vec(),
     ));
     (dir, client)
 }
@@ -40,7 +45,7 @@ async fn put_doc_and_get_doc_roundtrip() {
     let doc = Document::new(doc_id.clone(), "Hello, world!".to_string(), frontmatter);
 
     let cid = client
-        .put_doc(doc, vec![("ns".into(), "test".into())], Visibility::Internal)
+        .put_doc(doc, vec![("ns".into(), "test".into())], Visibility::Internal, None)
         .await
         .unwrap();
     assert!(!cid.is_empty());
@@ -63,7 +68,7 @@ async fn attach_file_and_get_attachment_roundtrip() {
     let doc_id = DocId::random();
     let doc = Document::new(doc_id.clone(), "doc with attachment".to_string(), BTreeMap::new());
     client
-        .put_doc(doc, vec![], Visibility::Internal)
+        .put_doc(doc, vec![], Visibility::Internal, None)
         .await
         .unwrap();
 
@@ -75,6 +80,7 @@ async fn attach_file_and_get_attachment_roundtrip() {
             "text/plain",
             vec![("classification".to_string(), "internal".to_string())],
             "internal",
+            None,
         )
         .await
         .unwrap();
@@ -109,15 +115,15 @@ async fn add_entity_and_traverse() {
     };
 
     let id_a = client
-        .add_entity(entity_a.clone(), Visibility::Internal)
+        .add_entity(entity_a.clone(), Visibility::Internal, None)
         .await
         .unwrap();
     let id_b = client
-        .add_entity(entity_b.clone(), Visibility::Internal)
+        .add_entity(entity_b.clone(), Visibility::Internal, None)
         .await
         .unwrap();
     let id_c = client
-        .add_entity(entity_c.clone(), Visibility::Internal)
+        .add_entity(entity_c.clone(), Visibility::Internal, None)
         .await
         .unwrap();
 
@@ -175,7 +181,7 @@ async fn search_after_indexing() {
         frontmatter,
     );
     client
-        .put_doc(doc, vec![("lang".into(), "rust".into())], Visibility::Internal)
+        .put_doc(doc, vec![("lang".into(), "rust".into())], Visibility::Internal, None)
         .await
         .unwrap();
 
@@ -286,8 +292,9 @@ async fn bucket_create_and_list() {
     assert_eq!(buckets.len(), 1);
     assert_eq!(buckets[0].name, "test-bucket");
     assert_eq!(buckets[0].id, bucket_id);
-    assert!(!buckets[0].is_attached); // private by default
-    assert!(buckets[0].cluster_id.is_none()); // not bound to any cluster
+    // With a non-zero cluster_id, bucket_create auto-attaches and auto-binds.
+    assert!(buckets[0].is_attached);
+    assert!(buckets[0].cluster_id.is_some());
 }
 
 #[tokio::test]
@@ -329,11 +336,23 @@ async fn bucket_rename() {
 
 #[tokio::test]
 async fn bucket_bind_to_cluster() {
-    let (_dir, client) = make_client();
+    // Use a zero cluster to test explicit binding without auto-bind.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
+    let client = Arc::new(LocalClient::new(
+        store, Arc::new(RwLock::new(TextIndex::new())),
+        Arc::new(RwLock::new(QuotaManager::default())),
+        Arc::new(EventBus::new(64)),
+        b"peer-1".to_vec(), vec![0u8; 32],
+    ));
     let bucket_id = client.bucket_create(
         "bindable", None, Visibility::Internal,
         memvault_core::classification::Classification::Internal,
     ).await.unwrap();
+
+    // Not bound yet (zero cluster = no auto-bind)
+    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
+    assert!(info.cluster_id.is_none());
 
     let cluster_id = memvault_core::ClusterId([1u8; 32]);
     client.bucket_bind(&bucket_id, &cluster_id, true).await.unwrap();
@@ -345,13 +364,21 @@ async fn bucket_bind_to_cluster() {
 
 #[tokio::test]
 async fn bucket_attach_flips_private() {
-    let (_dir, client) = make_client();
+    // Use zero cluster so bucket starts private (no auto-attach).
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
+    let client = Arc::new(LocalClient::new(
+        store, Arc::new(RwLock::new(TextIndex::new())),
+        Arc::new(RwLock::new(QuotaManager::default())),
+        Arc::new(EventBus::new(64)),
+        b"peer-1".to_vec(), vec![0u8; 32],
+    ));
     let bucket_id = client.bucket_create(
         "private-bucket", None, Visibility::Internal,
         memvault_core::classification::Classification::Internal,
     ).await.unwrap();
 
-    // Initially private
+    // Initially private (no cluster → not auto-attached)
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert!(!info.is_attached);
 
@@ -370,6 +397,11 @@ async fn bucket_attach_flips_private() {
 #[tokio::test]
 async fn bucket_archive() {
     let (_dir, client) = make_client();
+    // First bucket becomes auto-bound default; create a second one to archive.
+    let _default = client.bucket_create(
+        "default", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
     let bucket_id = client.bucket_create(
         "archivable", None, Visibility::Internal,
         memvault_core::classification::Classification::Internal,
@@ -380,6 +412,21 @@ async fn bucket_archive() {
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert!(info.name.contains("[ARCHIVED]"));
     assert!(info.description.unwrap_or_default().contains("no longer needed"));
+}
+
+#[tokio::test]
+async fn bucket_archive_default_refused() {
+    let (_dir, client) = make_client();
+    let bucket_id = client.bucket_create(
+        "the-default", None, Visibility::Internal,
+        memvault_core::classification::Classification::Internal,
+    ).await.unwrap();
+    // Auto-bound by bucket_create. Make it the explicit default.
+    let mut cluster_arr = [0u8; 32];
+    cluster_arr[..9].copy_from_slice(b"cluster-1");
+    client.bucket_bind(&bucket_id, &memvault_core::ClusterId(cluster_arr), true).await.unwrap();
+    let result = client.bucket_archive(&bucket_id, "try to remove").await;
+    assert!(result.is_err(), "archiving default bucket should fail");
 }
 
 #[tokio::test]
@@ -443,7 +490,15 @@ fn store_cluster_id_persistence() {
 
 #[tokio::test]
 async fn bucket_bind_exclusive_to_one_cluster() {
-    let (_dir, client) = make_client();
+    // Use zero cluster so bucket starts unbound.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
+    let client = Arc::new(LocalClient::new(
+        store, Arc::new(RwLock::new(TextIndex::new())),
+        Arc::new(RwLock::new(QuotaManager::default())),
+        Arc::new(EventBus::new(64)),
+        b"peer-1".to_vec(), vec![0u8; 32],
+    ));
     let bucket_id = client.bucket_create(
         "exclusive", None, Visibility::Internal,
         memvault_core::classification::Classification::Internal,
@@ -465,7 +520,15 @@ async fn bucket_bind_exclusive_to_one_cluster() {
 
 #[tokio::test]
 async fn bucket_bind_idempotent_same_cluster() {
-    let (_dir, client) = make_client();
+    // Use zero cluster so bucket starts unbound.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
+    let client = Arc::new(LocalClient::new(
+        store, Arc::new(RwLock::new(TextIndex::new())),
+        Arc::new(RwLock::new(QuotaManager::default())),
+        Arc::new(EventBus::new(64)),
+        b"peer-1".to_vec(), vec![0u8; 32],
+    ));
     let bucket_id = client.bucket_create(
         "idem", None, Visibility::Internal,
         memvault_core::classification::Classification::Internal,
