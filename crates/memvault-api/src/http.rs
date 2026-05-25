@@ -558,11 +558,57 @@ impl MemvaultClient for HttpApiClient {
 
     // -- Tokens --
 
-    async fn issue_token(&self, _role: Role, _ttl_secs: u64, _max_uses: u32, _label: Option<String>) -> Result<String> {
-        Err(ApiError::Other("token operations not supported via HTTP".into()))
+    async fn issue_token(&self, role: Role, ttl_secs: u64, max_uses: u32, label: Option<String>) -> Result<String> {
+        let body = serde_json::json!({
+            "role": role,
+            "ttl_secs": ttl_secs,
+            "max_uses": max_uses,
+            "label": label,
+        });
+        let resp: serde_json::Value = self
+            .client
+            .post(self.url("/tokens"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        resp["token"].as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| ApiError::Other("missing token in response".into()))
     }
-    async fn list_tokens(&self) -> Result<Vec<TokenStatus>> { Ok(vec![]) }
-    async fn revoke_token(&self, _token_cid: &[u8], _reason: &str) -> Result<()> { Ok(()) }
+
+    async fn list_tokens(&self) -> Result<Vec<TokenStatus>> {
+        let resp = self
+            .client
+            .get(self.url("/tokens"))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn revoke_token(&self, token_cid: &[u8], reason: &str) -> Result<()> {
+        let body = serde_json::json!({ "reason": reason });
+        self.client
+            .delete(self.url(&format!("/tokens/{}", hex::encode(token_cid))))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
 
     // -- Rotation --
 

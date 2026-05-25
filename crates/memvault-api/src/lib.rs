@@ -1,5 +1,6 @@
 //! `memvault-api` — Agent-facing API, RPC layer, and client trait for memvault.
 
+pub mod agent_identity;
 pub mod client;
 pub mod docs;
 pub mod error;

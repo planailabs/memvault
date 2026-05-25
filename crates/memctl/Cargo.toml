@@ -20,6 +20,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 dirs = "6"
+rand = "0.8"
+ed25519-dalek = { version = "2", features = ["serde"] }
 
 [lib]
 name = "memctl"

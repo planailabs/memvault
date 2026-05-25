@@ -69,6 +69,10 @@ pub struct LocalClient {
     event_bus: Arc<EventBus>,
     peer_id: Vec<u8>,
     cluster_id: Vec<u8>,
+    /// Optional admin signing key for token issuance and agent enrollment.
+    admin_signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Optional agent identity for agent-scoped operations.
+    agent_identity: Option<crate::agent_identity::AgentIdentity>,
     start_time: std::time::Instant,
 }
 
@@ -88,8 +92,25 @@ impl LocalClient {
             event_bus,
             peer_id,
             cluster_id,
+            admin_signing_key: None,
+            agent_identity: None,
             start_time: std::time::Instant::now(),
         }
+    }
+
+    /// Set the admin signing key (enables real token issuance).
+    pub fn set_admin_signing_key(&mut self, key: ed25519_dalek::SigningKey) {
+        self.admin_signing_key = Some(key);
+    }
+
+    /// Set the agent identity (enables agent-scoped operations).
+    pub fn set_agent_identity(&mut self, identity: crate::agent_identity::AgentIdentity) {
+        self.agent_identity = Some(identity);
+    }
+
+    /// Get the agent ID if set.
+    pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
+        self.agent_identity.as_ref().map(|i| &i.agent_id)
     }
 
     /// Load the TextIndex from a cache file, or rebuild from the blockstore if
@@ -1089,7 +1110,25 @@ impl MemvaultClient for LocalClient {
         max_uses: u32,
         label: Option<String>,
     ) -> Result<String> {
-        crate::tokens::issue_token_placeholder(role, ttl_secs, max_uses, label)
+        let admin_key = self.admin_signing_key.as_ref()
+            .ok_or_else(|| ApiError::Other(
+                "no admin signing key configured — cannot issue tokens".into()
+            ))?;
+        let peer_id = memvault_core::PeerId(self.peer_id.clone());
+        let cluster_id_arr: [u8; 32] = self.cluster_id.clone().try_into()
+            .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))?;
+        let cluster_id = memvault_core::ClusterId(cluster_id_arr);
+
+        crate::tokens::issue_token(
+            &peer_id,
+            &cluster_id,
+            admin_key,
+            role,
+            ttl_secs,
+            max_uses,
+            label,
+            &self.store,
+        )
     }
 
     async fn list_tokens(&self) -> Result<Vec<TokenStatus>> {

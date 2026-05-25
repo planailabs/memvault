@@ -232,6 +232,25 @@ pub enum Commands {
         #[arg(short, long, default_value = "internal")]
         visibility: String,
     },
+    /// Enroll an agent using a join token
+    AgentEnroll {
+        /// Join token string (mvjoin1:...)
+        #[arg(long)]
+        token: String,
+        /// Agent identifier (e.g. "openclaw")
+        #[arg(long)]
+        agent_id: String,
+        /// Identity directory (default: ~/.local/share/memvault/agents/<agent-id>/)
+        #[arg(long)]
+        identity_dir: Option<PathBuf>,
+    },
+    /// List enrolled agents
+    AgentList,
+    /// Show an agent's enrollment details
+    AgentShow {
+        /// Agent identifier
+        agent_id: String,
+    },
 }
 
 fn default_data_dir() -> PathBuf {
@@ -721,6 +740,130 @@ pub async fn run(cli: Cli) -> Result<()> {
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));
             let imported = memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis).await?;
             println!("Imported {imported} document(s).");
+        }
+        Commands::AgentEnroll { token, agent_id, identity_dir } => {
+            // Decode the join token to extract cluster info
+            let join_token = memvault_auth::decode_token_string(&token)
+                .map_err(|e| anyhow::anyhow!("failed to decode token: {e}"))?;
+
+            let identity_dir = identity_dir.unwrap_or_else(|| {
+                dirs::data_local_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("memvault")
+                    .join("agents")
+                    .join(&agent_id)
+            });
+
+            if memvault_api::agent_identity::AgentIdentity::exists(&identity_dir) {
+                println!("Agent identity already exists at {}", identity_dir.display());
+                println!("To re-enroll, remove the directory first.");
+                return Ok(());
+            }
+
+            // For CLI enrollment, we need an admin key to sign the enrollment.
+            // In the local case, we generate a temporary admin identity.
+            // In production, this would go through the /join/1.0 protocol.
+            let _store = make_store()?;
+
+            // Read cluster_id from the data dir
+            let cluster_id_path = data_dir.join("cluster_id");
+            let cluster_id_hex = std::fs::read_to_string(&cluster_id_path)
+                .map_err(|e| anyhow::anyhow!("failed to read cluster_id: {e} (run genesis first)"))?;
+            let cluster_id_bytes = hex::decode(cluster_id_hex.trim())?;
+            let cluster_id_arr: [u8; 32] = cluster_id_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("cluster_id must be 32 bytes"))?;
+            let cluster_id = ClusterId(cluster_id_arr);
+
+            // Load or generate admin key from identity dir
+            let admin_key_path = data_dir.join("identity").join("admin_key.pem");
+            let admin_sk = if admin_key_path.exists() {
+                let id = memvault_api::agent_identity::AgentIdentity::load(
+                    &data_dir.join("identity")
+                ).map_err(|e| anyhow::anyhow!("failed to load admin identity: {e}"))?;
+                id.signing_key
+            } else {
+                // Generate a temporary admin key for local enrollment
+                let mut secret = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+                ed25519_dalek::SigningKey::from_bytes(&secret)
+            };
+
+            let admin_vk = admin_sk.verifying_key();
+            let admin_peer_id = memvault_core::PeerId(admin_vk.as_bytes().to_vec());
+
+            let identity = memvault_api::agent_identity::AgentIdentity::generate_local(
+                &identity_dir,
+                &agent_id,
+                &cluster_id,
+                &admin_peer_id,
+                &admin_sk,
+                join_token.role,
+                join_token.not_after_ns.saturating_sub(memvault_core::time::wall_ns()),
+            ).map_err(|e| anyhow::anyhow!("enrollment failed: {e}"))?;
+
+            println!("Agent enrolled successfully.");
+            println!("  Agent ID:     {agent_id}");
+            println!("  Cluster:      {}", hex::encode(cluster_id.0));
+            println!("  Identity dir: {}", identity_dir.display());
+            println!("  Public key:   {}", hex::encode(identity.verifying_key.as_bytes()));
+        }
+        Commands::AgentList => {
+            let agents_dir = dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("memvault")
+                .join("agents");
+
+            if !agents_dir.exists() {
+                println!("No agents enrolled.");
+                return Ok(());
+            }
+
+            let mut found = false;
+            for entry in std::fs::read_dir(&agents_dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() { continue; }
+                let agent_dir = entry.path();
+                if memvault_api::agent_identity::AgentIdentity::exists(&agent_dir) {
+                    match memvault_api::agent_identity::AgentIdentity::load(&agent_dir) {
+                        Ok(id) => {
+                            println!("{} cluster={} pubkey={}",
+                                id.agent_id.0,
+                                hex::encode(id.cluster_id.0),
+                                hex::encode(id.verifying_key.as_bytes()),
+                            );
+                            found = true;
+                        }
+                        Err(e) => {
+                            eprintln!("  (error loading {}: {e})", agent_dir.display());
+                        }
+                    }
+                }
+            }
+            if !found {
+                println!("No agents enrolled.");
+            }
+        }
+        Commands::AgentShow { agent_id } => {
+            let agent_dir = dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("memvault")
+                .join("agents")
+                .join(&agent_id);
+
+            if !memvault_api::agent_identity::AgentIdentity::exists(&agent_dir) {
+                println!("Agent '{agent_id}' not found at {}", agent_dir.display());
+                return Ok(());
+            }
+
+            let id = memvault_api::agent_identity::AgentIdentity::load(&agent_dir)
+                .map_err(|e| anyhow::anyhow!("failed to load agent: {e}"))?;
+
+            println!("Agent: {}", id.agent_id.0);
+            println!("  Cluster:      {}", hex::encode(id.cluster_id.0));
+            println!("  Public key:   {}", hex::encode(id.verifying_key.as_bytes()));
+            println!("  Role:         {:?}", id.attestation.role);
+            println!("  Expires:      {} ns", id.attestation.not_after_ns);
+            println!("  Identity dir: {}", agent_dir.display());
         }
     }
 
