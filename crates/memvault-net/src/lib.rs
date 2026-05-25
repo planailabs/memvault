@@ -11,6 +11,7 @@ pub mod error;
 pub mod federation;
 pub mod gossip;
 pub mod join_proto;
+pub mod share_proto;
 pub mod standalone;
 pub mod visibility;
 
@@ -27,4 +28,7 @@ pub use join_proto::{
     JoinCodec, JoinRefuseReason, JoinRequest, JoinResponse, JoinResult, JOIN_PROTOCOL,
 };
 pub use standalone::{standalone_swarm, StandaloneMemvaultBehaviour};
-pub use visibility::VisibilityFilter;
+pub use share_proto::{
+    ShareCodec, ShareRequest, ShareResponse, ShareResult, SHARE_PROTOCOL,
+};
+pub use visibility::{ServeDecision, ServeRefuseReason, VisibilityFilter};

@@ -225,6 +225,92 @@ impl MemvaultStore {
         Ok(())
     }
 
+    // ── Share queries (added B5) ──────────────────────────────────
+
+    /// Record a share proposal in the inbox.
+    pub fn record_share_inbox(
+        &self,
+        proposal_cid: &[u8],
+        to_cluster: &[u8],
+        wall_ns: u64,
+        status: u8,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(SHARE_INBOX)?;
+            let mut key = Vec::with_capacity(to_cluster.len() + 8 + proposal_cid.len());
+            key.extend_from_slice(to_cluster);
+            key.extend_from_slice(&wall_ns.to_be_bytes());
+            key.extend_from_slice(proposal_cid);
+            table.insert(key.as_slice(), &[status] as &[u8])?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Record a share proposal in the outbox.
+    pub fn record_share_outbox(
+        &self,
+        proposal_cid: &[u8],
+        from_cluster: &[u8],
+        wall_ns: u64,
+        status: u8,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(SHARE_OUTBOX)?;
+            let mut key = Vec::with_capacity(from_cluster.len() + 8 + proposal_cid.len());
+            key.extend_from_slice(from_cluster);
+            key.extend_from_slice(&wall_ns.to_be_bytes());
+            key.extend_from_slice(proposal_cid);
+            table.insert(key.as_slice(), &[status] as &[u8])?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// List pending share proposals from the inbox.
+    pub fn list_share_inbox(&self, to_cluster: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(SHARE_INBOX)?;
+        let prefix = to_cluster.to_vec();
+        let mut end = prefix.clone();
+        end.push(0xFF);
+
+        let mut results = Vec::new();
+        let range = table.range(prefix.as_slice()..end.as_slice())?;
+        for entry in range {
+            let (key, _) = entry?;
+            let k = key.value();
+            if k.len() > to_cluster.len() + 8 {
+                let proposal_cid = k[to_cluster.len() + 8..].to_vec();
+                results.push(proposal_cid);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Record a cross-cluster bucket trust.
+    pub fn record_bucket_trust(
+        &self,
+        bucket_id: &[u8],
+        from_cluster: &[u8],
+        to_cluster: &[u8],
+        trust_cid: &[u8],
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(BUCKET_TRUST)?;
+            let mut key = Vec::with_capacity(bucket_id.len() + from_cluster.len() + to_cluster.len());
+            key.extend_from_slice(bucket_id);
+            key.extend_from_slice(from_cluster);
+            key.extend_from_slice(to_cluster);
+            table.insert(key.as_slice(), trust_cid)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     /// Bind a bucket to a cluster. If `is_default`, also set it as the cluster's default.
     pub fn bind_bucket(
         &self,

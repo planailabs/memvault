@@ -53,3 +53,14 @@ pub const BUCKET_CLUSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("
 
 /// Cluster → default bucket: cluster_id -> bucket_id.
 pub const CLUSTER_DEFAULT_BUCKET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cluster_default_bucket");
+
+// ── Share tables (added B5) ────────────────────────────────────────
+
+/// Share inbox: packed(to_cluster, wall_ns, proposal_cid) -> status_byte.
+pub const SHARE_INBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("share_inbox");
+
+/// Share outbox: packed(from_cluster, wall_ns, proposal_cid) -> status_byte.
+pub const SHARE_OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("share_outbox");
+
+/// Cross-cluster bucket trust: packed(bucket_id, from_cluster, to_cluster) -> trust_cid.
+pub const BUCKET_TRUST: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bucket_trust");
