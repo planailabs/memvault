@@ -9,5 +9,5 @@
 #
 # For a single node with hot-reload: dx serve --port 8080
 
-node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a dx serve --port 8080
-node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b dx serve --port 8090
+node_a: env CARGO_TARGET_DIR=../../target/node_a MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.a dx serve --port 8080 | tee /tmp/memvault-node-a.log
+node_b: env CARGO_TARGET_DIR=../../target/node_b MEMVAULT_DATA_DIR=$HOME/.local/share/memvault.b dx serve --port 8090 | tee /tmp/memvault-node-b.log
