@@ -280,6 +280,14 @@ pub enum Commands {
         /// New name
         name: String,
     },
+    /// Archive a bucket (soft-remove, data preserved)
+    BucketArchive {
+        /// Bucket ID (hex)
+        id: String,
+        /// Reason for archival
+        #[arg(short, long)]
+        reason: String,
+    },
     /// Bind a bucket to a cluster
     BucketBind {
         /// Bucket ID (hex)
@@ -914,6 +922,17 @@ pub async fn run(cli: Cli) -> Result<()> {
             let client = connect().connect().await?;
             client.bucket_rename(&bucket_id, &name).await?;
             println!("Bucket renamed to '{name}'.");
+        }
+        Commands::BucketArchive { id, reason } => {
+            let bucket_bytes = hex::decode(&id)?;
+            let bucket_arr: [u8; 32] = bucket_bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+            let bucket_id = memvault_core::BucketId(bucket_arr);
+            let client = connect().connect().await?;
+            // Archive is implemented as a rename with a special marker for now.
+            // In B8 full implementation, this would write a BucketArchive op.
+            client.bucket_rename(&bucket_id, &format!("[ARCHIVED] {reason}")).await?;
+            println!("Bucket archived: {reason}");
         }
         Commands::BucketBind { bucket_id, cluster_id, default } => {
             let bucket_bytes = hex::decode(&bucket_id)?;

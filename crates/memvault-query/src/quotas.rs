@@ -32,11 +32,15 @@ impl Default for AgentQuota {
     }
 }
 
-/// Tracks per-agent usage against configured quotas.
+/// Tracks per-agent and per-bucket usage against configured quotas.
 pub struct QuotaManager {
     quotas: HashMap<String, AgentQuota>,
     usage: HashMap<String, AgentUsage>,
     default_quota: AgentQuota,
+    /// Per-bucket quotas (added B8). Keyed by hex-encoded bucket_id.
+    bucket_quotas: HashMap<String, BucketQuota>,
+    /// Per-bucket usage tracking (added B8). Keyed by hex-encoded bucket_id.
+    bucket_usage: HashMap<String, BucketUsage>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +56,8 @@ impl QuotaManager {
             quotas: HashMap::new(),
             usage: HashMap::new(),
             default_quota,
+            bucket_quotas: HashMap::new(),
+            bucket_usage: HashMap::new(),
         }
     }
 
@@ -143,5 +149,83 @@ impl QuotaManager {
 impl Default for QuotaManager {
     fn default() -> Self {
         Self::new(AgentQuota::default())
+    }
+}
+
+// ── Per-bucket quotas (added B8) ─────────────────────────────────
+
+/// Per-bucket quota configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketQuota {
+    /// Maximum total bytes stored in this bucket.
+    pub max_bytes: u64,
+    /// Maximum number of envelopes in this bucket.
+    pub max_envelopes: u64,
+}
+
+impl Default for BucketQuota {
+    fn default() -> Self {
+        Self {
+            max_bytes: 10_737_418_240, // 10 GiB
+            max_envelopes: 1_000_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BucketUsage {
+    pub byte_count: u64,
+    pub envelope_count: u64,
+}
+
+impl QuotaManager {
+    /// Set a quota for a specific bucket.
+    pub fn set_bucket_quota(&mut self, bucket_id: &str, quota: BucketQuota) {
+        self.bucket_quotas.insert(bucket_id.to_string(), quota);
+    }
+
+    /// Check if a write to a bucket is allowed.
+    pub fn check_bucket_write(&self, bucket_id: &str, bytes: u64) -> Result<(), QuotaExceeded> {
+        let quota = match self.bucket_quotas.get(bucket_id) {
+            Some(q) => q,
+            None => return Ok(()), // no quota set = unlimited
+        };
+        let usage = self.bucket_usage.get(bucket_id);
+        let current_bytes = usage.map(|u| u.byte_count).unwrap_or(0);
+
+        if current_bytes + bytes > quota.max_bytes {
+            return Err(QuotaExceeded {
+                agent_id: format!("bucket:{bucket_id}"),
+                detail: format!(
+                    "bucket byte limit exceeded: {} + {} > {}",
+                    current_bytes, bytes, quota.max_bytes
+                ),
+            });
+        }
+
+        let current_envelopes = usage.map(|u| u.envelope_count).unwrap_or(0);
+        if current_envelopes >= quota.max_envelopes {
+            return Err(QuotaExceeded {
+                agent_id: format!("bucket:{bucket_id}"),
+                detail: format!(
+                    "bucket envelope limit reached: {} >= {}",
+                    current_envelopes, quota.max_envelopes
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Record a write to a bucket.
+    pub fn record_bucket_write(&mut self, bucket_id: &str, bytes: u64) {
+        let usage = self.bucket_usage.entry(bucket_id.to_string()).or_default();
+        usage.byte_count += bytes;
+        usage.envelope_count += 1;
+    }
+
+    /// Get the current usage for a bucket.
+    pub fn get_bucket_usage(&self, bucket_id: &str) -> BucketUsage {
+        self.bucket_usage.get(bucket_id).cloned().unwrap_or_default()
     }
 }
