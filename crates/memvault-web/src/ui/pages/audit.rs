@@ -238,6 +238,40 @@ async fn build_description(
                 ("Extracted text".to_string(), None)
             }
         }
+        // ── Bucket events ────────────────────────────────────────
+        "BucketCreate" => {
+            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
+            let name = tags.iter().find(|(s, _)| s == "kind" && *s == "bucket-decl")
+                .map(|_| "bucket").unwrap_or("bucket");
+            (format!("Created bucket ({})", bucket_tag.unwrap_or("?")), None)
+        }
+        "BucketRename" => {
+            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
+            (format!("Renamed bucket {}", bucket_tag.unwrap_or("?")), None)
+        }
+        "BucketAttach" => {
+            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
+            (format!("Attached bucket {}", bucket_tag.unwrap_or("?")), None)
+        }
+        "BucketArchive" => {
+            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
+            (format!("Archived bucket {}", bucket_tag.unwrap_or("?")), None)
+        }
+        "BucketTrust" => {
+            ("Cross-cluster bucket trust established".to_string(), None)
+        }
+        // ── Token events ────────────────────────────────────────
+        "TokenIssue" | "JoinToken" => {
+            let label = tags.iter().find(|(s, _)| s == "role").map(|(_, l)| l.as_str());
+            (format!("Issued join token (role: {})", label.unwrap_or("?")), None)
+        }
+        // ── Share events ────────────────────────────────────────
+        "SharePropose" => {
+            ("Sent share proposal".to_string(), None)
+        }
+        "ShareDecide" => {
+            ("Decided share proposal".to_string(), None)
+        }
         other => {
             if let Some(target) = ann_target {
                 let (name, link) = resolve_node(client, target).await;
