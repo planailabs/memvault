@@ -1127,8 +1127,19 @@ pub async fn run(cli: Cli) -> Result<()> {
                 });
                 println!("  API token:  {}", &auth_token[..8]);
 
-                // Start the web server (API + fullstack UI if assets exist)
-                let router = memvault_web::build_fullstack_router(app_state);
+                // Start the web server. Use fullstack (SSR + UI) if assets
+                // exist, otherwise API-only to avoid a panic from Dioxus.
+                let public_exists = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("public").exists()))
+                    .unwrap_or(false);
+                let router: axum::Router = if public_exists {
+                    println!("  Web UI:     http://127.0.0.1:{api_port}");
+                    memvault_web::build_fullstack_router(app_state)
+                } else {
+                    println!("  Web UI:     disabled (run `dx build` first)");
+                    memvault_web::build_router(app_state).into()
+                };
                 let addr = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
                 tokio::spawn(async move {
                     let listener = match tokio::net::TcpListener::bind(addr).await {
