@@ -1,6 +1,6 @@
 use cid::Cid;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use memvault_core::{AgentId, ClusterId, PeerId, TagPattern};
+use memvault_core::{AgentId, BucketId, ClusterId, PeerId, TagPattern};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -38,6 +38,10 @@ pub struct Grant {
     pub not_after_ns: u64,
     pub parent: Option<Cid>,
     pub nonce: [u8; 16],
+    /// Bucket-scoped grants — OR'd with tag scopes.
+    /// Added in B2. Old grants deserialize with empty vec via #[serde(default)].
+    #[serde(default)]
+    pub bucket_scopes: Vec<BucketId>,
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
@@ -53,6 +57,7 @@ struct GrantSigningPayload<'a> {
     not_after_ns: u64,
     parent: &'a Option<Cid>,
     nonce: &'a [u8; 16],
+    bucket_scopes: &'a Vec<BucketId>,
 }
 
 impl Grant {
@@ -68,8 +73,15 @@ impl Grant {
             not_after_ns: self.not_after_ns,
             parent: &self.parent,
             nonce: &self.nonce,
+            bucket_scopes: &self.bucket_scopes,
         };
         serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+    }
+
+    /// Check whether this grant covers a specific bucket.
+    pub fn covers_bucket(&self, bucket_id: &BucketId) -> bool {
+        // If no bucket_scopes, the grant applies to all buckets (legacy behavior)
+        self.bucket_scopes.is_empty() || self.bucket_scopes.contains(bucket_id)
     }
 
     /// Verify the grant signature against the issuer's key.

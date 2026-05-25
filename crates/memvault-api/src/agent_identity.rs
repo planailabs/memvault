@@ -207,6 +207,7 @@ fn sign_enrollment(
         cluster_id: cluster_id.clone(),
         enrolled_by: enrolled_by.clone(),
         initial_grants: vec![],
+        default_bucket: None,
         not_after_ns,
         signature: [0u8; 64], // placeholder, filled below
     };

@@ -68,6 +68,13 @@ pub struct View {
     pub cid: String,
 }
 
+/// Options for write operations, allowing callers to specify a target bucket.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WriteOptions {
+    /// Target bucket. None = agent's default bucket → cluster default.
+    pub bucket: Option<BucketId>,
+}
+
 /// Information about a bucket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketInfo {
