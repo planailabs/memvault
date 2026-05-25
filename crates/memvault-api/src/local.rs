@@ -1509,6 +1509,11 @@ impl MemvaultClient for LocalClient {
         self.store.insert_envelope(&new_cid.to_bytes(), &new_bytes, &meta)?;
         self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
 
+        // Also bind to the cluster if not already bound.
+        if self.cluster_id.iter().any(|&b| b != 0) {
+            let _ = self.store.bind_bucket(&id.0, &self.cluster_id, false);
+        }
+
         tracing::info!(bucket = %id, "bucket attached to cluster");
         Ok(())
     }
