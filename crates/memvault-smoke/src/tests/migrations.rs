@@ -345,3 +345,61 @@ fn token_string_prefix_unchanged() {
     assert!(memvault_auth::decode_token_string("mvjoin2:something").is_err());
     assert!(memvault_auth::decode_token_string("bearer:something").is_err());
 }
+
+// ── Auto-bind unbound buckets on client open with cluster ───────────
+
+#[tokio::test]
+async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
+    use tokio::sync::RwLock;
+    use memvault_api::{EventBus, LocalClient, MemvaultClient};
+    use memvault_query::{QuotaManager, TextIndex};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.redb");
+
+    // Phase 1: create buckets with NO cluster (simulates pre-genesis)
+    {
+        let store = Arc::new(MemvaultStore::open(&db_path).unwrap());
+        let client = LocalClient::new(
+            Arc::clone(&store),
+            Arc::new(RwLock::new(TextIndex::new())),
+            Arc::new(RwLock::new(QuotaManager::default())),
+            Arc::new(EventBus::new(64)),
+            vec![0u8; 32], // zero peer_id
+            vec![0u8; 32], // zero cluster_id = no cluster
+        );
+        // Create buckets — these will be private/unbound since no cluster
+        let b1 = client.bucket_create("pre-genesis-1", None,
+            Visibility::Internal, Classification::Internal).await.unwrap();
+        let b2 = client.bucket_create("pre-genesis-2", None,
+            Visibility::Internal, Classification::Internal).await.unwrap();
+
+        // Verify they're unbound
+        let info = client.bucket_get(&b1).await.unwrap().unwrap();
+        assert!(info.cluster_id.is_none(), "should be unbound with no cluster");
+    }
+
+    // Phase 2: re-open the store WITH a cluster_id (simulates post-genesis)
+    {
+        let cluster_id = vec![42u8; 32];
+        let store = Arc::new(MemvaultStore::open(&db_path).unwrap());
+        store.set_local_cluster_id(&cluster_id).unwrap();
+
+        let client = LocalClient::new(
+            Arc::clone(&store),
+            Arc::new(RwLock::new(TextIndex::new())),
+            Arc::new(RwLock::new(QuotaManager::default())),
+            Arc::new(EventBus::new(64)),
+            vec![1u8; 32],
+            cluster_id.clone(),
+        );
+
+        // The unbound buckets should now be auto-bound to the cluster
+        let buckets = client.bucket_list().await.unwrap();
+        assert_eq!(buckets.len(), 2);
+        for b in &buckets {
+            assert_eq!(b.cluster_id.as_ref().map(|c| c.0.to_vec()), Some(cluster_id.clone()),
+                "bucket '{}' should be auto-bound to cluster", b.name);
+        }
+    }
+}

@@ -85,7 +85,7 @@ impl LocalClient {
         peer_id: Vec<u8>,
         cluster_id: Vec<u8>,
     ) -> Self {
-        Self {
+        let client = Self {
             store,
             index,
             quotas,
@@ -95,7 +95,16 @@ impl LocalClient {
             admin_signing_key: None,
             agent_identity: None,
             start_time: std::time::Instant::now(),
+        };
+
+        // Auto-bind any unbound buckets to the cluster (handles the case where
+        // buckets were created before genesis/cluster-join, and the store is
+        // now re-opened with a cluster_id).
+        if client.cluster_id.iter().any(|&b| b != 0) {
+            let _ = client.store.bind_unbound_buckets(&client.cluster_id);
         }
+
+        client
     }
 
     /// Set the admin signing key (enables real token issuance).
