@@ -2,7 +2,7 @@
 #
 # Uses separate CARGO_TARGET_DIR per node to avoid build lock conflicts.
 # Both nodes share the same WASM output (public/) since it's identical code.
-# MEMVAULT_API_PORT sets the REST/web UI port (--api-port via env).
+# MEMVAULT_API_PORT sets the REST/web UI port.
 #
 # Prerequisites:
 #   cd memvault/crates/memctl   (this directory)
