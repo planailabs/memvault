@@ -369,6 +369,32 @@ fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
     )
 }
 
+/// Load a libp2p Ed25519 keypair from disk, or generate and save a new one.
+fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
+    if key_path.exists() {
+        let key_bytes = std::fs::read(key_path)?;
+        let kp = libp2p::identity::Keypair::ed25519_from_bytes(key_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to load keypair from {}: {e}", key_path.display()))?;
+        return Ok(kp);
+    }
+
+    // Generate new keypair
+    let kp = libp2p::identity::Keypair::generate_ed25519();
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Extract the raw Ed25519 secret key bytes and save them
+    let ed_kp = kp.clone().try_into_ed25519()
+        .map_err(|e| anyhow::anyhow!("keypair is not ed25519: {e}"))?;
+    std::fs::write(key_path, ed_kp.to_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(kp)
+}
+
 fn parse_entity_id(hex_str: &str) -> Result<EntityId> {
     let bytes = hex::decode(hex_str)?;
     let mut id = [0u8; 32];
@@ -1021,8 +1047,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Open the store and reconcile PeerId
             let store = make_store()?;
 
-            // Generate or load a libp2p keypair
-            let keypair = libp2p::identity::Keypair::generate_ed25519();
+            // Load or generate a persistent libp2p keypair.
+            // The keypair is saved to `identity/libp2p.key` in the data dir
+            // so the PeerId stays stable across restarts.
+            let key_path = data_dir.join("identity").join("libp2p.key");
+            let keypair = load_or_generate_keypair(&key_path)?;
             let local_peer_id = keypair.public().to_peer_id();
             let peer_id_bytes = local_peer_id.to_bytes();
 
