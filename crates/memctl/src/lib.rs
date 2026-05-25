@@ -362,17 +362,41 @@ fn open_store(data_dir: &Path) -> Result<Arc<MemvaultStore>> {
     open_store_at(&db_path)
 }
 
-fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
+fn create_client_with_data_dir(store: Arc<MemvaultStore>, data_dir: &Path) -> LocalClient {
     let peer_id = store.get_local_peer_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
     let cluster_id = store.get_local_cluster_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
-    LocalClient::new(
+    let mut client = LocalClient::new(
         store,
         Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
         Arc::new(EventBus::new(64)),
         peer_id,
         cluster_id,
-    )
+    );
+    // Load admin signing key if available (enables token issuance)
+    let admin_key_path = data_dir.join("identity").join("admin.key");
+    if admin_key_path.exists() {
+        if let Ok(key_bytes) = std::fs::read(&admin_key_path) {
+            if key_bytes.len() >= 32 {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&key_bytes[..32]);
+                client.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&seed));
+            }
+        }
+    }
+    client
+}
+
+fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
+    // Resolve data_dir from env or default (for admin key loading)
+    let data_dir = std::env::var("MEMVAULT_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("memvault")
+        });
+    create_client_with_data_dir(store, &data_dir)
 }
 
 /// Load a libp2p Ed25519 keypair from disk, or generate and save a new one.
@@ -459,6 +483,20 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Persist cluster_id in the store. PeerId is set by the daemon
             // on first start (from the libp2p keypair).
             store.set_local_cluster_id(&cluster_id.0)?;
+
+            // Generate admin signing key (for token issuance)
+            let admin_key_path = data_dir.join("identity").join("admin.key");
+            if !admin_key_path.exists() {
+                std::fs::create_dir_all(admin_key_path.parent().unwrap())?;
+                let mut seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+                std::fs::write(&admin_key_path, &seed)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&admin_key_path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
 
             let client = create_client(store.clone());
             let bucket_id = if let Some(ref bucket_hex) = default_bucket {
