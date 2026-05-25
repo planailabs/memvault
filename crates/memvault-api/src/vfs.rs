@@ -1,11 +1,11 @@
 //! VFS (Virtual Filesystem) helpers — shared logic for managing the directory tree.
 //!
-//! All functions operate on `&dyn MemvaultClient` and can be used from the HTTP API,
-//! web UI server functions, CLI (memctl), and MCP tools.
+//! Each bucket has its own VFS root, identified by tags `(vfs, root)` + `(bucket, <id>)`.
+//! All functions require a `bucket_id` parameter. There is no global/unscoped VFS.
 
 use std::collections::BTreeMap;
 
-use memvault_core::{EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{BucketId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Edge, Entity};
 
 use crate::error::Result;
@@ -14,38 +14,48 @@ use crate::MemvaultClient;
 pub const VFS_DIR_KIND: &str = "vfs:dir";
 pub const VFS_CHILD_REL: &str = "vfs:child";
 
-/// Find or create the VFS root entity.
-/// Searches by `vfs:root` tag first, then by `name: "/"` property as fallback.
-/// Creates a new root if none exists.
-pub async fn ensure_root(client: &dyn MemvaultClient) -> Result<EntityId> {
+/// Get the default bucket for VFS operations. Uses the first bucket from the list.
+/// Returns a zero BucketId as fallback if no buckets exist (pre-genesis).
+pub async fn default_bucket(client: &dyn MemvaultClient) -> BucketId {
+    if let Ok(buckets) = client.bucket_list().await {
+        if let Some(b) = buckets.iter().find(|b| b.is_default) {
+            return b.id.clone();
+        }
+        if let Some(b) = buckets.first() {
+            return b.id.clone();
+        }
+    }
+    BucketId([0u8; 32])
+}
+
+/// Find or create the VFS root entity for a specific bucket.
+///
+/// Searches by `(vfs, root)` + `(bucket, <bucket_id>)` tags.
+/// Creates a new root if none exists for this bucket.
+pub async fn ensure_root(client: &dyn MemvaultClient, bucket_id: &BucketId) -> Result<EntityId> {
+    let bucket_hex = hex::encode(bucket_id.0);
     let entities = client.list_entities(500).await?;
     let mut candidates: Vec<[u8; 32]> = Vec::new();
-    let mut fallback_candidates: Vec<[u8; 32]> = Vec::new();
+
     for e in &entities {
         if e.kind != VFS_DIR_KIND {
             continue;
         }
         let node_id = format!("entity:{}", hex::encode(e.id.0));
         let tags = client.get_tags(&node_id).await.unwrap_or_default();
-        if tags.iter().any(|(s, l)| s == "vfs" && l == "root") {
+        let has_root = tags.iter().any(|(s, l)| s == "vfs" && l == "root");
+        let has_bucket = tags.iter().any(|(s, l)| s == "bucket" && l == &bucket_hex);
+        if has_root && has_bucket {
             candidates.push(e.id.0);
         }
-        if e.props.get("name").and_then(|v| v.as_str()) == Some("/") {
-            fallback_candidates.push(e.id.0);
-        }
     }
+
     if !candidates.is_empty() {
         candidates.sort();
         return Ok(EntityId(candidates[0]));
     }
-    if !fallback_candidates.is_empty() {
-        fallback_candidates.sort();
-        let id = EntityId(fallback_candidates[0]);
-        let node_id = format!("entity:{}", hex::encode(id.0));
-        let _ = client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await;
-        return Ok(id);
-    }
-    // Create root.
+
+    // Create root for this bucket.
     let mut props = BTreeMap::new();
     props.insert("name".to_string(), serde_json::json!("/"));
     let entity = Entity {
@@ -56,7 +66,10 @@ pub async fn ensure_root(client: &dyn MemvaultClient) -> Result<EntityId> {
     };
     let id = client.add_entity(entity, Visibility::Internal).await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
-    client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await?;
+    client.add_tags(&node_id, vec![
+        ("vfs".into(), "root".into()),
+        ("bucket".into(), bucket_hex),
+    ]).await?;
     Ok(id)
 }
 
@@ -106,13 +119,15 @@ pub async fn find_named_child(
     Ok(best)
 }
 
-/// Resolve a VFS path to its target node. Returns `None` if any component is missing.
+/// Resolve a VFS path to its target node within a bucket.
+/// Returns `None` if any component is missing.
 pub async fn resolve_path(
     client: &dyn MemvaultClient,
+    bucket_id: &BucketId,
     path: &str,
 ) -> Result<Option<(NodeRef, Option<EdgeId>)>> {
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let root = ensure_root(client).await?;
+    let root = ensure_root(client, bucket_id).await?;
     if components.is_empty() {
         return Ok(Some((NodeRef::Entity(root), None)));
     }
@@ -169,14 +184,15 @@ pub async fn create_child_edge(
     client.add_link(parent, edge, Visibility::Internal).await
 }
 
-/// Ensure all path components exist as directories, creating missing ones.
+/// Ensure all path components exist as directories within a bucket, creating missing ones.
 /// Returns the NodeRef of the deepest directory.
 pub async fn ensure_dir_path(
     client: &dyn MemvaultClient,
+    bucket_id: &BucketId,
     path: &str,
 ) -> Result<NodeRef> {
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let root = ensure_root(client).await?;
+    let root = ensure_root(client, bucket_id).await?;
     let mut current = NodeRef::Entity(root);
     for component in &components {
         match find_named_child(client, &current, component).await? {
@@ -187,8 +203,6 @@ pub async fn ensure_dir_path(
                 match create_child_edge(client, &current, &child, component).await {
                     Ok(_) => {}
                     Err(_) => {
-                        // Race: another writer created this entry concurrently.
-                        // Use the existing one instead of our orphaned dir.
                         if let Some((existing, _)) = find_named_child(client, &current, component).await? {
                             current = existing;
                             continue;
@@ -205,9 +219,10 @@ pub async fn ensure_dir_path(
     Ok(current)
 }
 
-/// Link a node at a VFS path, creating intermediate directories as needed.
+/// Link a node at a VFS path within a bucket, creating intermediate directories as needed.
 pub async fn link_at_path(
     client: &dyn MemvaultClient,
+    bucket_id: &BucketId,
     path: &str,
     target: &NodeRef,
 ) -> Result<EdgeId> {
@@ -222,19 +237,20 @@ pub async fn link_at_path(
     } else {
         format!("/{}", parent_parts.join("/"))
     };
-    let parent = ensure_dir_path(client, &parent_path).await?;
+    let parent = ensure_dir_path(client, bucket_id, &parent_path).await?;
     create_child_edge(client, &parent, target, name).await
 }
 
-/// Convenience: link a node (by its "type:hex" ID string) at a VFS path.
+/// Convenience: link a node (by its "type:hex" ID string) at a VFS path in a bucket.
 pub async fn link_node_at_path(
     client: &dyn MemvaultClient,
+    bucket_id: &BucketId,
     path: &str,
     node_id: &str,
 ) -> Result<()> {
     let target = NodeRef::from_tag_label(node_id)
         .ok_or_else(|| crate::error::ApiError::Other(format!("invalid node_id: {node_id}")))?;
-    link_at_path(client, path, &target).await?;
+    link_at_path(client, bucket_id, path, &target).await?;
     Ok(())
 }
 

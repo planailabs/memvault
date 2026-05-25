@@ -1,6 +1,7 @@
 //! Virtual filesystem endpoints — organise nodes into a path hierarchy.
 //!
-//! Delegates all VFS logic to `memvault_api::vfs` shared module.
+//! Each bucket has its own VFS root. All operations use the default bucket
+//! unless the client specifies one (future: bucket query param).
 
 use std::sync::Arc;
 
@@ -65,7 +66,8 @@ pub async fn vfs_ls(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (node, _) = vfs_ops::resolve_path(state.client.as_ref(), &params.path)
+    let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
+    let (node, _) = vfs_ops::resolve_path(state.client.as_ref(), &bucket, &params.path)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("path not found"))?;
@@ -117,7 +119,8 @@ pub async fn vfs_resolve(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsResolveQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    match vfs_ops::resolve_path(state.client.as_ref(), &params.path)
+    let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
+    match vfs_ops::resolve_path(state.client.as_ref(), &bucket, &params.path)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
     {
@@ -140,7 +143,8 @@ pub async fn vfs_mkdir(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsMkdirRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
-    let parent = vfs_ops::ensure_dir_path(state.client.as_ref(), &req.path)
+    let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
+    let parent = vfs_ops::ensure_dir_path(state.client.as_ref(), &bucket, &req.path)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok((
@@ -159,9 +163,10 @@ pub async fn vfs_link(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsLinkRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+    let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
     let target = NodeRef::from_tag_label(&req.target)
         .ok_or_else(|| ApiError::bad_request("invalid target — expected entity:<hex>, doc:<hex>, or file:<hex>"))?;
-    let edge_id = vfs_ops::link_at_path(state.client.as_ref(), &req.path, &target)
+    let edge_id = vfs_ops::link_at_path(state.client.as_ref(), &bucket, &req.path, &target)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok((
@@ -181,6 +186,7 @@ pub async fn vfs_unlink(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsUnlinkQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
     let components: Vec<&str> = params.path.split('/').filter(|s| !s.is_empty()).collect();
     if components.is_empty() {
         return Err(ApiError::bad_request("cannot unlink root"));
@@ -188,7 +194,7 @@ pub async fn vfs_unlink(
     let (parent_parts, file_name) = components.split_at(components.len() - 1);
     let file_name = file_name[0];
 
-    let root = vfs_ops::ensure_root(state.client.as_ref()).await
+    let root = vfs_ops::ensure_root(state.client.as_ref(), &bucket).await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let mut current = NodeRef::Entity(root);
     for component in parent_parts {
@@ -213,8 +219,10 @@ pub async fn vfs_mv(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsMvRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
+
     // Resolve source.
-    let (source_node, source_edge) = vfs_ops::resolve_path(state.client.as_ref(), &req.from)
+    let (source_node, source_edge) = vfs_ops::resolve_path(state.client.as_ref(), &bucket, &req.from)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("source path not found"))?;
@@ -224,7 +232,7 @@ pub async fn vfs_mv(
     let from_components: Vec<&str> = req.from.split('/').filter(|s| !s.is_empty()).collect();
     let (from_parent_parts, _) = from_components.split_at(from_components.len() - 1);
     let from_parent = {
-        let root = vfs_ops::ensure_root(state.client.as_ref()).await
+        let root = vfs_ops::ensure_root(state.client.as_ref(), &bucket).await
             .map_err(|e| ApiError::internal(e.to_string()))?;
         let mut current = NodeRef::Entity(root);
         for component in from_parent_parts {
@@ -242,7 +250,7 @@ pub async fn vfs_mv(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     // Link at destination.
-    vfs_ops::link_at_path(state.client.as_ref(), &req.to, &source_node)
+    vfs_ops::link_at_path(state.client.as_ref(), &bucket, &req.to, &source_node)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

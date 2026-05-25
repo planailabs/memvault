@@ -882,7 +882,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                         });
                         if let (Some(entity_hex), Some(path)) = (entity_tag, intended_path) {
                             let node_ref = format!("entity:{entity_hex}");
-                            match memvault_api::vfs::link_node_at_path(&client, &path, &node_ref).await {
+                            let bucket = memvault_api::vfs::default_bucket(&client).await;
+                            match memvault_api::vfs::link_node_at_path(&client, &bucket, &path, &node_ref).await {
                                 Ok(_) => {
                                     let _ = client.remove_tags(&node_ref, vec![("vfs_status".into(), "pending_repair".into())]).await;
                                     let _ = client.add_tags(&node_ref, vec![("vfs_status".into(), "linked".into())]).await;

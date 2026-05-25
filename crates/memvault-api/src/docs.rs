@@ -48,7 +48,8 @@ pub async fn create_doc(
     let node_id = format!("doc:{}", hex::encode(doc_id.0));
 
     if let Some(path) = vfs_path {
-        if let Err(e) = crate::vfs::link_node_at_path(client, path, &node_id).await {
+        let bucket = crate::vfs::default_bucket(client).await;
+        if let Err(e) = crate::vfs::link_node_at_path(client, &bucket, path, &node_id).await {
             tracing::warn!(path, error = %e, "VFS link failed after doc creation");
         }
     }

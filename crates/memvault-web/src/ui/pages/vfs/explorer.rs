@@ -44,7 +44,9 @@ async fn list_vfs_entries(path: String) -> Result<Vec<VfsRow>, ServerFnError> {
     use memvault_core::NodeRef;
     let client = crate::ui::state::client()?;
 
-    let root_id = vfs_ensure_root(&*client).await?;
+    let bucket = memvault_api::vfs::default_bucket(&*client).await;
+    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket).await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     let mut current = NodeRef::Entity(root_id);
@@ -94,7 +96,9 @@ async fn list_vfs_entries(path: String) -> Result<Vec<VfsRow>, ServerFnError> {
 async fn vfs_mkdir(path: String) -> Result<String, ServerFnError> {
     use memvault_core::NodeRef;
     let client = crate::ui::state::client()?;
-    let root_id = vfs_ensure_root(&*client).await?;
+    let bucket = memvault_api::vfs::default_bucket(&*client).await;
+    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket).await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if components.is_empty() {
         return Ok(format!("entity:{}", hex::encode(root_id.0)));
