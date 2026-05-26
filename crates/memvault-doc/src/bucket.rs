@@ -7,6 +7,27 @@ use memvault_core::classification::Classification;
 use memvault_core::{AgentId, BucketId, ClusterId, PeerId, Visibility};
 use serde::{Deserialize, Serialize};
 
+/// The role a bucket plays within the system.
+///
+/// Set at creation time and stored in `BucketDecl`.  The role is
+/// informational / policy — it does not affect storage mechanics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BucketRole {
+    /// Normal user-created bucket (the default for backwards compat).
+    Standard,
+    /// Holds data adopted from pre-bucket (legacy) envelopes.
+    Legacy,
+    /// Per-agent bucket, created automatically when an agent is enrolled.
+    Agent,
+}
+
+impl Default for BucketRole {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
 /// Declaration of a bucket — its identity and metadata.
 ///
 /// No `is_default` field: default-ness is a cluster-level binding, not a
@@ -24,6 +45,10 @@ pub struct BucketDecl {
     /// If Some, this bucket is private to a single peer and not gossiped.
     /// Set to None when the bucket is attached to the cluster.
     pub private_to_peer: Option<PeerId>,
+    /// The role this bucket plays.  Absent in pre-role envelopes, which
+    /// deserialize as `Standard` via `#[serde(default)]`.
+    #[serde(default)]
+    pub role: BucketRole,
 }
 
 /// Records that a bucket is associated with a cluster.

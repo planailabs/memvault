@@ -707,12 +707,14 @@ impl MemvaultClient for HttpApiClient {
         description: Option<&str>,
         default_visibility: memvault_core::Visibility,
         default_classification: memvault_core::classification::Classification,
+        role: memvault_doc::BucketRole,
     ) -> Result<memvault_core::BucketId> {
         let body = serde_json::json!({
             "name": name,
             "description": description,
             "default_visibility": default_visibility,
             "default_classification": default_classification,
+            "role": role,
         });
         let resp: serde_json::Value = self
             .client

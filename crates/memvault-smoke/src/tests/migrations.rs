@@ -10,7 +10,7 @@ use std::sync::Arc;
 use memvault_api::MemvaultClient;
 use memvault_core::tags::Tag;
 use memvault_core::*;
-use memvault_doc::{Document, Entity, Op, TextPatch};
+use memvault_doc::{BucketRole, Document, Entity, Op, TextPatch};
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_store::MemvaultStore;
 use memvault_store::insert::EnvelopeMeta;
@@ -121,6 +121,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
                 None,
                 Visibility::Internal,
                 classification::Classification::Internal,
+                BucketRole::Standard,
             )
             .await
             .unwrap();
@@ -275,6 +276,7 @@ async fn editing_docs_preserves_their_bucket() {
             None,
             Visibility::Internal,
             classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -323,6 +325,7 @@ async fn vfs_roots_and_dirs_are_created_in_the_requested_bucket() {
             None,
             Visibility::Internal,
             classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -597,6 +600,7 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
                 None,
                 Visibility::Internal,
                 Classification::Internal,
+                BucketRole::Standard,
             )
             .await
             .unwrap();
@@ -606,6 +610,7 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
                 None,
                 Visibility::Internal,
                 Classification::Internal,
+                BucketRole::Standard,
             )
             .await
             .unwrap();

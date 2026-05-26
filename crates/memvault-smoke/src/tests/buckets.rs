@@ -5,7 +5,7 @@ use std::sync::Arc;
 use memvault_api::{EventBus, LocalClient, MemvaultClient};
 use memvault_core::classification::Classification;
 use memvault_core::{BucketId, ClusterId, DocId, Visibility};
-use memvault_doc::Document;
+use memvault_doc::{BucketRole, Document};
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_store::MemvaultStore;
 use tokio::sync::RwLock;
@@ -17,7 +17,7 @@ async fn create_bucket() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("test", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("test", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     assert_ne!(id, BucketId([0u8; 32]));
@@ -33,6 +33,7 @@ async fn create_bucket_with_description() {
             Some("Daily notes"),
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -51,6 +52,7 @@ async fn create_bucket_default_visibility() {
             None,
             Visibility::Public,
             Classification::Public,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -70,15 +72,15 @@ async fn list_empty_buckets() {
 async fn list_multiple_buckets() {
     let node = TestNode::new();
     node.client
-        .bucket_create("a", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("a", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     node.client
-        .bucket_create("b", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("b", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     node.client
-        .bucket_create("c", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("c", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     let buckets = node.client.bucket_list().await.unwrap();
@@ -97,7 +99,7 @@ async fn rename_bucket() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("old", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("old", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     node.client.bucket_rename(&id, "new").await.unwrap();
@@ -110,7 +112,7 @@ async fn rename_bucket_multiple_times() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("v1", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("v1", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     node.client.bucket_rename(&id, "v2").await.unwrap();
@@ -131,6 +133,7 @@ async fn bucket_auto_attached_when_cluster_exists() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -156,6 +159,7 @@ async fn bucket_attach() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -169,7 +173,7 @@ async fn bucket_attach_idempotent() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("idem", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("idem", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     node.client.bucket_attach(&id).await.unwrap();
@@ -184,7 +188,7 @@ async fn bucket_archive() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("temp", None, Visibility::Internal, Classification::Internal)
+        .bucket_create("temp", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
         .await
         .unwrap();
     node.client
@@ -210,6 +214,7 @@ async fn bucket_bind_to_cluster() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -232,6 +237,7 @@ async fn bucket_bind_non_default() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -255,6 +261,7 @@ async fn bucket_exclusive_binding() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -276,6 +283,7 @@ async fn bucket_rebind_same_cluster_ok() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -302,6 +310,7 @@ async fn bucket_auto_bound_to_cluster() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -319,6 +328,7 @@ async fn create_20_buckets() {
                 None,
                 Visibility::Internal,
                 Classification::Internal,
+                BucketRole::Standard,
             )
             .await
             .unwrap();
@@ -336,6 +346,7 @@ async fn two_nodes_buckets_isolated() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -346,6 +357,7 @@ async fn two_nodes_buckets_isolated() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -383,6 +395,7 @@ async fn private_bucket_attach_after_genesis() {
             Some("Created before genesis"),
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -512,6 +525,7 @@ async fn attach_also_binds_unbound_bucket() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();

@@ -649,6 +649,7 @@ mod native {
                             None,
                             Visibility::Internal,
                             Classification::Internal,
+                            memvault_doc::BucketRole::Standard,
                         )
                         .await?
                 };
@@ -1524,7 +1525,7 @@ mod native {
                 };
                 let client = connect().connect().await?;
                 let bucket_id = client
-                    .bucket_create(&name, desc.as_deref(), vis, class)
+                    .bucket_create(&name, desc.as_deref(), vis, class, memvault_doc::BucketRole::Standard)
                     .await?;
                 println!("Bucket created: {}", hex::encode(bucket_id.0));
             }
@@ -1830,6 +1831,7 @@ mod native {
                             None,
                             Visibility::Internal,
                             Classification::Internal,
+                            memvault_doc::BucketRole::Standard,
                         )
                         .await?;
                     store.bind_bucket(&bucket_id.0, &cluster_id.0, true)?;

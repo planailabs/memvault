@@ -89,6 +89,7 @@ pub async fn create_bucket(
             req.description.as_deref(),
             memvault_core::Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

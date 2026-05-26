@@ -144,6 +144,7 @@ pub trait MemvaultClient: Send + Sync {
         description: Option<&str>,
         default_visibility: Visibility,
         default_classification: Classification,
+        role: memvault_doc::BucketRole,
     ) -> Result<BucketId>;
 
     /// List all buckets in the store.

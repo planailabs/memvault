@@ -69,6 +69,7 @@ async fn create_bucket(name: String) -> Result<String, ServerFnError> {
             None,
             memvault_core::Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
         )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;

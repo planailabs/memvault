@@ -3,7 +3,7 @@
 use memvault_api::MemvaultClient;
 use memvault_core::classification::Classification;
 use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
-use memvault_doc::{Document, Edge, Entity};
+use memvault_doc::{BucketRole, Document, Edge, Entity};
 use std::collections::BTreeMap;
 
 use crate::harness::TestNode;
@@ -20,6 +20,7 @@ async fn full_genesis_workflow() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -82,6 +83,7 @@ async fn two_node_independent_workflow() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -98,6 +100,7 @@ async fn two_node_independent_workflow() {
             None,
             Visibility::Internal,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -166,6 +169,7 @@ async fn bucket_lifecycle_full() {
             Some("full test"),
             Visibility::Federated,
             Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();

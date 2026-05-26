@@ -113,6 +113,42 @@ impl LocalClient {
         self.agent_identity = Some(identity);
     }
 
+    /// Create an `Agent`-role bucket for the current agent identity if one
+    /// does not already exist.  Returns the bucket ID (existing or new).
+    ///
+    /// Call after [`set_agent_identity`] and cluster genesis.  No-op when
+    /// no agent identity is set.
+    pub async fn ensure_agent_bucket(&self) -> Result<Option<memvault_core::BucketId>> {
+        let agent_id = match self.agent_id() {
+            Some(id) => id.clone(),
+            None => return Ok(None),
+        };
+
+        // Check if an agent bucket already exists for this agent.
+        let buckets = self.bucket_list().await?;
+        for b in &buckets {
+            if b.role == memvault_doc::BucketRole::Agent
+                && b.owner_agent.as_ref() == Some(&agent_id)
+            {
+                return Ok(Some(b.id.clone()));
+            }
+        }
+
+        // Create one.
+        let name = format!("agent:{}", agent_id.0);
+        let bid = self
+            .bucket_create(
+                &name,
+                Some("auto-created agent bucket"),
+                Visibility::Internal,
+                memvault_core::classification::Classification::Internal,
+                memvault_doc::BucketRole::Agent,
+            )
+            .await?;
+        tracing::info!(agent = %agent_id.0, bucket = %bid, "created agent bucket");
+        Ok(Some(bid))
+    }
+
     /// Get the agent ID if set.
     pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
         self.agent_identity.as_ref().map(|i| &i.agent_id)
@@ -177,6 +213,7 @@ impl LocalClient {
             default_classification: decl.default_classification,
             created_ns: decl.created_ns,
             envelope_count,
+            role: decl.role,
         }))
     }
 
@@ -1780,6 +1817,7 @@ impl MemvaultClient for LocalClient {
         description: Option<&str>,
         default_visibility: Visibility,
         default_classification: memvault_core::classification::Classification,
+        role: memvault_doc::BucketRole,
     ) -> Result<memvault_core::BucketId> {
         use memvault_doc::BucketDecl;
 
@@ -1802,6 +1840,7 @@ impl MemvaultClient for LocalClient {
             } else {
                 Some(memvault_core::PeerId(self.peer_id.clone()))
             },
+            role,
         };
 
         // Wrap BucketDecl in an envelope so the block is self-describing

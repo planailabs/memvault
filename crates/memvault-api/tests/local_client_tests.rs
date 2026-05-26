@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 use memvault_api::{EventBus, LocalClient, MemvaultClient, MemvaultEvent};
 use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
-use memvault_doc::{Document, Edge, Entity};
+use memvault_doc::{BucketRole, Document, Edge, Entity};
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_store::MemvaultStore;
 use rand::RngCore;
@@ -311,6 +311,7 @@ async fn bucket_create_and_list() {
             Some("A test bucket"),
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -334,6 +335,7 @@ async fn bucket_get_by_id() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -362,6 +364,7 @@ async fn bucket_rename() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -391,6 +394,7 @@ async fn bucket_bind_to_cluster() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -429,6 +433,7 @@ async fn bucket_attach_flips_private() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -459,6 +464,7 @@ async fn bucket_archive() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -468,6 +474,7 @@ async fn bucket_archive() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -495,6 +502,7 @@ async fn bucket_archive_default_refused() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -519,6 +527,7 @@ async fn bucket_create_multiple_and_list() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -528,6 +537,7 @@ async fn bucket_create_multiple_and_list() {
             None,
             Visibility::Federated,
             memvault_core::classification::Classification::Public,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -537,6 +547,7 @@ async fn bucket_create_multiple_and_list() {
             None,
             Visibility::Public,
             memvault_core::classification::Classification::Confidential,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -608,6 +619,7 @@ async fn bucket_bind_exclusive_to_one_cluster() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -654,6 +666,7 @@ async fn bucket_bind_idempotent_same_cluster() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
         )
         .await
         .unwrap();

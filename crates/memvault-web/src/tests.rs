@@ -314,6 +314,7 @@ impl MemvaultClient for MockClient {
         _description: Option<&str>,
         _vis: memvault_core::Visibility,
         _class: memvault_core::classification::Classification,
+        _role: memvault_doc::BucketRole,
     ) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
     }

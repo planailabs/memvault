@@ -98,6 +98,9 @@ pub struct BucketInfo {
     pub created_ns: u64,
     /// Number of envelopes in this bucket.
     pub envelope_count: u64,
+    /// The role this bucket plays (standard, legacy, agent).
+    #[serde(default)]
+    pub role: memvault_doc::BucketRole,
 }
 
 /// Node status information.
