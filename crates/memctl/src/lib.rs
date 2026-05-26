@@ -182,6 +182,13 @@ mod native {
         Peers,
         /// Rebuild all indexes from blockstore, repair VFS tree (re-link orphaned directories)
         RepairIndex,
+        /// Diff blocks between two stores (semantic, deserialized)
+        DiffBlocks {
+            /// Path to first redb database
+            db_a: PathBuf,
+            /// Path to second redb database
+            db_b: PathBuf,
+        },
         /// Export all raw blocks (one file per CID, hex-encoded name)
         ExportBlocks {
             /// Output path (directory or .tar/.tar.gz file)
@@ -881,6 +888,9 @@ mod native {
             Commands::Gc { doc, before } => {
                 println!("GC: doc={doc:?} before={before:?}");
                 println!("  (manual GC not yet wired to compaction)");
+            }
+            Commands::DiffBlocks { db_a, db_b } => {
+                diff_blocks(&db_a, &db_b)?;
             }
             Commands::Peers => {
                 println!("Connected peers: 0 (standalone mode)");
@@ -2017,6 +2027,138 @@ mod native {
             n_docs, n_entities, n_files, link_count
         );
         Ok(())
+    }
+
+    fn diff_blocks(db_a: &Path, db_b: &Path) -> Result<()> {
+        use std::collections::{BTreeMap, HashSet};
+
+        let store_a = Arc::new(MemvaultStore::open(db_a)?);
+        let store_b = Arc::new(MemvaultStore::open(db_b)?);
+
+        let blocks_a = store_a.iter_blocks()?;
+        let blocks_b = store_b.iter_blocks()?;
+
+        let cids_a: HashSet<Vec<u8>> = blocks_a.iter().map(|(c, _)| c.clone()).collect();
+        let cids_b: HashSet<Vec<u8>> = blocks_b.iter().map(|(c, _)| c.clone()).collect();
+
+        let only_a: Vec<&Vec<u8>> = cids_a.difference(&cids_b).collect();
+        let only_b: Vec<&Vec<u8>> = cids_b.difference(&cids_a).collect();
+        let common = cids_a.intersection(&cids_b).count();
+
+        println!("Node A: {} blocks  ({})", blocks_a.len(), db_a.display());
+        println!("Node B: {} blocks  ({})", blocks_b.len(), db_b.display());
+        println!("Common: {common}");
+        println!("Only A: {}", only_a.len());
+        println!("Only B: {}", only_b.len());
+
+        if only_a.is_empty() && only_b.is_empty() {
+            println!("\nStores are identical.");
+            return Ok(());
+        }
+
+        let map_a: BTreeMap<Vec<u8>, Vec<u8>> = blocks_a.into_iter().collect();
+        let map_b: BTreeMap<Vec<u8>, Vec<u8>> = blocks_b.into_iter().collect();
+
+        if !only_a.is_empty() {
+            println!("\n=== Only on Node A ({}) ===\n", only_a.len());
+            for cid in &only_a {
+                if let Some(data) = map_a.get(*cid) {
+                    print_block_summary(cid, data);
+                }
+            }
+        }
+
+        if !only_b.is_empty() {
+            println!("\n=== Only on Node B ({}) ===\n", only_b.len());
+            for cid in &only_b {
+                if let Some(data) = map_b.get(*cid) {
+                    print_block_summary(cid, data);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn print_block_summary(cid: &[u8], data: &[u8]) {
+        let cid_hex = &hex::encode(cid)[..16];
+        let size = data.len();
+
+        if let Some(val) = memvault_store::deserialize_block(data) {
+            // Envelope or manifest — show structured content.
+            let kind = if val.get("payload").is_some() {
+                let payload = val.get("payload").unwrap();
+                if payload.get("DocCreate").is_some() {
+                    "DocCreate"
+                } else if payload.get("DocEdit").is_some() {
+                    "DocEdit"
+                } else if payload.get("EntityCreate").is_some() {
+                    "EntityCreate"
+                } else if payload.get("EntityUpdate").is_some() {
+                    "EntityUpdate"
+                } else if payload.get("EdgeAdd").is_some() {
+                    "EdgeAdd"
+                } else if payload.get("BucketCreate").is_some() {
+                    "BucketCreate"
+                } else {
+                    "envelope"
+                }
+            } else if val.get("content_root").is_some() {
+                "manifest"
+            } else if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                "attachment"
+            } else if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
+                "annotation"
+            } else {
+                "json/cbor"
+            };
+
+            let author = val
+                .get("author")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    let bytes: Vec<u8> = a.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect();
+                    hex::encode(&bytes)
+                })
+                .unwrap_or_default();
+            let author_short = if author.len() > 16 { &author[..16] } else { &author };
+
+            let bucket = val
+                .get("bucket_id")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    let bytes: Vec<u8> = a.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect();
+                    hex::encode(&bytes)
+                });
+            let bucket_short = bucket.as_deref().map(|b| if b.len() > 16 { &b[..16] } else { b });
+
+            let tags: Vec<String> = val
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| {
+                            let a = t.as_array()?;
+                            let s = a.first()?.as_str()?;
+                            let l = a.get(1)?.as_str()?;
+                            Some(format!("{s}:{l}"))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            println!("  {cid_hex}…  {kind:<16} {size:>6}B  author={author_short}…");
+            if let Some(bkt) = bucket_short {
+                println!("    bucket={bkt}…");
+            }
+            if !tags.is_empty() {
+                let tag_str = tags.join(", ");
+                let tag_display = if tag_str.len() > 80 { &tag_str[..80] } else { &tag_str };
+                println!("    tags=[{tag_display}]");
+            }
+        } else {
+            println!("  {cid_hex}…  raw             {size:>6}B");
+        }
     }
 
 } // mod native
