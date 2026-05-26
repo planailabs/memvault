@@ -241,24 +241,40 @@ async fn build_description(
         // ── Bucket events ────────────────────────────────────────
         "BucketCreate" => {
             let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            let name = tags.iter().find(|(s, _)| s == "kind" && *s == "bucket-decl")
-                .map(|_| "bucket").unwrap_or("bucket");
-            (format!("Created bucket ({})", bucket_tag.unwrap_or("?")), None)
+            // Try to resolve bucket name from the store.
+            if let Some(bid) = bucket_tag {
+                if let Ok(Some(info)) = resolve_bucket_name(client, bid).await {
+                    (format!("Created bucket \"{info}\""), None)
+                } else {
+                    (format!("Created bucket {}", short_id(bid)), None)
+                }
+            } else {
+                ("Created bucket".to_string(), None)
+            }
         }
         "BucketRename" => {
             let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            (format!("Renamed bucket {}", bucket_tag.unwrap_or("?")), None)
+            (format!("Renamed bucket {}", bucket_tag.map(short_id).unwrap_or("?".into())), None)
         }
         "BucketAttach" => {
             let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            (format!("Attached bucket {}", bucket_tag.unwrap_or("?")), None)
+            (format!("Attached bucket {} to cluster", bucket_tag.map(short_id).unwrap_or("?".into())), None)
         }
         "BucketArchive" => {
             let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            (format!("Archived bucket {}", bucket_tag.unwrap_or("?")), None)
+            (format!("Archived bucket {}", bucket_tag.map(short_id).unwrap_or("?".into())), None)
+        }
+        "BucketBind" => {
+            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
+            (format!("Bound bucket {} to cluster", bucket_tag.map(short_id).unwrap_or("?".into())), None)
         }
         "BucketTrust" => {
             ("Cross-cluster bucket trust established".to_string(), None)
+        }
+        // ── View events ─────────────────────────────────────────
+        "ViewCreate" => {
+            let view_tag = tags.iter().find(|(s, _)| s == "view").map(|(_, l)| l.as_str());
+            (format!("Created view {}", view_tag.map(short_id).unwrap_or("?".into())), None)
         }
         // ── Token events ────────────────────────────────────────
         "TokenIssue" | "JoinToken" => {
@@ -281,6 +297,22 @@ async fn build_description(
             }
         }
     }
+}
+
+#[cfg(feature = "server")]
+async fn resolve_bucket_name(
+    client: &std::sync::Arc<dyn memvault_api::MemvaultClient>,
+    bucket_tag: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    // bucket_tag is the bs58-encoded bucket ID from the tag.
+    // Try to find it via bucket_list.
+    let buckets = client.bucket_list().await?;
+    for b in &buckets {
+        if b.id.to_string() == bucket_tag || hex::encode(b.id.0) == bucket_tag {
+            return Ok(Some(b.name.clone()));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(feature = "server")]
