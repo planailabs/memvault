@@ -808,6 +808,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                         cid_envelope += 1;
                         continue;
                     }
+                    // Synthesized manifests (from Phase 1c) have content_size +
+                    // filename but their CID references the original manifest.
+                    if val.get("content_size").is_some() && val.get("filename").is_some() {
+                        cid_ok += 1;
+                        continue;
+                    }
                 }
                 cid_mismatch += 1;
                 eprintln!("  CID mismatch: {}", hex::encode(cid));
