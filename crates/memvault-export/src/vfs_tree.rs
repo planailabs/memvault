@@ -16,11 +16,12 @@ pub struct VfsSymlink {
     pub target: PathBuf,
 }
 
-/// Walk the VFS tree and produce symlink entries.
+/// Walk the VFS tree for the default bucket and produce symlink entries.
 pub async fn build_vfs_symlinks(
     client: &dyn MemvaultClient,
 ) -> Result<Vec<VfsSymlink>> {
-    let root = match vfs::ensure_root(client).await {
+    let bucket = vfs::default_bucket(client).await;
+    let root = match vfs::ensure_root(client, &bucket).await {
         Ok(id) => id,
         Err(_) => return Ok(Vec::new()), // no VFS tree
     };

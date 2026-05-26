@@ -91,13 +91,20 @@ pub fn apply_doc_ops(ops: &[Op]) -> Result<Document> {
                 })?;
                 d.frontmatter.remove(key);
             }
-            // Skip graph ops
+            // Skip graph and bucket ops
             Op::EntityCreate { .. }
             | Op::EntityUpdate { .. }
             | Op::EntityDelete { .. }
             | Op::EdgeAdd { .. }
             | Op::EdgeRemove { .. }
-            | Op::EdgeUpdate { .. } => {}
+            | Op::EdgeUpdate { .. }
+            | Op::BucketCreate { .. }
+            | Op::BucketBind { .. }
+            | Op::BucketRename { .. }
+            | Op::BucketArchive { .. }
+            | Op::BucketAttach { .. }
+            | Op::BucketGrantAgent { .. }
+            | Op::BucketRevokeAgent { .. } => {}
         }
     }
 
@@ -186,11 +193,18 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<GraphState> {
                     }
                 }
             }
-            // Skip doc ops
+            // Skip doc and bucket ops
             Op::DocCreate { .. }
             | Op::DocEdit { .. }
             | Op::DocSetMeta { .. }
-            | Op::DocRemoveMeta { .. } => {}
+            | Op::DocRemoveMeta { .. }
+            | Op::BucketCreate { .. }
+            | Op::BucketBind { .. }
+            | Op::BucketRename { .. }
+            | Op::BucketArchive { .. }
+            | Op::BucketAttach { .. }
+            | Op::BucketGrantAgent { .. }
+            | Op::BucketRevokeAgent { .. } => {}
         }
     }
 

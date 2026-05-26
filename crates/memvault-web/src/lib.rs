@@ -72,6 +72,25 @@ mod server_router {
         Router::new().nest("/api/v1", super::api::routes(state))
     }
 
+    /// Serve the memvault fullstack app using dioxus::serve().
+    ///
+    /// This handles port negotiation with dx's dev server automatically.
+    /// Call this instead of manual axum::serve when running under dx serve.
+    /// This function does NOT return — it runs the server forever.
+    pub fn serve_app(state: Arc<AppState>) {
+        use dioxus::server::{DioxusRouterExt, ServeConfig};
+
+        dioxus::serve(move || {
+            let state = Arc::clone(&state);
+            async move {
+                let router = axum::Router::new()
+                    .serve_dioxus_application(ServeConfig::new(), super::ui::app::App)
+                    .nest("/api/v1", super::api::routes(state));
+                Ok(router)
+            }
+        });
+    }
+
     /// Build a fullstack router: API + Dioxus SSR + static assets.
     ///
     /// Uses `serve_dioxus_application` (the standard dioxus fullstack pattern)

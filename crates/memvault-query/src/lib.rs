@@ -18,7 +18,7 @@ pub use audit::retraction::{is_retracted, retract};
 pub use index::effective_tags::effective_tags;
 pub use index::search::{SearchHit, SearchQuery, TextIndex, UnifiedHit, INDEX_FORMAT_VERSION};
 
-pub use quotas::{AgentQuota, QuotaExceeded, QuotaManager};
+pub use quotas::{AgentQuota, BucketQuota, BucketUsage, QuotaExceeded, QuotaManager};
 
 #[cfg(test)]
 mod tests;

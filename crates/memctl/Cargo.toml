@@ -3,7 +3,29 @@ name = "memctl"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Server build uses defaults (daemon). WASM client uses only `web`.
+# dx must be invoked with: @client --no-default-features --features web @server
+# This avoids pulling tokio/mio into the WASM target.
+default = ["daemon"]
+daemon = ["dep:memvault-web", "memvault-web/server", "dep:axum", "dep:dioxus"]
+embed = ["memvault-web?/embed"]
+# WASM client for the web UI — built by dx for embedding.
+# dioxus must be a direct dep so dx detects this as a Dioxus fullstack app.
+web = ["dep:memvault-web", "memvault-web/web", "dep:dioxus", "getrandom_04/wasm_js"]
+
+# Dependencies needed for both native and WASM builds
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom_04 = { package = "getrandom", version = "0.4" }
+
+# Optional WASM/UI dependencies
+memvault-web = { path = "../memvault-web", optional = true, default-features = false }
+dioxus = { version = "0.8.0-alpha.0", features = ["fullstack", "router"], optional = true }
+
+# Native-only dependencies (not compiled for WASM)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memvault-core = { path = "../memvault-core" }
 memvault-doc = { path = "../memvault-doc" }
 memvault-api = { path = "../memvault-api", features = ["http-client"] }
@@ -12,14 +34,22 @@ memvault-query = { path = "../memvault-query" }
 memvault-auth = { path = "../memvault-auth" }
 memvault-export = { path = "../memvault-export" }
 memvault-import = { path = "../memvault-import" }
-serde_json = "1"
+memvault-net = { path = "../memvault-net" }
+memvault-swarm = { path = "../memvault-swarm" }
+libp2p = { workspace = true }
 tokio = { version = "1", features = ["full"] }
-anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
 hex = "0.4"
+futures = "0.3"
+rand = "0.8"
+ed25519-dalek = { version = "2", features = ["serde"] }
 dirs = "6"
+axum = { version = "0.8", optional = true }
+
+[dev-dependencies]
 
 [lib]
 name = "memctl"

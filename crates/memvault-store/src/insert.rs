@@ -1,5 +1,7 @@
 //! Atomic envelope insertion: stores block + all index entries in one transaction.
 
+use redb::ReadableTable;
+
 use crate::error::StoreError;
 use crate::keys;
 use crate::tables::*;
@@ -14,6 +16,8 @@ pub struct EnvelopeMeta {
     pub causal: Vec<Vec<u8>>,
     pub provenance: Vec<Vec<u8>>,
     pub cluster_id: Option<Vec<u8>>,
+    /// Bucket this envelope belongs to (extracted from the envelope's bucket_id field).
+    pub bucket_id: Option<Vec<u8>>,
 }
 
 impl MemvaultStore {
@@ -37,6 +41,8 @@ impl MemvaultStore {
             let mut t = txn.open_table(CLUSTER_ORIGIN)?;
             while let Some(entry) = t.pop_first()? { drop(entry); }
             let mut t = txn.open_table(EDGES)?;
+            while let Some(entry) = t.pop_first()? { drop(entry); }
+            let mut t = txn.open_table(BY_BUCKET)?;
             while let Some(entry) = t.pop_first()? { drop(entry); }
         }
         txn.commit()?;
@@ -78,6 +84,8 @@ impl MemvaultStore {
             .unwrap_or_default();
         let cluster_id: Option<Vec<u8>> = val.get("cluster_id")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let bucket_id: Option<Vec<u8>> = val.get("bucket_id")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         if wall_ns == 0 && author.is_empty() && tags.is_empty() {
             return Ok(false); // not an envelope
@@ -90,6 +98,7 @@ impl MemvaultStore {
             causal,
             provenance,
             cluster_id,
+            bucket_id,
         };
 
         // Write index entries (without re-inserting the block itself)
@@ -128,9 +137,97 @@ impl MemvaultStore {
                 let cluster_key = keys::pack_cluster_key(cluster_id, meta.wall_ns, cid_bytes);
                 cluster_table.insert(cluster_key.as_slice(), &[] as &[u8])?;
             }
+
+            if let Some(bucket_id) = &meta.bucket_id {
+                let mut bucket_table = txn.open_table(BY_BUCKET)?;
+                let bucket_key = keys::pack_bucket_key(bucket_id, meta.wall_ns, cid_bytes);
+                bucket_table.insert(bucket_key.as_slice(), &[] as &[u8])?;
+            }
+
+            // ── Bucket metadata reconstruction ──────────────────
+            // If this envelope is a bucket decl, also populate the BUCKETS table.
+            let has_bucket_tag = meta.tags.iter()
+                .any(|(s, l)| s == "kind" && l == "bucket-decl");
+            if has_bucket_tag {
+                // Try payload.BucketCreate.bucket_id (new envelope format)
+                // then fall back to root bucket_id (legacy raw BucketDecl).
+                let bid = val.get("payload")
+                    .and_then(|p| p.get("BucketCreate"))
+                    .and_then(|bc| bc.get("bucket_id"))
+                    .or_else(|| val.get("bucket_id"))
+                    .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok());
+                if let Some(bid) = bid {
+                    let mut bucket_table = txn.open_table(BUCKETS)?;
+                    bucket_table.insert(bid.as_slice(), cid_bytes)?;
+
+                    // Also bind the bucket to the cluster from the envelope metadata.
+                    if let Some(ref cid_val) = meta.cluster_id {
+                        if cid_val.iter().any(|&b| b != 0) {
+                            let mut bc_table = txn.open_table(BUCKET_CLUSTER)?;
+                            // Only bind if not already bound (don't overwrite).
+                            if bc_table.get(bid.as_slice())?.is_none() {
+                                bc_table.insert(bid.as_slice(), cid_val.as_slice())?;
+                            }
+                        }
+                    }
+                }
+            }
         }
         txn.commit()?;
         tracing::debug!("reindexed block");
+        Ok(true)
+    }
+
+    /// Try to parse a block as a BucketDecl and register it in the BUCKETS table.
+    /// Call this after storing a synced block that might be a bucket declaration.
+    /// Returns true if the block was recognized as a bucket decl.
+    pub fn reindex_bucket_decl(&self, cid_bytes: &[u8], block_bytes: &[u8]) -> Result<bool, StoreError> {
+        let val: serde_json::Value = match serde_json::from_slice(block_bytes) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+
+        // Try envelope format: payload.BucketCreate.bucket_id
+        let (bucket_id, cluster_id) = if let Some(bc) = val.get("payload")
+            .and_then(|p| p.get("BucketCreate"))
+        {
+            let bid = bc.get("bucket_id")
+                .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok());
+            let cid = val.get("cluster_id")
+                .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+            (bid, cid)
+        } else {
+            // Legacy raw BucketDecl: has bucket_id + name at root.
+            let bid = val.get("bucket_id")
+                .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok());
+            if bid.is_some() && val.get("name").and_then(|v| v.as_str()).is_none() {
+                return Ok(false); // Has bucket_id but no name — not a decl.
+            }
+            (bid, None)
+        };
+
+        let bucket_id = match bucket_id {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(BUCKETS)?;
+            table.insert(bucket_id.as_slice(), cid_bytes)?;
+
+            // Bind to cluster if we know it.
+            if let Some(ref cid_val) = cluster_id {
+                if cid_val.iter().any(|&b| b != 0) {
+                    let mut bc_table = txn.open_table(BUCKET_CLUSTER)?;
+                    if bc_table.get(bucket_id.as_slice())?.is_none() {
+                        bc_table.insert(bucket_id.as_slice(), cid_val.as_slice())?;
+                    }
+                }
+            }
+        }
+        txn.commit()?;
+        tracing::debug!(bucket = %hex::encode(bucket_id), "reindexed bucket decl");
         Ok(true)
     }
 
@@ -202,6 +299,13 @@ impl MemvaultStore {
                 let mut cluster_table = txn.open_table(CLUSTER_ORIGIN)?;
                 let cluster_key = keys::pack_cluster_key(cluster_id, meta.wall_ns, cid_bytes);
                 cluster_table.insert(cluster_key.as_slice(), &[] as &[u8])?;
+            }
+
+            // Bucket index
+            if let Some(bucket_id) = &meta.bucket_id {
+                let mut bucket_table = txn.open_table(BY_BUCKET)?;
+                let bucket_key = keys::pack_bucket_key(bucket_id, meta.wall_ns, cid_bytes);
+                bucket_table.insert(bucket_key.as_slice(), &[] as &[u8])?;
             }
         }
         txn.commit()?;

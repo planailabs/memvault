@@ -25,4 +25,7 @@ pub enum StoreError {
 
     #[error("CID mismatch: expected {expected}, got {got}")]
     CidMismatch { expected: String, got: String },
+
+    #[error("{0}")]
+    Other(String),
 }

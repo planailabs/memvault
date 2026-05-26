@@ -67,12 +67,13 @@ pub async fn create_entity(
         edges_out: vec![],
     };
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
-    let id = state.client.add_entity(entity, vis).await?;
+    let id = state.client.add_entity(entity, vis, None).await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
 
     if let Some(vfs_path) = &req.vfs_path {
-        if let Err(e) = memvault_api::vfs::link_node_at_path(state.client.as_ref(), vfs_path, &node_id).await {
+        let bucket = memvault_api::vfs::default_bucket(state.client.as_ref()).await;
+        if let Err(e) = memvault_api::vfs::link_node_at_path(state.client.as_ref(), &bucket, vfs_path, &node_id).await {
             tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
         }
     }

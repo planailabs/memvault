@@ -98,7 +98,7 @@ async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, Serv
 
     // Load entities
     let entities = client
-        .list_entities(200)
+        .list_entities(200, None)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 

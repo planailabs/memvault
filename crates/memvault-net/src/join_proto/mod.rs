@@ -14,6 +14,12 @@ pub struct JoinRequest {
     pub token_block: Vec<u8>,
     pub peer_id: Vec<u8>,
     pub requested_ttl: Option<u64>,
+    /// Agent identifier for enrollment (e.g. "openclaw").
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Agent's Ed25519 public key (32 bytes) for enrollment.
+    #[serde(default)]
+    pub public_key: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +30,12 @@ pub struct JoinResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JoinResult {
-    Success { attestation_block: Vec<u8> },
+    Success {
+        attestation_block: Vec<u8>,
+        /// AgentEnrollment block (CBOR), present when the request included agent_id + public_key.
+        #[serde(default)]
+        enrollment_block: Option<Vec<u8>>,
+    },
     Refuse { reason: JoinRefuseReason, try_peers: Vec<String> },
 }
 

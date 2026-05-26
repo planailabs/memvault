@@ -20,6 +20,15 @@ pub enum OpKind {
     TagUpdate,
     Extraction,
     Retract,
+    BucketCreate,
+    BucketRename,
+    BucketAttach,
+    BucketArchive,
+    BucketBind,
+    ViewCreate,
+    TokenIssue,
+    SharePropose,
+    ShareDecide,
     Other(String),
 }
 
@@ -115,22 +124,43 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
             OpKind::EdgeAdd
         } else if p.get("EdgeRemove").is_some() {
             OpKind::EdgeRemove
+        } else if p.get("BucketCreate").is_some() {
+            OpKind::BucketCreate
+        } else if p.get("BucketRename").is_some() {
+            OpKind::BucketRename
+        } else if p.get("BucketAttach").is_some() {
+            OpKind::BucketAttach
+        } else if p.get("BucketArchive").is_some() {
+            OpKind::BucketArchive
+        } else if p.get("BucketBind").is_some() {
+            OpKind::BucketBind
         } else {
             OpKind::Other("unknown".into())
         }
     } else {
         let kind = val.get("kind").and_then(|v| v.as_str());
         let ann_type = val.get("type").and_then(|v| v.as_str());
-        match (kind, ann_type) {
-            (Some("annotation"), Some("retraction")) => OpKind::Retract,
-            (Some("annotation"), Some("tag_update")) => OpKind::TagUpdate,
-            (Some("annotation"), Some("extraction")) => OpKind::Extraction,
-            (Some("annotation"), Some(t)) => OpKind::Other(t.into()),
-            (Some("attachment"), _) => OpKind::AttachFile,
-            (Some("node_retraction"), _) => OpKind::Retract, // legacy
-            (Some("tag_update"), _) => OpKind::TagUpdate, // legacy
-            (Some(other), _) => OpKind::Other(other.into()),
-            (None, _) => OpKind::Other("unknown".into()),
+        let kind_tag = tags.iter().find(|(s, _)| s == "kind").map(|(_, l)| l.as_str());
+        match (kind, ann_type, kind_tag) {
+            (Some("annotation"), Some("retraction"), _) => OpKind::Retract,
+            (Some("annotation"), Some("tag_update"), _) => OpKind::TagUpdate,
+            (Some("annotation"), Some("extraction"), _) => OpKind::Extraction,
+            (Some("annotation"), Some(t), _) => OpKind::Other(t.into()),
+            (Some("attachment"), _, _) => OpKind::AttachFile,
+            (Some("node_retraction"), _, _) => OpKind::Retract,
+            (Some("tag_update"), _, _) => OpKind::TagUpdate,
+            // Bucket ops stored without payload wrapper (legacy).
+            (_, _, Some("bucket-decl")) => OpKind::BucketCreate,
+            (_, _, Some("bucket-rename")) => OpKind::BucketRename,
+            (_, _, Some("bucket-archive")) => OpKind::BucketArchive,
+            // View and token blocks.
+            (_, _, Some("view")) => OpKind::ViewCreate,
+            (_, _, Some("join-token")) => OpKind::TokenIssue,
+            (_, _, Some("share-proposal")) => OpKind::SharePropose,
+            (_, _, Some("share-decision")) => OpKind::ShareDecide,
+            (Some(other), _, _) => OpKind::Other(other.into()),
+            (None, _, Some(other)) => OpKind::Other(other.into()),
+            _ => OpKind::Other("unknown".into()),
         }
     };
 

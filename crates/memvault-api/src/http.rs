@@ -5,14 +5,14 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 
-use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_auth::Role;
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 
 use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
-use crate::types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View};
+use crate::types::{BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View};
 
 /// HTTP client that implements MemvaultClient by talking to the daemon's REST API.
 pub struct HttpApiClient {
@@ -72,6 +72,7 @@ impl MemvaultClient for HttpApiClient {
         doc: Document,
         tags: Vec<(String, String)>,
         vis: Visibility,
+        _bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         let resp: serde_json::Value = self
             .client
@@ -136,6 +137,7 @@ impl MemvaultClient for HttpApiClient {
         &self,
         tag_filter: Option<(String, String)>,
         limit: usize,
+        _bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
         let mut url = format!("{}?limit={limit}", self.url("/docs"));
         if let Some((scope, label)) = &tag_filter {
@@ -186,6 +188,7 @@ impl MemvaultClient for HttpApiClient {
         mime_type: &str,
         _tags: Vec<(String, String)>,
         _visibility: &str,
+        _bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         let fname = filename.unwrap_or("unnamed");
         let part = reqwest::multipart::Part::bytes(data.to_vec())
@@ -254,7 +257,7 @@ impl MemvaultClient for HttpApiClient {
 
     // -- Graph --
 
-    async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId> {
+    async fn add_entity(&self, entity: Entity, vis: Visibility, _bucket: Option<&BucketId>) -> Result<EntityId> {
         let resp: serde_json::Value = self
             .client
             .post(self.url("/entities"))
@@ -300,7 +303,7 @@ impl MemvaultClient for HttpApiClient {
         Ok(Some(Entity { id: id.clone(), kind, props, edges_out: vec![] }))
     }
 
-    async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>> {
+    async fn list_entities(&self, limit: usize, _bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
         let resp: serde_json::Value = self
             .client
             .get(self.url(&format!("/nodes?limit={limit}&type=entity")))
@@ -558,11 +561,165 @@ impl MemvaultClient for HttpApiClient {
 
     // -- Tokens --
 
-    async fn issue_token(&self, _role: Role, _ttl_secs: u64, _max_uses: u32, _label: Option<String>) -> Result<String> {
-        Err(ApiError::Other("token operations not supported via HTTP".into()))
+    async fn issue_token(&self, role: Role, ttl_secs: u64, max_uses: u32, label: Option<String>) -> Result<String> {
+        let body = serde_json::json!({
+            "role": role,
+            "ttl_secs": ttl_secs,
+            "max_uses": max_uses,
+            "label": label,
+        });
+        let resp: serde_json::Value = self
+            .client
+            .post(self.url("/tokens"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        resp["token"].as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| ApiError::Other("missing token in response".into()))
     }
-    async fn list_tokens(&self) -> Result<Vec<TokenStatus>> { Ok(vec![]) }
-    async fn revoke_token(&self, _token_cid: &[u8], _reason: &str) -> Result<()> { Ok(()) }
+
+    async fn list_tokens(&self) -> Result<Vec<TokenStatus>> {
+        let resp = self
+            .client
+            .get(self.url("/tokens"))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn revoke_token(&self, token_cid: &[u8], reason: &str) -> Result<()> {
+        let body = serde_json::json!({ "reason": reason });
+        self.client
+            .delete(self.url(&format!("/tokens/{}", hex::encode(token_cid))))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    // -- Buckets --
+
+    async fn bucket_create(
+        &self, name: &str, description: Option<&str>,
+        default_visibility: memvault_core::Visibility,
+        default_classification: memvault_core::classification::Classification,
+    ) -> Result<memvault_core::BucketId> {
+        let body = serde_json::json!({
+            "name": name,
+            "description": description,
+            "default_visibility": default_visibility,
+            "default_classification": default_classification,
+        });
+        let resp: serde_json::Value = self.client
+            .post(self.url("/buckets"))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        let id_bytes: Vec<u8> = serde_json::from_value(resp["id"].clone())
+            .map_err(|e| ApiError::Other(format!("missing bucket id: {e}")))?;
+        let arr: [u8; 32] = id_bytes.try_into()
+            .map_err(|_| ApiError::Other("bucket id must be 32 bytes".into()))?;
+        Ok(memvault_core::BucketId(arr))
+    }
+
+    async fn bucket_list(&self) -> Result<Vec<BucketInfo>> {
+        let resp = self.client.get(self.url("/buckets"))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn bucket_get(&self, id: &memvault_core::BucketId) -> Result<Option<BucketInfo>> {
+        let resp = self.client.get(self.url(&format!("/buckets/{}", hex::encode(id.0))))
+            .send().await.map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let info = resp.error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(Some(info))
+    }
+
+    async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {
+        let body = serde_json::json!({ "name": new_name });
+        self.client.patch(self.url(&format!("/buckets/{}", hex::encode(id.0))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn bucket_bind(
+        &self, bucket_id: &memvault_core::BucketId,
+        cluster_id: &memvault_core::ClusterId, is_default: bool,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "cluster_id": cluster_id.0,
+            "is_default": is_default,
+        });
+        self.client.post(self.url(&format!("/buckets/{}/bind", hex::encode(bucket_id.0))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn share_inbox(&self) -> Result<Vec<Vec<u8>>> {
+        let resp = self.client.get(self.url("/share/inbox"))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn share_outbox(&self) -> Result<Vec<Vec<u8>>> {
+        let resp = self.client.get(self.url("/share/outbox"))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?
+            .json().await.map_err(map_reqwest)?;
+        Ok(resp)
+    }
+
+    async fn share_decide(&self, proposal_cid: &[u8], approve: bool, reason: Option<&str>) -> Result<()> {
+        let body = serde_json::json!({
+            "approve": approve,
+            "reason": reason,
+        });
+        self.client.post(self.url(&format!("/share/decide/{}", hex::encode(proposal_cid))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn bucket_attach(&self, id: &memvault_core::BucketId) -> Result<()> {
+        self.client.post(self.url(&format!("/buckets/{}/attach", hex::encode(id.0))))
+            .send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
+        let body = serde_json::json!({ "reason": reason });
+        self.client.post(self.url(&format!("/buckets/{}/archive", hex::encode(id.0))))
+            .json(&body).send().await.map_err(map_reqwest)?
+            .error_for_status().map_err(map_reqwest)?;
+        Ok(())
+    }
 
     // -- Rotation --
 
@@ -590,5 +747,16 @@ impl MemvaultClient for HttpApiClient {
             peer_count: resp["peer_count"].as_u64().unwrap_or(0) as u32,
             uptime_secs: resp["uptime_secs"].as_u64().unwrap_or(0),
         })
+    }
+
+    async fn default_bucket_id(&self) -> Result<BucketId> {
+        let buckets = self.bucket_list().await?;
+        if let Some(b) = buckets.iter().find(|b| b.is_default) {
+            return Ok(b.id.clone());
+        }
+        if let Some(b) = buckets.first() {
+            return Ok(b.id.clone());
+        }
+        Ok(BucketId([0u8; 32]))
     }
 }

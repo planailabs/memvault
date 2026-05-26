@@ -50,13 +50,18 @@ mod inner {
 
         tracing::info!("opening local memvault db at {}", db_path.display());
         let store = Arc::new(memvault_store::MemvaultStore::open(&db_path)?);
+
+        // Read peer_id and cluster_id from store (set during genesis/daemon start)
+        let peer_id = store.get_local_peer_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
+        let cluster_id = store.get_local_cluster_id().ok().flatten().unwrap_or_else(|| vec![0u8; 32]);
+
         let client = Arc::new(memvault_api::LocalClient::new(
             store,
             Arc::new(RwLock::new(memvault_query::TextIndex::new())),
             Arc::new(RwLock::new(memvault_query::QuotaManager::new(Default::default()))),
             Arc::new(memvault_api::EventBus::new(64)),
-            vec![0u8; 32],
-            vec![0u8; 32],
+            peer_id,
+            cluster_id,
         ));
 
         // Load or rebuild the text index in a background thread to avoid
@@ -75,3 +80,25 @@ mod inner {
 
 #[cfg(feature = "server")]
 pub use inner::*;
+
+/// Server-side storage for the API auth token, used to generate session tokens
+/// for the web UI to call the REST API directly.
+#[cfg(feature = "server")]
+mod token_store {
+    use std::sync::OnceLock;
+
+    static API_TOKEN: OnceLock<String> = OnceLock::new();
+
+    /// Set the API auth token (called during server startup).
+    pub fn set_api_token(token: String) {
+        let _ = API_TOKEN.set(token);
+    }
+
+    /// Get the API auth token for session-token generation.
+    pub fn api_token() -> Option<&'static str> {
+        API_TOKEN.get().map(|s| s.as_str())
+    }
+}
+
+#[cfg(feature = "server")]
+pub use token_store::*;

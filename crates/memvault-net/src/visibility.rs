@@ -38,6 +38,42 @@ impl VisibilityFilter {
         }
     }
 
+    /// Extended serve check that also considers bucket privacy.
+    ///
+    /// This is the security boundary — every bitswap serve path MUST consult it.
+    /// Gossip filtering is a performance optimization only.
+    ///
+    /// Checks (in order):
+    /// 1. Block visibility (Internal/Federated/Public)
+    /// 2. Private bucket: refuse if bucket is private to another peer
+    /// 3. Cross-cluster: require BucketTrust for the specific bucket
+    pub fn may_serve(
+        &self,
+        block_visibility: &Visibility,
+        bucket_private_to_peer: Option<&[u8]>,
+        requester: &ConnectionState,
+        federation_state: &FederationState,
+    ) -> ServeDecision {
+        // 1. Visibility check
+        if !self.can_serve(block_visibility, requester, federation_state) {
+            return ServeDecision::Refused(ServeRefuseReason::VisibilityRefused);
+        }
+
+        // 2. Private bucket check
+        if let Some(owner_peer) = bucket_private_to_peer {
+            if owner_peer != self.local_cluster_id.as_slice() {
+                // Private to someone else on this cluster — refuse to everyone
+                return ServeDecision::Refused(ServeRefuseReason::BucketPrivate);
+            }
+            if !requester.is_local_cluster || requester.peer_id != owner_peer {
+                // Private to this peer — refuse to any other peer
+                return ServeDecision::Refused(ServeRefuseReason::BucketPrivate);
+            }
+        }
+
+        ServeDecision::Allowed
+    }
+
     /// Filter a list of head announcements for a specific peer.
     pub fn filter_heads_for_peer<'a>(
         &self,
@@ -50,6 +86,21 @@ impl VisibilityFilter {
             .filter(|(_, vis, _)| self.can_serve(vis, peer, federation_state))
             .collect()
     }
+}
+
+/// Result of a serve-side access check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeDecision {
+    Allowed,
+    Refused(ServeRefuseReason),
+}
+
+/// Why a serve request was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeRefuseReason {
+    VisibilityRefused,
+    BucketPrivate,
+    NoBucketTrust,
 }
 
 #[cfg(test)]

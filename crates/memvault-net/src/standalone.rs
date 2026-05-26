@@ -8,6 +8,7 @@ use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, StreamProtocol, Swarm, SwarmBuilder};
 
 use crate::auth_proto::{AuthCodec, AUTH_PROTOCOL};
+use crate::block_proto::{BlockCodec, BLOCK_PROTOCOL};
 use crate::error::NetError;
 use crate::gossip;
 use crate::join_proto::{JoinCodec, JOIN_PROTOCOL};
@@ -21,6 +22,7 @@ pub struct StandaloneMemvaultBehaviour {
     pub kad: kad::Behaviour<kad::store::MemoryStore>,
     pub auth: request_response::Behaviour<AuthCodec>,
     pub join: request_response::Behaviour<JoinCodec>,
+    pub block_exchange: request_response::Behaviour<BlockCodec>,
     pub gossipsub: gossipsub::Behaviour,
 }
 
@@ -61,6 +63,14 @@ pub async fn standalone_swarm(
                 request_response::Config::default(),
             );
 
+            let block_exchange = request_response::Behaviour::new(
+                [(
+                    StreamProtocol::new(BLOCK_PROTOCOL),
+                    ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            );
+
             let gossipsub_config = gossipsub::Config::default();
             let mut gs = gossipsub::Behaviour::new(
                 MessageAuthenticity::Signed(key.clone()),
@@ -93,6 +103,7 @@ pub async fn standalone_swarm(
                 kad,
                 auth,
                 join,
+                block_exchange,
                 gossipsub: gs,
             })
         })

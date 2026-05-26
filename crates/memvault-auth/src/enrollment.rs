@@ -1,6 +1,6 @@
 use cid::Cid;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use memvault_core::{AgentId, ClusterId, PeerId};
+use memvault_core::{AgentId, BucketId, ClusterId, PeerId};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -14,6 +14,11 @@ pub struct AgentEnrollment {
     pub cluster_id: ClusterId,
     pub enrolled_by: PeerId,
     pub initial_grants: Vec<Cid>,
+    /// The bucket the agent writes to when no bucket is specified.
+    /// Defaults to the cluster's default bucket if not set.
+    /// Added in B2. Old enrollments deserialize with None via #[serde(default)].
+    #[serde(default)]
+    pub default_bucket: Option<BucketId>,
     pub not_after_ns: u64,
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
@@ -26,6 +31,7 @@ struct EnrollmentSigningPayload<'a> {
     cluster_id: &'a ClusterId,
     enrolled_by: &'a PeerId,
     initial_grants: &'a [Cid],
+    default_bucket: &'a Option<BucketId>,
     not_after_ns: u64,
 }
 
@@ -38,6 +44,7 @@ impl AgentEnrollment {
             cluster_id: &self.cluster_id,
             enrolled_by: &self.enrolled_by,
             initial_grants: &self.initial_grants,
+            default_bucket: &self.default_bucket,
             not_after_ns: self.not_after_ns,
         };
         serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))

@@ -1,26 +1,30 @@
 //! The MemvaultClient trait — the full API surface.
 
 use async_trait::async_trait;
-use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::classification::Classification;
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 use memvault_auth::Role;
 
 use crate::error::Result;
-use crate::types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
+use crate::types::{BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
 
 /// The complete memvault API surface.
+///
+/// All write and list operations accept an optional `bucket` parameter.
+/// When `None`, implementations should resolve the cluster's default bucket.
 #[async_trait]
 pub trait MemvaultClient: Send + Sync {
     // -- Documents --
-    async fn put_doc(&self, doc: Document, tags: Vec<(String, String)>, vis: Visibility) -> Result<Vec<u8>>;
+    async fn put_doc(&self, doc: Document, tags: Vec<(String, String)>, vis: Visibility, bucket: Option<&BucketId>) -> Result<Vec<u8>>;
     async fn get_doc(&self, id: &DocId) -> Result<Option<Document>>;
     async fn edit_doc(&self, id: &DocId, patch: TextPatch) -> Result<Vec<u8>>;
-    async fn list_docs(&self, tag_filter: Option<(String, String)>, limit: usize) -> Result<Vec<DocSummary>>;
+    async fn list_docs(&self, tag_filter: Option<(String, String)>, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<DocSummary>>;
 
     // -- Files --
     async fn upload_file(&self, data: &[u8], filename: Option<&str>, mime_type: &str,
-                         tags: Vec<(String, String)>, visibility: &str) -> Result<Vec<u8>>;
+                         tags: Vec<(String, String)>, visibility: &str, bucket: Option<&BucketId>) -> Result<Vec<u8>>;
     async fn read_file(&self, manifest_cid: &[u8]) -> Result<Vec<u8>>;
     async fn read_file_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>>;
     async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>>;
@@ -30,9 +34,9 @@ pub trait MemvaultClient: Send + Sync {
     async fn get_file_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>>;  // returns JSON
 
     // -- Graph --
-    async fn add_entity(&self, entity: Entity, vis: Visibility) -> Result<EntityId>;
+    async fn add_entity(&self, entity: Entity, vis: Visibility, bucket: Option<&BucketId>) -> Result<EntityId>;
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>>;
-    async fn list_entities(&self, limit: usize) -> Result<Vec<Entity>>;
+    async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>>;
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>>;
 
     // -- Links (cross-type edges) --
@@ -72,6 +76,9 @@ pub trait MemvaultClient: Send + Sync {
     /// Resolve a node_id (tag_label like "entity:<hex>") to a human-readable label.
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>>;
 
+    /// Resolve the default bucket for this client (cluster default or first available).
+    async fn default_bucket_id(&self) -> Result<BucketId>;
+
     // -- History & Audit --
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>>;
     async fn audit(&self, query: AuditQuery) -> Result<Vec<AuditRecord>>;
@@ -87,6 +94,45 @@ pub trait MemvaultClient: Send + Sync {
 
     // -- Rotation --
     async fn list_rotations(&self) -> Result<Vec<RotationInfo>>;
+
+    // -- Buckets --
+    /// Create a new bucket. Does NOT require a cluster — creates a standalone bucket.
+    async fn bucket_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        default_visibility: Visibility,
+        default_classification: Classification,
+    ) -> Result<BucketId>;
+
+    /// List all buckets in the store.
+    async fn bucket_list(&self) -> Result<Vec<BucketInfo>>;
+
+    /// Get a single bucket's info by ID.
+    async fn bucket_get(&self, id: &BucketId) -> Result<Option<BucketInfo>>;
+
+    /// Rename a bucket (writes a BucketRename op, LWW by lamport).
+    async fn bucket_rename(&self, id: &BucketId, new_name: &str) -> Result<()>;
+
+    /// Bind a bucket to a cluster. If `is_default`, set it as the cluster's default.
+    async fn bucket_bind(&self, bucket_id: &BucketId, cluster_id: &ClusterId, is_default: bool) -> Result<()>;
+
+    /// Attach a private bucket to the cluster (flips private_to_peer to None, triggers gossip).
+    async fn bucket_attach(&self, id: &BucketId) -> Result<()>;
+
+    /// Archive a bucket (soft-remove: new writes are refused, reads continue, data preserved).
+    async fn bucket_archive(&self, id: &BucketId, reason: &str) -> Result<()>;
+
+    // -- Sharing --
+
+    /// List share proposals received by this cluster.
+    async fn share_inbox(&self) -> Result<Vec<Vec<u8>>>;
+
+    /// List share proposals sent by this cluster.
+    async fn share_outbox(&self) -> Result<Vec<Vec<u8>>>;
+
+    /// Decide a share proposal (approve or reject).
+    async fn share_decide(&self, proposal_cid: &[u8], approve: bool, reason: Option<&str>) -> Result<()>;
 
     // -- Status --
     async fn status(&self) -> Result<NodeStatus>;

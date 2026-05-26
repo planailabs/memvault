@@ -14,7 +14,7 @@ pub use classification::Classification;
 pub use codec::{decode, encode};
 pub use envelope::Signed;
 pub use error::{Error, Result};
-pub use ids::{AgentId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId};
+pub use ids::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId};
 pub use tags::{Tag, TagPattern};
 pub use tags_lint::lint_tags;
 pub use time::{wall_ns, LamportClock};
