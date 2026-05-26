@@ -12,9 +12,7 @@ pub fn lint_tags(tags: &[Tag]) -> Result<Classification> {
         .collect();
 
     match classification_tags.len() {
-        0 => Err(Error::TagLint(
-            "missing required classification tag".into(),
-        )),
+        0 => Err(Error::TagLint("missing required classification tag".into())),
         1 => {
             let tag = classification_tags[0];
             Classification::from_label(&tag.label).ok_or_else(|| {

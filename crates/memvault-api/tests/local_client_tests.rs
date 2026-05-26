@@ -45,7 +45,12 @@ async fn put_doc_and_get_doc_roundtrip() {
     let doc = Document::new(doc_id.clone(), "Hello, world!".to_string(), frontmatter);
 
     let cid = client
-        .put_doc(doc, vec![("ns".into(), "test".into())], Visibility::Internal, None)
+        .put_doc(
+            doc,
+            vec![("ns".into(), "test".into())],
+            Visibility::Internal,
+            None,
+        )
         .await
         .unwrap();
     assert!(!cid.is_empty());
@@ -66,7 +71,11 @@ async fn attach_file_and_get_attachment_roundtrip() {
     let (_dir, client) = make_client();
 
     let doc_id = DocId::random();
-    let doc = Document::new(doc_id.clone(), "doc with attachment".to_string(), BTreeMap::new());
+    let doc = Document::new(
+        doc_id.clone(),
+        "doc with attachment".to_string(),
+        BTreeMap::new(),
+    );
     client
         .put_doc(doc, vec![], Visibility::Internal, None)
         .await
@@ -137,7 +146,11 @@ async fn add_entity_and_traverse() {
         provenance: None,
     };
     client
-        .add_link(&NodeRef::Entity(id_a.clone()), edge_ab, Visibility::Internal)
+        .add_link(
+            &NodeRef::Entity(id_a.clone()),
+            edge_ab,
+            Visibility::Internal,
+        )
         .await
         .unwrap();
 
@@ -150,12 +163,19 @@ async fn add_entity_and_traverse() {
         provenance: None,
     };
     client
-        .add_link(&NodeRef::Entity(id_b.clone()), edge_bc, Visibility::Internal)
+        .add_link(
+            &NodeRef::Entity(id_b.clone()),
+            edge_bc,
+            Visibility::Internal,
+        )
         .await
         .unwrap();
 
     // Traverse from A with max_depth=2
-    let hits = client.traverse_from(&NodeRef::Entity(id_a.clone()), Some("knows"), 2).await.unwrap();
+    let hits = client
+        .traverse_from(&NodeRef::Entity(id_a.clone()), Some("knows"), 2)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 2);
 
     // First hit should be B at depth 1
@@ -181,7 +201,12 @@ async fn search_after_indexing() {
         frontmatter,
     );
     client
-        .put_doc(doc, vec![("lang".into(), "rust".into())], Visibility::Internal, None)
+        .put_doc(
+            doc,
+            vec![("lang".into(), "rust".into())],
+            Visibility::Internal,
+            None,
+        )
         .await
         .unwrap();
 
@@ -280,12 +305,15 @@ async fn bucket_create_and_list() {
     assert!(buckets.is_empty());
 
     // Create a bucket
-    let bucket_id = client.bucket_create(
-        "test-bucket",
-        Some("A test bucket"),
-        Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "test-bucket",
+            Some("A test bucket"),
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     // List should return it
     let buckets = client.bucket_list().await.unwrap();
@@ -300,10 +328,15 @@ async fn bucket_create_and_list() {
 #[tokio::test]
 async fn bucket_get_by_id() {
     let (_dir, client) = make_client();
-    let bucket_id = client.bucket_create(
-        "alpha", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "alpha",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     let info = client.bucket_get(&bucket_id).await.unwrap();
     assert!(info.is_some());
@@ -323,10 +356,15 @@ async fn bucket_get_nonexistent_returns_none() {
 #[tokio::test]
 async fn bucket_rename() {
     let (_dir, client) = make_client();
-    let bucket_id = client.bucket_create(
-        "old-name", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "old-name",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     client.bucket_rename(&bucket_id, "new-name").await.unwrap();
 
@@ -340,22 +378,32 @@ async fn bucket_bind_to_cluster() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
-        store, Arc::new(RwLock::new(TextIndex::new())),
+        store,
+        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
-        b"peer-1".to_vec(), vec![0u8; 32],
+        b"peer-1".to_vec(),
+        vec![0u8; 32],
     ));
-    let bucket_id = client.bucket_create(
-        "bindable", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "bindable",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     // Not bound yet (zero cluster = no auto-bind)
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert!(info.cluster_id.is_none());
 
     let cluster_id = memvault_core::ClusterId([1u8; 32]);
-    client.bucket_bind(&bucket_id, &cluster_id, true).await.unwrap();
+    client
+        .bucket_bind(&bucket_id, &cluster_id, true)
+        .await
+        .unwrap();
 
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(cluster_id));
@@ -368,15 +416,22 @@ async fn bucket_attach_flips_private() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
-        store, Arc::new(RwLock::new(TextIndex::new())),
+        store,
+        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
-        b"peer-1".to_vec(), vec![0u8; 32],
+        b"peer-1".to_vec(),
+        vec![0u8; 32],
     ));
-    let bucket_id = client.bucket_create(
-        "private-bucket", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "private-bucket",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     // Initially private (no cluster → not auto-attached)
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
@@ -398,33 +453,58 @@ async fn bucket_attach_flips_private() {
 async fn bucket_archive() {
     let (_dir, client) = make_client();
     // First bucket becomes auto-bound default; create a second one to archive.
-    let _default = client.bucket_create(
-        "default", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
-    let bucket_id = client.bucket_create(
-        "archivable", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let _default = client
+        .bucket_create(
+            "default",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "archivable",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
-    client.bucket_archive(&bucket_id, "no longer needed").await.unwrap();
+    client
+        .bucket_archive(&bucket_id, "no longer needed")
+        .await
+        .unwrap();
 
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert!(info.name.contains("[ARCHIVED]"));
-    assert!(info.description.unwrap_or_default().contains("no longer needed"));
+    assert!(
+        info.description
+            .unwrap_or_default()
+            .contains("no longer needed")
+    );
 }
 
 #[tokio::test]
 async fn bucket_archive_default_refused() {
     let (_dir, client) = make_client();
-    let bucket_id = client.bucket_create(
-        "the-default", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "the-default",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
     // Auto-bound by bucket_create. Make it the explicit default.
     let mut cluster_arr = [0u8; 32];
     cluster_arr[..9].copy_from_slice(b"cluster-1");
-    client.bucket_bind(&bucket_id, &memvault_core::ClusterId(cluster_arr), true).await.unwrap();
+    client
+        .bucket_bind(&bucket_id, &memvault_core::ClusterId(cluster_arr), true)
+        .await
+        .unwrap();
     let result = client.bucket_archive(&bucket_id, "try to remove").await;
     assert!(result.is_err(), "archiving default bucket should fail");
 }
@@ -433,12 +513,33 @@ async fn bucket_archive_default_refused() {
 async fn bucket_create_multiple_and_list() {
     let (_dir, client) = make_client();
 
-    let _b1 = client.bucket_create("alpha", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal).await.unwrap();
-    let _b2 = client.bucket_create("beta", None, Visibility::Federated,
-        memvault_core::classification::Classification::Public).await.unwrap();
-    let _b3 = client.bucket_create("gamma", None, Visibility::Public,
-        memvault_core::classification::Classification::Confidential).await.unwrap();
+    let _b1 = client
+        .bucket_create(
+            "alpha",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
+    let _b2 = client
+        .bucket_create(
+            "beta",
+            None,
+            Visibility::Federated,
+            memvault_core::classification::Classification::Public,
+        )
+        .await
+        .unwrap();
+    let _b3 = client
+        .bucket_create(
+            "gamma",
+            None,
+            Visibility::Public,
+            memvault_core::classification::Classification::Confidential,
+        )
+        .await
+        .unwrap();
 
     let buckets = client.bucket_list().await.unwrap();
     assert_eq!(buckets.len(), 3);
@@ -494,28 +595,44 @@ async fn bucket_bind_exclusive_to_one_cluster() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
-        store, Arc::new(RwLock::new(TextIndex::new())),
+        store,
+        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
-        b"peer-1".to_vec(), vec![0u8; 32],
+        b"peer-1".to_vec(),
+        vec![0u8; 32],
     ));
-    let bucket_id = client.bucket_create(
-        "exclusive", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "exclusive",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     let cluster_a = memvault_core::ClusterId([1u8; 32]);
     let cluster_b = memvault_core::ClusterId([2u8; 32]);
 
     // Bind to cluster A succeeds
-    client.bucket_bind(&bucket_id, &cluster_a, false).await.unwrap();
+    client
+        .bucket_bind(&bucket_id, &cluster_a, false)
+        .await
+        .unwrap();
 
     // Rebind to same cluster A is idempotent
-    client.bucket_bind(&bucket_id, &cluster_a, false).await.unwrap();
+    client
+        .bucket_bind(&bucket_id, &cluster_a, false)
+        .await
+        .unwrap();
 
     // Bind to different cluster B fails
     let result = client.bucket_bind(&bucket_id, &cluster_b, false).await;
-    assert!(result.is_err(), "should refuse rebinding to a different cluster");
+    assert!(
+        result.is_err(),
+        "should refuse rebinding to a different cluster"
+    );
 }
 
 #[tokio::test]
@@ -524,25 +641,38 @@ async fn bucket_bind_idempotent_same_cluster() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
-        store, Arc::new(RwLock::new(TextIndex::new())),
+        store,
+        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
-        b"peer-1".to_vec(), vec![0u8; 32],
+        b"peer-1".to_vec(),
+        vec![0u8; 32],
     ));
-    let bucket_id = client.bucket_create(
-        "idem", None, Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = client
+        .bucket_create(
+            "idem",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     let cluster = memvault_core::ClusterId([5u8; 32]);
 
     // Bind as non-default
-    client.bucket_bind(&bucket_id, &cluster, false).await.unwrap();
+    client
+        .bucket_bind(&bucket_id, &cluster, false)
+        .await
+        .unwrap();
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert!(!info.is_default);
 
     // Rebind same cluster as default
-    client.bucket_bind(&bucket_id, &cluster, true).await.unwrap();
+    client
+        .bucket_bind(&bucket_id, &cluster, true)
+        .await
+        .unwrap();
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert!(info.is_default);
 }
@@ -596,7 +726,9 @@ fn agent_identity_requires_all_files() {
     std::fs::create_dir_all(&identity_dir).unwrap();
 
     // Missing files should fail to load
-    assert!(!memvault_api::agent_identity::AgentIdentity::exists(&identity_dir));
+    assert!(!memvault_api::agent_identity::AgentIdentity::exists(
+        &identity_dir
+    ));
 
     let result = memvault_api::agent_identity::AgentIdentity::load(&identity_dir);
     assert!(result.is_err());
@@ -604,9 +736,9 @@ fn agent_identity_requires_all_files() {
 
 #[test]
 fn join_token_roundtrip_with_verify() {
-    use memvault_auth::{decode_token_string, encode_token_string, JoinToken, Role};
+    use ed25519_dalek::{Signer, SigningKey};
+    use memvault_auth::{JoinToken, Role, decode_token_string, encode_token_string};
     use memvault_core::{ClusterId, PeerId};
-    use ed25519_dalek::{SigningKey, Signer};
 
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
@@ -631,7 +763,10 @@ fn join_token_roundtrip_with_verify() {
     // Sign
     let signing_bytes = token.signing_bytes().unwrap();
     let sig = sk.sign(&signing_bytes);
-    let signed_token = JoinToken { signature: sig.to_bytes(), ..token };
+    let signed_token = JoinToken {
+        signature: sig.to_bytes(),
+        ..token
+    };
 
     // Encode + decode
     let encoded = encode_token_string(&signed_token).unwrap();
@@ -646,7 +781,10 @@ fn join_token_roundtrip_with_verify() {
     decoded.verify_time_bounds(1000).unwrap();
 
     // Expired token fails
-    let expired = JoinToken { not_after_ns: 500, ..decoded };
+    let expired = JoinToken {
+        not_after_ns: 500,
+        ..decoded
+    };
     assert!(expired.verify_time_bounds(1000).is_err());
 }
 
@@ -654,8 +792,8 @@ fn join_token_roundtrip_with_verify() {
 
 #[test]
 fn envelope_v1_no_bucket_roundtrip() {
-    use memvault_core::{PeerId, Signed, Visibility, BucketId};
     use memvault_core::tags::Tag;
+    use memvault_core::{BucketId, PeerId, Signed, Visibility};
 
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
@@ -666,11 +804,16 @@ fn envelope_v1_no_bucket_roundtrip() {
         "v1 content".to_string(),
         &sk,
         PeerId(vk.as_bytes().to_vec()),
-        vec![], vec![],
+        vec![],
+        vec![],
         vec![Tag::new("classification", "internal")],
-        Visibility::Internal, 1, 1000, None,
+        Visibility::Internal,
+        1,
+        1000,
+        None,
         None, // no bucket = v1
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(envelope.version, 1);
     assert!(envelope.bucket_id.is_none());
@@ -679,8 +822,8 @@ fn envelope_v1_no_bucket_roundtrip() {
 
 #[test]
 fn envelope_v2_with_bucket_roundtrip() {
-    use memvault_core::{PeerId, Signed, Visibility, BucketId};
     use memvault_core::tags::Tag;
+    use memvault_core::{BucketId, PeerId, Signed, Visibility};
 
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
@@ -692,11 +835,16 @@ fn envelope_v2_with_bucket_roundtrip() {
         "v2 content".to_string(),
         &sk,
         PeerId(vk.as_bytes().to_vec()),
-        vec![], vec![],
+        vec![],
+        vec![],
         vec![Tag::new("classification", "internal")],
-        Visibility::Internal, 1, 1000, None,
+        Visibility::Internal,
+        1,
+        1000,
+        None,
         Some(bucket.clone()),
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(envelope.version, 2);
     assert_eq!(envelope.bucket_id, Some(bucket));
@@ -705,8 +853,8 @@ fn envelope_v2_with_bucket_roundtrip() {
 
 #[test]
 fn envelope_v2_tampered_bucket_fails_verify() {
-    use memvault_core::{PeerId, Signed, Visibility, BucketId};
     use memvault_core::tags::Tag;
+    use memvault_core::{BucketId, PeerId, Signed, Visibility};
 
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
@@ -717,11 +865,16 @@ fn envelope_v2_tampered_bucket_fails_verify() {
         "tamper test".to_string(),
         &sk,
         PeerId(vk.as_bytes().to_vec()),
-        vec![], vec![],
+        vec![],
+        vec![],
         vec![Tag::new("classification", "internal")],
-        Visibility::Internal, 1, 1000, None,
+        Visibility::Internal,
+        1,
+        1000,
+        None,
         Some(BucketId::random()),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Tamper with the bucket_id
     envelope.bucket_id = Some(BucketId::random());

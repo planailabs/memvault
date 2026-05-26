@@ -11,7 +11,10 @@ pub enum SummarizationScope {
     /// Summarize documents in a time range.
     TimeRange { after_ns: u64, before_ns: u64 },
     /// Summarize a knowledge graph subgraph starting from an entity.
-    GraphNeighborhood { entity_id: EntityId, max_depth: usize },
+    GraphNeighborhood {
+        entity_id: EntityId,
+        max_depth: usize,
+    },
 }
 
 /// What kind of summary to produce.

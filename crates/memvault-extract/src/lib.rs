@@ -4,7 +4,7 @@ pub mod wasm_host;
 
 pub use error::ExtractError;
 pub use memvault_extract_abi::{
-    ExtractionHints, ExtractionResponse, ExtractedText, ExtractorCapability, MatchRule,
+    ExtractedText, ExtractionHints, ExtractionResponse, ExtractorCapability, MatchRule,
     PluginCapabilities,
 };
 pub use registry::ExtractionRegistry;
@@ -46,7 +46,11 @@ mod tests {
         let input =
             "Intro paragraph.\n\n# Title\n\nSome **bold** text and [a link](http://example.com).\n";
         let result = reg
-            .extract(input.as_bytes(), "text/markdown", &ExtractionHints::default())
+            .extract(
+                input.as_bytes(),
+                "text/markdown",
+                &ExtractionHints::default(),
+            )
             .unwrap();
         assert!(result.text.contains("Title"));
         assert!(result.text.contains("bold"));
@@ -79,7 +83,11 @@ mod tests {
     #[test]
     fn registry_unsupported_mime() {
         let reg = ExtractionRegistry::with_defaults();
-        let result = reg.extract(b"data", "application/octet-stream", &ExtractionHints::default());
+        let result = reg.extract(
+            b"data",
+            "application/octet-stream",
+            &ExtractionHints::default(),
+        );
         assert!(matches!(result, Err(ExtractError::UnsupportedMime(_))));
     }
 
@@ -112,9 +120,7 @@ mod tests {
             max_text_bytes: Some(100),
             ..Default::default()
         };
-        let result = reg
-            .extract(input.as_bytes(), "text/plain", &hints)
-            .unwrap();
+        let result = reg.extract(input.as_bytes(), "text/plain", &hints).unwrap();
         assert_eq!(result.text.len(), 100);
     }
 

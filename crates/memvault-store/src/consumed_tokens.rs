@@ -2,10 +2,10 @@
 
 use redb::ReadableTable;
 
+use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::keys;
 use crate::tables::CONSUMED_TOKENS;
-use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Record a token consumption. Returns the new consumption count.

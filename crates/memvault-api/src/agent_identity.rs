@@ -8,11 +8,9 @@
 
 use std::path::Path;
 
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use memvault_auth::{
-    AgentEnrollment, AttestationOrigin, MembershipAttestation, Role,
-    JoinToken,
-    encode_token_string,
+    AgentEnrollment, AttestationOrigin, JoinToken, MembershipAttestation, Role, encode_token_string,
 };
 use memvault_core::{AgentId, ClusterId, PeerId};
 use serde::{Deserialize, Serialize};
@@ -56,14 +54,19 @@ impl AgentIdentity {
         let verifying_key = signing_key.verifying_key();
 
         // Load attestation
-        let att_bytes = std::fs::read(&attestation_path)
-            .map_err(|e| ApiError::Other(format!("failed to read {}: {e}", attestation_path.display())))?;
+        let att_bytes = std::fs::read(&attestation_path).map_err(|e| {
+            ApiError::Other(format!(
+                "failed to read {}: {e}",
+                attestation_path.display()
+            ))
+        })?;
         let attestation: MembershipAttestation = serde_ipld_dagcbor::from_slice(&att_bytes)
             .map_err(|e| ApiError::Other(format!("failed to decode attestation: {e}")))?;
 
         // Load enrollment
-        let enr_bytes = std::fs::read(&enrollment_path)
-            .map_err(|e| ApiError::Other(format!("failed to read {}: {e}", enrollment_path.display())))?;
+        let enr_bytes = std::fs::read(&enrollment_path).map_err(|e| {
+            ApiError::Other(format!("failed to read {}: {e}", enrollment_path.display()))
+        })?;
         let enrollment: AgentEnrollment = serde_ipld_dagcbor::from_slice(&enr_bytes)
             .map_err(|e| ApiError::Other(format!("failed to decode enrollment: {e}")))?;
 
@@ -75,8 +78,11 @@ impl AgentIdentity {
 
         let cluster_id_bytes = hex::decode(&meta.cluster_id)
             .map_err(|e| ApiError::Other(format!("invalid cluster_id hex: {e}")))?;
-        let cluster_id = ClusterId(cluster_id_bytes.try_into()
-            .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))?);
+        let cluster_id = ClusterId(
+            cluster_id_bytes
+                .try_into()
+                .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))?,
+        );
 
         Ok(Self {
             agent_id: AgentId(meta.agent_id),
@@ -137,11 +143,17 @@ impl AgentIdentity {
         )?;
 
         // Write to disk
-        write_identity_dir(identity_dir, &signing_key, &attestation, &enrollment, &AgentMeta {
-            agent_id: agent_id.to_string(),
-            cluster_id: hex::encode(cluster_id.0),
-            enrolled_at_ns: now_ns,
-        })?;
+        write_identity_dir(
+            identity_dir,
+            &signing_key,
+            &attestation,
+            &enrollment,
+            &AgentMeta {
+                agent_id: agent_id.to_string(),
+                cluster_id: hex::encode(cluster_id.0),
+                enrolled_at_ns: now_ns,
+            },
+        )?;
 
         Ok(Self {
             agent_id: AgentId(agent_id.to_string()),
@@ -212,7 +224,8 @@ fn sign_enrollment(
         signature: [0u8; 64], // placeholder, filled below
     };
 
-    let signing_bytes = enrollment.signing_bytes()
+    let signing_bytes = enrollment
+        .signing_bytes()
         .map_err(|e| ApiError::Other(format!("enrollment signing bytes: {e}")))?;
     let sig = admin_key.sign(&signing_bytes);
 
@@ -240,7 +253,8 @@ fn sign_attestation(
         signature: [0u8; 64], // placeholder, filled below
     };
 
-    let signing_bytes = attestation.signing_bytes()
+    let signing_bytes = attestation
+        .signing_bytes()
         .map_err(|e| ApiError::Other(format!("attestation signing bytes: {e}")))?;
     let sig = admin_key.sign(&signing_bytes);
 
@@ -298,9 +312,7 @@ fn encode_ed25519_pem(key: &SigningKey) -> String {
     use data_encoding::BASE64;
     let seed = key.to_bytes();
     let b64 = BASE64.encode(&seed);
-    format!(
-        "-----BEGIN ED25519 PRIVATE KEY-----\n{b64}\n-----END ED25519 PRIVATE KEY-----\n"
-    )
+    format!("-----BEGIN ED25519 PRIVATE KEY-----\n{b64}\n-----END ED25519 PRIVATE KEY-----\n")
 }
 
 /// Parse an Ed25519 signing key from our simplified PEM format.
@@ -314,10 +326,12 @@ fn parse_ed25519_pem(pem_bytes: &[u8]) -> Result<SigningKey> {
         .ok_or_else(|| ApiError::Other("PEM file has no data line".into()))?;
 
     use data_encoding::BASE64;
-    let seed_bytes = BASE64.decode(b64_line.as_bytes())
+    let seed_bytes = BASE64
+        .decode(b64_line.as_bytes())
         .map_err(|e| ApiError::Other(format!("PEM base64 decode failed: {e}")))?;
 
-    let seed: [u8; 32] = seed_bytes.try_into()
+    let seed: [u8; 32] = seed_bytes
+        .try_into()
         .map_err(|_| ApiError::Other("PEM seed must be exactly 32 bytes".into()))?;
 
     Ok(SigningKey::from_bytes(&seed))
@@ -351,7 +365,8 @@ pub fn issue_join_token(
         signature: [0u8; 64], // placeholder
     };
 
-    let signing_bytes = token.signing_bytes()
+    let signing_bytes = token
+        .signing_bytes()
         .map_err(|e| ApiError::Other(format!("token signing bytes: {e}")))?;
     let sig = admin_key.sign(&signing_bytes);
 
@@ -360,8 +375,8 @@ pub fn issue_join_token(
         ..token
     };
 
-    let encoded = encode_token_string(&token)
-        .map_err(|e| ApiError::Other(format!("token encode: {e}")))?;
+    let encoded =
+        encode_token_string(&token).map_err(|e| ApiError::Other(format!("token encode: {e}")))?;
 
     Ok((token, encoded))
 }
@@ -404,7 +419,8 @@ mod tests {
             &admin_sk,
             Role::AgentHost,
             86400_000_000_000, // 1 day in ns
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(identity.agent_id.0, "test-agent");
         assert_eq!(identity.cluster_id, cluster_id);
@@ -418,7 +434,10 @@ mod tests {
         // Load from disk
         let loaded = AgentIdentity::load(&identity_dir).unwrap();
         assert_eq!(loaded.agent_id.0, "test-agent");
-        assert_eq!(loaded.signing_key.to_bytes(), identity.signing_key.to_bytes());
+        assert_eq!(
+            loaded.signing_key.to_bytes(),
+            identity.signing_key.to_bytes()
+        );
     }
 
     #[test]
@@ -432,17 +451,27 @@ mod tests {
 
         // First call: generates
         let id1 = AgentIdentity::ensure(
-            &identity_dir, "ensure-agent", &cluster_id,
-            &admin_peer_id, &admin_sk, Role::AgentHost,
+            &identity_dir,
+            "ensure-agent",
+            &cluster_id,
+            &admin_peer_id,
+            &admin_sk,
+            Role::AgentHost,
             86400_000_000_000,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Second call: loads (same key)
         let id2 = AgentIdentity::ensure(
-            &identity_dir, "ensure-agent", &cluster_id,
-            &admin_peer_id, &admin_sk, Role::AgentHost,
+            &identity_dir,
+            "ensure-agent",
+            &cluster_id,
+            &admin_peer_id,
+            &admin_sk,
+            Role::AgentHost,
             86400_000_000_000,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(id1.signing_key.to_bytes(), id2.signing_key.to_bytes());
     }
@@ -461,7 +490,8 @@ mod tests {
             3600_000_000_000, // 1 hour
             1,
             Some("test-token".to_string()),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Verify signature
         token.verify_signature(&admin_vk).unwrap();

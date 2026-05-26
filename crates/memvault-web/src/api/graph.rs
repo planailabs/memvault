@@ -3,15 +3,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use memvault_core::EntityId;
 use memvault_doc::Entity;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct ListEntitiesQuery {
@@ -72,17 +72,26 @@ pub async fn create_entity(
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
     let bucket_id = req.bucket.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 { return None; }
-        let mut a = [0u8; 32]; a.copy_from_slice(&bytes);
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(a))
     });
-    let id = state.client.add_entity(entity, vis, bucket_id.as_ref()).await?;
+    let id = state
+        .client
+        .add_entity(entity, vis, bucket_id.as_ref())
+        .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
 
     if let Some(vfs_path) = &req.vfs_path {
         let bucket = memvault_api::vfs::default_bucket(state.client.as_ref()).await;
-        if let Err(e) = memvault_api::vfs::link_node_at_path(state.client.as_ref(), &bucket, vfs_path, &node_id).await {
+        if let Err(e) =
+            memvault_api::vfs::link_node_at_path(state.client.as_ref(), &bucket, vfs_path, &node_id)
+                .await
+        {
             tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
         }
     }
@@ -141,11 +150,11 @@ pub async fn delete_entity(
     Ok(Json(serde_json::json!({ "cid": hex::encode(&cid) })))
 }
 
-
 /// Parse an entity ID from either "entity:<hex>" or raw "<hex>" format.
 fn parse_entity_id(input: &str) -> Result<EntityId, ApiError> {
     let hex_str = input.strip_prefix("entity:").unwrap_or(input);
-    let bytes = hex::decode(hex_str).map_err(|_| ApiError::bad_request("Invalid entity ID — expected hex or entity:<hex>"))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| ApiError::bad_request("Invalid entity ID — expected hex or entity:<hex>"))?;
     if bytes.len() != 32 {
         return Err(ApiError::bad_request("Entity ID must be 32 bytes"));
     }
@@ -153,4 +162,3 @@ fn parse_entity_id(input: &str) -> Result<EntityId, ApiError> {
     arr.copy_from_slice(&bytes);
     Ok(EntityId(arr))
 }
-

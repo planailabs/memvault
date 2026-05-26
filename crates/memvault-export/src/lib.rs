@@ -9,10 +9,12 @@ pub mod sink;
 pub mod title;
 pub mod vfs_tree;
 
-pub use export::{run_export, export_single_doc, export_single_entity, export_single_file, ExportStats};
-pub use node::{export_node, NodeExportResult};
+pub use export::{
+    ExportStats, export_single_doc, export_single_entity, export_single_file, run_export,
+};
+pub use node::{NodeExportResult, export_node};
 pub use plan::ExportPlan;
-pub use sink::{create_sink, DirSink, ExportSink, TarSink};
+pub use sink::{DirSink, ExportSink, TarSink, create_sink};
 
 /// Options controlling what gets exported.
 #[derive(Debug, Clone, Default)]

@@ -56,30 +56,110 @@ impl Metrics {
         let mut out = String::new();
 
         let fields: &[(&str, &str, &AtomicU64)] = &[
-            ("memvault_blocks_stored_total", "Total blocks stored", &self.blocks_stored),
-            ("memvault_blocks_served_total", "Total blocks served", &self.blocks_served),
-            ("memvault_envelopes_inserted_total", "Total envelopes inserted", &self.envelopes_inserted),
-            ("memvault_queries_total", "Total queries executed", &self.queries_total),
-            ("memvault_auth_handshakes_total", "Total auth handshakes", &self.auth_handshakes_total),
-            ("memvault_auth_handshakes_failed_total", "Total failed auth handshakes", &self.auth_handshakes_failed),
-            ("memvault_tokens_issued_total", "Total tokens issued", &self.tokens_issued),
-            ("memvault_tokens_redeemed_total", "Total tokens redeemed", &self.tokens_redeemed),
-            ("memvault_tokens_revoked_total", "Total tokens revoked", &self.tokens_revoked),
-            ("memvault_rotations_total", "Total key rotations", &self.rotations_total),
-            ("memvault_pii_findings_total", "Total PII findings detected", &self.pii_findings_total),
-            ("memvault_egress_checks_total", "Total egress checks", &self.egress_checks_total),
-            ("memvault_egress_denials_total", "Total egress denials", &self.egress_denials_total),
-            ("memvault_summaries_generated_total", "Total summaries generated", &self.summaries_generated),
-            ("memvault_retractions_total", "Total retractions", &self.retractions_total),
-            ("memvault_federation_announcements_sent_total", "Federation announcements sent", &self.federation_announcements_sent),
-            ("memvault_federation_announcements_received_total", "Federation announcements received", &self.federation_announcements_received),
-            ("memvault_connected_peers", "Currently connected peers", &self.connected_peers),
-            ("memvault_storage_bytes", "Total storage bytes used", &self.storage_bytes),
+            (
+                "memvault_blocks_stored_total",
+                "Total blocks stored",
+                &self.blocks_stored,
+            ),
+            (
+                "memvault_blocks_served_total",
+                "Total blocks served",
+                &self.blocks_served,
+            ),
+            (
+                "memvault_envelopes_inserted_total",
+                "Total envelopes inserted",
+                &self.envelopes_inserted,
+            ),
+            (
+                "memvault_queries_total",
+                "Total queries executed",
+                &self.queries_total,
+            ),
+            (
+                "memvault_auth_handshakes_total",
+                "Total auth handshakes",
+                &self.auth_handshakes_total,
+            ),
+            (
+                "memvault_auth_handshakes_failed_total",
+                "Total failed auth handshakes",
+                &self.auth_handshakes_failed,
+            ),
+            (
+                "memvault_tokens_issued_total",
+                "Total tokens issued",
+                &self.tokens_issued,
+            ),
+            (
+                "memvault_tokens_redeemed_total",
+                "Total tokens redeemed",
+                &self.tokens_redeemed,
+            ),
+            (
+                "memvault_tokens_revoked_total",
+                "Total tokens revoked",
+                &self.tokens_revoked,
+            ),
+            (
+                "memvault_rotations_total",
+                "Total key rotations",
+                &self.rotations_total,
+            ),
+            (
+                "memvault_pii_findings_total",
+                "Total PII findings detected",
+                &self.pii_findings_total,
+            ),
+            (
+                "memvault_egress_checks_total",
+                "Total egress checks",
+                &self.egress_checks_total,
+            ),
+            (
+                "memvault_egress_denials_total",
+                "Total egress denials",
+                &self.egress_denials_total,
+            ),
+            (
+                "memvault_summaries_generated_total",
+                "Total summaries generated",
+                &self.summaries_generated,
+            ),
+            (
+                "memvault_retractions_total",
+                "Total retractions",
+                &self.retractions_total,
+            ),
+            (
+                "memvault_federation_announcements_sent_total",
+                "Federation announcements sent",
+                &self.federation_announcements_sent,
+            ),
+            (
+                "memvault_federation_announcements_received_total",
+                "Federation announcements received",
+                &self.federation_announcements_received,
+            ),
+            (
+                "memvault_connected_peers",
+                "Currently connected peers",
+                &self.connected_peers,
+            ),
+            (
+                "memvault_storage_bytes",
+                "Total storage bytes used",
+                &self.storage_bytes,
+            ),
         ];
 
         for (name, help, value) in fields {
             let _ = writeln!(out, "# HELP {name} {help}");
-            let metric_type = if name.ends_with("_total") { "counter" } else { "gauge" };
+            let metric_type = if name.ends_with("_total") {
+                "counter"
+            } else {
+                "gauge"
+            };
             let _ = writeln!(out, "# TYPE {name} {metric_type}");
             let _ = writeln!(out, "{name} {}", value.load(Ordering::Relaxed));
         }
@@ -104,8 +184,10 @@ impl Metrics {
         self.egress_denials_total.store(0, Ordering::Relaxed);
         self.summaries_generated.store(0, Ordering::Relaxed);
         self.retractions_total.store(0, Ordering::Relaxed);
-        self.federation_announcements_sent.store(0, Ordering::Relaxed);
-        self.federation_announcements_received.store(0, Ordering::Relaxed);
+        self.federation_announcements_sent
+            .store(0, Ordering::Relaxed);
+        self.federation_announcements_received
+            .store(0, Ordering::Relaxed);
         self.connected_peers.store(0, Ordering::Relaxed);
         self.storage_bytes.store(0, Ordering::Relaxed);
     }

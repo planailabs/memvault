@@ -10,10 +10,7 @@ use crate::client::MemvaultClient;
 use crate::error::ApiError;
 
 /// Start the JSON-RPC server on a Unix socket.
-pub async fn serve(
-    socket_path: &Path,
-    client: Arc<dyn MemvaultClient>,
-) -> Result<(), ApiError> {
+pub async fn serve(socket_path: &Path, client: Arc<dyn MemvaultClient>) -> Result<(), ApiError> {
     // Remove existing socket file
     let _ = std::fs::remove_file(socket_path);
 
@@ -35,8 +32,8 @@ pub async fn serve(
                     Ok(0) => break, // EOF
                     Ok(_) => {
                         let response = handle_request(&client, &line).await;
-                        let mut resp_bytes = serde_json::to_vec(&response)
-                            .unwrap_or_else(|_| b"{}".to_vec());
+                        let mut resp_bytes =
+                            serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
                         resp_bytes.push(b'\n');
                         if writer.write_all(&resp_bytes).await.is_err() {
                             break;
@@ -49,10 +46,7 @@ pub async fn serve(
     }
 }
 
-async fn handle_request(
-    client: &Arc<dyn MemvaultClient>,
-    line: &str,
-) -> serde_json::Value {
+async fn handle_request(client: &Arc<dyn MemvaultClient>, line: &str) -> serde_json::Value {
     let req: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -92,15 +86,13 @@ async fn dispatch(
     match method {
         "status" => {
             let status = client.status().await?;
-            Ok(serde_json::to_value(status)
-                .map_err(|e| ApiError::Serialization(e.to_string()))?)
+            Ok(serde_json::to_value(status).map_err(|e| ApiError::Serialization(e.to_string()))?)
         }
         "search" => {
             let query = params.get("query").and_then(|q| q.as_str()).unwrap_or("");
             let limit = params.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
             let hits = client.search(query, limit).await?;
-            Ok(serde_json::to_value(hits)
-                .map_err(|e| ApiError::Serialization(e.to_string()))?)
+            Ok(serde_json::to_value(hits).map_err(|e| ApiError::Serialization(e.to_string()))?)
         }
         "list_rotations" => {
             let rotations = client.list_rotations().await?;
@@ -109,8 +101,7 @@ async fn dispatch(
         }
         "list_tokens" => {
             let tokens = client.list_tokens().await?;
-            Ok(serde_json::to_value(tokens)
-                .map_err(|e| ApiError::Serialization(e.to_string()))?)
+            Ok(serde_json::to_value(tokens).map_err(|e| ApiError::Serialization(e.to_string()))?)
         }
         _ => Err(ApiError::Rpc(format!("unknown method: {method}"))),
     }

@@ -6,7 +6,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "memvault-import", about = "Import files and documents into memvault")]
+#[command(
+    name = "memvault-import",
+    about = "Import files and documents into memvault"
+)]
 struct Cli {
     #[command(flatten)]
     client: memvault_api::ClientArgs,
@@ -60,15 +63,28 @@ async fn main() -> Result<()> {
     let client = cli.client.connect().await?;
 
     match cli.command {
-        Commands::Files { path, vfs, tag, visibility } => {
+        Commands::Files {
+            path,
+            vfs,
+            tag,
+            visibility,
+        } => {
             let tags = memvault_api::docs::parse_tags(&tag);
-            let imported = memvault_import::import_files(&*client, &path, vfs.as_deref(), &tags, &visibility).await?;
+            let imported =
+                memvault_import::import_files(&*client, &path, vfs.as_deref(), &tags, &visibility)
+                    .await?;
             println!("Imported {imported} file(s).");
         }
-        Commands::Docs { path, vfs, tag, visibility } => {
+        Commands::Docs {
+            path,
+            vfs,
+            tag,
+            visibility,
+        } => {
             let tags = memvault_api::docs::parse_tags(&tag);
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));
-            let imported = memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis).await?;
+            let imported =
+                memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis).await?;
             println!("Imported {imported} document(s).");
         }
     }

@@ -2,14 +2,14 @@
 
 use std::collections::HashMap;
 
-use memvault_attach::{
-    AttachmentCache, AttachmentManifest, ChunkLayout, ManifestUpdate, ReplicationHint,
-    chunk_file, decide_layout, default_replication,
-};
-use memvault_attach::pin::{PinReason, pin, unpin, is_pinned};
+use memvault_attach::chunk::{DEFAULT_CHUNK_SIZE, EAGER_THRESHOLD, INLINE_THRESHOLD};
+use memvault_attach::pin::{PinReason, is_pinned, pin, unpin};
 use memvault_attach::unixfs::{read_unixfs, read_unixfs_range};
-use memvault_attach::chunk::{INLINE_THRESHOLD, DEFAULT_CHUNK_SIZE, EAGER_THRESHOLD};
-use sha2::{Sha256, Digest};
+use memvault_attach::{
+    AttachmentCache, AttachmentManifest, ChunkLayout, ManifestUpdate, ReplicationHint, chunk_file,
+    decide_layout, default_replication,
+};
+use sha2::{Digest, Sha256};
 
 /// Helper: build a block map from chunking output.
 fn block_map(blocks: &[(Vec<u8>, Vec<u8>)]) -> HashMap<Vec<u8>, Vec<u8>> {
@@ -176,7 +176,12 @@ fn test_pin_reasons() {
     let cid2 = b"cid-grant";
 
     pin(&store, cid1, PinReason::EagerByPolicy).unwrap();
-    pin(&store, cid2, PinReason::PinnedByGrant(b"grant-cid".to_vec())).unwrap();
+    pin(
+        &store,
+        cid2,
+        PinReason::PinnedByGrant(b"grant-cid".to_vec()),
+    )
+    .unwrap();
 
     assert!(is_pinned(&store, cid1).unwrap());
     assert!(is_pinned(&store, cid2).unwrap());

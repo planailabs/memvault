@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct AuditQueryParams {
@@ -40,8 +40,7 @@ pub async fn query_audit(
     use memvault_query::AuditQuery;
 
     let doc_id = if let Some(ref id_hex) = params.doc_id {
-        let bytes =
-            hex::decode(id_hex).map_err(|_| ApiError::bad_request("Invalid doc_id hex"))?;
+        let bytes = hex::decode(id_hex).map_err(|_| ApiError::bad_request("Invalid doc_id hex"))?;
         if bytes.len() != 32 {
             return Err(ApiError::bad_request("doc_id must be 32 bytes"));
         }

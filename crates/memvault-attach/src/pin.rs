@@ -55,7 +55,10 @@ pub fn is_pinned(store: &MemvaultStore, manifest_cid: &[u8]) -> Result<bool, Att
 ///
 /// Note: This is a simplified implementation that requires scanning.
 /// In practice, a dedicated table would be more efficient.
-pub fn list_pinned(store: &MemvaultStore, known_cids: &[Vec<u8>]) -> Result<Vec<(Vec<u8>, PinReason)>, AttachError> {
+pub fn list_pinned(
+    store: &MemvaultStore,
+    known_cids: &[Vec<u8>],
+) -> Result<Vec<(Vec<u8>, PinReason)>, AttachError> {
     let mut result = Vec::new();
     for cid in known_cids {
         let key = pin_key(cid);

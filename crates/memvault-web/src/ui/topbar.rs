@@ -59,23 +59,33 @@ struct BucketOption {
 #[server]
 async fn fetch_buckets() -> Result<Vec<BucketOption>, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let buckets = client.bucket_list().await
+    let buckets = client
+        .bucket_list()
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(buckets.iter().map(|b| BucketOption {
-        id_hex: hex::encode(b.id.0),
-        name: b.name.clone(),
-    }).collect())
+    Ok(buckets
+        .iter()
+        .map(|b| BucketOption {
+            id_hex: hex::encode(b.id.0),
+            name: b.name.clone(),
+        })
+        .collect())
 }
 
 #[server]
 async fn fetch_views() -> Result<Vec<ViewOption>, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let views = client.list_views().await
+    let views = client
+        .list_views()
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(views.iter().map(|v| ViewOption {
-        name: v.name.clone(),
-        tag_count: v.tags.len(),
-    }).collect())
+    Ok(views
+        .iter()
+        .map(|v| ViewOption {
+            name: v.name.clone(),
+            tag_count: v.tags.len(),
+        })
+        .collect())
 }
 
 #[component]
@@ -88,8 +98,16 @@ pub fn Topbar() -> Element {
     let views_res = use_server_future(fetch_views)?;
     let buckets_res = use_server_future(fetch_buckets)?;
 
-    let current_name = active_view.read().name.clone().unwrap_or_else(|| "All".to_string());
-    let current_bucket = active_bucket.read().name.clone().unwrap_or_else(|| "All".to_string());
+    let current_name = active_view
+        .read()
+        .name
+        .clone()
+        .unwrap_or_else(|| "All".to_string());
+    let current_bucket = active_bucket
+        .read()
+        .name
+        .clone()
+        .unwrap_or_else(|| "All".to_string());
 
     let on_view_change = move |e: Event<FormData>| {
         let name = e.value();
@@ -184,7 +202,9 @@ pub fn Topbar() -> Element {
 #[server]
 async fn get_view_tags(name: String) -> Result<Option<Vec<(String, String)>>, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let view = client.get_view(&name).await
+    let view = client
+        .get_view(&name)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(view.map(|v| v.tags))
 }

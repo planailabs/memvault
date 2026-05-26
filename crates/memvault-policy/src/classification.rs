@@ -9,9 +9,7 @@ pub fn classification_allows(content_level: &str, max_allowed: &str) -> bool {
     let content_idx = CLASSIFICATION_LEVELS
         .iter()
         .position(|&l| l == content_level);
-    let max_idx = CLASSIFICATION_LEVELS
-        .iter()
-        .position(|&l| l == max_allowed);
+    let max_idx = CLASSIFICATION_LEVELS.iter().position(|&l| l == max_allowed);
 
     match (content_idx, max_idx) {
         (Some(c), Some(m)) => c <= m,

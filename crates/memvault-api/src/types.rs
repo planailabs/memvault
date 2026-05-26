@@ -1,8 +1,8 @@
 //! Request/response types for the memvault API.
 
-use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
-use memvault_core::classification::Classification;
 use memvault_auth::Role;
+use memvault_core::classification::Classification;
+use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use serde::{Deserialize, Serialize};
 
 /// Summary of a document for list operations.

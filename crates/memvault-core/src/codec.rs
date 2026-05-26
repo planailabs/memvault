@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Encode a value to DAG-CBOR bytes.
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {

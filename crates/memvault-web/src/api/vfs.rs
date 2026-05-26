@@ -5,15 +5,15 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use memvault_api::vfs as vfs_ops;
 use memvault_core::NodeRef;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 // ── Request / Response types ───────────────────────────────────────
 
@@ -85,9 +85,11 @@ fn ls_entries<'a>(
     node: &'a NodeRef,
     recursive: bool,
     prefix: &'a str,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<VfsEntry>, ApiError>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<VfsEntry>, ApiError>> + Send + 'a>>
+{
     Box::pin(async move {
-        let children = vfs_ops::list_children(client, node).await
+        let children = vfs_ops::list_children(client, node)
+            .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
         let mut entries = Vec::new();
         for (name, target, eid) in &children {
@@ -164,8 +166,9 @@ pub async fn vfs_link(
     Json(req): Json<VfsLinkRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
-    let target = NodeRef::from_tag_label(&req.target)
-        .ok_or_else(|| ApiError::bad_request("invalid target — expected entity:<hex>, doc:<hex>, or file:<hex>"))?;
+    let target = NodeRef::from_tag_label(&req.target).ok_or_else(|| {
+        ApiError::bad_request("invalid target — expected entity:<hex>, doc:<hex>, or file:<hex>")
+    })?;
     let edge_id = vfs_ops::link_at_path(state.client.as_ref(), &bucket, &req.path, &target)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -194,7 +197,8 @@ pub async fn vfs_unlink(
     let (parent_parts, file_name) = components.split_at(components.len() - 1);
     let file_name = file_name[0];
 
-    let root = vfs_ops::ensure_root(state.client.as_ref(), &bucket).await
+    let root = vfs_ops::ensure_root(state.client.as_ref(), &bucket)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let mut current = NodeRef::Entity(root);
     for component in parent_parts {
@@ -208,7 +212,10 @@ pub async fn vfs_unlink(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found(format!("'{file_name}' not found in directory")))?;
-    state.client.remove_link_from(&current, &edge_id).await
+    state
+        .client
+        .remove_link_from(&current, &edge_id)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -222,17 +229,19 @@ pub async fn vfs_mv(
     let bucket = vfs_ops::default_bucket(state.client.as_ref()).await;
 
     // Resolve source.
-    let (source_node, source_edge) = vfs_ops::resolve_path(state.client.as_ref(), &bucket, &req.from)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("source path not found"))?;
+    let (source_node, source_edge) =
+        vfs_ops::resolve_path(state.client.as_ref(), &bucket, &req.from)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .ok_or_else(|| ApiError::not_found("source path not found"))?;
     let source_edge = source_edge.ok_or_else(|| ApiError::bad_request("cannot move root"))?;
 
     // Find source's parent to unlink.
     let from_components: Vec<&str> = req.from.split('/').filter(|s| !s.is_empty()).collect();
     let (from_parent_parts, _) = from_components.split_at(from_components.len() - 1);
     let from_parent = {
-        let root = vfs_ops::ensure_root(state.client.as_ref(), &bucket).await
+        let root = vfs_ops::ensure_root(state.client.as_ref(), &bucket)
+            .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
         let mut current = NodeRef::Entity(root);
         for component in from_parent_parts {
@@ -246,7 +255,10 @@ pub async fn vfs_mv(
     };
 
     // Unlink from source.
-    state.client.remove_link_from(&from_parent, &source_edge).await
+    state
+        .client
+        .remove_link_from(&from_parent, &source_edge)
+        .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     // Link at destination.

@@ -17,5 +17,5 @@ pub use error::{Error, Result};
 pub use ids::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId};
 pub use tags::{Tag, TagPattern};
 pub use tags_lint::lint_tags;
-pub use time::{wall_ns, LamportClock};
+pub use time::{LamportClock, wall_ns};
 pub use visibility::Visibility;

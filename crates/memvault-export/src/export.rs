@@ -7,11 +7,11 @@ use memvault_api::MemvaultClient;
 use memvault_core::{DocId, EntityId};
 use tracing::info;
 
+use crate::ExportOptions;
 use crate::plan;
 use crate::sink::ExportSink;
 use crate::title;
 use crate::vfs_tree;
-use crate::ExportOptions;
 
 /// Statistics from an export run.
 #[derive(Debug, Default)]
@@ -38,7 +38,14 @@ pub async fn run_export(
 
     // Export files
     for entry in &plan.files {
-        export_file(client, &mut *sink, &entry.manifest_cid, entry.filename.as_deref(), &mut stats).await?;
+        export_file(
+            client,
+            &mut *sink,
+            &entry.manifest_cid,
+            entry.filename.as_deref(),
+            &mut stats,
+        )
+        .await?;
     }
 
     // Export entities
@@ -78,7 +85,10 @@ async fn export_document(
 
     let filename = title::doc_filename(&doc);
     let content = render_doc_markdown(&doc);
-    sink.write_file(&PathBuf::from("documents").join(&filename), content.as_bytes())?;
+    sink.write_file(
+        &PathBuf::from("documents").join(&filename),
+        content.as_bytes(),
+    )?;
     stats.documents += 1;
 
     if include_history {
@@ -142,7 +152,10 @@ async fn export_file(
                 .to_string();
             (fname, mime)
         }
-        None => (filename_hint.map(String::from), "application/octet-stream".to_string()),
+        None => (
+            filename_hint.map(String::from),
+            "application/octet-stream".to_string(),
+        ),
     };
 
     let cid_hex = hex::encode(manifest_cid);

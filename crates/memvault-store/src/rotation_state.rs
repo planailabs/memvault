@@ -2,10 +2,10 @@
 
 use redb::ReadableTable;
 
+use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::keys;
 use crate::tables::ROTATIONS;
-use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Store a rotation entry.

@@ -7,11 +7,11 @@ use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, StreamProtocol, Swarm, SwarmBuilder};
 
-use crate::auth_proto::{AuthCodec, AUTH_PROTOCOL};
-use crate::block_proto::{BlockCodec, BLOCK_PROTOCOL};
+use crate::auth_proto::{AUTH_PROTOCOL, AuthCodec};
+use crate::block_proto::{BLOCK_PROTOCOL, BlockCodec};
 use crate::error::NetError;
 use crate::gossip;
-use crate::join_proto::{JoinCodec, JOIN_PROTOCOL};
+use crate::join_proto::{JOIN_PROTOCOL, JoinCodec};
 
 /// Standalone behaviour that includes everything needed for independent operation.
 #[derive(NetworkBehaviour)]
@@ -48,26 +48,17 @@ pub async fn standalone_swarm(
             let kad = kad::Behaviour::new(local_peer_id, kad_store);
 
             let auth = request_response::Behaviour::new(
-                [(
-                    StreamProtocol::new(AUTH_PROTOCOL),
-                    ProtocolSupport::Full,
-                )],
+                [(StreamProtocol::new(AUTH_PROTOCOL), ProtocolSupport::Full)],
                 request_response::Config::default(),
             );
 
             let join = request_response::Behaviour::new(
-                [(
-                    StreamProtocol::new(JOIN_PROTOCOL),
-                    ProtocolSupport::Full,
-                )],
+                [(StreamProtocol::new(JOIN_PROTOCOL), ProtocolSupport::Full)],
                 request_response::Config::default(),
             );
 
             let block_exchange = request_response::Behaviour::new(
-                [(
-                    StreamProtocol::new(BLOCK_PROTOCOL),
-                    ProtocolSupport::Full,
-                )],
+                [(StreamProtocol::new(BLOCK_PROTOCOL), ProtocolSupport::Full)],
                 request_response::Config::default(),
             );
 
@@ -84,17 +75,13 @@ pub async fn standalone_swarm(
             gs.subscribe(&gossip::admin_topic())
                 .map_err(|e| NetError::Gossipsub(e.to_string()))?;
 
-            let identify_config = libp2p::identify::Config::new(
-                "/ai-memvault/id/1.0".to_string(),
-                key.public(),
-            );
+            let identify_config =
+                libp2p::identify::Config::new("/ai-memvault/id/1.0".to_string(), key.public());
             let identify = libp2p::identify::Behaviour::new(identify_config);
 
-            let mdns = libp2p::mdns::tokio::Behaviour::new(
-                libp2p::mdns::Config::default(),
-                local_peer_id,
-            )
-            .map_err(|e| NetError::Transport(e.to_string()))?;
+            let mdns =
+                libp2p::mdns::tokio::Behaviour::new(libp2p::mdns::Config::default(), local_peer_id)
+                    .map_err(|e| NetError::Transport(e.to_string()))?;
 
             Ok(StandaloneMemvaultBehaviour {
                 ping: libp2p::ping::Behaviour::default(),

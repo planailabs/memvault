@@ -6,14 +6,14 @@ pub mod error;
 pub mod pii;
 
 pub use classification::{
-    classification_allows, extract_classification, validate_classification, CLASSIFICATION_LEVELS,
+    CLASSIFICATION_LEVELS, classification_allows, extract_classification, validate_classification,
 };
 pub use cleaner::report::{RedactionApplied, RedactionResult};
 pub use cleaner::strategy::{RedactionPolicy, RedactionStrategy};
 pub use cleaner::{DefaultCleaner, PiiCleaner};
+pub use egress::EgressPolicy;
 pub use egress::decision::EgressDecision;
 pub use egress::destination::{EgressDestination, EgressKind};
-pub use egress::EgressPolicy;
 pub use error::PolicyError;
 pub use pii::findings::{Location, PiiFinding, PiiKind};
 pub use pii::{PiiDetector, RegexDetector};
@@ -139,7 +139,10 @@ mod tests {
         let result2 = cleaner.redact("Another same@email.com mention.", &policy);
 
         // Same PII should get same token
-        assert_eq!(result1.applied[0].replacement, result2.applied[0].replacement);
+        assert_eq!(
+            result1.applied[0].replacement,
+            result2.applied[0].replacement
+        );
         assert!(result1.applied[0].replacement.starts_with("[TOKEN-"));
     }
 
@@ -192,8 +195,7 @@ mod tests {
             kind: EgressKind::CloudLlm,
             url: Some("https://api.openai.com".into()),
         };
-        let decision =
-            policy.check_egress("secret stuff", "confidential", &dest, &detector);
+        let decision = policy.check_egress("secret stuff", "confidential", &dest, &detector);
         assert!(matches!(decision, EgressDecision::Deny { .. }));
     }
 
@@ -212,7 +214,10 @@ mod tests {
             &dest,
             &detector,
         );
-        assert!(matches!(decision, EgressDecision::AllowWithRedaction { .. }));
+        assert!(matches!(
+            decision,
+            EgressDecision::AllowWithRedaction { .. }
+        ));
     }
 
     #[test]
@@ -297,11 +302,8 @@ mod tests {
     #[test]
     fn test_validate_classification_public_with_pii() {
         let detector = RegexDetector::new();
-        let warnings = validate_classification(
-            "Contact john@example.com for details",
-            "public",
-            &detector,
-        );
+        let warnings =
+            validate_classification("Contact john@example.com for details", "public", &detector);
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("PII"));
     }
@@ -317,11 +319,7 @@ mod tests {
     #[test]
     fn test_validate_classification_confidential_no_warning() {
         let detector = RegexDetector::new();
-        let warnings = validate_classification(
-            "SSN: 123-45-6789",
-            "confidential",
-            &detector,
-        );
+        let warnings = validate_classification("SSN: 123-45-6789", "confidential", &detector);
         // Confidential classification is appropriate for PII, no warning
         assert!(warnings.is_empty());
     }

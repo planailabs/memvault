@@ -39,8 +39,8 @@ pub fn use_event_bus_provider() -> EventBusContext {
         let mut rec = ctx.recent;
         use_effect(move || {
             spawn(async move {
-                use wasm_bindgen::closure::Closure;
                 use wasm_bindgen::JsCast;
+                use wasm_bindgen::closure::Closure;
                 use web_sys::MessageEvent;
 
                 let window = web_sys::window().unwrap();

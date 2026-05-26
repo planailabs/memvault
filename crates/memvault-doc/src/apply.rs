@@ -70,9 +70,9 @@ pub fn apply_doc_ops(ops: &[Op]) -> Result<Document> {
                 ));
             }
             Op::DocEdit { doc_id: _, patch } => {
-                let d = doc.as_mut().ok_or_else(|| {
-                    DocError::InvalidOp("DocEdit before DocCreate".to_string())
-                })?;
+                let d = doc
+                    .as_mut()
+                    .ok_or_else(|| DocError::InvalidOp("DocEdit before DocCreate".to_string()))?;
                 d.body = apply_text_patch(&d.body, patch)?;
             }
             Op::DocSetMeta {
@@ -129,9 +129,9 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<GraphState> {
                 entities.insert(entity.id.clone(), entity.clone());
             }
             Op::EntityUpdate { entity_id, props } => {
-                let e = entities.get_mut(entity_id).ok_or_else(|| {
-                    DocError::EntityNotFound(format!("{entity_id:?}"))
-                })?;
+                let e = entities
+                    .get_mut(entity_id)
+                    .ok_or_else(|| DocError::EntityNotFound(format!("{entity_id:?}")))?;
                 for (k, v) in props {
                     e.props.insert(k.clone(), v.clone());
                 }
@@ -139,60 +139,56 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<GraphState> {
             Op::EntityDelete { entity_id } => {
                 entities.remove(entity_id);
             }
-            Op::EdgeAdd { source, edge } => {
-                match source {
-                    NodeRef::Entity(entity_id) => {
-                        let e = entities.get_mut(entity_id).ok_or_else(|| {
-                            DocError::EntityNotFound(format!("{entity_id:?}"))
-                        })?;
-                        e.edges_out.push(edge.clone());
-                    }
-                    other => {
-                        standalone_edges.push((other.clone(), edge.clone()));
-                    }
+            Op::EdgeAdd { source, edge } => match source {
+                NodeRef::Entity(entity_id) => {
+                    let e = entities
+                        .get_mut(entity_id)
+                        .ok_or_else(|| DocError::EntityNotFound(format!("{entity_id:?}")))?;
+                    e.edges_out.push(edge.clone());
                 }
-            }
-            Op::EdgeRemove { source, edge_id } => {
-                match source {
-                    NodeRef::Entity(entity_id) => {
-                        let e = entities.get_mut(entity_id).ok_or_else(|| {
-                            DocError::EntityNotFound(format!("{entity_id:?}"))
-                        })?;
-                        e.edges_out.retain(|edge| edge.id != *edge_id);
-                    }
-                    _ => {
-                        standalone_edges.retain(|(_, edge)| edge.id != *edge_id);
-                    }
+                other => {
+                    standalone_edges.push((other.clone(), edge.clone()));
                 }
-            }
+            },
+            Op::EdgeRemove { source, edge_id } => match source {
+                NodeRef::Entity(entity_id) => {
+                    let e = entities
+                        .get_mut(entity_id)
+                        .ok_or_else(|| DocError::EntityNotFound(format!("{entity_id:?}")))?;
+                    e.edges_out.retain(|edge| edge.id != *edge_id);
+                }
+                _ => {
+                    standalone_edges.retain(|(_, edge)| edge.id != *edge_id);
+                }
+            },
             Op::EdgeUpdate {
                 source,
                 edge_id,
                 props,
-            } => {
-                match source {
-                    NodeRef::Entity(entity_id) => {
-                        let e = entities.get_mut(entity_id).ok_or_else(|| {
-                            DocError::EntityNotFound(format!("{entity_id:?}"))
-                        })?;
-                        let edge = e
-                            .edges_out
-                            .iter_mut()
-                            .find(|edge| edge.id == *edge_id)
-                            .ok_or_else(|| DocError::EdgeNotFound(format!("{edge_id:?}")))?;
+            } => match source {
+                NodeRef::Entity(entity_id) => {
+                    let e = entities
+                        .get_mut(entity_id)
+                        .ok_or_else(|| DocError::EntityNotFound(format!("{entity_id:?}")))?;
+                    let edge = e
+                        .edges_out
+                        .iter_mut()
+                        .find(|edge| edge.id == *edge_id)
+                        .ok_or_else(|| DocError::EdgeNotFound(format!("{edge_id:?}")))?;
+                    for (k, v) in props {
+                        edge.props.insert(k.clone(), v.clone());
+                    }
+                }
+                _ => {
+                    if let Some((_, edge)) =
+                        standalone_edges.iter_mut().find(|(_, e)| e.id == *edge_id)
+                    {
                         for (k, v) in props {
                             edge.props.insert(k.clone(), v.clone());
                         }
                     }
-                    _ => {
-                        if let Some((_, edge)) = standalone_edges.iter_mut().find(|(_, e)| e.id == *edge_id) {
-                            for (k, v) in props {
-                                edge.props.insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
                 }
-            }
+            },
             // Skip doc and bucket ops
             Op::DocCreate { .. }
             | Op::DocEdit { .. }
@@ -208,5 +204,8 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<GraphState> {
         }
     }
 
-    Ok(GraphState { entities, standalone_edges })
+    Ok(GraphState {
+        entities,
+        standalone_edges,
+    })
 }

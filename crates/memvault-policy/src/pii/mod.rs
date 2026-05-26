@@ -25,9 +25,7 @@ impl RegexDetector {
     }
 
     /// Create a detector with custom patterns.
-    pub fn with_custom_patterns(
-        custom: Vec<(PiiKind, &str, f32)>,
-    ) -> Result<Self, PolicyError> {
+    pub fn with_custom_patterns(custom: Vec<(PiiKind, &str, f32)>) -> Result<Self, PolicyError> {
         let mut patterns = Vec::new();
         for (kind, pattern, confidence) in custom {
             let regex = regex::Regex::new(pattern)?;

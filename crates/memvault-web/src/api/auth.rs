@@ -1,8 +1,8 @@
 //! Bearer token authentication middleware.
 
 use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 
 use std::sync::Arc;

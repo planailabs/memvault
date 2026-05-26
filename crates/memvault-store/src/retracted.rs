@@ -1,8 +1,8 @@
 //! Retraction tracking.
 
+use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::tables::RETRACTED;
-use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Record that a CID has been retracted with the given tombstone CID.

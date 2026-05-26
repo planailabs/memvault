@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use memvault_api::{EventBus, LocalClient, MemvaultClient};
-use memvault_core::{BucketId, ClusterId, DocId, Visibility};
 use memvault_core::classification::Classification;
+use memvault_core::{BucketId, ClusterId, DocId, Visibility};
 use memvault_doc::Document;
 use memvault_query::{QuotaManager, TextIndex};
 use memvault_store::MemvaultStore;
@@ -15,14 +15,27 @@ use crate::harness::TestNode;
 #[tokio::test]
 async fn create_bucket() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("test", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create("test", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
     assert_ne!(id, BucketId([0u8; 32]));
 }
 
 #[tokio::test]
 async fn create_bucket_with_description() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("notes", Some("Daily notes"), Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "notes",
+            Some("Daily notes"),
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.name, "notes");
     assert_eq!(info.description, Some("Daily notes".to_string()));
@@ -31,7 +44,16 @@ async fn create_bucket_with_description() {
 #[tokio::test]
 async fn create_bucket_default_visibility() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("public-stuff", None, Visibility::Public, Classification::Public).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "public-stuff",
+            None,
+            Visibility::Public,
+            Classification::Public,
+        )
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.default_visibility, Visibility::Public);
     assert_eq!(info.default_classification, Classification::Public);
@@ -47,9 +69,18 @@ async fn list_empty_buckets() {
 #[tokio::test]
 async fn list_multiple_buckets() {
     let node = TestNode::new();
-    node.client.bucket_create("a", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    node.client.bucket_create("b", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    node.client.bucket_create("c", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    node.client
+        .bucket_create("a", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
+    node.client
+        .bucket_create("b", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
+    node.client
+        .bucket_create("c", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
     let buckets = node.client.bucket_list().await.unwrap();
     assert_eq!(buckets.len(), 3);
 }
@@ -64,7 +95,11 @@ async fn get_nonexistent_bucket() {
 #[tokio::test]
 async fn rename_bucket() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("old", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create("old", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
     node.client.bucket_rename(&id, "new").await.unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.name, "new");
@@ -73,7 +108,11 @@ async fn rename_bucket() {
 #[tokio::test]
 async fn rename_bucket_multiple_times() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("v1", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create("v1", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
     node.client.bucket_rename(&id, "v2").await.unwrap();
     node.client.bucket_rename(&id, "v3").await.unwrap();
     node.client.bucket_rename(&id, "final").await.unwrap();
@@ -85,16 +124,41 @@ async fn rename_bucket_multiple_times() {
 async fn bucket_auto_attached_when_cluster_exists() {
     // When a node has a cluster, buckets are auto-attached (visible to peers)
     let node = TestNode::new();
-    let id = node.client.bucket_create("auto-attached", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "auto-attached",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
-    assert!(info.is_attached, "bucket should be auto-attached when cluster exists");
-    assert_eq!(info.cluster_id, Some(node.cluster_id.clone()), "bucket should be auto-bound to cluster");
+    assert!(
+        info.is_attached,
+        "bucket should be auto-attached when cluster exists"
+    );
+    assert_eq!(
+        info.cluster_id,
+        Some(node.cluster_id.clone()),
+        "bucket should be auto-bound to cluster"
+    );
 }
 
 #[tokio::test]
 async fn bucket_attach() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("attachable", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "attachable",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
     node.client.bucket_attach(&id).await.unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert!(info.is_attached);
@@ -103,7 +167,11 @@ async fn bucket_attach() {
 #[tokio::test]
 async fn bucket_attach_idempotent() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("idem", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create("idem", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
     node.client.bucket_attach(&id).await.unwrap();
     node.client.bucket_attach(&id).await.unwrap();
     node.client.bucket_attach(&id).await.unwrap();
@@ -114,18 +182,41 @@ async fn bucket_attach_idempotent() {
 #[tokio::test]
 async fn bucket_archive() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("temp", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    node.client.bucket_archive(&id, "done with it").await.unwrap();
+    let id = node
+        .client
+        .bucket_create("temp", None, Visibility::Internal, Classification::Internal)
+        .await
+        .unwrap();
+    node.client
+        .bucket_archive(&id, "done with it")
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert!(info.name.contains("[ARCHIVED]"));
-    assert!(info.description.unwrap_or_default().contains("done with it"));
+    assert!(
+        info.description
+            .unwrap_or_default()
+            .contains("done with it")
+    );
 }
 
 #[tokio::test]
 async fn bucket_bind_to_cluster() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("bindable", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    node.client.bucket_bind(&id, &node.cluster_id, true).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "bindable",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
+    node.client
+        .bucket_bind(&id, &node.cluster_id, true)
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
     assert!(info.is_default);
@@ -134,8 +225,20 @@ async fn bucket_bind_to_cluster() {
 #[tokio::test]
 async fn bucket_bind_non_default() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("secondary", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    node.client.bucket_bind(&id, &node.cluster_id, false).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "secondary",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
+    node.client
+        .bucket_bind(&id, &node.cluster_id, false)
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
     assert!(!info.is_default);
@@ -145,8 +248,20 @@ async fn bucket_bind_non_default() {
 async fn bucket_exclusive_binding() {
     let node = TestNode::new();
     let other_cluster = ClusterId::random();
-    let id = node.client.bucket_create("exclusive", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    node.client.bucket_bind(&id, &node.cluster_id, false).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "exclusive",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
+    node.client
+        .bucket_bind(&id, &node.cluster_id, false)
+        .await
+        .unwrap();
     let result = node.client.bucket_bind(&id, &other_cluster, false).await;
     assert!(result.is_err());
 }
@@ -154,9 +269,24 @@ async fn bucket_exclusive_binding() {
 #[tokio::test]
 async fn bucket_rebind_same_cluster_ok() {
     let node = TestNode::new();
-    let id = node.client.bucket_create("rebindable", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    node.client.bucket_bind(&id, &node.cluster_id, false).await.unwrap();
-    node.client.bucket_bind(&id, &node.cluster_id, true).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "rebindable",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
+    node.client
+        .bucket_bind(&id, &node.cluster_id, false)
+        .await
+        .unwrap();
+    node.client
+        .bucket_bind(&id, &node.cluster_id, true)
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert!(info.is_default);
 }
@@ -165,7 +295,16 @@ async fn bucket_rebind_same_cluster_ok() {
 async fn bucket_auto_bound_to_cluster() {
     // Buckets created on a clustered node are auto-bound
     let node = TestNode::new();
-    let id = node.client.bucket_create("auto-bound", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let id = node
+        .client
+        .bucket_create(
+            "auto-bound",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
 }
@@ -174,7 +313,15 @@ async fn bucket_auto_bound_to_cluster() {
 async fn create_20_buckets() {
     let node = TestNode::new();
     for i in 0..20 {
-        node.client.bucket_create(&format!("b-{i}"), None, Visibility::Internal, Classification::Internal).await.unwrap();
+        node.client
+            .bucket_create(
+                &format!("b-{i}"),
+                None,
+                Visibility::Internal,
+                Classification::Internal,
+            )
+            .await
+            .unwrap();
     }
     assert_eq!(node.client.bucket_list().await.unwrap().len(), 20);
 }
@@ -182,8 +329,26 @@ async fn create_20_buckets() {
 #[tokio::test]
 async fn two_nodes_buckets_isolated() {
     let (node_a, node_b) = TestNode::cluster_pair();
-    let a = node_a.client.bucket_create("from-a", None, Visibility::Internal, Classification::Internal).await.unwrap();
-    let b = node_b.client.bucket_create("from-b", None, Visibility::Internal, Classification::Internal).await.unwrap();
+    let a = node_a
+        .client
+        .bucket_create(
+            "from-a",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
+    let b = node_b
+        .client
+        .bucket_create(
+            "from-b",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
     assert_ne!(a, b);
     assert_eq!(node_a.client.bucket_list().await.unwrap().len(), 1);
     assert_eq!(node_b.client.bucket_list().await.unwrap().len(), 1);
@@ -212,19 +377,39 @@ async fn private_bucket_attach_after_genesis() {
     );
 
     // Create a bucket — should be private (no cluster).
-    let bucket_id = pre_client.bucket_create(
-        "private-notes", Some("Created before genesis"),
-        Visibility::Internal, Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = pre_client
+        .bucket_create(
+            "private-notes",
+            Some("Created before genesis"),
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     let info = pre_client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert!(!info.is_attached, "bucket should be private before genesis");
-    assert!(info.cluster_id.is_none(), "bucket should be unbound before genesis");
+    assert!(
+        info.cluster_id.is_none(),
+        "bucket should be unbound before genesis"
+    );
 
     // Write some docs into the private bucket.
     for i in 0..5 {
-        let doc = Document::new(DocId::random(), format!("private note #{i}"), Default::default());
-        pre_client.put_doc(doc, vec![("scope".into(), "private".into())], Visibility::Internal, Some(&bucket_id)).await.unwrap();
+        let doc = Document::new(
+            DocId::random(),
+            format!("private note #{i}"),
+            Default::default(),
+        );
+        pre_client
+            .put_doc(
+                doc,
+                vec![("scope".into(), "private".into())],
+                Visibility::Internal,
+                Some(&bucket_id),
+            )
+            .await
+            .unwrap();
     }
 
     // Verify docs are there.
@@ -251,27 +436,52 @@ async fn private_bucket_attach_after_genesis() {
 
     // The bucket should now be bound (auto-bind on open) but still private.
     let info = post_client.bucket_get(&bucket_id).await.unwrap().unwrap();
-    assert!(!info.is_attached, "bucket should still be private until explicitly attached");
-    assert_eq!(info.cluster_id, Some(cluster_id.clone()), "bucket should be auto-bound to cluster");
+    assert!(
+        !info.is_attached,
+        "bucket should still be private until explicitly attached"
+    );
+    assert_eq!(
+        info.cluster_id,
+        Some(cluster_id.clone()),
+        "bucket should be auto-bound to cluster"
+    );
 
     // Pre-existing docs should still be accessible.
     let docs = post_client.list_docs(None, 100, None).await.unwrap();
-    assert_eq!(docs.len(), 5, "docs written before genesis should still be accessible");
+    assert_eq!(
+        docs.len(),
+        5,
+        "docs written before genesis should still be accessible"
+    );
 
     // Phase 3: attach the bucket to make it visible to peers.
     post_client.bucket_attach(&bucket_id).await.unwrap();
 
     let info = post_client.bucket_get(&bucket_id).await.unwrap().unwrap();
-    assert!(info.is_attached, "bucket should be attached after bucket_attach");
-    assert_eq!(info.cluster_id, Some(cluster_id.clone()), "cluster binding should persist");
+    assert!(
+        info.is_attached,
+        "bucket should be attached after bucket_attach"
+    );
+    assert_eq!(
+        info.cluster_id,
+        Some(cluster_id.clone()),
+        "cluster binding should persist"
+    );
 
     // Docs are still accessible.
     let docs = post_client.list_docs(None, 100, None).await.unwrap();
     assert_eq!(docs.len(), 5, "docs should survive attach transition");
 
     // Can write more docs now that bucket is attached.
-    let doc = Document::new(DocId::random(), "post-attach note".into(), Default::default());
-    post_client.put_doc(doc, vec![], Visibility::Internal, Some(&bucket_id)).await.unwrap();
+    let doc = Document::new(
+        DocId::random(),
+        "post-attach note".into(),
+        Default::default(),
+    );
+    post_client
+        .put_doc(doc, vec![], Visibility::Internal, Some(&bucket_id))
+        .await
+        .unwrap();
     let docs = post_client.list_docs(None, 100, None).await.unwrap();
     assert_eq!(docs.len(), 6, "should have pre + post-attach docs");
 }
@@ -296,9 +506,15 @@ async fn attach_also_binds_unbound_bucket() {
         peer_id.to_vec(),
         vec![0u8; 32],
     );
-    let bucket_id = pre_client.bucket_create(
-        "will-attach", None, Visibility::Internal, Classification::Internal,
-    ).await.unwrap();
+    let bucket_id = pre_client
+        .bucket_create(
+            "will-attach",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+        )
+        .await
+        .unwrap();
 
     // Now open with a cluster, but DON'T use the auto-bind constructor path.
     // Instead, manually set cluster_id and call attach directly.

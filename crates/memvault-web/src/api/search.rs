@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct SearchQuery {

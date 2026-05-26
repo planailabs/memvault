@@ -11,7 +11,9 @@ pub enum AuthError {
     #[error("attestation revoked: {reason}")]
     AttestationRevoked { reason: String },
 
-    #[error("peer mismatch: attestation member {attestation_member} != connecting peer {connecting_peer}")]
+    #[error(
+        "peer mismatch: attestation member {attestation_member} != connecting peer {connecting_peer}"
+    )]
     PeerMismatch {
         attestation_member: String,
         connecting_peer: String,

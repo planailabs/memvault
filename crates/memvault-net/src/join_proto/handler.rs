@@ -17,10 +17,16 @@ pub fn validate_join_request(req: &JoinRequest) -> Result<(), &'static str> {
 }
 
 /// Build a successful join response with the new attestation and optional enrollment.
-pub fn build_join_success(attestation_block: Vec<u8>, enrollment_block: Option<Vec<u8>>) -> JoinResponse {
+pub fn build_join_success(
+    attestation_block: Vec<u8>,
+    enrollment_block: Option<Vec<u8>>,
+) -> JoinResponse {
     JoinResponse {
         version: 1,
-        result: JoinResult::Success { attestation_block, enrollment_block },
+        result: JoinResult::Success {
+            attestation_block,
+            enrollment_block,
+        },
     }
 }
 

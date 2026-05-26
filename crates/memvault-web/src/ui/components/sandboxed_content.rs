@@ -105,9 +105,7 @@ fn parent_script(iframe_id: &str) -> String {
 
 /// Build the full HTML document for srcdoc.
 fn build_srcdoc(html: &str, iframe_id: &str) -> String {
-    let escaped_html = html
-        .replace('&', "&amp;")
-        .replace('"', "&quot;");
+    let escaped_html = html.replace('&', "&amp;").replace('"', "&quot;");
 
     format!(
         r#"<!DOCTYPE html>

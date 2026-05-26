@@ -31,8 +31,7 @@ impl VisibilityFilter {
         match block_visibility {
             Visibility::Internal => requester.is_local_cluster,
             Visibility::Federated => {
-                requester.is_local_cluster
-                    || federation_state.is_trusted(&requester.cluster_id)
+                requester.is_local_cluster || federation_state.is_trusted(&requester.cluster_id)
             }
             Visibility::Public => true,
         }

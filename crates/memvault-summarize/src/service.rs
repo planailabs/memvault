@@ -78,11 +78,7 @@ impl SummarizationService {
     }
 
     /// Cache a summary for later retrieval.
-    pub fn cache_summary(
-        &mut self,
-        request: &SummarizationRequest,
-        summary: Summary,
-    ) {
+    pub fn cache_summary(&mut self, request: &SummarizationRequest, summary: Summary) {
         let source_cids = summary.sources.clone();
         let key = SummaryCache::cache_key(request, &source_cids);
         let now_ns = summary.generated_at_ns;

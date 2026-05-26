@@ -45,12 +45,23 @@ async fn create_note(
     let tags = parse_tags_str(&tags_str);
     let vis = crate::api::docs::parse_visibility_str(Some(&visibility));
     client
-        .put_doc(doc, tags, vis, bucket_hex.as_deref().and_then(|h| {
-            let b = hex::decode(h).ok()?;
-            if b.len() != 32 { return None; }
-            let mut a = [0u8; 32]; a.copy_from_slice(&b);
-            Some(memvault_core::BucketId(a))
-        }).as_ref())
+        .put_doc(
+            doc,
+            tags,
+            vis,
+            bucket_hex
+                .as_deref()
+                .and_then(|h| {
+                    let b = hex::decode(h).ok()?;
+                    if b.len() != 32 {
+                        return None;
+                    }
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&b);
+                    Some(memvault_core::BucketId(a))
+                })
+                .as_ref(),
+        )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 

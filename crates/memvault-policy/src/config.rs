@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::egress::destination::EgressKind;
 use crate::egress::EgressPolicy;
+use crate::egress::destination::EgressKind;
 use crate::error::PolicyError;
 
 /// Top-level policy configuration loaded from TOML.
@@ -123,9 +123,7 @@ fn parse_egress_kind(s: &str) -> Result<EgressKind, PolicyError> {
         "agent_host" => Ok(EgressKind::AgentHost),
         "third_party" => Ok(EgressKind::ThirdParty),
         "public_share" => Ok(EgressKind::PublicShare),
-        other => Err(PolicyError::Config(format!(
-            "unknown egress kind: {other}"
-        ))),
+        other => Err(PolicyError::Config(format!("unknown egress kind: {other}"))),
     }
 }
 

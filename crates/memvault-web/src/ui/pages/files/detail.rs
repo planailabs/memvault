@@ -65,16 +65,24 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
 
-    let extracted_text = client
-        .read_extracted_text(&cid_bytes)
-        .await
-        .unwrap_or(None);
+    let extracted_text = client.read_extracted_text(&cid_bytes).await.unwrap_or(None);
 
     Ok(FileData {
         cid,
-        filename: manifest.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
-        mime_type: manifest.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string(),
-        content_size: manifest.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0),
+        filename: manifest
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unnamed")
+            .to_string(),
+        mime_type: manifest
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("application/octet-stream")
+            .to_string(),
+        content_size: manifest
+            .get("content_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         sha256: manifest
             .get("sha256")
             .and_then(|v| v.as_str())
@@ -102,7 +110,12 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
                         ("incoming".to_string(), source.tag_label())
                     };
                     let other_label = client.resolve_label(&other_node).await.unwrap_or(None);
-                    items.push(FileLinkedItem { direction, relation: edge.relation.clone(), other_node, other_label });
+                    items.push(FileLinkedItem {
+                        direction,
+                        relation: edge.relation.clone(),
+                        other_node,
+                        other_label,
+                    });
                 }
             }
             items
@@ -258,22 +271,32 @@ fn html_escape_text(s: &str) -> String {
 }
 
 #[server]
-async fn search_file_link_targets(query: String) -> Result<Vec<(String, String, String)>, ServerFnError> {
+async fn search_file_link_targets(
+    query: String,
+) -> Result<Vec<(String, String, String)>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let hits = client
         .search_unified(&query, 8)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(hits.into_iter().map(|h| (h.node_id, h.node_type, h.label)).collect())
+    Ok(hits
+        .into_iter()
+        .map(|h| (h.node_id, h.node_type, h.label))
+        .collect())
 }
 
 #[server]
-async fn create_file_link(source: String, target: String, relation: String) -> Result<String, ServerFnError> {
+async fn create_file_link(
+    source: String,
+    target: String,
+    relation: String,
+) -> Result<String, ServerFnError> {
     let client = crate::ui::state::client()?;
     let source_ref = memvault_core::NodeRef::from_tag_label(&source)
         .ok_or_else(|| ServerFnError::new("Invalid source node"))?;
-    let target_ref = memvault_core::NodeRef::from_tag_label(&target)
-        .ok_or_else(|| ServerFnError::new("Invalid target — use format: entity:<hex>, doc:<hex>, or file:<hex>"))?;
+    let target_ref = memvault_core::NodeRef::from_tag_label(&target).ok_or_else(|| {
+        ServerFnError::new("Invalid target — use format: entity:<hex>, doc:<hex>, or file:<hex>")
+    })?;
 
     let edge = memvault_doc::Edge {
         id: memvault_core::EdgeId::random(),

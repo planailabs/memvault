@@ -24,18 +24,28 @@ async fn share_decide_approve() {
     let node = TestNode::new();
     // Store a fake proposal CID
     let proposal_cid = vec![1u8; 32];
-    node.store.record_share_inbox(&proposal_cid, &node.cluster_id.0, 1000, 0).unwrap();
+    node.store
+        .record_share_inbox(&proposal_cid, &node.cluster_id.0, 1000, 0)
+        .unwrap();
 
-    node.client.share_decide(&proposal_cid, true, None).await.unwrap();
+    node.client
+        .share_decide(&proposal_cid, true, None)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn share_decide_reject() {
     let node = TestNode::new();
     let proposal_cid = vec![2u8; 32];
-    node.store.record_share_inbox(&proposal_cid, &node.cluster_id.0, 2000, 0).unwrap();
+    node.store
+        .record_share_inbox(&proposal_cid, &node.cluster_id.0, 2000, 0)
+        .unwrap();
 
-    node.client.share_decide(&proposal_cid, false, Some("not authorized")).await.unwrap();
+    node.client
+        .share_decide(&proposal_cid, false, Some("not authorized"))
+        .await
+        .unwrap();
 }
 
 #[test]
@@ -56,7 +66,9 @@ fn share_proposal_sign_verify() {
         purpose: "test".into(),
         not_after_ns: u64::MAX,
         signature: [0u8; 64],
-    }.sign(&sk).unwrap();
+    }
+    .sign(&sk)
+    .unwrap();
 
     proposal.verify_signature(&vk).unwrap();
 }
@@ -78,7 +90,9 @@ fn share_reply_sign_verify() {
         },
         decided_at_ns: 1000,
         signature: [0u8; 64],
-    }.sign(&sk).unwrap();
+    }
+    .sign(&sk)
+    .unwrap();
 
     reply.verify_signature(&vk).unwrap();
 }
@@ -99,7 +113,9 @@ fn bucket_trust_sign_verify() {
         from_proposal: memvault_core::cid_from_bytes(b"proposal"),
         from_reply: memvault_core::cid_from_bytes(b"reply"),
         signature: [0u8; 64],
-    }.sign(&sk).unwrap();
+    }
+    .sign(&sk)
+    .unwrap();
 
     trust.verify_signature(&vk).unwrap();
     assert!(trust.is_valid_at(1000));

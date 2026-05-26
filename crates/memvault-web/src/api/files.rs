@@ -2,16 +2,16 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 #[derive(Serialize)]
 pub struct FileListItem {
@@ -104,14 +104,24 @@ pub async fn upload_file(
 
     let bucket_id = query.bucket.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 { return None; }
-        let mut a = [0u8; 32]; a.copy_from_slice(&bytes);
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(a))
     });
     let (_cid, node_id) = memvault_api::files::upload_file(
-        state.client.as_ref(), &data, Some(&name), &content_type,
-        vec![], "internal", query.vfs_path.as_deref(), bucket_id.as_ref(),
-    ).await?;
+        state.client.as_ref(),
+        &data,
+        Some(&name),
+        &content_type,
+        vec![],
+        "internal",
+        query.vfs_path.as_deref(),
+        bucket_id.as_ref(),
+    )
+    .await?;
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
 
     Ok((

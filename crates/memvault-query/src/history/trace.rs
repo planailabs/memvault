@@ -83,9 +83,11 @@ fn extract_metadata(data: &[u8]) -> (Vec<u8>, u64, Vec<(String, String)>) {
             .and_then(|v| v.as_str())
             .map(|s| s.as_bytes().to_vec())
             .or_else(|| {
-                val.get("author")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect())
+                val.get("author").and_then(|v| v.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as u8))
+                        .collect()
+                })
             })
             .unwrap_or_default();
 
@@ -121,8 +123,11 @@ fn extract_provenance_parents(data: &[u8]) -> Vec<Vec<u8>> {
                 arr.iter()
                     .filter_map(|v| {
                         v.as_str().map(|s| s.as_bytes().to_vec()).or_else(|| {
-                            v.as_array()
-                                .map(|a| a.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect())
+                            v.as_array().map(|a| {
+                                a.iter()
+                                    .filter_map(|n| n.as_u64().map(|n| n as u8))
+                                    .collect()
+                            })
                         })
                     })
                     .collect()

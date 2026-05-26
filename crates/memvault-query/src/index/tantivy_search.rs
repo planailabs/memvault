@@ -6,10 +6,10 @@
 use std::path::Path;
 
 use tantivy::{
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
     collector::TopDocs,
     query::QueryParser,
-    schema::{Field, NumericOptions, Schema, STORED, STRING, TEXT},
-    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
+    schema::{Field, NumericOptions, STORED, STRING, Schema, TEXT},
 };
 
 use crate::error::QueryError;
@@ -218,8 +218,7 @@ impl TantivyIndex {
             query_text.to_string()
         };
 
-        let query_parser =
-            QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
+        let query_parser = QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
         let query = query_parser
             .parse_query(&effective_query)
             .map_err(|e| QueryError::Other(format!("query parse: {e}")))?;
@@ -312,12 +311,15 @@ mod tests {
     fn test_add_and_search_document() {
         let (_dir, mut idx) = make_index();
         idx.add_document(
-            "cid001", "doc:001",
+            "cid001",
+            "doc:001",
             "The quick brown fox jumps over the lazy dog",
             "Fox Story",
             &[("category".into(), "animals".into())],
-            None, 1000,
-        ).unwrap();
+            None,
+            1000,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         let hits = idx.search_filtered("fox", None, 10).unwrap();
@@ -332,11 +334,16 @@ mod tests {
     fn test_add_entity() {
         let (_dir, mut idx) = make_index();
         idx.add_entity(
-            "cid_e1", "entity:e1", "person", "Alice",
+            "cid_e1",
+            "entity:e1",
+            "person",
+            "Alice",
             "name Alice age 30 role engineer",
             &[("kind".into(), "person".into())],
-            None, 2000,
-        ).unwrap();
+            None,
+            2000,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         let hits = idx.search_filtered("engineer", None, 10).unwrap();
@@ -349,10 +356,16 @@ mod tests {
     fn test_add_attachment() {
         let (_dir, mut idx) = make_index();
         idx.add_attachment(
-            "cid_f1", "file:f1", "report.pdf", "application/pdf",
+            "cid_f1",
+            "file:f1",
+            "report.pdf",
+            "application/pdf",
             Some("quarterly financial report Q3 2025"),
-            &[], None, 3000,
-        ).unwrap();
+            &[],
+            None,
+            3000,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         let hits = idx.search_filtered("quarterly", None, 10).unwrap();
@@ -365,13 +378,25 @@ mod tests {
     fn test_bucket_filter() {
         let (_dir, mut idx) = make_index();
         idx.add_document(
-            "cid_b1", "doc:b1", "shared document in bucket alpha",
-            "Alpha Doc", &[], Some("bucket_alpha"), 1000,
-        ).unwrap();
+            "cid_b1",
+            "doc:b1",
+            "shared document in bucket alpha",
+            "Alpha Doc",
+            &[],
+            Some("bucket_alpha"),
+            1000,
+        )
+        .unwrap();
         idx.add_document(
-            "cid_b2", "doc:b2", "shared document in bucket beta",
-            "Beta Doc", &[], Some("bucket_beta"), 2000,
-        ).unwrap();
+            "cid_b2",
+            "doc:b2",
+            "shared document in bucket beta",
+            "Beta Doc",
+            &[],
+            Some("bucket_beta"),
+            2000,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         // Search all buckets
@@ -379,7 +404,9 @@ mod tests {
         assert_eq!(all.len(), 2);
 
         // Search specific bucket
-        let alpha = idx.search_filtered("shared document", Some("bucket_alpha"), 10).unwrap();
+        let alpha = idx
+            .search_filtered("shared document", Some("bucket_alpha"), 10)
+            .unwrap();
         assert_eq!(alpha.len(), 1);
         assert_eq!(alpha[0].node_id, "doc:b1");
     }
@@ -387,7 +414,16 @@ mod tests {
     #[test]
     fn test_retract() {
         let (_dir, mut idx) = make_index();
-        idx.add_document("cid_r1", "doc:r1", "content to retract", "Retractable", &[], None, 1000).unwrap();
+        idx.add_document(
+            "cid_r1",
+            "doc:r1",
+            "content to retract",
+            "Retractable",
+            &[],
+            None,
+            1000,
+        )
+        .unwrap();
         idx.commit().unwrap();
         assert_eq!(idx.num_docs(), 1);
 
@@ -399,8 +435,26 @@ mod tests {
     #[test]
     fn test_score_ordering() {
         let (_dir, mut idx) = make_index();
-        idx.add_document("cid_a", "doc:a", "rust programming language", "Rust Intro", &[], None, 100).unwrap();
-        idx.add_document("cid_b", "doc:b", "rust rust rust is amazing for rust developers", "All About Rust", &[], None, 200).unwrap();
+        idx.add_document(
+            "cid_a",
+            "doc:a",
+            "rust programming language",
+            "Rust Intro",
+            &[],
+            None,
+            100,
+        )
+        .unwrap();
+        idx.add_document(
+            "cid_b",
+            "doc:b",
+            "rust rust rust is amazing for rust developers",
+            "All About Rust",
+            &[],
+            None,
+            200,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         let hits = idx.search_filtered("rust", None, 10).unwrap();
@@ -412,9 +466,38 @@ mod tests {
     #[test]
     fn test_unified_search_across_types() {
         let (_dir, mut idx) = make_index();
-        idx.add_document("c1", "doc:1", "kubernetes cluster management", "K8s Guide", &[], None, 100).unwrap();
-        idx.add_entity("c2", "entity:2", "tool", "kubectl", "kubernetes command line tool", &[], None, 200).unwrap();
-        idx.add_attachment("c3", "file:3", "k8s-setup.md", "text/markdown", Some("kubernetes setup instructions"), &[], None, 300).unwrap();
+        idx.add_document(
+            "c1",
+            "doc:1",
+            "kubernetes cluster management",
+            "K8s Guide",
+            &[],
+            None,
+            100,
+        )
+        .unwrap();
+        idx.add_entity(
+            "c2",
+            "entity:2",
+            "tool",
+            "kubectl",
+            "kubernetes command line tool",
+            &[],
+            None,
+            200,
+        )
+        .unwrap();
+        idx.add_attachment(
+            "c3",
+            "file:3",
+            "k8s-setup.md",
+            "text/markdown",
+            Some("kubernetes setup instructions"),
+            &[],
+            None,
+            300,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         let hits = idx.search_unified("kubernetes", None, 10).unwrap();

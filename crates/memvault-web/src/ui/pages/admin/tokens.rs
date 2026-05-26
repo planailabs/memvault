@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use plan_ai_design::{Button, ButtonVariant, Card, FormField, PageHeader, Pill, PillVariant, Td, TdMuted};
+use plan_ai_design::{
+    Button, ButtonVariant, Card, FormField, PageHeader, Pill, PillVariant, Td, TdMuted,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::components::cid_display::CidDisplay;

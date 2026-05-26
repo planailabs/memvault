@@ -3,27 +3,33 @@
 //! These tests spawn actual libp2p swarms on localhost, connect them,
 //! and verify gossip, auth, and join protocols work end-to-end.
 
-use std::time::Duration;
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId as Libp2pPeerId};
+use std::time::Duration;
 use tokio::time::timeout;
 
-use memvault_net::{
-    standalone_swarm, AdminAnnouncement, AuthRequest, AuthResponse,
-    JoinRequest, JoinResult, FederationAnnouncement,
-};
 use memvault_net::gossip;
+use memvault_net::{
+    AdminAnnouncement, AuthRequest, AuthResponse, FederationAnnouncement, JoinRequest, JoinResult,
+    standalone_swarm,
+};
 
 /// Spawn a swarm on a random port and return it with its listen address.
-async fn spawn_swarm() -> (libp2p::Swarm<memvault_net::StandaloneMemvaultBehaviour>, Multiaddr, Libp2pPeerId) {
+async fn spawn_swarm() -> (
+    libp2p::Swarm<memvault_net::StandaloneMemvaultBehaviour>,
+    Multiaddr,
+    Libp2pPeerId,
+) {
     let keypair = libp2p::identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
     let mut swarm = standalone_swarm(
         keypair,
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(), // random port
         vec![],
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Wait for listen address
     let addr = loop {
@@ -131,7 +137,11 @@ async fn gossip_admin_announcement_propagates() {
     let announcement = AdminAnnouncement::TokenConsumed(vec![1, 2, 3, 4]);
     let data = serde_ipld_dagcbor::to_vec(&announcement).unwrap();
     let topic = gossip::admin_topic();
-    swarm_a.behaviour_mut().gossipsub.publish(topic.clone(), data).unwrap();
+    swarm_a
+        .behaviour_mut()
+        .gossipsub
+        .publish(topic.clone(), data)
+        .unwrap();
 
     // swarm_b should receive it
     let received = timeout(Duration::from_secs(5), async {
@@ -170,7 +180,11 @@ async fn gossip_bucket_created_propagates() {
 
     let announcement = AdminAnnouncement::BucketCreated(vec![10, 20, 30]);
     let data = serde_ipld_dagcbor::to_vec(&announcement).unwrap();
-    swarm_a.behaviour_mut().gossipsub.publish(gossip::admin_topic(), data).unwrap();
+    swarm_a
+        .behaviour_mut()
+        .gossipsub
+        .publish(gossip::admin_topic(), data)
+        .unwrap();
 
     let received = timeout(Duration::from_secs(5), async {
         loop {
@@ -324,8 +338,10 @@ async fn join_request_response() {
 
 #[test]
 fn visibility_filter_internal_blocks_remote() {
-    use memvault_net::{VisibilityFilter, FederationState, ConnectionState, ServeDecision, ServeRefuseReason};
     use memvault_core::Visibility;
+    use memvault_net::{
+        ConnectionState, FederationState, ServeDecision, ServeRefuseReason, VisibilityFilter,
+    };
 
     let filter = VisibilityFilter::new(b"cluster-1".to_vec());
     let fed_state = FederationState::new(b"cluster-1".to_vec());
@@ -356,8 +372,8 @@ fn visibility_filter_internal_blocks_remote() {
 
 #[test]
 fn visibility_filter_federated_with_trust() {
-    use memvault_net::{VisibilityFilter, FederationState, TrustedClusterInfo, ConnectionState};
     use memvault_core::Visibility;
+    use memvault_net::{ConnectionState, FederationState, TrustedClusterInfo, VisibilityFilter};
 
     let filter = VisibilityFilter::new(b"cluster-1".to_vec());
     let mut fed_state = FederationState::new(b"cluster-1".to_vec());
@@ -389,8 +405,10 @@ fn visibility_filter_federated_with_trust() {
 
 #[test]
 fn may_serve_private_bucket_refused() {
-    use memvault_net::{VisibilityFilter, FederationState, ConnectionState, ServeDecision, ServeRefuseReason};
     use memvault_core::Visibility;
+    use memvault_net::{
+        ConnectionState, FederationState, ServeDecision, ServeRefuseReason, VisibilityFilter,
+    };
 
     let filter = VisibilityFilter::new(b"my-cluster".to_vec());
     let fed_state = FederationState::new(b"my-cluster".to_vec());
@@ -410,7 +428,10 @@ fn may_serve_private_bucket_refused() {
         &other_peer,
         &fed_state,
     );
-    assert_eq!(decision, ServeDecision::Refused(ServeRefuseReason::BucketPrivate));
+    assert_eq!(
+        decision,
+        ServeDecision::Refused(ServeRefuseReason::BucketPrivate)
+    );
 }
 
 // ── Connection registry tests ───────────────────────────────────────
@@ -421,20 +442,26 @@ fn connection_registry_tracks_peers() {
 
     let mut registry = ConnectionRegistry::new();
 
-    registry.register(b"peer-1".to_vec(), ConnectionState {
-        peer_id: b"peer-1".to_vec(),
-        cluster_id: b"cluster-a".to_vec(),
-        role: "admin".to_string(),
-        is_local_cluster: true,
-        authenticated_at_ns: 1000,
-    });
-    registry.register(b"peer-2".to_vec(), ConnectionState {
-        peer_id: b"peer-2".to_vec(),
-        cluster_id: b"cluster-b".to_vec(),
-        role: "agent".to_string(),
-        is_local_cluster: false,
-        authenticated_at_ns: 2000,
-    });
+    registry.register(
+        b"peer-1".to_vec(),
+        ConnectionState {
+            peer_id: b"peer-1".to_vec(),
+            cluster_id: b"cluster-a".to_vec(),
+            role: "admin".to_string(),
+            is_local_cluster: true,
+            authenticated_at_ns: 1000,
+        },
+    );
+    registry.register(
+        b"peer-2".to_vec(),
+        ConnectionState {
+            peer_id: b"peer-2".to_vec(),
+            cluster_id: b"cluster-b".to_vec(),
+            role: "agent".to_string(),
+            is_local_cluster: false,
+            authenticated_at_ns: 2000,
+        },
+    );
 
     assert!(registry.get(b"peer-1").is_some());
     assert!(registry.get(b"peer-2").is_some());
@@ -483,9 +510,15 @@ async fn block_exchange_request_response() {
     // A requests blocks from B
     let request = memvault_net::BlockRequest {
         cids: vec![vec![1, 2, 3], vec![4, 5, 6]],
-        since_ns: None, limit: None, range_fingerprints: vec![], token: None,
+        since_ns: None,
+        limit: None,
+        range_fingerprints: vec![],
+        token: None,
     };
-    swarm_a.behaviour_mut().block_exchange.send_request(&peer_b, request);
+    swarm_a
+        .behaviour_mut()
+        .block_exchange
+        .send_request(&peer_b, request);
 
     let completed = timeout(Duration::from_secs(5), async {
         let mut b_received = false;
@@ -556,9 +589,16 @@ async fn block_exchange_large_block() {
     // Request a single large block (1 MiB)
     let large_data = vec![0xABu8; 1024 * 1024];
     let request = memvault_net::BlockRequest {
-        cids: vec![vec![42; 32]], since_ns: None, limit: None, range_fingerprints: vec![], token: None,
+        cids: vec![vec![42; 32]],
+        since_ns: None,
+        limit: None,
+        range_fingerprints: vec![],
+        token: None,
     };
-    swarm_a.behaviour_mut().block_exchange.send_request(&peer_b, request);
+    swarm_a
+        .behaviour_mut()
+        .block_exchange
+        .send_request(&peer_b, request);
 
     let large_data_clone = large_data.clone();
     let completed = timeout(Duration::from_secs(10), async {
@@ -635,7 +675,9 @@ async fn head_announcement_propagates() {
         bucket_id: Some(vec![0xBB; 32]),
     };
     let data = serde_ipld_dagcbor::to_vec(&ann).unwrap();
-    swarm_a.behaviour_mut().gossipsub
+    swarm_a
+        .behaviour_mut()
+        .gossipsub
         .publish(gossip::heads_topic(), data)
         .unwrap();
 
@@ -677,8 +719,7 @@ fn head_announcement_serialization_roundtrip() {
         bucket_id: None,
     };
     let bytes = serde_ipld_dagcbor::to_vec(&ann).unwrap();
-    let decoded: memvault_net::HeadAnnouncement =
-        serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+    let decoded: memvault_net::HeadAnnouncement = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
     assert_eq!(decoded.cid, ann.cid);
     assert_eq!(decoded.cluster_id, ann.cluster_id);
     assert_eq!(decoded.wall_ns, ann.wall_ns);
@@ -692,30 +733,39 @@ fn head_announcement_serialization_roundtrip() {
         bucket_id: Some(vec![30; 32]),
     };
     let bytes2 = serde_ipld_dagcbor::to_vec(&ann2).unwrap();
-    let decoded2: memvault_net::HeadAnnouncement =
-        serde_ipld_dagcbor::from_slice(&bytes2).unwrap();
+    let decoded2: memvault_net::HeadAnnouncement = serde_ipld_dagcbor::from_slice(&bytes2).unwrap();
     assert_eq!(decoded2.bucket_id, Some(vec![30; 32]));
 }
 
 #[test]
 fn block_request_response_serialization_roundtrip() {
     let req = memvault_net::BlockRequest {
-        cids: vec![vec![1; 32], vec![2; 32], vec![3; 32]], since_ns: None, limit: None, range_fingerprints: vec![], token: None,
+        cids: vec![vec![1; 32], vec![2; 32], vec![3; 32]],
+        since_ns: None,
+        limit: None,
+        range_fingerprints: vec![],
+        token: None,
     };
     let bytes = serde_ipld_dagcbor::to_vec(&req).unwrap();
-    let decoded: memvault_net::BlockRequest =
-        serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+    let decoded: memvault_net::BlockRequest = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
     assert_eq!(decoded.cids.len(), 3);
 
     let resp = memvault_net::BlockResponse {
         blocks: vec![
-            memvault_net::BlockEntry { cid: vec![1; 32], data: b"hello".to_vec(), found: true },
-            memvault_net::BlockEntry { cid: vec![2; 32], data: vec![], found: false },
+            memvault_net::BlockEntry {
+                cid: vec![1; 32],
+                data: b"hello".to_vec(),
+                found: true,
+            },
+            memvault_net::BlockEntry {
+                cid: vec![2; 32],
+                data: vec![],
+                found: false,
+            },
         ],
     };
     let bytes = serde_ipld_dagcbor::to_vec(&resp).unwrap();
-    let decoded: memvault_net::BlockResponse =
-        serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+    let decoded: memvault_net::BlockResponse = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
     assert_eq!(decoded.blocks.len(), 2);
     assert!(decoded.blocks[0].found);
     assert!(!decoded.blocks[1].found);

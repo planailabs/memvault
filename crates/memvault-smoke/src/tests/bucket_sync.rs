@@ -1,18 +1,17 @@
 //! Bucket sync tests: gossip propagation of bucket lifecycle events
 //! between two live swarms, plus federation bucket announcements.
 
-use std::time::Duration;
 use futures::StreamExt;
-use libp2p::swarm::SwarmEvent;
 use libp2p::Multiaddr;
+use libp2p::swarm::SwarmEvent;
+use std::time::Duration;
 use tokio::time::timeout;
 
-use memvault_net::{
-    standalone_swarm, AdminAnnouncement,
-    FederationAnnouncement, StandaloneMemvaultBehaviourEvent,
-};
-use memvault_net::gossip;
 use memvault_core::Visibility;
+use memvault_net::gossip;
+use memvault_net::{
+    AdminAnnouncement, FederationAnnouncement, StandaloneMemvaultBehaviourEvent, standalone_swarm,
+};
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -23,13 +22,9 @@ async fn spawn_swarm() -> (
 ) {
     let keypair = libp2p::identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
-    let mut swarm = standalone_swarm(
-        keypair,
-        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
-        vec![],
-    )
-    .await
-    .unwrap();
+    let mut swarm = standalone_swarm(keypair, "/ip4/127.0.0.1/tcp/0".parse().unwrap(), vec![])
+        .await
+        .unwrap();
 
     let addr = loop {
         match swarm.next().await.unwrap() {
@@ -123,8 +118,16 @@ async fn publish_and_receive_federation(
     let topic = gossip::federation_ident_topic(cluster_a, cluster_b);
 
     // Both must subscribe to this federation topic.
-    publisher.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
-    receiver.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+    publisher
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic)
+        .unwrap();
+    receiver
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic)
+        .unwrap();
 
     // Allow subscription to propagate.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -259,10 +262,8 @@ async fn federation_head_with_bucket_id_propagates() {
         bucket_id: Some(bucket.clone()),
     };
 
-    let received = publish_and_receive_federation(
-        &mut a, &mut b, &cluster_x, &cluster_y, ann,
-    )
-    .await;
+    let received =
+        publish_and_receive_federation(&mut a, &mut b, &cluster_x, &cluster_y, ann).await;
 
     match received {
         Some(FederationAnnouncement::HeadAvailable {
@@ -293,10 +294,8 @@ async fn federation_bucket_trust_established_propagates() {
         trust_cid: trust_cid.clone(),
     };
 
-    let received = publish_and_receive_federation(
-        &mut a, &mut b, &cluster_x, &cluster_y, ann,
-    )
-    .await;
+    let received =
+        publish_and_receive_federation(&mut a, &mut b, &cluster_x, &cluster_y, ann).await;
 
     match received {
         Some(FederationAnnouncement::BucketTrustEstablished { trust_cid: tc }) => {
@@ -322,10 +321,8 @@ async fn federation_bucket_trust_revoked_propagates() {
         revocation_cid: revocation_cid.clone(),
     };
 
-    let received = publish_and_receive_federation(
-        &mut a, &mut b, &cluster_x, &cluster_y, ann,
-    )
-    .await;
+    let received =
+        publish_and_receive_federation(&mut a, &mut b, &cluster_x, &cluster_y, ann).await;
 
     match received {
         Some(FederationAnnouncement::BucketTrustRevoked { revocation_cid: rc }) => {
@@ -339,7 +336,9 @@ async fn federation_bucket_trust_revoked_propagates() {
 
 #[test]
 fn private_bucket_blocks_other_local_peer() {
-    use memvault_net::{VisibilityFilter, FederationState, ConnectionState, ServeDecision, ServeRefuseReason};
+    use memvault_net::{
+        ConnectionState, FederationState, ServeDecision, ServeRefuseReason, VisibilityFilter,
+    };
 
     // Filter for cluster-a. Bucket is private to "cluster-a" (owner = cluster_id).
     let filter = VisibilityFilter::new(b"cluster-a".to_vec());
@@ -362,12 +361,15 @@ fn private_bucket_blocks_other_local_peer() {
         &other_local,
         &fed,
     );
-    assert_eq!(decision, ServeDecision::Refused(ServeRefuseReason::BucketPrivate));
+    assert_eq!(
+        decision,
+        ServeDecision::Refused(ServeRefuseReason::BucketPrivate)
+    );
 }
 
 #[test]
 fn private_bucket_allows_owner_peer() {
-    use memvault_net::{VisibilityFilter, FederationState, ConnectionState, ServeDecision};
+    use memvault_net::{ConnectionState, FederationState, ServeDecision, VisibilityFilter};
 
     let filter = VisibilityFilter::new(b"cluster-a".to_vec());
     let fed = FederationState::new(b"cluster-a".to_vec());
@@ -381,18 +383,15 @@ fn private_bucket_allows_owner_peer() {
         authenticated_at_ns: 1000,
     };
 
-    let decision = filter.may_serve(
-        &Visibility::Internal,
-        Some(b"cluster-a"),
-        &owner,
-        &fed,
-    );
+    let decision = filter.may_serve(&Visibility::Internal, Some(b"cluster-a"), &owner, &fed);
     assert_eq!(decision, ServeDecision::Allowed);
 }
 
 #[test]
 fn private_bucket_foreign_owner_always_refused() {
-    use memvault_net::{VisibilityFilter, FederationState, ConnectionState, ServeDecision, ServeRefuseReason};
+    use memvault_net::{
+        ConnectionState, FederationState, ServeDecision, ServeRefuseReason, VisibilityFilter,
+    };
 
     let filter = VisibilityFilter::new(b"cluster-a".to_vec());
     let fed = FederationState::new(b"cluster-a".to_vec());
@@ -406,18 +405,16 @@ fn private_bucket_foreign_owner_always_refused() {
     };
 
     // Bucket owned by a different cluster — always refused
-    let decision = filter.may_serve(
-        &Visibility::Internal,
-        Some(b"cluster-b"),
-        &local,
-        &fed,
+    let decision = filter.may_serve(&Visibility::Internal, Some(b"cluster-b"), &local, &fed);
+    assert_eq!(
+        decision,
+        ServeDecision::Refused(ServeRefuseReason::BucketPrivate)
     );
-    assert_eq!(decision, ServeDecision::Refused(ServeRefuseReason::BucketPrivate));
 }
 
 #[test]
 fn attached_bucket_allows_local_cluster_access() {
-    use memvault_net::{VisibilityFilter, FederationState, ConnectionState};
+    use memvault_net::{ConnectionState, FederationState, VisibilityFilter};
 
     let filter = VisibilityFilter::new(b"cluster-a".to_vec());
     let fed = FederationState::new(b"cluster-a".to_vec());
@@ -437,7 +434,7 @@ fn attached_bucket_allows_local_cluster_access() {
 
 #[test]
 fn federated_bucket_with_trust_allows_remote() {
-    use memvault_net::{VisibilityFilter, FederationState, TrustedClusterInfo, ConnectionState};
+    use memvault_net::{ConnectionState, FederationState, TrustedClusterInfo, VisibilityFilter};
 
     let filter = VisibilityFilter::new(b"cluster-a".to_vec());
     let mut fed = FederationState::new(b"cluster-a".to_vec());
@@ -462,7 +459,7 @@ fn federated_bucket_with_trust_allows_remote() {
 
 #[test]
 fn federated_bucket_without_trust_blocks_remote() {
-    use memvault_net::{VisibilityFilter, FederationState, ConnectionState};
+    use memvault_net::{ConnectionState, FederationState, VisibilityFilter};
 
     let filter = VisibilityFilter::new(b"cluster-a".to_vec());
     let fed = FederationState::new(b"cluster-a".to_vec()); // no trust added

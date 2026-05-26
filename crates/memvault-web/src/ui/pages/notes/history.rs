@@ -21,8 +21,8 @@ struct HistoryEntry {
 #[server]
 async fn get_note_history(id: String) -> Result<Vec<HistoryEntry>, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let doc_id = crate::api::docs::parse_doc_id(&id)
-        .map_err(|e| ServerFnError::new(format!("{e}")))?;
+    let doc_id =
+        crate::api::docs::parse_doc_id(&id).map_err(|e| ServerFnError::new(format!("{e}")))?;
     let records = client
         .history_of(&doc_id)
         .await

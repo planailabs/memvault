@@ -1,4 +1,4 @@
-use redb::{TableDefinition};
+use redb::TableDefinition;
 
 /// Primary block storage: CID bytes -> raw block bytes.
 pub const BLOCKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
@@ -52,7 +52,8 @@ pub const BUCKETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("buckets
 pub const BUCKET_CLUSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bucket_cluster");
 
 /// Cluster → default bucket: cluster_id -> bucket_id.
-pub const CLUSTER_DEFAULT_BUCKET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cluster_default_bucket");
+pub const CLUSTER_DEFAULT_BUCKET: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("cluster_default_bucket");
 
 // ── Share tables (added B5) ────────────────────────────────────────
 

@@ -19,8 +19,8 @@ fn main() {
                                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                                 .join("memvault")
                         });
-                    let auth_token = memvault_web::load_or_generate_token(&data_dir)
-                        .unwrap_or_default();
+                    let auth_token =
+                        memvault_web::load_or_generate_token(&data_dir).unwrap_or_default();
 
                     let app_state = Arc::new(memvault_web::AppState {
                         client,

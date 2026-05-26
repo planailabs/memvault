@@ -16,9 +16,15 @@ fn generate_and_load_identity() {
     let admin_peer = PeerId(admin_vk.as_bytes().to_vec());
 
     let id = AgentIdentity::generate_local(
-        &identity_dir, "smoke-agent", &cluster_id, &admin_peer, &admin_sk,
-        Role::AgentHost, 86400_000_000_000,
-    ).unwrap();
+        &identity_dir,
+        "smoke-agent",
+        &cluster_id,
+        &admin_peer,
+        &admin_sk,
+        Role::AgentHost,
+        86400_000_000_000,
+    )
+    .unwrap();
 
     assert_eq!(id.agent_id.0, "smoke-agent");
     id.attestation.verify_signature(&admin_vk).unwrap();
@@ -41,13 +47,25 @@ fn ensure_idempotent() {
     let admin_peer = PeerId(admin_vk.as_bytes().to_vec());
 
     let id1 = AgentIdentity::ensure(
-        &identity_dir, "agent", &cluster_id, &admin_peer, &admin_sk,
-        Role::AgentHost, 86400_000_000_000,
-    ).unwrap();
+        &identity_dir,
+        "agent",
+        &cluster_id,
+        &admin_peer,
+        &admin_sk,
+        Role::AgentHost,
+        86400_000_000_000,
+    )
+    .unwrap();
     let id2 = AgentIdentity::ensure(
-        &identity_dir, "agent", &cluster_id, &admin_peer, &admin_sk,
-        Role::AgentHost, 86400_000_000_000,
-    ).unwrap();
+        &identity_dir,
+        "agent",
+        &cluster_id,
+        &admin_peer,
+        &admin_sk,
+        Role::AgentHost,
+        86400_000_000_000,
+    )
+    .unwrap();
     assert_eq!(id1.signing_key.to_bytes(), id2.signing_key.to_bytes());
 }
 

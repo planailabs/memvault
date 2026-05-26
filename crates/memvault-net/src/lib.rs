@@ -16,24 +16,24 @@ pub mod share_proto;
 pub mod standalone;
 pub mod visibility;
 
-pub use auth_proto::{AuthCodec, AuthRequest, AuthResponse, AUTH_PROTOCOL};
+pub use auth_proto::{AUTH_PROTOCOL, AuthCodec, AuthRequest, AuthResponse};
 pub use behaviour::MemvaultBehaviour;
 pub use block_proto::{
-    BlockAccessToken, BlockCodec, BlockEntry, BlockRequest, BlockResponse,
-    RangeFingerprint, BLOCK_PROTOCOL,
+    BLOCK_PROTOCOL, BlockAccessToken, BlockCodec, BlockEntry, BlockRequest, BlockResponse,
+    RangeFingerprint,
 };
 pub use conn_state::{ConnectionRegistry, ConnectionState};
 pub use error::NetError;
 pub use federation::{FederationAnnouncement, FederationState, TrustedClusterInfo};
 pub use gossip::{
-    AdminAnnouncement, HeadAnnouncement, federation_ident_topic, federation_topic, ADMIN_TOPIC,
-    FEDERATION_TOPIC_PREFIX, HEADS_TOPIC,
+    ADMIN_TOPIC, AdminAnnouncement, FEDERATION_TOPIC_PREFIX, HEADS_TOPIC, HeadAnnouncement,
+    federation_ident_topic, federation_topic,
 };
 pub use join_proto::{
-    JoinCodec, JoinRefuseReason, JoinRequest, JoinResponse, JoinResult, JOIN_PROTOCOL,
+    JOIN_PROTOCOL, JoinCodec, JoinRefuseReason, JoinRequest, JoinResponse, JoinResult,
 };
-pub use standalone::{standalone_swarm, StandaloneMemvaultBehaviour, StandaloneMemvaultBehaviourEvent};
-pub use share_proto::{
-    ShareCodec, ShareRequest, ShareResponse, ShareResult, SHARE_PROTOCOL,
+pub use share_proto::{SHARE_PROTOCOL, ShareCodec, ShareRequest, ShareResponse, ShareResult};
+pub use standalone::{
+    StandaloneMemvaultBehaviour, StandaloneMemvaultBehaviourEvent, standalone_swarm,
 };
 pub use visibility::{ServeDecision, ServeRefuseReason, VisibilityFilter};

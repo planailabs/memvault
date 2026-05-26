@@ -77,7 +77,10 @@ impl AuthVerifier {
         }
 
         // Try federation keys.
-        if self.verify_with_federation_keys(attestation, now_ns).is_ok() {
+        if self
+            .verify_with_federation_keys(attestation, now_ns)
+            .is_ok()
+        {
             return Ok(());
         }
 

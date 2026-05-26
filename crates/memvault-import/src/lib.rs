@@ -27,17 +27,32 @@ pub async fn import_files(
         return Ok(0);
     }
 
-    let base_dir = if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) };
+    let base_dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(Path::new("."))
+    };
     let mut count = 0usize;
 
     for file_path in &files {
         let data = std::fs::read(file_path)?;
-        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unnamed");
+        let filename = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unnamed");
         let mime = memvault_api::files::detect_mime(file_path);
         let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
         let (_cid, node_id) = memvault_api::files::upload_file(
-            client, &data, Some(filename), mime, tags.to_vec(), visibility, vfs_path.as_deref(), None,
-        ).await?;
+            client,
+            &data,
+            Some(filename),
+            mime,
+            tags.to_vec(),
+            visibility,
+            vfs_path.as_deref(),
+            None,
+        )
+        .await?;
         println!("  {} -> {node_id}", file_path.display());
         count += 1;
     }
@@ -66,16 +81,31 @@ pub async fn import_docs(
         return Ok(0);
     }
 
-    let base_dir = if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) };
+    let base_dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(Path::new("."))
+    };
     let mut count = 0usize;
 
     for file_path in &files {
         let body = std::fs::read_to_string(file_path)?;
-        let title = file_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
+        let title = file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
         let vfs_path = vfs_folder.map(|f| compute_vfs_path(f, base_dir, file_path, path.is_dir()));
         let result = memvault_api::docs::create_doc(
-            client, &body, title.as_deref(), None, tags.to_vec(), vis, vfs_path.as_deref(), None,
-        ).await?;
+            client,
+            &body,
+            title.as_deref(),
+            None,
+            tags.to_vec(),
+            vis,
+            vfs_path.as_deref(),
+            None,
+        )
+        .await?;
         println!("  {} -> {}", file_path.display(), result.node_id);
         count += 1;
     }
@@ -83,21 +113,33 @@ pub async fn import_docs(
 }
 
 /// Compute the VFS path for a file being imported.
-pub fn compute_vfs_path(vfs_folder: &str, base_dir: &Path, file_path: &Path, is_dir_import: bool) -> String {
+pub fn compute_vfs_path(
+    vfs_folder: &str,
+    base_dir: &Path,
+    file_path: &Path,
+    is_dir_import: bool,
+) -> String {
     let folder = vfs_folder.trim_end_matches('/');
     if is_dir_import {
         let rel = file_path.strip_prefix(base_dir).unwrap_or(file_path);
         let rel_str = rel.to_string_lossy();
         format!("{folder}/{rel_str}")
     } else {
-        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unnamed");
+        let filename = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unnamed");
         format!("{folder}/{filename}")
     }
 }
 
 /// Collect files recursively, skipping hidden entries.
 /// If `extensions` is Some, only includes files with matching extensions.
-pub fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>, extensions: Option<&[&str]>) -> Result<()> {
+pub fn collect_files_recursive(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    extensions: Option<&[&str]>,
+) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

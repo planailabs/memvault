@@ -3,15 +3,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use memvault_core::{DocId, Visibility};
 use memvault_doc::TextPatch;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct ListDocsQuery {
@@ -82,13 +82,18 @@ pub async fn list_docs(
 
     let bucket_id = params.bucket.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 { return None; }
+        if bytes.len() != 32 {
+            return None;
+        }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
     });
 
-    let docs = state.client.list_docs(tag_filter, limit, bucket_id.as_ref()).await?;
+    let docs = state
+        .client
+        .list_docs(tag_filter, limit, bucket_id.as_ref())
+        .await?;
 
     let results: Vec<DocSummaryResponse> = docs
         .into_iter()
@@ -115,7 +120,9 @@ pub async fn create_doc(
 
     let bucket_id = req.bucket.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 { return None; }
+        if bytes.len() != 32 {
+            return None;
+        }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
@@ -130,7 +137,8 @@ pub async fn create_doc(
         vis,
         req.vfs_path.as_deref(),
         bucket_id.as_ref(),
-    ).await?;
+    )
+    .await?;
     tracing::info!(doc_id = %result.node_id, "API: doc created");
 
     let resp = DocResponse {
@@ -242,7 +250,8 @@ pub async fn doc_history(
 /// Parse a document ID from either "doc:<hex>" or raw "<hex>" format.
 pub fn parse_doc_id(input: &str) -> Result<DocId, ApiError> {
     let hex_str = input.strip_prefix("doc:").unwrap_or(input);
-    let bytes = hex::decode(hex_str).map_err(|_| ApiError::bad_request("Invalid document ID — expected hex or doc:<hex>"))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| ApiError::bad_request("Invalid document ID — expected hex or doc:<hex>"))?;
     if bytes.len() != 32 {
         return Err(ApiError::bad_request("Document ID must be 32 bytes"));
     }

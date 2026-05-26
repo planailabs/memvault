@@ -51,10 +51,10 @@ impl ClientArgs {
     /// Returns a local client if `--db` is set, otherwise an HTTP client.
     pub async fn connect(&self) -> std::result::Result<Box<dyn MemvaultClient>, anyhow::Error> {
         if let Some(db_path) = &self.db {
-            use std::sync::Arc;
-            use tokio::sync::RwLock;
             use memvault_query::{QuotaManager, TextIndex};
             use memvault_store::MemvaultStore;
+            use std::sync::Arc;
+            use tokio::sync::RwLock;
 
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -70,7 +70,9 @@ impl ClientArgs {
             );
             Ok(Box::new(client))
         } else {
-            let token = self.token_file.as_ref()
+            let token = self
+                .token_file
+                .as_ref()
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
@@ -93,12 +95,14 @@ pub struct ConnectOptions {
 
 /// Create a MemvaultClient from connection options.
 #[cfg(feature = "http-client")]
-pub async fn connect(opts: ConnectOptions) -> std::result::Result<Box<dyn MemvaultClient>, anyhow::Error> {
+pub async fn connect(
+    opts: ConnectOptions,
+) -> std::result::Result<Box<dyn MemvaultClient>, anyhow::Error> {
     if let Some(db_path) = &opts.db {
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
         use memvault_query::{QuotaManager, TextIndex};
         use memvault_store::MemvaultStore;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
 
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -114,7 +118,9 @@ pub async fn connect(opts: ConnectOptions) -> std::result::Result<Box<dyn Memvau
         );
         Ok(Box::new(client))
     } else {
-        let url = opts.url.unwrap_or_else(|| "http://127.0.0.1:8401".to_string());
+        let url = opts
+            .url
+            .unwrap_or_else(|| "http://127.0.0.1:8401".to_string());
         let token = opts.token.unwrap_or_default();
         let client = HttpApiClient::new(&url, &token)?;
         Ok(Box::new(client))

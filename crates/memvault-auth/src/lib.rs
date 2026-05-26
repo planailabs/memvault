@@ -19,7 +19,9 @@ pub use key_state::{AdminKeyState, KeyValidity};
 pub use revocation::Revocation;
 pub use role::Role;
 pub use rotation::{AdminKeyRotation, AgentKeyRotation, RotationAborted};
-pub use token::{decode_token_string, encode_token_string, JoinToken, TokenConsumption};
-pub use share::{BucketTrust, ShareDecision, ShareProposal, ShareRecipient, ShareReply, ShareStatus};
+pub use share::{
+    BucketTrust, ShareDecision, ShareProposal, ShareRecipient, ShareReply, ShareStatus,
+};
+pub use token::{JoinToken, TokenConsumption, decode_token_string, encode_token_string};
 pub use trust::ClusterTrust;
 pub use verifier::{AuthVerifier, RevocationStore};

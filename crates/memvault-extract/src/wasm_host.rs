@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use memvault_extract_abi::{
-    ExtractionHints, ExtractionInput, ExtractionResponse, ExtractedText, PluginCapabilities,
+    ExtractedText, ExtractionHints, ExtractionInput, ExtractionResponse, PluginCapabilities,
 };
 
 use crate::error::ExtractError;
@@ -63,14 +63,14 @@ impl WasmExtractor {
         if let Some(fuel) = limits.fuel {
             builder = builder.with_fuel_limit(fuel);
         }
-        let mut plugin = builder.build().map_err(|e| {
-            ExtractError::PluginError(format!("failed to instantiate plugin: {e}"))
-        })?;
+        let mut plugin = builder
+            .build()
+            .map_err(|e| ExtractError::PluginError(format!("failed to instantiate plugin: {e}")))?;
 
         // Query capabilities
-        let caps_bytes = plugin.call::<&[u8], Vec<u8>>("capabilities", &[]).map_err(|e| {
-            ExtractError::PluginError(format!("failed to query capabilities: {e}"))
-        })?;
+        let caps_bytes = plugin
+            .call::<&[u8], Vec<u8>>("capabilities", &[])
+            .map_err(|e| ExtractError::PluginError(format!("failed to query capabilities: {e}")))?;
 
         let capabilities = memvault_extract_abi::decode_capabilities(&caps_bytes)
             .map_err(|e| ExtractError::PluginError(format!("invalid capabilities: {e}")))?;
@@ -88,34 +88,46 @@ impl WasmExtractor {
 
     /// Check if this plugin supports a given MIME type.
     pub fn supports_mime(&self, mime: &str) -> bool {
-        self.capabilities.capabilities.iter().any(|c| match &c.match_rule {
-            memvault_extract_abi::MatchRule::Mime(m) => m == mime,
-            _ => false,
-        })
+        self.capabilities
+            .capabilities
+            .iter()
+            .any(|c| match &c.match_rule {
+                memvault_extract_abi::MatchRule::Mime(m) => m == mime,
+                _ => false,
+            })
     }
 
     /// Check if this plugin supports a given file extension.
     pub fn supports_extension(&self, ext: &str) -> bool {
-        self.capabilities.capabilities.iter().any(|c| match &c.match_rule {
-            memvault_extract_abi::MatchRule::Extension(e) => e == ext,
-            _ => false,
-        })
+        self.capabilities
+            .capabilities
+            .iter()
+            .any(|c| match &c.match_rule {
+                memvault_extract_abi::MatchRule::Extension(e) => e == ext,
+                _ => false,
+            })
     }
 
     /// Get the priority for a specific MIME type.
     pub fn priority_for_mime(&self, mime: &str) -> Option<i32> {
-        self.capabilities.capabilities.iter().find_map(|c| match &c.match_rule {
-            memvault_extract_abi::MatchRule::Mime(m) if m == mime => Some(c.priority),
-            _ => None,
-        })
+        self.capabilities
+            .capabilities
+            .iter()
+            .find_map(|c| match &c.match_rule {
+                memvault_extract_abi::MatchRule::Mime(m) if m == mime => Some(c.priority),
+                _ => None,
+            })
     }
 
     /// Get the priority for a specific extension.
     pub fn priority_for_extension(&self, ext: &str) -> Option<i32> {
-        self.capabilities.capabilities.iter().find_map(|c| match &c.match_rule {
-            memvault_extract_abi::MatchRule::Extension(e) if e == ext => Some(c.priority),
-            _ => None,
-        })
+        self.capabilities
+            .capabilities
+            .iter()
+            .find_map(|c| match &c.match_rule {
+                memvault_extract_abi::MatchRule::Extension(e) if e == ext => Some(c.priority),
+                _ => None,
+            })
     }
 
     /// Run extraction.

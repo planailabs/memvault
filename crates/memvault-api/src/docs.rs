@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use memvault_core::{BucketId, DocId, Visibility};
 use memvault_doc::Document;
 
-use crate::error::Result;
 use crate::MemvaultClient;
+use crate::error::Result;
 
 /// Result of creating a document.
 pub struct CreateDocResult {
@@ -51,14 +51,22 @@ pub async fn create_doc(
     if let Some(path) = vfs_path {
         let bucket_id = match bucket {
             Some(b) => b.clone(),
-            None => client.default_bucket_id().await.unwrap_or(BucketId([0u8; 32])),
+            None => client
+                .default_bucket_id()
+                .await
+                .unwrap_or(BucketId([0u8; 32])),
         };
         if let Err(e) = crate::vfs::link_node_at_path(client, &bucket_id, path, &node_id).await {
             tracing::warn!(path, error = %e, "VFS link failed after doc creation");
         }
     }
 
-    Ok(CreateDocResult { cid, node_id, doc_id, frontmatter: fm })
+    Ok(CreateDocResult {
+        cid,
+        node_id,
+        doc_id,
+        frontmatter: fm,
+    })
 }
 
 /// Parse tags from "scope:label" strings.

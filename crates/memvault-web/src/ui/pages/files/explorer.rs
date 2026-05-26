@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use plan_ai_design::{Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
+use plan_ai_design::{
+    Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -42,13 +44,19 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
 
     // If a view is active, use list_all filtered to files.
     if let Some(ref view_name) = view {
-        let items = client.list_all(Some(view_name), 500).await
+        let items = client
+            .list_all(Some(view_name), 500)
+            .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
-        return Ok(items.into_iter()
+        return Ok(items
+            .into_iter()
             .filter(|(_, node_type, _, _)| node_type == "file" || node_type == "attachment")
             .map(|(id, _, label, _)| FileRow {
-                cid: id, filename: label, mime_type: "".to_string(),
-                size: 0, wall_ns: 0,
+                cid: id,
+                filename: label,
+                mime_type: "".to_string(),
+                size: 0,
+                wall_ns: 0,
             })
             .collect());
     }
@@ -78,12 +86,22 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
             Ok(Some(bytes)) => {
                 let m: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
                 (
-                    m.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
-                    m.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string(),
+                    m.get("filename")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                    m.get("mime_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("application/octet-stream")
+                        .to_string(),
                     m.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0),
                 )
             }
-            _ => ("unnamed".to_string(), "application/octet-stream".to_string(), 0),
+            _ => (
+                "unnamed".to_string(),
+                "application/octet-stream".to_string(),
+                0,
+            ),
         };
 
         files.push(FileRow {
@@ -193,7 +211,11 @@ fn FileTable(list: Vec<FileRow>) -> Element {
         let mut items: Vec<FileRow> = if q.is_empty() {
             list_clone.clone()
         } else {
-            list_clone.iter().filter(|f| f.matches_search(&q)).cloned().collect()
+            list_clone
+                .iter()
+                .filter(|f| f.matches_search(&q))
+                .cloned()
+                .collect()
         };
         let (key, asc) = sort.read().clone();
         items.sort_by(|a, b| {

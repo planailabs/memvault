@@ -26,9 +26,7 @@ pub fn read_full_with_layout(
                 .ok_or_else(|| AttachError::BlockNotFound("content root".into()))
         }
         ChunkLayout::UnixFs { .. } => {
-            let get_block = |cid: &[u8]| -> Option<Vec<u8>> {
-                store.get_block(cid).ok().flatten()
-            };
+            let get_block = |cid: &[u8]| -> Option<Vec<u8>> { store.get_block(cid).ok().flatten() };
             unixfs::read_unixfs(root_cid, &get_block)
         }
     }
@@ -56,9 +54,7 @@ pub fn read_range_with_layout(
             Ok(data[start..end].to_vec())
         }
         ChunkLayout::UnixFs { .. } => {
-            let get_block = |cid: &[u8]| -> Option<Vec<u8>> {
-                store.get_block(cid).ok().flatten()
-            };
+            let get_block = |cid: &[u8]| -> Option<Vec<u8>> { store.get_block(cid).ok().flatten() };
             unixfs::read_unixfs_range(root_cid, start, end, &get_block)
         }
     }
@@ -66,9 +62,7 @@ pub fn read_range_with_layout(
 
 /// Read the full content (legacy convenience — tries UnixFS first, falls back to raw).
 pub fn read_full(store: &MemvaultStore, root_cid: &[u8]) -> Result<Vec<u8>, AttachError> {
-    let get_block = |cid: &[u8]| -> Option<Vec<u8>> {
-        store.get_block(cid).ok().flatten()
-    };
+    let get_block = |cid: &[u8]| -> Option<Vec<u8>> { store.get_block(cid).ok().flatten() };
     // Try UnixFS first; if protobuf decode fails, treat as raw inline block
     match unixfs::read_unixfs(root_cid, &get_block) {
         Ok(data) => Ok(data),
@@ -86,9 +80,7 @@ pub fn read_range(
     start: u64,
     end: u64,
 ) -> Result<Vec<u8>, AttachError> {
-    let get_block = |cid: &[u8]| -> Option<Vec<u8>> {
-        store.get_block(cid).ok().flatten()
-    };
+    let get_block = |cid: &[u8]| -> Option<Vec<u8>> { store.get_block(cid).ok().flatten() };
     match unixfs::read_unixfs_range(root_cid, start, end, &get_block) {
         Ok(data) => Ok(data),
         Err(_) => {

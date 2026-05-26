@@ -1,9 +1,9 @@
 //! Heads tracking for CRDT-style document convergence.
 
+use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::keys;
 use crate::tables::HEADS;
-use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Set the head CID for a (doc_id, peer_id) pair.

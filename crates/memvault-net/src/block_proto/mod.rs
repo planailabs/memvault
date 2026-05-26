@@ -67,7 +67,9 @@ impl BlockAccessToken {
     /// Verify the token's signature against an admin verifying key.
     pub fn verify(&self, key: &ed25519_dalek::VerifyingKey) -> bool {
         use ed25519_dalek::Verifier;
-        if self.signature.len() != 64 { return false; }
+        if self.signature.len() != 64 {
+            return false;
+        }
         let payload = self.signing_payload();
         let mut sig_bytes = [0u8; 64];
         sig_bytes.copy_from_slice(&self.signature);

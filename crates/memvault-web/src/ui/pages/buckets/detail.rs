@@ -50,7 +50,10 @@ async fn get_bucket(id: String) -> Result<Option<BucketData>, ServerFnError> {
             id_hex: hex::encode(b.id.0),
             name: b.name,
             description: b.description.unwrap_or_default(),
-            owner: b.owner_agent.map(|a| a.0).unwrap_or_else(|| "cluster".to_string()),
+            owner: b
+                .owner_agent
+                .map(|a| a.0)
+                .unwrap_or_else(|| "cluster".to_string()),
             status: status.to_string(),
             cluster_hex: b.cluster_id.map(|c| hex::encode(c.0)).unwrap_or_default(),
             is_default: b.is_default,
@@ -71,7 +74,9 @@ async fn rename_bucket(id: String, new_name: String) -> Result<(), ServerFnError
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
     let client = crate::ui::state::client()?;
-    client.bucket_rename(&bucket_id, &new_name).await
+    client
+        .bucket_rename(&bucket_id, &new_name)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
@@ -83,7 +88,9 @@ async fn attach_bucket(id: String) -> Result<(), ServerFnError> {
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
     let client = crate::ui::state::client()?;
-    client.bucket_attach(&bucket_id).await
+    client
+        .bucket_attach(&bucket_id)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
@@ -95,7 +102,9 @@ async fn archive_bucket(id: String, reason: String) -> Result<(), ServerFnError>
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
     let client = crate::ui::state::client()?;
-    client.bucket_archive(&bucket_id, &reason).await
+    client
+        .bucket_archive(&bucket_id, &reason)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 

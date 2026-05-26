@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use memvault_summarize::{
-    LlmClient, MockLlmClient, SummarizationRequest, SummarizationScope, SummaryCache,
-    SummarizationService, SummaryKind, build_prompt, truncate_context,
+    LlmClient, MockLlmClient, SummarizationRequest, SummarizationScope, SummarizationService,
+    SummaryCache, SummaryKind, build_prompt, truncate_context,
 };
 
 #[tokio::test]
@@ -38,7 +38,10 @@ async fn service_produces_summary_with_provenance() {
         (vec![4, 5, 6], "Second document content".to_string()),
     ];
 
-    let summary = service.summarize(&request, &sources, "mock-v1").await.unwrap();
+    let summary = service
+        .summarize(&request, &sources, "mock-v1")
+        .await
+        .unwrap();
 
     assert_eq!(summary.output, "test output");
     assert_eq!(summary.model_id, "mock-v1");
@@ -206,7 +209,10 @@ fn prompt_building_timeline() {
 #[test]
 fn prompt_building_custom() {
     let texts = vec!["Data".to_string()];
-    let prompt = build_prompt(&SummaryKind::Custom("Analyze sentiment of:".to_string()), &texts);
+    let prompt = build_prompt(
+        &SummaryKind::Custom("Analyze sentiment of:".to_string()),
+        &texts,
+    );
     assert!(prompt.contains("Analyze sentiment of:"));
     assert!(prompt.contains("Data"));
 }

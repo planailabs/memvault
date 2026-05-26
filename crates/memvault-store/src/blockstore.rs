@@ -2,9 +2,9 @@
 
 use redb::ReadableTable;
 
+use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::tables::BLOCKS;
-use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Store a raw block by CID bytes.
@@ -22,7 +22,10 @@ impl MemvaultStore {
             }
             Err(_) => {
                 // Unsupported hash algorithm — allow the write but log.
-                tracing::debug!(cid_len = cid.len(), "put_block: CID uses unknown hash, skipping validation");
+                tracing::debug!(
+                    cid_len = cid.len(),
+                    "put_block: CID uses unknown hash, skipping validation"
+                );
             }
         }
         let txn = self.db.begin_write()?;

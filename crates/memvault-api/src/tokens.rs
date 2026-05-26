@@ -1,9 +1,7 @@
 //! Token lifecycle helpers (issue, redeem, revoke, list).
 
-use ed25519_dalek::{SigningKey, Signer};
-use memvault_auth::{
-    JoinToken, Role, encode_token_string,
-};
+use ed25519_dalek::{Signer, SigningKey};
+use memvault_auth::{JoinToken, Role, encode_token_string};
 use memvault_core::{ClusterId, PeerId};
 use memvault_store::MemvaultStore;
 
@@ -41,7 +39,8 @@ pub fn issue_token(
         signature: [0u8; 64],
     };
 
-    let signing_bytes = token.signing_bytes()
+    let signing_bytes = token
+        .signing_bytes()
         .map_err(|e| ApiError::Other(format!("token signing bytes: {e}")))?;
     let sig = admin_key.sign(&signing_bytes);
 
@@ -71,8 +70,8 @@ pub fn issue_token(
     };
     store.insert_envelope(&cid_bytes, &token_cbor, &meta)?;
 
-    let encoded = encode_token_string(&token)
-        .map_err(|e| ApiError::Other(format!("token encode: {e}")))?;
+    let encoded =
+        encode_token_string(&token).map_err(|e| ApiError::Other(format!("token encode: {e}")))?;
 
     Ok(encoded)
 }

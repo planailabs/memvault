@@ -20,10 +20,7 @@ pub fn default_patterns() -> Vec<PatternEntry> {
         },
         PatternEntry {
             kind: PiiKind::Phone,
-            regex: Regex::new(
-                r"(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-            )
-            .unwrap(),
+            regex: Regex::new(r"(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}").unwrap(),
             confidence: 0.80,
             detector_name: "regex:phone_us".into(),
         },
@@ -35,10 +32,7 @@ pub fn default_patterns() -> Vec<PatternEntry> {
         },
         PatternEntry {
             kind: PiiKind::CreditCard,
-            regex: Regex::new(
-                r"\b(?:\d[ \-]?){13,19}\b",
-            )
-            .unwrap(),
+            regex: Regex::new(r"\b(?:\d[ \-]?){13,19}\b").unwrap(),
             confidence: 0.75,
             detector_name: "regex:credit_card".into(),
         },
@@ -59,10 +53,8 @@ pub fn default_patterns() -> Vec<PatternEntry> {
         },
         PatternEntry {
             kind: PiiKind::DateOfBirth,
-            regex: Regex::new(
-                r"(?i)(?:dob|born|date of birth)[:\s]+\d{1,4}[-/]\d{1,2}[-/]\d{1,4}",
-            )
-            .unwrap(),
+            regex: Regex::new(r"(?i)(?:dob|born|date of birth)[:\s]+\d{1,4}[-/]\d{1,2}[-/]\d{1,4}")
+                .unwrap(),
             confidence: 0.85,
             detector_name: "regex:dob".into(),
         },

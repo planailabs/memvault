@@ -34,8 +34,7 @@ impl ExportSink for DirSink {
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&full, content)
-            .with_context(|| format!("writing {}", full.display()))?;
+        std::fs::write(&full, content).with_context(|| format!("writing {}", full.display()))?;
         Ok(())
     }
 
@@ -106,11 +105,7 @@ impl<W: Write + Send> ExportSink for TarSink<W> {
 }
 
 /// Create the appropriate sink based on output path and flags.
-pub fn create_sink(
-    output: &Path,
-    force_tar: bool,
-    gzip: bool,
-) -> Result<Box<dyn ExportSink>> {
+pub fn create_sink(output: &Path, force_tar: bool, gzip: bool) -> Result<Box<dyn ExportSink>> {
     let is_tar = force_tar
         || output.extension().is_some_and(|e| e == "tar")
         || output
@@ -121,7 +116,11 @@ pub fn create_sink(
     if is_tar {
         let file = std::fs::File::create(output)
             .with_context(|| format!("creating tar file {}", output.display()))?;
-        if gzip || output.to_str().is_some_and(|s| s.ends_with(".gz") || s.ends_with(".tgz")) {
+        if gzip
+            || output
+                .to_str()
+                .is_some_and(|s| s.ends_with(".gz") || s.ends_with(".tgz"))
+        {
             let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
             Ok(Box::new(TarSink::new(encoder)))
         } else {

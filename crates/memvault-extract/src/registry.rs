@@ -91,9 +91,9 @@ impl ExtractionRegistry {
         mime: &str,
         hints: &ExtractionHints,
     ) -> Result<memvault_extract_abi::ExtractedText, ExtractError> {
-        let plugin = self.find_by_mime(mime).ok_or_else(|| {
-            ExtractError::UnsupportedMime(mime.to_string())
-        })?;
+        let plugin = self
+            .find_by_mime(mime)
+            .ok_or_else(|| ExtractError::UnsupportedMime(mime.to_string()))?;
 
         plugin.extract(content, mime, None, hints)
     }
@@ -105,9 +105,9 @@ impl ExtractionRegistry {
         ext: &str,
         hints: &ExtractionHints,
     ) -> Result<memvault_extract_abi::ExtractedText, ExtractError> {
-        let plugin = self.find_by_extension(ext).ok_or_else(|| {
-            ExtractError::UnsupportedExtension(ext.to_string())
-        })?;
+        let plugin = self
+            .find_by_extension(ext)
+            .ok_or_else(|| ExtractError::UnsupportedExtension(ext.to_string()))?;
 
         // Pass extension info so the guest can dispatch
         plugin.extract(content, "", Some(ext), hints)

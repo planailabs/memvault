@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
-use memvault_api::vfs::{self, VFS_DIR_KIND};
-use memvault_api::MemvaultClient;
-use memvault_core::NodeRef;
 use crate::title;
+use anyhow::Result;
+use memvault_api::MemvaultClient;
+use memvault_api::vfs::{self, VFS_DIR_KIND};
+use memvault_core::NodeRef;
 
 /// A symlink to create in the VFS export tree.
 pub struct VfsSymlink {
@@ -17,9 +17,7 @@ pub struct VfsSymlink {
 }
 
 /// Walk the VFS tree for the default bucket and produce symlink entries.
-pub async fn build_vfs_symlinks(
-    client: &dyn MemvaultClient,
-) -> Result<Vec<VfsSymlink>> {
+pub async fn build_vfs_symlinks(client: &dyn MemvaultClient) -> Result<Vec<VfsSymlink>> {
     let bucket = vfs::default_bucket(client).await;
     let root = match vfs::ensure_root(client, &bucket).await {
         Ok(id) => id,
@@ -27,10 +25,7 @@ pub async fn build_vfs_symlinks(
     };
 
     let mut symlinks = Vec::new();
-    let mut stack: Vec<(NodeRef, PathBuf)> = vec![(
-        NodeRef::Entity(root),
-        PathBuf::new(),
-    )];
+    let mut stack: Vec<(NodeRef, PathBuf)> = vec![(NodeRef::Entity(root), PathBuf::new())];
 
     while let Some((node, prefix)) = stack.pop() {
         let children = vfs::list_children(client, &node).await?;
@@ -75,9 +70,7 @@ pub async fn build_vfs_symlinks(
                         .and_then(|e| e.to_str())
                         .unwrap_or("bin");
                     let file_name = format!("{}.{}", hex::encode(cid), ext);
-                    let target_path = relative_prefix(&child_path)
-                        .join("files")
-                        .join(&file_name);
+                    let target_path = relative_prefix(&child_path).join("files").join(&file_name);
                     symlinks.push(VfsSymlink {
                         link_path: child_path,
                         target: target_path,

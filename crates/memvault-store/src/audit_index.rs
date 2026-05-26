@@ -3,9 +3,9 @@
 //! Revocations are tracked separately from retractions: a revocation invalidates
 //! a credential/capability, while a retraction hides content.
 
+use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::tables::REVOCATIONS;
-use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Record a revocation: marks `target_cid` as revoked with the given revocation block.

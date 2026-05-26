@@ -5,7 +5,7 @@ use memvault_store::{EnvelopeMeta, MemvaultStore};
 
 use crate::audit::retraction::{is_retracted, retract};
 use crate::history::checkpoint::Checkpoint;
-use crate::history::diff::{diff_doc, DiffEntry};
+use crate::history::diff::{DiffEntry, diff_doc};
 use crate::history::trace::trace_provenance;
 use crate::index::effective_tags::effective_tags;
 use crate::index::search::TextIndex;
@@ -111,7 +111,12 @@ fn text_index_title_boost() {
     // doc1 has "database" only in body
     index.index_doc(doc1.clone(), "database is a tool for storage", None, vec![]);
     // doc2 has "database" in title (boosted 3x)
-    index.index_doc(doc2.clone(), "just some text", Some("database guide"), vec![]);
+    index.index_doc(
+        doc2.clone(),
+        "just some text",
+        Some("database guide"),
+        vec![],
+    );
 
     let results = index.search("database", 10);
     assert_eq!(results.len(), 2);
@@ -234,7 +239,12 @@ fn retraction_double_retract_errors() {
     // Second retraction should fail
     let result = retract(&store, target_cid, b"tomb-2");
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("already retracted"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("already retracted")
+    );
 }
 
 // === DiffEntry Tests ===
@@ -316,8 +326,14 @@ fn diff_mixed_changes() {
     let diff = diff_doc(&before, &after);
     // op_b removed, op_c added
     assert_eq!(diff.len(), 2);
-    let removed_count = diff.iter().filter(|d| matches!(d, DiffEntry::Removed(_))).count();
-    let added_count = diff.iter().filter(|d| matches!(d, DiffEntry::Added(_))).count();
+    let removed_count = diff
+        .iter()
+        .filter(|d| matches!(d, DiffEntry::Removed(_)))
+        .count();
+    let added_count = diff
+        .iter()
+        .filter(|d| matches!(d, DiffEntry::Added(_)))
+        .count();
     assert_eq!(removed_count, 1);
     assert_eq!(added_count, 1);
 }
@@ -326,7 +342,10 @@ fn diff_mixed_changes() {
 
 #[test]
 fn effective_tags_no_parents() {
-    let own = vec![Tag::new("project", "memvault"), Tag::new("classification", "internal")];
+    let own = vec![
+        Tag::new("project", "memvault"),
+        Tag::new("classification", "internal"),
+    ];
     let parent_tags: Vec<Vec<Tag>> = vec![];
 
     let result = effective_tags(&own, &parent_tags);
@@ -338,9 +357,10 @@ fn effective_tags_no_parents() {
 #[test]
 fn effective_tags_inherits_from_parents() {
     let own = vec![Tag::new("project", "memvault")];
-    let parent_tags = vec![
-        vec![Tag::new("team", "infra"), Tag::new("priority", "high")],
-    ];
+    let parent_tags = vec![vec![
+        Tag::new("team", "infra"),
+        Tag::new("priority", "high"),
+    ]];
 
     let result = effective_tags(&own, &parent_tags);
     assert_eq!(result.len(), 3);
@@ -352,14 +372,18 @@ fn effective_tags_inherits_from_parents() {
 #[test]
 fn effective_tags_no_duplicates() {
     let own = vec![Tag::new("project", "memvault"), Tag::new("team", "infra")];
-    let parent_tags = vec![
-        vec![Tag::new("team", "infra"), Tag::new("org", "engineering")],
-    ];
+    let parent_tags = vec![vec![
+        Tag::new("team", "infra"),
+        Tag::new("org", "engineering"),
+    ]];
 
     let result = effective_tags(&own, &parent_tags);
     assert_eq!(result.len(), 3);
     // "team:infra" appears once
-    let team_count = result.iter().filter(|t| t.scope == "team" && t.label == "infra").count();
+    let team_count = result
+        .iter()
+        .filter(|t| t.scope == "team" && t.label == "infra")
+        .count();
     assert_eq!(team_count, 1);
 }
 
@@ -460,7 +484,9 @@ fn trace_provenance_respects_max_depth() {
         "tags": [],
         "provenance": []
     });
-    store.put_block(b"a", &serde_json::to_vec(&a_data).unwrap()).unwrap();
+    store
+        .put_block(b"a", &serde_json::to_vec(&a_data).unwrap())
+        .unwrap();
 
     let b_data = serde_json::json!({
         "author": "b",
@@ -468,7 +494,9 @@ fn trace_provenance_respects_max_depth() {
         "tags": [],
         "provenance": ["a"]
     });
-    store.put_block(b"b", &serde_json::to_vec(&b_data).unwrap()).unwrap();
+    store
+        .put_block(b"b", &serde_json::to_vec(&b_data).unwrap())
+        .unwrap();
 
     let c_data = serde_json::json!({
         "author": "c",
@@ -476,7 +504,9 @@ fn trace_provenance_respects_max_depth() {
         "tags": [],
         "provenance": ["b"]
     });
-    store.put_block(b"c", &serde_json::to_vec(&c_data).unwrap()).unwrap();
+    store
+        .put_block(b"c", &serde_json::to_vec(&c_data).unwrap())
+        .unwrap();
 
     // max_depth=1: only finds b, not a
     let trace = trace_provenance(&store, b"c", 1).unwrap();
@@ -498,7 +528,9 @@ fn trace_provenance_empty_for_root() {
         "tags": [],
         "provenance": []
     });
-    store.put_block(b"root", &serde_json::to_vec(&root_data).unwrap()).unwrap();
+    store
+        .put_block(b"root", &serde_json::to_vec(&root_data).unwrap())
+        .unwrap();
 
     let trace = trace_provenance(&store, b"root", 10).unwrap();
     assert!(trace.is_empty());
@@ -508,7 +540,7 @@ fn trace_provenance_empty_for_root() {
 
 #[test]
 fn audit_query_by_time_range() {
-    use crate::audit::query::{query_audit, AuditQuery};
+    use crate::audit::query::{AuditQuery, query_audit};
 
     let (_dir, store) = temp_store();
 

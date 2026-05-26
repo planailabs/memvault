@@ -159,7 +159,10 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
                 bucket_id: &self.bucket_id,
             })?,
             _ => {
-                tracing::warn!(version = self.version, "unknown envelope version, skipping signature verification");
+                tracing::warn!(
+                    version = self.version,
+                    "unknown envelope version, skipping signature verification"
+                );
                 return Ok(());
             }
         };
@@ -303,14 +306,34 @@ mod tests {
         let tags = vec![Tag::new("classification", "internal")];
 
         let v1 = Signed::sign(
-            "same payload".to_string(), &signing_key, author.clone(),
-            vec![], vec![], tags.clone(), Visibility::Internal, 1, 1000, None, None,
-        ).unwrap();
+            "same payload".to_string(),
+            &signing_key,
+            author.clone(),
+            vec![],
+            vec![],
+            tags.clone(),
+            Visibility::Internal,
+            1,
+            1000,
+            None,
+            None,
+        )
+        .unwrap();
 
         let v2 = Signed::sign(
-            "same payload".to_string(), &signing_key, author,
-            vec![], vec![], tags, Visibility::Internal, 1, 1000, None, Some(BucketId::random()),
-        ).unwrap();
+            "same payload".to_string(),
+            &signing_key,
+            author,
+            vec![],
+            vec![],
+            tags,
+            Visibility::Internal,
+            1,
+            1000,
+            None,
+            Some(BucketId::random()),
+        )
+        .unwrap();
 
         assert_eq!(v1.version, 1);
         assert_eq!(v2.version, 2);

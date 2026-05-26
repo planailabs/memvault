@@ -60,18 +60,30 @@ pub struct TextIndex {
 
 impl TextIndex {
     pub fn new() -> Self {
-        Self { unified: HashMap::new(), retracted: HashSet::new() }
+        Self {
+            unified: HashMap::new(),
+            retracted: HashSet::new(),
+        }
     }
 
     /// Save the index atomically (write to temp, then rename).
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         let snapshot = IndexSnapshot {
             version: INDEX_FORMAT_VERSION,
-            unified: self.unified.iter()
-                .map(|(k, v)| (k.clone(), IndexedEntry {
-                    node_type: v.node_type.clone(), label: v.label.clone(),
-                    text: v.text.clone(), tags: v.tags.clone(),
-                }))
+            unified: self
+                .unified
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        IndexedEntry {
+                            node_type: v.node_type.clone(),
+                            label: v.label.clone(),
+                            text: v.text.clone(),
+                            tags: v.tags.clone(),
+                        },
+                    )
+                })
                 .collect(),
             retracted: self.retracted.clone(),
         };
@@ -87,31 +99,65 @@ impl TextIndex {
     pub fn load(path: &std::path::Path) -> Option<Self> {
         let data = std::fs::read(path).ok()?;
         let snapshot: IndexSnapshot = serde_json::from_slice(&data).ok()?;
-        if snapshot.version != INDEX_FORMAT_VERSION { return None; }
-        Some(Self { unified: snapshot.unified, retracted: snapshot.retracted })
+        if snapshot.version != INDEX_FORMAT_VERSION {
+            return None;
+        }
+        Some(Self {
+            unified: snapshot.unified,
+            retracted: snapshot.retracted,
+        })
     }
 
-    pub fn len(&self) -> usize { self.unified.len() }
-    pub fn is_empty(&self) -> bool { self.unified.is_empty() }
+    pub fn len(&self) -> usize {
+        self.unified.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.unified.is_empty()
+    }
 
     // ── Indexing ───────────────────────────────────────────────────
 
-    pub fn index_doc(&mut self, doc_id: DocId, body: &str, title: Option<&str>, tags: Vec<(String, String)>) {
+    pub fn index_doc(
+        &mut self,
+        doc_id: DocId,
+        body: &str,
+        title: Option<&str>,
+        tags: Vec<(String, String)>,
+    ) {
         let label = title.unwrap_or("Untitled").to_string();
         let node_id = format!("doc:{}", hex::encode(doc_id.0));
         let mut text_parts = vec![body.to_string()];
-        if let Some(t) = title { text_parts.push(t.to_string()); }
-        for (scope, lbl) in &tags { text_parts.push(format!("{scope}:{lbl}")); }
-        self.unified.insert(node_id, IndexedEntry {
-            node_type: "doc".to_string(), label, text: text_parts.join(" "), tags,
-        });
+        if let Some(t) = title {
+            text_parts.push(t.to_string());
+        }
+        for (scope, lbl) in &tags {
+            text_parts.push(format!("{scope}:{lbl}"));
+        }
+        self.unified.insert(
+            node_id,
+            IndexedEntry {
+                node_type: "doc".to_string(),
+                label,
+                text: text_parts.join(" "),
+                tags,
+            },
+        );
     }
 
-    pub fn index_entity(&mut self, entity_id: &memvault_core::EntityId, kind: &str,
-                         props: &std::collections::BTreeMap<String, serde_json::Value>, tags: Vec<(String, String)>) {
+    pub fn index_entity(
+        &mut self,
+        entity_id: &memvault_core::EntityId,
+        kind: &str,
+        props: &std::collections::BTreeMap<String, serde_json::Value>,
+        tags: Vec<(String, String)>,
+    ) {
         let node_id = format!("entity:{}", hex::encode(entity_id.0));
-        let label = props.get("name").or_else(|| props.get("title"))
-            .and_then(|v| v.as_str()).unwrap_or(kind).to_string();
+        let label = props
+            .get("name")
+            .or_else(|| props.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(kind)
+            .to_string();
         let mut text_parts = vec![kind.to_string(), label.clone()];
         for (key, val) in props {
             text_parts.push(key.clone());
@@ -120,27 +166,53 @@ impl TextIndex {
                 other => text_parts.push(other.to_string()),
             }
         }
-        for (scope, lbl) in &tags { text_parts.push(format!("{scope}:{lbl}")); }
-        self.unified.insert(node_id, IndexedEntry {
-            node_type: "entity".to_string(), label, text: text_parts.join(" "), tags,
-        });
+        for (scope, lbl) in &tags {
+            text_parts.push(format!("{scope}:{lbl}"));
+        }
+        self.unified.insert(
+            node_id,
+            IndexedEntry {
+                node_type: "entity".to_string(),
+                label,
+                text: text_parts.join(" "),
+                tags,
+            },
+        );
     }
 
-    pub fn index_attachment(&mut self, manifest_cid: &[u8], filename: Option<&str>, mime_type: &str,
-                             extracted_text: Option<&str>, tags: Vec<(String, String)>) {
+    pub fn index_attachment(
+        &mut self,
+        manifest_cid: &[u8],
+        filename: Option<&str>,
+        mime_type: &str,
+        extracted_text: Option<&str>,
+        tags: Vec<(String, String)>,
+    ) {
         let node_id = format!("file:{}", hex::encode(manifest_cid));
         let label = filename.unwrap_or("unnamed file").to_string();
         let mut text_parts = vec![label.clone(), mime_type.to_string()];
         if let Some(f) = filename {
             for part in f.split(|c: char| c == '.' || c == '-' || c == '_' || c == ' ') {
-                if !part.is_empty() { text_parts.push(part.to_string()); }
+                if !part.is_empty() {
+                    text_parts.push(part.to_string());
+                }
             }
         }
-        if let Some(text) = extracted_text { text_parts.push(text.to_string()); }
-        for (scope, lbl) in &tags { text_parts.push(format!("{scope}:{lbl}")); }
-        self.unified.insert(node_id, IndexedEntry {
-            node_type: "file".to_string(), label, text: text_parts.join(" "), tags,
-        });
+        if let Some(text) = extracted_text {
+            text_parts.push(text.to_string());
+        }
+        for (scope, lbl) in &tags {
+            text_parts.push(format!("{scope}:{lbl}"));
+        }
+        self.unified.insert(
+            node_id,
+            IndexedEntry {
+                node_type: "file".to_string(),
+                label,
+                text: text_parts.join(" "),
+                tags,
+            },
+        );
     }
 
     pub fn remove_doc(&mut self, doc_id: &DocId) {
@@ -161,47 +233,82 @@ impl TextIndex {
 
     // ── Tags ───────────────────────────────────────────────────────
 
-    pub fn apply_tag_update(&mut self, node_id: &str, add: &[(String, String)], remove: &[(String, String)]) {
+    pub fn apply_tag_update(
+        &mut self,
+        node_id: &str,
+        add: &[(String, String)],
+        remove: &[(String, String)],
+    ) {
         if let Some(entry) = self.unified.get_mut(node_id) {
             entry.tags.retain(|t| !remove.contains(t));
             for tag in add {
-                if !entry.tags.contains(tag) { entry.tags.push(tag.clone()); }
+                if !entry.tags.contains(tag) {
+                    entry.tags.push(tag.clone());
+                }
             }
         }
     }
 
     pub fn get_tags(&self, node_id: &str) -> Vec<(String, String)> {
-        self.unified.get(node_id).map(|e| e.tags.clone()).unwrap_or_default()
+        self.unified
+            .get(node_id)
+            .map(|e| e.tags.clone())
+            .unwrap_or_default()
     }
 
     // ── Queries ────────────────────────────────────────────────────
 
     pub fn members_of_view(&self, required_tags: &[(String, String)]) -> Vec<String> {
-        if required_tags.is_empty() { return self.unified.keys().cloned().collect(); }
-        self.unified.iter()
+        if required_tags.is_empty() {
+            return self.unified.keys().cloned().collect();
+        }
+        self.unified
+            .iter()
             .filter(|(id, entry)| {
-                !self.retracted.contains(id.as_str()) &&
-                required_tags.iter().all(|(scope, label)| entry.tags.iter().any(|(s, l)| s == scope && l == label))
+                !self.retracted.contains(id.as_str())
+                    && required_tags.iter().all(|(scope, label)| {
+                        entry.tags.iter().any(|(s, l)| s == scope && l == label)
+                    })
             })
             .map(|(id, _)| id.clone())
             .collect()
     }
 
-    pub fn list_all(&self, view_tags: Option<&[(String, String)]>, limit: usize) -> Vec<(String, String, String, Vec<(String, String)>)> {
-        self.unified.iter()
+    pub fn list_all(
+        &self,
+        view_tags: Option<&[(String, String)]>,
+        limit: usize,
+    ) -> Vec<(String, String, String, Vec<(String, String)>)> {
+        self.unified
+            .iter()
             .filter(|(id, entry)| {
-                if self.retracted.contains(id.as_str()) { return false; }
+                if self.retracted.contains(id.as_str()) {
+                    return false;
+                }
                 if let Some(tags) = view_tags {
-                    tags.iter().all(|(scope, label)| entry.tags.iter().any(|(s, l)| s == scope && l == label))
-                } else { true }
+                    tags.iter().all(|(scope, label)| {
+                        entry.tags.iter().any(|(s, l)| s == scope && l == label)
+                    })
+                } else {
+                    true
+                }
             })
             .take(limit)
-            .map(|(id, entry)| (id.clone(), entry.node_type.clone(), entry.label.clone(), entry.tags.clone()))
+            .map(|(id, entry)| {
+                (
+                    id.clone(),
+                    entry.node_type.clone(),
+                    entry.label.clone(),
+                    entry.tags.clone(),
+                )
+            })
             .collect()
     }
 
     pub fn resolve_label(&self, node_id: &str) -> Option<String> {
-        if self.retracted.contains(node_id) { return None; }
+        if self.retracted.contains(node_id) {
+            return None;
+        }
         self.unified.get(node_id).map(|e| e.label.clone())
     }
 
@@ -215,17 +322,30 @@ impl TextIndex {
         self.search_filtered(&query.text, query.tag_filter.as_ref(), limit)
     }
 
-    fn search_filtered(&self, query: &str, tag_filter: Option<&(String, String)>, limit: usize) -> Vec<SearchHit> {
+    fn search_filtered(
+        &self,
+        query: &str,
+        tag_filter: Option<&(String, String)>,
+        limit: usize,
+    ) -> Vec<SearchHit> {
         let query_lower = query.to_lowercase();
         let terms: Vec<&str> = query_lower.split_whitespace().collect();
-        if terms.is_empty() { return Vec::new(); }
+        if terms.is_empty() {
+            return Vec::new();
+        }
 
         let mut hits: Vec<SearchHit> = Vec::new();
         for (node_id, entry) in &self.unified {
-            if entry.node_type != "doc" { continue; }
-            if self.retracted.contains(node_id) { continue; }
+            if entry.node_type != "doc" {
+                continue;
+            }
+            if self.retracted.contains(node_id) {
+                continue;
+            }
             if let Some((scope, label)) = tag_filter {
-                if !entry.tags.iter().any(|(s, l)| s == scope && l == label) { continue; }
+                if !entry.tags.iter().any(|(s, l)| s == scope && l == label) {
+                    continue;
+                }
             }
             let text_lower = entry.text.to_lowercase();
             let label_lower = entry.label.to_lowercase();
@@ -247,7 +367,8 @@ impl TextIndex {
                             let mut arr = [0u8; 32];
                             arr.copy_from_slice(&bytes);
                             hits.push(SearchHit {
-                                doc_id: DocId(arr), score,
+                                doc_id: DocId(arr),
+                                score,
                                 snippet: extract_snippet(&entry.text, &terms),
                             });
                         }
@@ -255,7 +376,11 @@ impl TextIndex {
                 }
             }
         }
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         hits
     }
@@ -264,11 +389,15 @@ impl TextIndex {
     pub fn search_unified(&self, query: &str, limit: usize) -> Vec<UnifiedHit> {
         let query_lower = query.to_lowercase();
         let terms: Vec<&str> = query_lower.split_whitespace().collect();
-        if terms.is_empty() { return Vec::new(); }
+        if terms.is_empty() {
+            return Vec::new();
+        }
 
         let mut hits: Vec<UnifiedHit> = Vec::new();
         for (node_id, entry) in &self.unified {
-            if self.retracted.contains(node_id.as_str()) { continue; }
+            if self.retracted.contains(node_id.as_str()) {
+                continue;
+            }
             let text_lower = entry.text.to_lowercase();
             let label_lower = entry.label.to_lowercase();
             let mut score: f32 = 0.0;
@@ -283,21 +412,29 @@ impl TextIndex {
             }
             if matched {
                 hits.push(UnifiedHit {
-                    node_id: node_id.clone(), node_type: entry.node_type.clone(),
-                    label: entry.label.clone(), score,
+                    node_id: node_id.clone(),
+                    node_type: entry.node_type.clone(),
+                    label: entry.label.clone(),
+                    score,
                     snippet: extract_snippet(&entry.text, &terms),
                     match_contexts: extract_match_contexts(&entry.text, &terms, 3),
                 });
             }
         }
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         hits
     }
 }
 
 impl Default for TextIndex {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -317,12 +454,20 @@ fn extract_match_contexts(body: &str, terms: &[&str], max: usize) -> Vec<String>
     let mut contexts = Vec::new();
     let mut last_end: usize = 0;
     for &pos in &positions {
-        if contexts.len() >= max { break; }
+        if contexts.len() >= max {
+            break;
+        }
         let window_start = pos.saturating_sub(40);
-        if window_start < last_end && !contexts.is_empty() { continue; }
+        if window_start < last_end && !contexts.is_empty() {
+            continue;
+        }
         let snip: String = body.chars().skip(window_start).take(100).collect();
         let prefix = if window_start > 0 { "..." } else { "" };
-        let suffix = if window_start + 100 < body.len() { "..." } else { "" };
+        let suffix = if window_start + 100 < body.len() {
+            "..."
+        } else {
+            ""
+        };
         contexts.push(format!("{prefix}{snip}{suffix}"));
         last_end = window_start + 100;
     }
@@ -333,10 +478,18 @@ fn extract_snippet(body: &str, terms: &[&str]) -> String {
     let body_lower = body.to_lowercase();
     let mut earliest_pos = body.len();
     for term in terms {
-        if let Some(pos) = body_lower.find(term) { earliest_pos = earliest_pos.min(pos); }
+        if let Some(pos) = body_lower.find(term) {
+            earliest_pos = earliest_pos.min(pos);
+        }
     }
-    if earliest_pos == body.len() { return body.chars().take(100).collect(); }
+    if earliest_pos == body.len() {
+        return body.chars().take(100).collect();
+    }
     let start = earliest_pos.saturating_sub(30);
     let snippet: String = body.chars().skip(start).take(120).collect();
-    if start > 0 { format!("...{snippet}") } else { snippet }
+    if start > 0 {
+        format!("...{snippet}")
+    } else {
+        snippet
+    }
 }

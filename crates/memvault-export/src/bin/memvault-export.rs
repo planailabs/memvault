@@ -5,10 +5,13 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
-use memvault_export::{create_sink, run_export, ExportOptions};
+use memvault_export::{ExportOptions, create_sink, run_export};
 
 #[derive(Parser)]
-#[command(name = "memvault-export", about = "Export memvault content to directory or tar archive")]
+#[command(
+    name = "memvault-export",
+    about = "Export memvault content to directory or tar archive"
+)]
 struct Cli {
     #[command(flatten)]
     client: memvault_api::ClientArgs,

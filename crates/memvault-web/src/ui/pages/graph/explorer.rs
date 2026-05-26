@@ -57,12 +57,17 @@ struct EdgeDetail {
 // ── Server functions ───────────────────────────────────────────────────
 
 #[server]
-async fn list_graph_nodes(view: Option<String>, bucket_hex: Option<String>) -> Result<Vec<NodeSummary>, ServerFnError> {
+async fn list_graph_nodes(
+    view: Option<String>,
+    bucket_hex: Option<String>,
+) -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
     let bucket_id = bucket_hex.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 { return None; }
+        if bytes.len() != 32 {
+            return None;
+        }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
@@ -70,15 +75,21 @@ async fn list_graph_nodes(view: Option<String>, bucket_hex: Option<String>) -> R
 
     // If a view is active, get all nodes matching the view.
     if let Some(ref view_name) = view {
-        let items = client.list_all(Some(view_name), 200).await
+        let items = client
+            .list_all(Some(view_name), 200)
+            .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         let mut nodes = Vec::new();
         for (id, node_type, label, _tags) in &items {
             // Skip vfs:dir entities from graph view.
             if node_type == "entity" {
-                if let Some(memvault_core::NodeRef::Entity(eid)) = memvault_core::NodeRef::from_tag_label(id) {
+                if let Some(memvault_core::NodeRef::Entity(eid)) =
+                    memvault_core::NodeRef::from_tag_label(id)
+                {
                     if let Ok(Some(e)) = client.get_entity(&eid).await {
-                        if e.kind == "vfs:dir" { continue; }
+                        if e.kind == "vfs:dir" {
+                            continue;
+                        }
                     }
                 }
             }
@@ -86,7 +97,9 @@ async fn list_graph_nodes(view: Option<String>, bucket_hex: Option<String>) -> R
             if let Some(node_ref) = memvault_core::NodeRef::from_tag_label(id) {
                 if let Ok(edge_list) = client.edges_of(&node_ref).await {
                     for (src, edge) in &edge_list {
-                        if src != &node_ref || edge.relation == "vfs:child" { continue; }
+                        if src != &node_ref || edge.relation == "vfs:child" {
+                            continue;
+                        }
                         edges.push(EdgeSummary {
                             edge_id: hex::encode(edge.id.0),
                             relation: edge.relation.clone(),
@@ -97,8 +110,12 @@ async fn list_graph_nodes(view: Option<String>, bucket_hex: Option<String>) -> R
                 }
             }
             nodes.push(NodeSummary {
-                id: id.clone(), node_type: node_type.clone(), kind: node_type.clone(),
-                label: label.clone(), edges, props: std::collections::BTreeMap::new(),
+                id: id.clone(),
+                node_type: node_type.clone(),
+                kind: node_type.clone(),
+                label: label.clone(),
+                edges,
+                props: std::collections::BTreeMap::new(),
             });
         }
         return Ok(nodes);
@@ -147,7 +164,9 @@ async fn list_graph_nodes(view: Option<String>, bucket_hex: Option<String>) -> R
     let mut extra_ids: Vec<String> = Vec::new();
     for node in &nodes {
         for edge in &node.edges {
-            if !edge.target_id.starts_with("entity:") && !nodes.iter().any(|n| n.id == edge.target_id) {
+            if !edge.target_id.starts_with("entity:")
+                && !nodes.iter().any(|n| n.id == edge.target_id)
+            {
                 extra_ids.push(edge.target_id.clone());
             }
         }
@@ -162,24 +181,48 @@ async fn list_graph_nodes(view: Option<String>, bucket_hex: Option<String>) -> R
         };
         let (node_type, kind, label) = match &node_ref {
             memvault_core::NodeRef::Doc(did) => {
-                let title = client.get_doc(did).await.ok().flatten()
-                    .and_then(|d| d.frontmatter.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                let title = client
+                    .get_doc(did)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|d| {
+                        d.frontmatter
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .unwrap_or_else(|| "Untitled".to_string());
                 ("doc".to_string(), "doc".to_string(), title)
             }
             memvault_core::NodeRef::Attachment(cid) => {
-                let name = client.get_file_manifest(cid).await.ok().flatten()
+                let name = client
+                    .get_file_manifest(cid)
+                    .await
+                    .ok()
+                    .flatten()
                     .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .and_then(|v| v.get("filename").and_then(|f| f.as_str()).map(|s| s.to_string()))
+                    .and_then(|v| {
+                        v.get("filename")
+                            .and_then(|f| f.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .unwrap_or_else(|| "Unnamed file".to_string());
                 ("file".to_string(), "file".to_string(), name)
             }
             memvault_core::NodeRef::Entity(eid) => {
                 // Skip vfs:dir entities that appear as edge targets.
                 if let Ok(Some(e)) = client.get_entity(eid).await {
-                    if e.kind == "vfs:dir" { continue; }
-                    let label = e.props.get("name").or_else(|| e.props.get("title"))
-                        .and_then(|v| v.as_str()).unwrap_or(&e.kind).to_string();
+                    if e.kind == "vfs:dir" {
+                        continue;
+                    }
+                    let label = e
+                        .props
+                        .get("name")
+                        .or_else(|| e.props.get("title"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&e.kind)
+                        .to_string();
                     ("entity".to_string(), e.kind.clone(), label)
                 } else {
                     continue;
@@ -283,7 +326,11 @@ async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
     let mut neighbors = Vec::new();
     if let Ok(edge_list) = client.edges_of(&node_ref).await {
         for (source, edge) in edge_list {
-            let other = if source == node_ref { &edge.target } else { &source };
+            let other = if source == node_ref {
+                &edge.target
+            } else {
+                &source
+            };
             let other_id = other.tag_label();
             // Try to get entity details for entity nodes
             if let memvault_core::NodeRef::Entity(eid) = other {
@@ -360,7 +407,6 @@ fn node_color(node_type: &str, kind: &str) -> String {
     }
 }
 
-
 // ── Viewport state ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -386,10 +432,22 @@ impl Viewport {
         if nodes.is_empty() {
             return Self::default();
         }
-        let min_x = nodes.iter().map(|n| n.x - n.radius).fold(f64::INFINITY, f64::min);
-        let max_x = nodes.iter().map(|n| n.x + n.radius).fold(f64::NEG_INFINITY, f64::max);
-        let min_y = nodes.iter().map(|n| n.y - n.radius).fold(f64::INFINITY, f64::min);
-        let max_y = nodes.iter().map(|n| n.y + n.radius).fold(f64::NEG_INFINITY, f64::max);
+        let min_x = nodes
+            .iter()
+            .map(|n| n.x - n.radius)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = nodes
+            .iter()
+            .map(|n| n.x + n.radius)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = nodes
+            .iter()
+            .map(|n| n.y - n.radius)
+            .fold(f64::INFINITY, f64::min);
+        let max_y = nodes
+            .iter()
+            .map(|n| n.y + n.radius)
+            .fold(f64::NEG_INFINITY, f64::max);
 
         let cx = (min_x + max_x) / 2.0;
         let cy = (min_y + max_y) / 2.0;
@@ -469,7 +527,9 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
         sim_ran.set(true);
         let mut s = sim.write();
         for _ in 0..300 {
-            if s.is_settled() { break; }
+            if s.is_settled() {
+                break;
+            }
             s.tick();
         }
         viewport.set(Viewport::fit_to_nodes(&s.nodes));
@@ -484,7 +544,8 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let (nodes, edges) = if let Some(ref focus_id) = *focus_node.read() {
         let focus_idx = all_nodes.iter().position(|n| &n.id == focus_id);
         if let Some(fi) = focus_idx {
-            let mut visible_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut visible_indices: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
             visible_indices.insert(fi);
             let relevant_edges: Vec<&GraphEdge> = all_edges
                 .iter()
@@ -527,9 +588,16 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     };
 
     // Collect unique node kinds for the filter.
-    let mut kinds: Vec<String> = initial_nodes.iter().map(|e| {
-        if e.node_type != "entity" { e.node_type.clone() } else { e.kind.clone() }
-    }).collect();
+    let mut kinds: Vec<String> = initial_nodes
+        .iter()
+        .map(|e| {
+            if e.node_type != "entity" {
+                e.node_type.clone()
+            } else {
+                e.kind.clone()
+            }
+        })
+        .collect();
     kinds.sort();
     kinds.dedup();
 
@@ -539,7 +607,11 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let filtered_list: Vec<&NodeSummary> = initial_nodes
         .iter()
         .filter(|e| {
-            let display_kind = if e.node_type != "entity" { &e.node_type } else { &e.kind };
+            let display_kind = if e.node_type != "entity" {
+                &e.node_type
+            } else {
+                &e.kind
+            };
             let kind_match = active_kind.as_ref().map_or(true, |k| display_kind == k);
             let search_match = sidebar_q.is_empty()
                 || e.label.to_lowercase().contains(&sidebar_q)

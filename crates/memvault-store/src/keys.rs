@@ -75,12 +75,16 @@ pub fn unpack_tag_label(key: &[u8]) -> Result<&[u8], StoreError> {
     let scope_len = u16::from_be_bytes([key[0], key[1]]) as usize;
     let offset = 2 + scope_len;
     if key.len() < offset + 2 {
-        return Err(StoreError::KeyEncoding("tag key too short for label".into()));
+        return Err(StoreError::KeyEncoding(
+            "tag key too short for label".into(),
+        ));
     }
     let label_len = u16::from_be_bytes([key[offset], key[offset + 1]]) as usize;
     let label_start = offset + 2;
     if key.len() < label_start + label_len {
-        return Err(StoreError::KeyEncoding("tag key too short for label data".into()));
+        return Err(StoreError::KeyEncoding(
+            "tag key too short for label data".into(),
+        ));
     }
     Ok(&key[label_start..label_start + label_len])
 }
@@ -93,7 +97,9 @@ pub fn unpack_tag_cid(key: &[u8]) -> Result<&[u8], StoreError> {
     let scope_len = u16::from_be_bytes([key[0], key[1]]) as usize;
     let offset = 2 + scope_len;
     if key.len() < offset + 2 {
-        return Err(StoreError::KeyEncoding("tag key too short for label".into()));
+        return Err(StoreError::KeyEncoding(
+            "tag key too short for label".into(),
+        ));
     }
     let label_len = u16::from_be_bytes([key[offset], key[offset + 1]]) as usize;
     let cid_start = offset + 2 + label_len + 8;
@@ -140,7 +146,9 @@ pub fn unpack_author_cid(key: &[u8]) -> Result<&[u8], StoreError> {
     let peer_len = u16::from_be_bytes([key[0], key[1]]) as usize;
     let cid_start = 2 + peer_len + 8;
     if key.len() < cid_start {
-        return Err(StoreError::KeyEncoding("author key too short for cid".into()));
+        return Err(StoreError::KeyEncoding(
+            "author key too short for cid".into(),
+        ));
     }
     Ok(&key[cid_start..])
 }
@@ -208,7 +216,9 @@ pub fn unpack_consumed_value(data: &[u8]) -> Result<(u32, Vec<u8>, u64), StoreEr
     let consumer_len = u16::from_be_bytes([data[4], data[5]]) as usize;
     let consumer_end = 6 + consumer_len;
     if data.len() < consumer_end + 8 {
-        return Err(StoreError::KeyEncoding("consumed value too short for timestamp".into()));
+        return Err(StoreError::KeyEncoding(
+            "consumed value too short for timestamp".into(),
+        ));
     }
     let consumer = data[6..consumer_end].to_vec();
     let at_ns = u64::from_be_bytes(data[consumer_end..consumer_end + 8].try_into().unwrap());
@@ -232,7 +242,9 @@ pub fn unpack_rotation_key(key: &[u8]) -> Result<(Vec<u8>, u64), StoreError> {
     let id_len = u16::from_be_bytes([key[0], key[1]]) as usize;
     let ts_start = 2 + id_len;
     if key.len() < ts_start + 8 {
-        return Err(StoreError::KeyEncoding("rotation key too short for timestamp".into()));
+        return Err(StoreError::KeyEncoding(
+            "rotation key too short for timestamp".into(),
+        ));
     }
     let rotation_id = key[2..ts_start].to_vec();
     let wall_ns = u64::from_be_bytes(key[ts_start..ts_start + 8].try_into().unwrap());
@@ -273,7 +285,9 @@ pub fn pack_bucket_prefix_end(bucket_id: &[u8]) -> Vec<u8> {
 pub fn unpack_bucket_cid(key: &[u8]) -> Result<&[u8], StoreError> {
     let cid_start = 32 + 8; // bucket_id + wall_ns
     if key.len() < cid_start {
-        return Err(StoreError::KeyEncoding("bucket key too short for cid".into()));
+        return Err(StoreError::KeyEncoding(
+            "bucket key too short for cid".into(),
+        ));
     }
     Ok(&key[cid_start..])
 }

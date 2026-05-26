@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct CreateViewRequest {
@@ -33,7 +33,9 @@ pub async fn add_tags(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.client.add_tags(&node_id, req.tags).await?;
     tracing::debug!(node_id = %node_id, "API: tags added");
-    Ok(Json(serde_json::json!({ "node_id": node_id, "status": "tags_added" })))
+    Ok(Json(
+        serde_json::json!({ "node_id": node_id, "status": "tags_added" }),
+    ))
 }
 
 /// DELETE /api/v1/tags/:node_id — remove tags from an item.
@@ -44,7 +46,9 @@ pub async fn remove_tags(
     Json(req): Json<TagUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.client.remove_tags(&node_id, req.tags).await?;
-    Ok(Json(serde_json::json!({ "node_id": node_id, "status": "tags_removed" })))
+    Ok(Json(
+        serde_json::json!({ "node_id": node_id, "status": "tags_removed" }),
+    ))
 }
 
 /// GET /api/v1/tags/:node_id — get effective tags for an item.
@@ -54,7 +58,9 @@ pub async fn get_tags(
     Path(node_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let tags = state.client.get_tags(&node_id).await?;
-    Ok(Json(serde_json::json!({ "node_id": node_id, "tags": tags })))
+    Ok(Json(
+        serde_json::json!({ "node_id": node_id, "tags": tags }),
+    ))
 }
 
 // ── Views ──────────────────────────────────────────────────────────
@@ -77,11 +83,16 @@ pub async fn create_view(
     let view = memvault_api::View {
         name: req.name.clone(),
         tags: req.tags,
-        created_ns: memvault_core::wall_ns(), cid: String::new(), bucket_id: None,
+        created_ns: memvault_core::wall_ns(),
+        cid: String::new(),
+        bucket_id: None,
     };
     state.client.create_view(view).await?;
     tracing::info!(name = %req.name, "API: view created");
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "name": req.name, "status": "created" }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "name": req.name, "status": "created" })),
+    ))
 }
 
 /// DELETE /api/v1/views/:name — delete a view.
@@ -104,10 +115,14 @@ pub async fn update_view(
     let view = memvault_api::View {
         name: name.clone(),
         tags: req.tags,
-        created_ns: memvault_core::wall_ns(), cid: String::new(), bucket_id: None,
+        created_ns: memvault_core::wall_ns(),
+        cid: String::new(),
+        bucket_id: None,
     };
     state.client.update_view(view).await?;
-    Ok(Json(serde_json::json!({ "name": name, "status": "updated" })))
+    Ok(Json(
+        serde_json::json!({ "name": name, "status": "updated" }),
+    ))
 }
 
 /// GET /api/v1/views/:name/members — list node_ids matching this view's tags.
@@ -117,7 +132,9 @@ pub async fn view_members(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let members = state.client.view_members(&name).await?;
-    Ok(Json(serde_json::json!({ "view": name, "count": members.len(), "members": members })))
+    Ok(Json(
+        serde_json::json!({ "view": name, "count": members.len(), "members": members }),
+    ))
 }
 
 /// GET /api/v1/views/:name — get a single view.

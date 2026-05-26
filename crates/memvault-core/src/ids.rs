@@ -116,13 +116,17 @@ impl NodeRef {
         let bytes = hex::decode(hex_str).ok()?;
         match kind {
             "entity" => {
-                if bytes.len() != 32 { return None; }
+                if bytes.len() != 32 {
+                    return None;
+                }
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
                 Some(NodeRef::Entity(EntityId(arr)))
             }
             "doc" => {
-                if bytes.len() != 32 { return None; }
+                if bytes.len() != 32 {
+                    return None;
+                }
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
                 Some(NodeRef::Doc(DocId(arr)))
@@ -164,15 +168,18 @@ impl<'de> Deserialize<'de> for NodeRef {
         // Tagged form: {"Entity": [...]} / {"Doc": [...]} / {"Attachment": [...]}
         if let Some(obj) = value.as_object() {
             if let Some(inner) = obj.get("Entity") {
-                let id: EntityId = serde_json::from_value(inner.clone()).map_err(serde::de::Error::custom)?;
+                let id: EntityId =
+                    serde_json::from_value(inner.clone()).map_err(serde::de::Error::custom)?;
                 return Ok(NodeRef::Entity(id));
             }
             if let Some(inner) = obj.get("Doc") {
-                let id: DocId = serde_json::from_value(inner.clone()).map_err(serde::de::Error::custom)?;
+                let id: DocId =
+                    serde_json::from_value(inner.clone()).map_err(serde::de::Error::custom)?;
                 return Ok(NodeRef::Doc(id));
             }
             if let Some(inner) = obj.get("Attachment") {
-                let cid: Vec<u8> = serde_json::from_value(inner.clone()).map_err(serde::de::Error::custom)?;
+                let cid: Vec<u8> =
+                    serde_json::from_value(inner.clone()).map_err(serde::de::Error::custom)?;
                 return Ok(NodeRef::Attachment(cid));
             }
         }
@@ -182,7 +189,9 @@ impl<'de> Deserialize<'de> for NodeRef {
             return Ok(NodeRef::Entity(EntityId(arr)));
         }
 
-        Err(serde::de::Error::custom("expected NodeRef: {\"Entity\": ...}, {\"Doc\": ...}, {\"Attachment\": ...}, or [u8; 32]"))
+        Err(serde::de::Error::custom(
+            "expected NodeRef: {\"Entity\": ...}, {\"Doc\": ...}, {\"Attachment\": ...}, or [u8; 32]",
+        ))
     }
 }
 
@@ -237,7 +246,10 @@ mod tests {
 
         let nr3 = NodeRef::Attachment(vec![3, 4, 5]);
         let label3 = nr3.tag_label();
-        assert!(label3.starts_with("file:"), "tag_label should use 'file:' prefix");
+        assert!(
+            label3.starts_with("file:"),
+            "tag_label should use 'file:' prefix"
+        );
         let back3 = NodeRef::from_tag_label(&label3).unwrap();
         assert_eq!(nr3, back3);
     }

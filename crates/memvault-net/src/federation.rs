@@ -161,24 +161,45 @@ mod tests {
             let decoded: FederationAnnouncement = serde_ipld_dagcbor::from_slice(&encoded).unwrap();
             // Verify basic structure preserved
             match (ann, &decoded) {
-                (FederationAnnouncement::HeadAvailable { head_cid, .. },
-                 FederationAnnouncement::HeadAvailable { head_cid: decoded_cid, .. }) => {
+                (
+                    FederationAnnouncement::HeadAvailable { head_cid, .. },
+                    FederationAnnouncement::HeadAvailable {
+                        head_cid: decoded_cid,
+                        ..
+                    },
+                ) => {
                     assert_eq!(head_cid, decoded_cid);
                 }
-                (FederationAnnouncement::GrantIssued { grant_cid },
-                 FederationAnnouncement::GrantIssued { grant_cid: decoded_cid }) => {
+                (
+                    FederationAnnouncement::GrantIssued { grant_cid },
+                    FederationAnnouncement::GrantIssued {
+                        grant_cid: decoded_cid,
+                    },
+                ) => {
                     assert_eq!(grant_cid, decoded_cid);
                 }
-                (FederationAnnouncement::GrantRevoked { revocation_cid },
-                 FederationAnnouncement::GrantRevoked { revocation_cid: decoded_cid }) => {
+                (
+                    FederationAnnouncement::GrantRevoked { revocation_cid },
+                    FederationAnnouncement::GrantRevoked {
+                        revocation_cid: decoded_cid,
+                    },
+                ) => {
                     assert_eq!(revocation_cid, decoded_cid);
                 }
-                (FederationAnnouncement::TrustRevoked { revocation_cid },
-                 FederationAnnouncement::TrustRevoked { revocation_cid: decoded_cid }) => {
+                (
+                    FederationAnnouncement::TrustRevoked { revocation_cid },
+                    FederationAnnouncement::TrustRevoked {
+                        revocation_cid: decoded_cid,
+                    },
+                ) => {
                     assert_eq!(revocation_cid, decoded_cid);
                 }
-                (FederationAnnouncement::AdminKeyRotated { rotation_cid },
-                 FederationAnnouncement::AdminKeyRotated { rotation_cid: decoded_cid }) => {
+                (
+                    FederationAnnouncement::AdminKeyRotated { rotation_cid },
+                    FederationAnnouncement::AdminKeyRotated {
+                        rotation_cid: decoded_cid,
+                    },
+                ) => {
                     assert_eq!(rotation_cid, decoded_cid);
                 }
                 _ => panic!("variant mismatch after roundtrip"),

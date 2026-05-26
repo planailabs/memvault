@@ -106,7 +106,9 @@ impl ShareProposal {
     pub fn verify_signature(&self, admin_key: &VerifyingKey) -> Result<()> {
         let bytes = self.signing_bytes()?;
         let sig = Signature::from_bytes(&self.signature);
-        admin_key.verify(&bytes, &sig).map_err(|_| AuthError::SignatureInvalid)
+        admin_key
+            .verify(&bytes, &sig)
+            .map_err(|_| AuthError::SignatureInvalid)
     }
 
     pub fn sign(mut self, key: &SigningKey) -> Result<Self> {
@@ -141,7 +143,8 @@ impl ShareReply {
     pub fn verify_signature(&self, key: &VerifyingKey) -> Result<()> {
         let bytes = self.signing_bytes()?;
         let sig = Signature::from_bytes(&self.signature);
-        key.verify(&bytes, &sig).map_err(|_| AuthError::SignatureInvalid)
+        key.verify(&bytes, &sig)
+            .map_err(|_| AuthError::SignatureInvalid)
     }
 
     pub fn sign(mut self, key: &SigningKey) -> Result<Self> {
@@ -180,7 +183,8 @@ impl BucketTrust {
     pub fn verify_signature(&self, key: &VerifyingKey) -> Result<()> {
         let bytes = self.signing_bytes()?;
         let sig = Signature::from_bytes(&self.signature);
-        key.verify(&bytes, &sig).map_err(|_| AuthError::SignatureInvalid)
+        key.verify(&bytes, &sig)
+            .map_err(|_| AuthError::SignatureInvalid)
     }
 
     pub fn sign(mut self, key: &SigningKey) -> Result<Self> {
@@ -231,7 +235,9 @@ mod tests {
             purpose: "test share".into(),
             not_after_ns: u64::MAX,
             signature: [0u8; 64],
-        }.sign(&sk).unwrap();
+        }
+        .sign(&sk)
+        .unwrap();
 
         proposal.verify_signature(&vk).unwrap();
     }
@@ -249,7 +255,9 @@ mod tests {
             },
             decided_at_ns: 1000,
             signature: [0u8; 64],
-        }.sign(&sk).unwrap();
+        }
+        .sign(&sk)
+        .unwrap();
 
         reply.verify_signature(&vk).unwrap();
     }
@@ -266,7 +274,9 @@ mod tests {
             from_proposal: memvault_core::cid_from_bytes(b"proposal"),
             from_reply: memvault_core::cid_from_bytes(b"reply"),
             signature: [0u8; 64],
-        }.sign(&sk).unwrap();
+        }
+        .sign(&sk)
+        .unwrap();
 
         trust.verify_signature(&vk).unwrap();
         assert!(trust.is_valid_at(1000));

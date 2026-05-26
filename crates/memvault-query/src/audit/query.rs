@@ -140,7 +140,10 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
     } else {
         let kind = val.get("kind").and_then(|v| v.as_str());
         let ann_type = val.get("type").and_then(|v| v.as_str());
-        let kind_tag = tags.iter().find(|(s, _)| s == "kind").map(|(_, l)| l.as_str());
+        let kind_tag = tags
+            .iter()
+            .find(|(s, _)| s == "kind")
+            .map(|(_, l)| l.as_str());
         match (kind, ann_type, kind_tag) {
             (Some("annotation"), Some("retraction"), _) => OpKind::Retract,
             (Some("annotation"), Some("tag_update"), _) => OpKind::TagUpdate,
@@ -176,7 +179,13 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
     });
 
     let entity_id = val.get("payload").and_then(|p| {
-        for key in ["EntityCreate", "EntityUpdate", "EntityDelete", "EdgeAdd", "EdgeRemove"] {
+        for key in [
+            "EntityCreate",
+            "EntityUpdate",
+            "EntityDelete",
+            "EdgeAdd",
+            "EdgeRemove",
+        ] {
             if let Some(inner) = p.get(key) {
                 // EntityCreate has entity.id, others have entity_id directly.
                 let id_val = inner

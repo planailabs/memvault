@@ -32,12 +32,17 @@ impl NoteRow {
 }
 
 #[server]
-async fn list_notes(view: Option<String>, bucket_hex: Option<String>) -> Result<Vec<NoteRow>, ServerFnError> {
+async fn list_notes(
+    view: Option<String>,
+    bucket_hex: Option<String>,
+) -> Result<Vec<NoteRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
     let bucket_id = bucket_hex.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 { return None; }
+        if bytes.len() != 32 {
+            return None;
+        }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
@@ -45,25 +50,37 @@ async fn list_notes(view: Option<String>, bucket_hex: Option<String>) -> Result<
 
     // If a view is active, use list_all (view-filtered) and filter to docs only.
     if let Some(ref view_name) = view {
-        let items = client.list_all(Some(view_name), 500).await
+        let items = client
+            .list_all(Some(view_name), 500)
+            .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
-        return Ok(items.into_iter()
+        return Ok(items
+            .into_iter()
             .filter(|(_, node_type, _, _)| node_type == "doc")
             .map(|(id, _, label, tags)| NoteRow {
-                id, title: label, tags, visibility: "internal".to_string(),
-                attachment_count: 0, updated_ns: 0,
+                id,
+                title: label,
+                tags,
+                visibility: "internal".to_string(),
+                attachment_count: 0,
+                updated_ns: 0,
             })
             .collect());
     }
 
-    let docs = client.list_docs(None, 500, bucket_id.as_ref()).await
+    let docs = client
+        .list_docs(None, 500, bucket_id.as_ref())
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(docs.into_iter()
+    Ok(docs
+        .into_iter()
         .map(|d| NoteRow {
             id: format!("doc:{}", hex::encode(d.id.0)),
             title: d.title.unwrap_or_else(|| "Untitled".to_string()),
-            tags: d.tags, visibility: "internal".to_string(),
-            attachment_count: d.attachment_count, updated_ns: d.updated_ns,
+            tags: d.tags,
+            visibility: "internal".to_string(),
+            attachment_count: d.attachment_count,
+            updated_ns: d.updated_ns,
         })
         .collect())
 }
@@ -119,11 +136,7 @@ fn NoteTable(list: Vec<NoteRow>) -> Element {
                 "attachments" => a.attachment_count.cmp(&b.attachment_count),
                 _ => a.updated_ns.cmp(&b.updated_ns),
             };
-            if asc {
-                ord
-            } else {
-                ord.reverse()
-            }
+            if asc { ord } else { ord.reverse() }
         });
         items
     });

@@ -104,8 +104,8 @@ mod server_router {
         let api = Router::new().nest("/api/v1", super::api::routes(state));
 
         // Dioxus fullstack: server fns + SSR + static assets (same as main.rs)
-        let dioxus = Router::new()
-            .serve_dioxus_application(ServeConfig::new(), super::ui::app::App);
+        let dioxus =
+            Router::new().serve_dioxus_application(ServeConfig::new(), super::ui::app::App);
 
         api.merge(dioxus)
     }

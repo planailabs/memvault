@@ -47,7 +47,9 @@ async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
 
     // Get all edges (outgoing + incoming) via edges_of, not just edges_out.
     let node_ref = memvault_core::NodeRef::Entity(entity_id);
-    let all_edges = client.edges_of(&node_ref).await
+    let all_edges = client
+        .edges_of(&node_ref)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut edges = Vec::new();

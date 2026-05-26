@@ -50,7 +50,11 @@ pub fn doc_filename(doc: &Document) -> String {
         Some(title) => {
             let safe = title_to_filename(&title);
             // Truncate long titles to avoid filesystem limits
-            let safe = if safe.len() > 200 { &safe[..200] } else { &safe };
+            let safe = if safe.len() > 200 {
+                &safe[..200]
+            } else {
+                &safe
+            };
             format!("{safe} - {cid_hex}.md")
         }
         None => format!("{cid_hex}.md"),

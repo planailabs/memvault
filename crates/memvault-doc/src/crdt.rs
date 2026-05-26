@@ -79,9 +79,7 @@ impl CrdtDocument {
 
     /// Export a binary snapshot of the current state.
     pub fn export_snapshot(&self) -> Vec<u8> {
-        self.doc
-            .export(ExportMode::Snapshot)
-            .unwrap_or_default()
+        self.doc.export(ExportMode::Snapshot).unwrap_or_default()
     }
 
     /// Export all updates (for sync protocol).

@@ -2,10 +2,10 @@
 
 use redb::ReadableTable;
 
+use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::keys;
 use crate::tables::*;
-use crate::MemvaultStore;
 
 impl MemvaultStore {
     /// Query CIDs by tag (scope + label), starting after `after_ns`, up to `limit` results.
@@ -174,7 +174,9 @@ impl MemvaultStore {
             let (key, _) = entry?;
             let cid = keys::unpack_time_cid(key.value())?;
             for (i, b) in cid.iter().enumerate() {
-                if i < 32 { xor[i] ^= b; }
+                if i < 32 {
+                    xor[i] ^= b;
+                }
             }
             count += 1;
         }
@@ -329,7 +331,8 @@ impl MemvaultStore {
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(BUCKET_TRUST)?;
-            let mut key = Vec::with_capacity(bucket_id.len() + from_cluster.len() + to_cluster.len());
+            let mut key =
+                Vec::with_capacity(bucket_id.len() + from_cluster.len() + to_cluster.len());
             key.extend_from_slice(bucket_id);
             key.extend_from_slice(from_cluster);
             key.extend_from_slice(to_cluster);

@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -41,8 +41,8 @@ impl RpcClient {
             "id": 1
         });
 
-        let mut req_bytes = serde_json::to_vec(&request)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let mut req_bytes =
+            serde_json::to_vec(&request).map_err(|e| ApiError::Serialization(e.to_string()))?;
         req_bytes.push(b'\n');
         writer.write_all(&req_bytes).await?;
 

@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::sse::{Event, Sse};
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use memvault_api::MemvaultEvent;
 
-use crate::api::auth::RequireAuth;
 use crate::AppState;
+use crate::api::auth::RequireAuth;
 
 /// GET /api/v1/events — SSE stream of MemvaultEvents.
 pub async fn events_stream(

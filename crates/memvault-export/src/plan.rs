@@ -34,18 +34,13 @@ pub struct ExportPlan {
 }
 
 /// Build an export plan by enumerating vault contents.
-pub async fn build_plan(
-    client: &dyn MemvaultClient,
-    opts: &ExportOptions,
-) -> Result<ExportPlan> {
+pub async fn build_plan(client: &dyn MemvaultClient, opts: &ExportOptions) -> Result<ExportPlan> {
     let mut documents = Vec::new();
     let mut files = Vec::new();
     let mut entities = Vec::new();
 
     // Use list_all for a unified listing, filtered by view if specified
-    let all_nodes = client
-        .list_all(opts.view_filter.as_deref(), 10_000)
-        .await?;
+    let all_nodes = client.list_all(opts.view_filter.as_deref(), 10_000).await?;
 
     for (node_id, node_type, label, tags) in &all_nodes {
         // Apply tag filter if specified

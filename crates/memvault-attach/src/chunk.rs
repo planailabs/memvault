@@ -40,7 +40,8 @@ pub fn decide_layout(size: u64) -> ChunkLayout {
     if size <= INLINE_THRESHOLD {
         ChunkLayout::Inline { size: size as u32 }
     } else {
-        let num_chunks = ((size + DEFAULT_CHUNK_SIZE as u64 - 1) / DEFAULT_CHUNK_SIZE as u64) as u32;
+        let num_chunks =
+            ((size + DEFAULT_CHUNK_SIZE as u64 - 1) / DEFAULT_CHUNK_SIZE as u64) as u32;
         ChunkLayout::UnixFs {
             chunk_size: DEFAULT_CHUNK_SIZE as u32,
             layout: UnixFsLayout::Balanced,

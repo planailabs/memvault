@@ -30,9 +30,28 @@ async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnErr
         .into_iter()
         .map(|hit| {
             let (kind, id) = match hit.node_type.as_str() {
-                "doc" => ("note", hit.node_id.strip_prefix("doc:").unwrap_or(&hit.node_id).to_string()),
-                "file" | "attachment" => ("file", hit.node_id.strip_prefix("file:").or_else(|| hit.node_id.strip_prefix("attachment:")).unwrap_or(&hit.node_id).to_string()),
-                _ => ("entity", hit.node_id.strip_prefix("entity:").unwrap_or(&hit.node_id).to_string()),
+                "doc" => (
+                    "note",
+                    hit.node_id
+                        .strip_prefix("doc:")
+                        .unwrap_or(&hit.node_id)
+                        .to_string(),
+                ),
+                "file" | "attachment" => (
+                    "file",
+                    hit.node_id
+                        .strip_prefix("file:")
+                        .or_else(|| hit.node_id.strip_prefix("attachment:"))
+                        .unwrap_or(&hit.node_id)
+                        .to_string(),
+                ),
+                _ => (
+                    "entity",
+                    hit.node_id
+                        .strip_prefix("entity:")
+                        .unwrap_or(&hit.node_id)
+                        .to_string(),
+                ),
             };
             PaletteResult {
                 kind: kind.to_string(),
@@ -68,33 +87,30 @@ pub fn CommandPalette() -> Element {
         #[cfg(target_arch = "wasm32")]
         {
             spawn(async move {
-                use wasm_bindgen::closure::Closure;
                 use wasm_bindgen::JsCast;
+                use wasm_bindgen::closure::Closure;
 
                 let window = web_sys::window().unwrap();
                 let mut open = open;
                 let mut query = query;
                 let mut results = results;
-                let cb = Closure::wrap(Box::new(
-                    move |e: web_sys::KeyboardEvent| {
-                        if (e.meta_key() || e.ctrl_key()) && e.key() == "k" {
-                            e.prevent_default();
-                            let was_open = *open.peek();
-                            open.set(!was_open);
-                            if !was_open {
-                                query.set(String::new());
-                                results.set(Vec::new());
-                            }
+                let cb = Closure::wrap(Box::new(move |e: web_sys::KeyboardEvent| {
+                    if (e.meta_key() || e.ctrl_key()) && e.key() == "k" {
+                        e.prevent_default();
+                        let was_open = *open.peek();
+                        open.set(!was_open);
+                        if !was_open {
+                            query.set(String::new());
+                            results.set(Vec::new());
                         }
-                        if e.key() == "Escape" && *open.peek() {
-                            open.set(false);
-                        }
-                    },
-                ) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
-                let _ = window.add_event_listener_with_callback(
-                    "keydown",
-                    cb.as_ref().unchecked_ref(),
-                );
+                    }
+                    if e.key() == "Escape" && *open.peek() {
+                        open.set(false);
+                    }
+                })
+                    as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+                let _ =
+                    window.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
                 cb.forget();
             });
         }

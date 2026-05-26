@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use plan_ai_design::{DataTable, FormField, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
+use plan_ai_design::{
+    DataTable, FormField, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -58,7 +60,8 @@ async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
         let op_kind = format!("{:?}", r.op_kind);
 
         // Build description and link from op_kind + tags
-        let (description, link_target) = build_description(&client, &op_kind, &r.tags, r.doc_id.as_ref()).await;
+        let (description, link_target) =
+            build_description(&client, &op_kind, &r.tags, r.doc_id.as_ref()).await;
 
         rows.push(AuditRow {
             cid: hex::encode(&r.cid),
@@ -95,19 +98,33 @@ async fn resolve_node(
     if let Some(node_ref) = memvault_core::NodeRef::from_tag_label(node_tag) {
         let label = match &node_ref {
             memvault_core::NodeRef::Doc(did) => {
-                client.get_doc(did).await.ok().flatten()
-                    .and_then(|d| d.frontmatter.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                client.get_doc(did).await.ok().flatten().and_then(|d| {
+                    d.frontmatter
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
             }
             memvault_core::NodeRef::Entity(eid) => {
-                client.get_entity(eid).await.ok().flatten()
-                    .and_then(|e| e.props.get("name").or_else(|| e.props.get("title"))
-                        .and_then(|v| v.as_str()).map(|s| s.to_string()))
+                client.get_entity(eid).await.ok().flatten().and_then(|e| {
+                    e.props
+                        .get("name")
+                        .or_else(|| e.props.get("title"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
             }
-            memvault_core::NodeRef::Attachment(cid) => {
-                client.get_file_manifest(cid).await.ok().flatten()
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .and_then(|v| v.get("filename").and_then(|f| f.as_str()).map(|s| s.to_string()))
-            }
+            memvault_core::NodeRef::Attachment(cid) => client
+                .get_file_manifest(cid)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|v| {
+                    v.get("filename")
+                        .and_then(|f| f.as_str())
+                        .map(|s| s.to_string())
+                }),
         };
         if let Some(name) = label {
             let link = audit_link_from_tag(node_tag, &name);
@@ -126,12 +143,27 @@ async fn build_description(
     tags: &[(String, String)],
     _doc_id: Option<&memvault_core::DocId>,
 ) -> (String, Option<AuditLink>) {
-    let doc_tag = tags.iter().find(|(s, _)| s == "doc").map(|(_, l)| l.as_str());
-    let entity_tag = tags.iter().find(|(s, _)| s == "entity").map(|(_, l)| l.as_str());
-    let edge_source = tags.iter().find(|(s, _)| s == "edge_source").map(|(_, l)| l.as_str());
-    let edge_target = tags.iter().find(|(s, _)| s == "edge_target").map(|(_, l)| l.as_str());
+    let doc_tag = tags
+        .iter()
+        .find(|(s, _)| s == "doc")
+        .map(|(_, l)| l.as_str());
+    let entity_tag = tags
+        .iter()
+        .find(|(s, _)| s == "entity")
+        .map(|(_, l)| l.as_str());
+    let edge_source = tags
+        .iter()
+        .find(|(s, _)| s == "edge_source")
+        .map(|(_, l)| l.as_str());
+    let edge_target = tags
+        .iter()
+        .find(|(s, _)| s == "edge_target")
+        .map(|(_, l)| l.as_str());
     // Unified annotation target (type:hex node_id)
-    let ann_target = tags.iter().find(|(s, _)| s == "_ann").map(|(_, l)| l.as_str());
+    let ann_target = tags
+        .iter()
+        .find(|(s, _)| s == "_ann")
+        .map(|(_, l)| l.as_str());
 
     match op_kind {
         "DocCreate" => {
@@ -240,7 +272,10 @@ async fn build_description(
         }
         // ── Bucket events ────────────────────────────────────────
         "BucketCreate" => {
-            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
+            let bucket_tag = tags
+                .iter()
+                .find(|(s, _)| s == "bucket")
+                .map(|(_, l)| l.as_str());
             // Try to resolve bucket name from the store.
             if let Some(bid) = bucket_tag {
                 if let Ok(Some(info)) = resolve_bucket_name(client, bid).await {
@@ -253,41 +288,86 @@ async fn build_description(
             }
         }
         "BucketRename" => {
-            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            (format!("Renamed bucket {}", bucket_tag.map(short_id).unwrap_or("?".into())), None)
+            let bucket_tag = tags
+                .iter()
+                .find(|(s, _)| s == "bucket")
+                .map(|(_, l)| l.as_str());
+            (
+                format!(
+                    "Renamed bucket {}",
+                    bucket_tag.map(short_id).unwrap_or("?".into())
+                ),
+                None,
+            )
         }
         "BucketAttach" => {
-            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            (format!("Attached bucket {} to cluster", bucket_tag.map(short_id).unwrap_or("?".into())), None)
+            let bucket_tag = tags
+                .iter()
+                .find(|(s, _)| s == "bucket")
+                .map(|(_, l)| l.as_str());
+            (
+                format!(
+                    "Attached bucket {} to cluster",
+                    bucket_tag.map(short_id).unwrap_or("?".into())
+                ),
+                None,
+            )
         }
         "BucketArchive" => {
-            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            (format!("Archived bucket {}", bucket_tag.map(short_id).unwrap_or("?".into())), None)
+            let bucket_tag = tags
+                .iter()
+                .find(|(s, _)| s == "bucket")
+                .map(|(_, l)| l.as_str());
+            (
+                format!(
+                    "Archived bucket {}",
+                    bucket_tag.map(short_id).unwrap_or("?".into())
+                ),
+                None,
+            )
         }
         "BucketBind" => {
-            let bucket_tag = tags.iter().find(|(s, _)| s == "bucket").map(|(_, l)| l.as_str());
-            (format!("Bound bucket {} to cluster", bucket_tag.map(short_id).unwrap_or("?".into())), None)
+            let bucket_tag = tags
+                .iter()
+                .find(|(s, _)| s == "bucket")
+                .map(|(_, l)| l.as_str());
+            (
+                format!(
+                    "Bound bucket {} to cluster",
+                    bucket_tag.map(short_id).unwrap_or("?".into())
+                ),
+                None,
+            )
         }
-        "BucketTrust" => {
-            ("Cross-cluster bucket trust established".to_string(), None)
-        }
+        "BucketTrust" => ("Cross-cluster bucket trust established".to_string(), None),
         // ── View events ─────────────────────────────────────────
         "ViewCreate" => {
-            let view_tag = tags.iter().find(|(s, _)| s == "view").map(|(_, l)| l.as_str());
-            (format!("Created view {}", view_tag.map(short_id).unwrap_or("?".into())), None)
+            let view_tag = tags
+                .iter()
+                .find(|(s, _)| s == "view")
+                .map(|(_, l)| l.as_str());
+            (
+                format!(
+                    "Created view {}",
+                    view_tag.map(short_id).unwrap_or("?".into())
+                ),
+                None,
+            )
         }
         // ── Token events ────────────────────────────────────────
         "TokenIssue" | "JoinToken" => {
-            let label = tags.iter().find(|(s, _)| s == "role").map(|(_, l)| l.as_str());
-            (format!("Issued join token (role: {})", label.unwrap_or("?")), None)
+            let label = tags
+                .iter()
+                .find(|(s, _)| s == "role")
+                .map(|(_, l)| l.as_str());
+            (
+                format!("Issued join token (role: {})", label.unwrap_or("?")),
+                None,
+            )
         }
         // ── Share events ────────────────────────────────────────
-        "SharePropose" => {
-            ("Sent share proposal".to_string(), None)
-        }
-        "ShareDecide" => {
-            ("Decided share proposal".to_string(), None)
-        }
+        "SharePropose" => ("Sent share proposal".to_string(), None),
+        "ShareDecide" => ("Decided share proposal".to_string(), None),
         other => {
             if let Some(target) = ann_target {
                 let (name, link) = resolve_node(client, target).await;

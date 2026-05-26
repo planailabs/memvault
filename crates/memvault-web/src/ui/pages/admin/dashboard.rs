@@ -72,7 +72,9 @@ pub fn AdminDashboard() -> Element {
     let data = use_server_future(get_admin_data)?;
 
     match &*data.read() {
-        Some(Ok((status, tokens))) => rsx! { AdminView { status: status.clone(), tokens: tokens.clone() } },
+        Some(Ok((status, tokens))) => {
+            rsx! { AdminView { status: status.clone(), tokens: tokens.clone() } }
+        }
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
         None => rsx! { p { class: "text-fg-muted", {t!("loading")} } },
     }

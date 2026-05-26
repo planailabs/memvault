@@ -29,7 +29,7 @@ struct LinkedItem {
     edge_id: String,
     direction: String, // "outgoing" or "incoming"
     relation: String,
-    other_node: String,  // tag_label format: "entity:hex", "doc:hex", etc.
+    other_node: String, // tag_label format: "entity:hex", "doc:hex", etc.
     other_label: Option<String>,
 }
 
@@ -81,12 +81,8 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
         .await
     {
         for record in records {
-            if let Ok(Some(manifest_bytes)) =
-                client.get_file_manifest(&record.cid).await
-            {
-                if let Ok(manifest) =
-                    serde_json::from_slice::<serde_json::Value>(&manifest_bytes)
-                {
+            if let Ok(Some(manifest_bytes)) = client.get_file_manifest(&record.cid).await {
+                if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) {
                     attachments.push(AttachmentInfo {
                         cid: hex::encode(&record.cid),
                         filename: manifest
@@ -143,12 +139,19 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
 }
 
 #[server]
-async fn create_link(source: String, target: String, relation: String) -> Result<String, ServerFnError> {
+async fn create_link(
+    source: String,
+    target: String,
+    relation: String,
+) -> Result<String, ServerFnError> {
     let client = crate::ui::state::client()?;
     let source_ref = memvault_core::NodeRef::from_tag_label(&source)
         .ok_or_else(|| ServerFnError::new("Invalid source node"))?;
-    let target_ref = memvault_core::NodeRef::from_tag_label(&target)
-        .ok_or_else(|| ServerFnError::new("Invalid target — use format: entity:<hex>, doc:<hex>, or attachment:<hex>"))?;
+    let target_ref = memvault_core::NodeRef::from_tag_label(&target).ok_or_else(|| {
+        ServerFnError::new(
+            "Invalid target — use format: entity:<hex>, doc:<hex>, or attachment:<hex>",
+        )
+    })?;
 
     let edge = memvault_doc::Edge {
         id: memvault_core::EdgeId::random(),
@@ -166,14 +169,19 @@ async fn create_link(source: String, target: String, relation: String) -> Result
 }
 
 #[server]
-async fn search_link_targets(query: String) -> Result<Vec<(String, String, String)>, ServerFnError> {
+async fn search_link_targets(
+    query: String,
+) -> Result<Vec<(String, String, String)>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let hits = client
         .search_unified(&query, 8)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     // Returns (node_id, node_type, label)
-    Ok(hits.into_iter().map(|h| (h.node_id, h.node_type, h.label)).collect())
+    Ok(hits
+        .into_iter()
+        .map(|h| (h.node_id, h.node_type, h.label))
+        .collect())
 }
 
 #[server]

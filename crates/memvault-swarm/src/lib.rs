@@ -212,7 +212,10 @@ pub async fn run_sync_loop(
 }
 
 /// Create a channel pair for outbound head announcements.
-pub fn head_channel() -> (mpsc::UnboundedSender<OutboundHead>, mpsc::UnboundedReceiver<OutboundHead>) {
+pub fn head_channel() -> (
+    mpsc::UnboundedSender<OutboundHead>,
+    mpsc::UnboundedReceiver<OutboundHead>,
+) {
     mpsc::unbounded_channel()
 }
 
@@ -234,13 +237,21 @@ fn request_remote_heads(
     // Cover all time: from epoch 0 to now. The first window catches
     // all data created before the other windows.
     let window_size = now / RBSR_WINDOWS as u64;
-    if window_size == 0 { return; }
+    if window_size == 0 {
+        return;
+    }
 
     let mut fingerprints = Vec::with_capacity(RBSR_WINDOWS);
     for i in 0..RBSR_WINDOWS {
         let start = (i as u64) * window_size;
-        let end = if i == RBSR_WINDOWS - 1 { u64::MAX } else { start + window_size };
-        let (count, xor) = store.range_fingerprint(start, end).unwrap_or((0, [0u8; 32]));
+        let end = if i == RBSR_WINDOWS - 1 {
+            u64::MAX
+        } else {
+            start + window_size
+        };
+        let (count, xor) = store
+            .range_fingerprint(start, end)
+            .unwrap_or((0, [0u8; 32]));
         fingerprints.push(RangeFingerprint {
             start_ns: start,
             end_ns: end,
@@ -257,7 +268,10 @@ fn request_remote_heads(
         range_fingerprints: fingerprints,
         token: None,
     };
-    swarm.behaviour_mut().block_exchange.send_request(&peer_id, request);
+    swarm
+        .behaviour_mut()
+        .block_exchange
+        .send_request(&peer_id, request);
     tracing::info!(%peer_id, windows = RBSR_WINDOWS, total_blocks = total, "sent RBSR full sync request");
 }
 
@@ -293,7 +307,13 @@ fn handle_gossip_message(
                 tracing::debug!(cid = %hex::encode(&ann.cid), %source, "missing block from gossip");
                 swarm.behaviour_mut().block_exchange.send_request(
                     &source,
-                    BlockRequest { cids: vec![ann.cid], since_ns: None, limit: None, range_fingerprints: vec![], token: None },
+                    BlockRequest {
+                        cids: vec![ann.cid],
+                        since_ns: None,
+                        limit: None,
+                        range_fingerprints: vec![],
+                        token: None,
+                    },
                 );
             }
         }
@@ -319,10 +339,11 @@ fn serve_block_request(
     let peer_cluster = peer_clusters.get(&peer);
     let is_local = peer_cluster.map(|c| c == cluster_id).unwrap_or(false);
 
-    let entries = if !request.cids.is_empty() {
-        // Fetch mode: return block data, with visibility check.
-        tracing::debug!(%peer, cids = request.cids.len(), "block fetch request");
-        request.cids.iter().map(|cid| {
+    let entries =
+        if !request.cids.is_empty() {
+            // Fetch mode: return block data, with visibility check.
+            tracing::debug!(%peer, cids = request.cids.len(), "block fetch request");
+            request.cids.iter().map(|cid| {
             match store.get_block(cid) {
                 Ok(Some(data)) => {
                     // Visibility enforcement: check bucket access.
@@ -336,44 +357,54 @@ fn serve_block_request(
                 _ => BlockEntry { cid: cid.clone(), data: vec![], found: false },
             }
         }).collect()
-    } else if !request.range_fingerprints.is_empty() {
-        // RBSR mode: compare fingerprints, return CIDs from mismatched windows.
-        let mut diff_cids = Vec::new();
-        let mut matched = 0usize;
-        let mut mismatched = 0usize;
-        for rf in &request.range_fingerprints {
-            let (local_count, local_xor) = store.range_fingerprint(rf.start_ns, rf.end_ns)
-                .unwrap_or((0, [0u8; 32]));
-            if local_count as u32 == rf.count && local_xor == rf.xor {
-                matched += 1;
-                continue; // Same data in this window.
-            }
-            mismatched += 1;
-            // Return our CIDs from this window so the requester can diff.
-            if let Ok(cids) = store.query_by_time(rf.start_ns, rf.end_ns, 1000) {
-                for cid in cids {
-                    diff_cids.push(BlockEntry { cid, data: vec![], found: true });
+        } else if !request.range_fingerprints.is_empty() {
+            // RBSR mode: compare fingerprints, return CIDs from mismatched windows.
+            let mut diff_cids = Vec::new();
+            let mut matched = 0usize;
+            let mut mismatched = 0usize;
+            for rf in &request.range_fingerprints {
+                let (local_count, local_xor) = store
+                    .range_fingerprint(rf.start_ns, rf.end_ns)
+                    .unwrap_or((0, [0u8; 32]));
+                if local_count as u32 == rf.count && local_xor == rf.xor {
+                    matched += 1;
+                    continue; // Same data in this window.
+                }
+                mismatched += 1;
+                // Return our CIDs from this window so the requester can diff.
+                if let Ok(cids) = store.query_by_time(rf.start_ns, rf.end_ns, 1000) {
+                    for cid in cids {
+                        diff_cids.push(BlockEntry {
+                            cid,
+                            data: vec![],
+                            found: true,
+                        });
+                    }
                 }
             }
-        }
-        tracing::debug!(%peer, matched, mismatched, diff = diff_cids.len(), "RBSR response");
-        diff_cids
-    } else if let Some(since_ns) = request.since_ns {
-        // List-heads fallback.
-        let limit = request.limit.unwrap_or(500);
-        tracing::debug!(%peer, since_ns, limit, "list-heads request");
-        match store.query_by_time(since_ns, u64::MAX, limit) {
-            Ok(cids) => cids.into_iter().map(|cid| {
-                BlockEntry { cid, data: vec![], found: true }
-            }).collect(),
-            Err(e) => {
-                tracing::warn!(%peer, %e, "failed to query recent heads");
-                vec![]
+            tracing::debug!(%peer, matched, mismatched, diff = diff_cids.len(), "RBSR response");
+            diff_cids
+        } else if let Some(since_ns) = request.since_ns {
+            // List-heads fallback.
+            let limit = request.limit.unwrap_or(500);
+            tracing::debug!(%peer, since_ns, limit, "list-heads request");
+            match store.query_by_time(since_ns, u64::MAX, limit) {
+                Ok(cids) => cids
+                    .into_iter()
+                    .map(|cid| BlockEntry {
+                        cid,
+                        data: vec![],
+                        found: true,
+                    })
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(%peer, %e, "failed to query recent heads");
+                    vec![]
+                }
             }
-        }
-    } else {
-        vec![]
-    };
+        } else {
+            vec![]
+        };
 
     let found = entries.iter().filter(|e| e.found).count();
     tracing::debug!(%peer, found, total = entries.len(), "serving block response");
@@ -399,7 +430,8 @@ fn check_block_access(
     };
 
     // Check if the block belongs to a private bucket.
-    let bucket_id = val.get("bucket_id")
+    let bucket_id = val
+        .get("bucket_id")
         .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
 
     let bucket_id = match bucket_id {
@@ -426,7 +458,8 @@ fn check_block_access(
         if let Ok(Some(decl_data)) = store.get_block(&decl_cid) {
             if let Ok(decl) = serde_json::from_slice::<serde_json::Value>(&decl_data) {
                 // Check both envelope format and legacy raw decl.
-                let ptp = decl.get("payload")
+                let ptp = decl
+                    .get("payload")
                     .and_then(|p| p.get("BucketCreate"))
                     .and_then(|bc| bc.get("private_to_peer"))
                     .or_else(|| decl.get("private_to_peer"));
@@ -487,7 +520,13 @@ fn handle_block_response(
         tracing::info!(%peer, missing = missing_cids.len(), "requesting missing blocks from peer");
         swarm.behaviour_mut().block_exchange.send_request(
             &peer,
-            BlockRequest { cids: missing_cids, since_ns: None, limit: None, range_fingerprints: vec![], token: None },
+            BlockRequest {
+                cids: missing_cids,
+                since_ns: None,
+                limit: None,
+                range_fingerprints: vec![],
+                token: None,
+            },
         );
     }
 }

@@ -10,12 +10,12 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use memvault_api::{EventBus, MemvaultClient, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
+use memvault_auth::Role;
 use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
-use memvault_auth::Role;
 
-use crate::{build_router, AppState};
+use crate::{AppState, build_router};
 
 const TEST_TOKEN: &str = "test-secret-token";
 
@@ -65,7 +65,11 @@ impl MemvaultClient for MockClient {
             Ok(vec![memvault_api::DocSummary {
                 id: doc.id.clone(),
                 cid: doc.id.0.to_vec(),
-                title: doc.frontmatter.get("title").and_then(|v| v.as_str()).map(String::from),
+                title: doc
+                    .frontmatter
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 tags: vec![],
                 updated_ns: 1000,
                 attachment_count: 0,
@@ -91,11 +95,19 @@ impl MemvaultClient for MockClient {
         Ok(b"file-content-here".to_vec())
     }
 
-    async fn read_file_range(&self, _manifest_cid: &[u8], _start: u64, _end: u64) -> memvault_api::Result<Vec<u8>> {
+    async fn read_file_range(
+        &self,
+        _manifest_cid: &[u8],
+        _start: u64,
+        _end: u64,
+    ) -> memvault_api::Result<Vec<u8>> {
         Ok(b"range-data".to_vec())
     }
 
-    async fn read_extracted_text(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Option<String>> {
+    async fn read_extracted_text(
+        &self,
+        _manifest_cid: &[u8],
+    ) -> memvault_api::Result<Option<String>> {
         Ok(Some("extracted text".to_string()))
     }
 
@@ -111,7 +123,10 @@ impl MemvaultClient for MockClient {
         Ok(vec![])
     }
 
-    async fn get_file_manifest(&self, _manifest_cid: &[u8]) -> memvault_api::Result<Option<Vec<u8>>> {
+    async fn get_file_manifest(
+        &self,
+        _manifest_cid: &[u8],
+    ) -> memvault_api::Result<Option<Vec<u8>>> {
         Ok(Some(b"{}".to_vec()))
     }
 
@@ -133,11 +148,18 @@ impl MemvaultClient for MockClient {
         }))
     }
 
-    async fn list_entities(&self, _limit: usize, _bucket: Option<&memvault_core::BucketId>) -> memvault_api::Result<Vec<Entity>> {
+    async fn list_entities(
+        &self,
+        _limit: usize,
+        _bucket: Option<&memvault_core::BucketId>,
+    ) -> memvault_api::Result<Vec<Entity>> {
         Ok(vec![])
     }
 
-    async fn entity_history(&self, _id: &EntityId) -> memvault_api::Result<Vec<memvault_query::AuditRecord>> {
+    async fn entity_history(
+        &self,
+        _id: &EntityId,
+    ) -> memvault_api::Result<Vec<memvault_query::AuditRecord>> {
         Ok(vec![])
     }
 
@@ -171,7 +193,6 @@ impl MemvaultClient for MockClient {
         Ok(vec![])
     }
 
-
     async fn search(&self, query: &str, _limit: usize) -> memvault_api::Result<Vec<SearchHit>> {
         if query == "hello" {
             Ok(vec![SearchHit {
@@ -184,7 +205,11 @@ impl MemvaultClient for MockClient {
         }
     }
 
-    async fn search_unified(&self, _query: &str, _limit: usize) -> memvault_api::Result<Vec<memvault_query::UnifiedHit>> {
+    async fn search_unified(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> memvault_api::Result<Vec<memvault_query::UnifiedHit>> {
         Ok(vec![])
     }
 
@@ -192,17 +217,51 @@ impl MemvaultClient for MockClient {
         Ok(None)
     }
 
-    async fn list_views(&self) -> memvault_api::Result<Vec<memvault_api::View>> { Ok(vec![]) }
-    async fn create_view(&self, _view: memvault_api::View) -> memvault_api::Result<()> { Ok(()) }
-    async fn update_view(&self, _view: memvault_api::View) -> memvault_api::Result<()> { Ok(()) }
-    async fn view_members(&self, _name: &str) -> memvault_api::Result<Vec<String>> { Ok(vec![]) }
-    async fn add_tags(&self, _node_id: &str, _tags: Vec<(String, String)>) -> memvault_api::Result<()> { Ok(()) }
-    async fn remove_tags(&self, _node_id: &str, _tags: Vec<(String, String)>) -> memvault_api::Result<()> { Ok(()) }
-    async fn get_tags(&self, _node_id: &str) -> memvault_api::Result<Vec<(String, String)>> { Ok(vec![]) }
-    async fn retract_node(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> { Ok(()) }
-    async fn list_all(&self, _view: Option<&str>, _limit: usize) -> memvault_api::Result<Vec<(String, String, String, Vec<(String, String)>)>> { Ok(vec![]) }
-    async fn delete_view(&self, _name: &str) -> memvault_api::Result<()> { Ok(()) }
-    async fn get_view(&self, _name: &str) -> memvault_api::Result<Option<memvault_api::View>> { Ok(None) }
+    async fn list_views(&self) -> memvault_api::Result<Vec<memvault_api::View>> {
+        Ok(vec![])
+    }
+    async fn create_view(&self, _view: memvault_api::View) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn update_view(&self, _view: memvault_api::View) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn view_members(&self, _name: &str) -> memvault_api::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    async fn add_tags(
+        &self,
+        _node_id: &str,
+        _tags: Vec<(String, String)>,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn remove_tags(
+        &self,
+        _node_id: &str,
+        _tags: Vec<(String, String)>,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn get_tags(&self, _node_id: &str) -> memvault_api::Result<Vec<(String, String)>> {
+        Ok(vec![])
+    }
+    async fn retract_node(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn list_all(
+        &self,
+        _view: Option<&str>,
+        _limit: usize,
+    ) -> memvault_api::Result<Vec<(String, String, String, Vec<(String, String)>)>> {
+        Ok(vec![])
+    }
+    async fn delete_view(&self, _name: &str) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn get_view(&self, _name: &str) -> memvault_api::Result<Option<memvault_api::View>> {
+        Ok(None)
+    }
 
     async fn history_of(&self, _doc_id: &DocId) -> memvault_api::Result<Vec<AuditRecord>> {
         Ok(vec![])
@@ -249,18 +308,63 @@ impl MemvaultClient for MockClient {
         })
     }
 
-    async fn bucket_create(&self, _name: &str, _description: Option<&str>, _vis: memvault_core::Visibility, _class: memvault_core::classification::Classification) -> memvault_api::Result<memvault_core::BucketId> {
+    async fn bucket_create(
+        &self,
+        _name: &str,
+        _description: Option<&str>,
+        _vis: memvault_core::Visibility,
+        _class: memvault_core::classification::Classification,
+    ) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
     }
-    async fn bucket_list(&self) -> memvault_api::Result<Vec<memvault_api::types::BucketInfo>> { Ok(vec![]) }
-    async fn bucket_get(&self, _id: &memvault_core::BucketId) -> memvault_api::Result<Option<memvault_api::types::BucketInfo>> { Ok(None) }
-    async fn bucket_rename(&self, _id: &memvault_core::BucketId, _name: &str) -> memvault_api::Result<()> { Ok(()) }
-    async fn bucket_bind(&self, _bucket: &memvault_core::BucketId, _cluster: &memvault_core::ClusterId, _default: bool) -> memvault_api::Result<()> { Ok(()) }
-    async fn bucket_attach(&self, _id: &memvault_core::BucketId) -> memvault_api::Result<()> { Ok(()) }
-    async fn bucket_archive(&self, _id: &memvault_core::BucketId, _reason: &str) -> memvault_api::Result<()> { Ok(()) }
-    async fn share_inbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> { Ok(vec![]) }
-    async fn share_outbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> { Ok(vec![]) }
-    async fn share_decide(&self, _cid: &[u8], _approve: bool, _reason: Option<&str>) -> memvault_api::Result<()> { Ok(()) }
+    async fn bucket_list(&self) -> memvault_api::Result<Vec<memvault_api::types::BucketInfo>> {
+        Ok(vec![])
+    }
+    async fn bucket_get(
+        &self,
+        _id: &memvault_core::BucketId,
+    ) -> memvault_api::Result<Option<memvault_api::types::BucketInfo>> {
+        Ok(None)
+    }
+    async fn bucket_rename(
+        &self,
+        _id: &memvault_core::BucketId,
+        _name: &str,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_bind(
+        &self,
+        _bucket: &memvault_core::BucketId,
+        _cluster: &memvault_core::ClusterId,
+        _default: bool,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_attach(&self, _id: &memvault_core::BucketId) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_archive(
+        &self,
+        _id: &memvault_core::BucketId,
+        _reason: &str,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn share_inbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> {
+        Ok(vec![])
+    }
+    async fn share_outbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> {
+        Ok(vec![])
+    }
+    async fn share_decide(
+        &self,
+        _cid: &[u8],
+        _approve: bool,
+        _reason: Option<&str>,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
 
     async fn default_bucket_id(&self) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
@@ -276,7 +380,6 @@ fn make_app() -> axum::Router {
     });
     build_router(state)
 }
-
 
 #[tokio::test]
 async fn test_unauthorized_without_token() {

@@ -101,9 +101,8 @@ pub fn read_unixfs(
     root_cid: &[u8],
     get_block: &dyn Fn(&[u8]) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>, AttachError> {
-    let block = get_block(root_cid).ok_or_else(|| {
-        AttachError::BlockNotFound(hex::encode_upper(root_cid))
-    })?;
+    let block = get_block(root_cid)
+        .ok_or_else(|| AttachError::BlockNotFound(hex::encode_upper(root_cid)))?;
 
     let node = PbNode::decode(block.as_slice())?;
     let ufs_data = parse_unixfs_data(&node)?;
@@ -115,9 +114,10 @@ pub fn read_unixfs(
         // Interior node — recurse into children.
         let mut result = Vec::with_capacity(ufs_data.filesize.unwrap_or(0) as usize);
         for link in &node.links {
-            let child_cid = link.hash.as_ref().ok_or_else(|| {
-                AttachError::InvalidDagPb("link missing hash".into())
-            })?;
+            let child_cid = link
+                .hash
+                .as_ref()
+                .ok_or_else(|| AttachError::InvalidDagPb("link missing hash".into()))?;
             let child_bytes = read_unixfs(child_cid, get_block)?;
             result.extend_from_slice(&child_bytes);
         }
@@ -136,9 +136,8 @@ pub fn read_unixfs_range(
         return Ok(Vec::new());
     }
 
-    let block = get_block(root_cid).ok_or_else(|| {
-        AttachError::BlockNotFound(hex::encode_upper(root_cid))
-    })?;
+    let block = get_block(root_cid)
+        .ok_or_else(|| AttachError::BlockNotFound(hex::encode_upper(root_cid)))?;
 
     let node = PbNode::decode(block.as_slice())?;
     let ufs_data = parse_unixfs_data(&node)?;
@@ -183,9 +182,10 @@ pub fn read_unixfs_range(
                 break;
             }
 
-            let child_cid = link.hash.as_ref().ok_or_else(|| {
-                AttachError::InvalidDagPb("link missing hash".into())
-            })?;
+            let child_cid = link
+                .hash
+                .as_ref()
+                .ok_or_else(|| AttachError::InvalidDagPb("link missing hash".into()))?;
 
             // Compute the local range within this child.
             let local_start = start.saturating_sub(child_start);

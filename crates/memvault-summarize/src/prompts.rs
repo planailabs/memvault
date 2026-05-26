@@ -72,9 +72,5 @@ fn timeline_prompt(context: &[String]) -> String {
 }
 
 fn custom_prompt(template: &str, context: &[String]) -> String {
-    format!(
-        "{}\n\n{}\n\nResponse:",
-        template,
-        context.join("\n---\n")
-    )
+    format!("{}\n\n{}\n\nResponse:", template, context.join("\n---\n"))
 }

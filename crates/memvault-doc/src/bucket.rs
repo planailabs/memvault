@@ -3,8 +3,8 @@
 //! A bucket is independent of any cluster. It can be created before genesis,
 //! populated with data, and then bound to a cluster later.
 
-use memvault_core::{AgentId, BucketId, ClusterId, PeerId, Visibility};
 use memvault_core::classification::Classification;
+use memvault_core::{AgentId, BucketId, ClusterId, PeerId, Visibility};
 use serde::{Deserialize, Serialize};
 
 /// Declaration of a bucket — its identity and metadata.

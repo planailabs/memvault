@@ -57,6 +57,9 @@ impl TestNode {
     /// Create a two-node cluster (both nodes share the same cluster_id).
     pub fn cluster_pair() -> (Self, Self) {
         let cluster_id = ClusterId::random();
-        (Self::with_cluster(&cluster_id), Self::with_cluster(&cluster_id))
+        (
+            Self::with_cluster(&cluster_id),
+            Self::with_cluster(&cluster_id),
+        )
     }
 }

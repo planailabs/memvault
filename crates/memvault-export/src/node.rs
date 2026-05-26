@@ -115,7 +115,10 @@ async fn export_entity_node(
     out_dir: &Path,
 ) -> Result<NodeExportResult> {
     let bytes = hex::decode(hex_str)?;
-    anyhow::ensure!(bytes.len() == 32, "entity ID must be 32 bytes (64 hex chars)");
+    anyhow::ensure!(
+        bytes.len() == 32,
+        "entity ID must be 32 bytes (64 hex chars)"
+    );
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     let entity_id = EntityId(arr);

@@ -3,15 +3,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use memvault_core::{EdgeId, NodeRef};
 use memvault_doc::Edge;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::api::auth::RequireAuth;
 use crate::error::ApiError;
-use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct CreateLinkRequest {
@@ -58,10 +58,16 @@ pub async fn create_link(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateLinkRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
-    let source = NodeRef::from_tag_label(&req.source)
-        .ok_or_else(|| ApiError::bad_request("Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
-    let target = NodeRef::from_tag_label(&req.target)
-        .ok_or_else(|| ApiError::bad_request("Invalid target: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
+    let source = NodeRef::from_tag_label(&req.source).ok_or_else(|| {
+        ApiError::bad_request(
+            "Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
+        )
+    })?;
+    let target = NodeRef::from_tag_label(&req.target).ok_or_else(|| {
+        ApiError::bad_request(
+            "Invalid target: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
+        )
+    })?;
 
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
 
@@ -89,8 +95,11 @@ pub async fn list_links(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LinksQuery>,
 ) -> Result<Json<Vec<LinkResponse>>, ApiError> {
-    let node = NodeRef::from_tag_label(&params.node)
-        .ok_or_else(|| ApiError::bad_request("Invalid node: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
+    let node = NodeRef::from_tag_label(&params.node).ok_or_else(|| {
+        ApiError::bad_request(
+            "Invalid node: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
+        )
+    })?;
 
     let edges = state.client.edges_of(&node).await?;
 
@@ -122,12 +131,18 @@ pub async fn get_node(
     Path(node_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     tracing::debug!(node_id = %node_id, "API: get node");
-    let node_ref = NodeRef::from_tag_label(&node_id)
-        .ok_or_else(|| ApiError::bad_request("Invalid node ID — expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
+    let node_ref = NodeRef::from_tag_label(&node_id).ok_or_else(|| {
+        ApiError::bad_request(
+            "Invalid node ID — expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
+        )
+    })?;
 
     match node_ref {
         NodeRef::Entity(eid) => {
-            let entity = state.client.get_entity(&eid).await?
+            let entity = state
+                .client
+                .get_entity(&eid)
+                .await?
                 .ok_or_else(|| ApiError::not_found("Entity not found"))?;
             Ok(Json(serde_json::json!({
                 "node_id": node_id,
@@ -144,7 +159,10 @@ pub async fn get_node(
             })))
         }
         NodeRef::Doc(did) => {
-            let doc = state.client.get_doc(&did).await?
+            let doc = state
+                .client
+                .get_doc(&did)
+                .await?
                 .ok_or_else(|| ApiError::not_found("Document not found"))?;
             Ok(Json(serde_json::json!({
                 "node_id": node_id,
@@ -192,7 +210,10 @@ pub async fn retract_node(
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    state.client.retract_node(&node_id, "retracted via API").await?;
+    state
+        .client
+        .retract_node(&node_id, "retracted via API")
+        .await?;
     tracing::info!(node_id = %node_id, "API: node retracted");
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -213,8 +234,11 @@ pub async fn delete_link(
     arr.copy_from_slice(&bytes);
     let edge_id = EdgeId(arr);
 
-    let source = NodeRef::from_tag_label(&params.source)
-        .ok_or_else(|| ApiError::bad_request("Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'"))?;
+    let source = NodeRef::from_tag_label(&params.source).ok_or_else(|| {
+        ApiError::bad_request(
+            "Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
+        )
+    })?;
 
     state.client.remove_link_from(&source, &edge_id).await?;
 

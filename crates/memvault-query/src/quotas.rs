@@ -68,10 +68,7 @@ impl QuotaManager {
 
     /// Check if a write of `bytes` size is allowed for the agent.
     pub fn check_write(&self, agent_id: &AgentId, bytes: u64) -> Result<(), QuotaExceeded> {
-        let quota = self
-            .quotas
-            .get(&agent_id.0)
-            .unwrap_or(&self.default_quota);
+        let quota = self.quotas.get(&agent_id.0).unwrap_or(&self.default_quota);
         let usage = self.usage.get(&agent_id.0);
         let current_bytes = usage.map(|u| u.byte_count).unwrap_or(0);
 
@@ -89,10 +86,7 @@ impl QuotaManager {
 
     /// Check if creating a new doc is allowed for the agent.
     pub fn check_doc_create(&self, agent_id: &AgentId) -> Result<(), QuotaExceeded> {
-        let quota = self
-            .quotas
-            .get(&agent_id.0)
-            .unwrap_or(&self.default_quota);
+        let quota = self.quotas.get(&agent_id.0).unwrap_or(&self.default_quota);
         let usage = self.usage.get(&agent_id.0);
         let current_docs = usage.map(|u| u.doc_count).unwrap_or(0);
 
@@ -107,10 +101,7 @@ impl QuotaManager {
 
     /// Check if creating a new entity is allowed for the agent.
     pub fn check_entity_create(&self, agent_id: &AgentId) -> Result<(), QuotaExceeded> {
-        let quota = self
-            .quotas
-            .get(&agent_id.0)
-            .unwrap_or(&self.default_quota);
+        let quota = self.quotas.get(&agent_id.0).unwrap_or(&self.default_quota);
         let usage = self.usage.get(&agent_id.0);
         let current = usage.map(|u| u.entity_count).unwrap_or(0);
 
@@ -226,6 +217,9 @@ impl QuotaManager {
 
     /// Get the current usage for a bucket.
     pub fn get_bucket_usage(&self, bucket_id: &str) -> BucketUsage {
-        self.bucket_usage.get(bucket_id).cloned().unwrap_or_default()
+        self.bucket_usage
+            .get(bucket_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }

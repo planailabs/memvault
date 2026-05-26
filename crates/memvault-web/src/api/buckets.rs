@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -25,21 +25,27 @@ pub async fn list_buckets(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let buckets = state.client.bucket_list().await
+    let buckets = state
+        .client
+        .bucket_list()
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let result: Vec<serde_json::Value> = buckets.iter().map(|b| {
-        serde_json::json!({
-            "id": hex::encode(b.id.0),
-            "name": b.name,
-            "description": b.description,
-            "owner_agent": b.owner_agent.as_ref().map(|a| &a.0),
-            "cluster_id": b.cluster_id.as_ref().map(|c| hex::encode(c.0)),
-            "is_default": b.is_default,
-            "is_attached": b.is_attached,
-            "envelope_count": b.envelope_count,
-            "created_ns": b.created_ns,
+    let result: Vec<serde_json::Value> = buckets
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "id": hex::encode(b.id.0),
+                "name": b.name,
+                "description": b.description,
+                "owner_agent": b.owner_agent.as_ref().map(|a| &a.0),
+                "cluster_id": b.cluster_id.as_ref().map(|c| hex::encode(c.0)),
+                "is_default": b.is_default,
+                "is_attached": b.is_attached,
+                "envelope_count": b.envelope_count,
+                "created_ns": b.created_ns,
+            })
         })
-    }).collect();
+        .collect();
     Ok(Json(serde_json::json!(result)))
 }
 
@@ -49,7 +55,9 @@ pub async fn get_bucket(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let bucket_bytes = hex::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_arr: [u8; 32] = bucket_bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
 
     match state.client.bucket_get(&bucket_id).await {
@@ -74,12 +82,16 @@ pub async fn create_bucket(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateBucketRequest>,
 ) -> Result<Json<CreateBucketResponse>, StatusCode> {
-    let bucket_id = state.client.bucket_create(
-        &req.name,
-        req.description.as_deref(),
-        memvault_core::Visibility::Internal,
-        memvault_core::classification::Classification::Internal,
-    ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let bucket_id = state
+        .client
+        .bucket_create(
+            &req.name,
+            req.description.as_deref(),
+            memvault_core::Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(CreateBucketResponse {
         id: hex::encode(bucket_id.0),
@@ -98,10 +110,15 @@ pub async fn rename_bucket(
     Json(req): Json<RenameBucketRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let bucket_bytes = hex::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_arr: [u8; 32] = bucket_bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
 
-    state.client.bucket_rename(&bucket_id, &req.name).await
+    state
+        .client
+        .bucket_rename(&bucket_id, &req.name)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -113,10 +130,15 @@ pub async fn attach_bucket(
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let bucket_bytes = hex::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_arr: [u8; 32] = bucket_bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
 
-    state.client.bucket_attach(&bucket_id).await
+    state
+        .client
+        .bucket_attach(&bucket_id)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -134,10 +156,15 @@ pub async fn archive_bucket(
     Json(req): Json<ArchiveBucketRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let bucket_bytes = hex::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_arr: [u8; 32] = bucket_bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
 
-    state.client.bucket_archive(&bucket_id, &req.reason).await
+    state
+        .client
+        .bucket_archive(&bucket_id, &req.reason)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::NO_CONTENT)

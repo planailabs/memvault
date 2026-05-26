@@ -28,10 +28,7 @@ pub fn doc_at_time(
 
     // Intersect: only keep CIDs that appear in both sets
     let time_set: std::collections::HashSet<Vec<u8>> = time_cids.into_iter().collect();
-    let relevant_cids: Vec<Vec<u8>> = cids
-        .into_iter()
-        .filter(|c| time_set.contains(c))
-        .collect();
+    let relevant_cids: Vec<Vec<u8>> = cids.into_iter().filter(|c| time_set.contains(c)).collect();
 
     // Deserialize ops from blocks
     let mut ops = Vec::new();

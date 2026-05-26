@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use memvault_core::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef};
 use memvault_auth::Action;
+use memvault_core::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef};
 use serde::{Deserialize, Serialize};
 
 use crate::bucket::BucketDecl;

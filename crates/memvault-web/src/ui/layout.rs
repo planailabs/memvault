@@ -6,7 +6,9 @@ use dioxus_i18n::t;
 use super::cmd_k::{CommandPalette, PaletteOpen};
 use super::events::use_event_bus_provider;
 use super::navbar::Sidebar;
-use super::topbar::{ActiveBucket, ActiveBucketSignal, ActiveView, ActiveViewSignal, Topbar, TopbarMeta};
+use super::topbar::{
+    ActiveBucket, ActiveBucketSignal, ActiveView, ActiveViewSignal, Topbar, TopbarMeta,
+};
 
 #[component]
 pub fn Layout() -> Element {

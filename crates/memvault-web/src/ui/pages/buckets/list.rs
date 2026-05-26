@@ -1,7 +1,10 @@
 //! Bucket list page — shows all buckets with status, actions.
 
 use dioxus::prelude::*;
-use plan_ai_design::{Button, ButtonVariant, Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
+use plan_ai_design::{
+    Button, ButtonVariant, Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh,
+    Td, TdMuted,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -11,8 +14,8 @@ use crate::ui::topbar::use_topbar;
 struct BucketRow {
     id_hex: String,
     name: String,
-    status: String,       // "unbound", "private", "attached", "archived"
-    cluster_hex: String,  // empty if unbound
+    status: String,      // "unbound", "private", "attached", "archived"
+    cluster_hex: String, // empty if unbound
     is_default: bool,
     envelope_count: u64,
 }

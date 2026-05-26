@@ -16,8 +16,7 @@ fn main() {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -40,8 +39,8 @@ fn main() {
         // Zero args → dioxus::serve() + swarm on background thread.
         #[cfg(feature = "daemon")]
         {
-            use std::sync::Arc;
             use dioxus::server::{DioxusRouterExt, ServeConfig};
+            use std::sync::Arc;
 
             let data_dir = std::env::var("MEMVAULT_DATA_DIR")
                 .map(std::path::PathBuf::from)
@@ -73,21 +72,16 @@ fn main() {
             // set it BEFORE dioxus::serve() so server functions find it.
             if let Some(store) = store {
                 let client: Arc<dyn memvault_api::MemvaultClient> = Arc::new(
-                    memctl::create_client_with_bus(
-                        store,
-                        &data_dir,
-                        Arc::clone(&event_bus),
-                    )
+                    memctl::create_client_with_bus(store, &data_dir, Arc::clone(&event_bus)),
                 );
                 memvault_web::ui::state::set_client(Arc::clone(&client));
             }
             // If swarm failed, let client() do its lazy init (opens its own store).
 
-            let auth_token = memvault_web::load_or_generate_token(&data_dir)
-                .unwrap_or_default();
+            let auth_token = memvault_web::load_or_generate_token(&data_dir).unwrap_or_default();
 
-            let client_arc = memvault_web::ui::state::client()
-                .expect("failed to initialize memvault client");
+            let client_arc =
+                memvault_web::ui::state::client().expect("failed to initialize memvault client");
 
             let app_state = Arc::new(memvault_web::AppState {
                 client: client_arc,

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use decision::EgressDecision;
 use destination::{EgressDestination, EgressKind};
 
-use crate::classification::{classification_allows, CLASSIFICATION_LEVELS};
+use crate::classification::{CLASSIFICATION_LEVELS, classification_allows};
 use crate::cleaner::strategy::RedactionPolicy;
 use crate::pii::PiiDetector;
 
@@ -79,10 +79,7 @@ impl EgressPolicy {
             // No entry means unknown destination kind, check if it's in CLASSIFICATION_LEVELS
             if !CLASSIFICATION_LEVELS.contains(&classification) {
                 return EgressDecision::Deny {
-                    reasons: vec![format!(
-                        "unknown classification level: {}",
-                        classification
-                    )],
+                    reasons: vec![format!("unknown classification level: {}", classification)],
                 };
             }
         }

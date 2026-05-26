@@ -29,13 +29,7 @@ impl SummaryCache {
     }
 
     /// Insert a summary into the cache.
-    pub fn put(
-        &mut self,
-        key: Vec<u8>,
-        summary: Summary,
-        source_cids: Vec<Vec<u8>>,
-        now_ns: u64,
-    ) {
+    pub fn put(&mut self, key: Vec<u8>, summary: Summary, source_cids: Vec<Vec<u8>>, now_ns: u64) {
         self.entries.insert(
             key,
             CacheEntry {
@@ -56,7 +50,12 @@ impl SummaryCache {
         let keys_to_remove: Vec<Vec<u8>> = self
             .entries
             .iter()
-            .filter(|(_, entry)| entry.source_cids.iter().any(|cid| cid.as_slice() == source_cid))
+            .filter(|(_, entry)| {
+                entry
+                    .source_cids
+                    .iter()
+                    .any(|cid| cid.as_slice() == source_cid)
+            })
             .map(|(key, _)| key.clone())
             .collect();
 
@@ -90,8 +89,7 @@ impl SummaryCache {
         let mut hasher = blake3::Hasher::new();
 
         // Hash the serialized request
-        let request_bytes =
-            serde_json::to_vec(request).unwrap_or_default();
+        let request_bytes = serde_json::to_vec(request).unwrap_or_default();
         hasher.update(&request_bytes);
 
         // Hash sorted source CIDs for deterministic ordering

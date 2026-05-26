@@ -204,7 +204,9 @@ mod tests {
                 cluster_id: None,
                 bucket_id: None,
             };
-            store.insert_envelope(cid.as_bytes(), b"data", &meta).unwrap();
+            store
+                .insert_envelope(cid.as_bytes(), b"data", &meta)
+                .unwrap();
         }
 
         // Query range [200, 400)
@@ -219,10 +221,14 @@ mod tests {
 
         assert_eq!(store.get_token_consumption_count(token).unwrap(), 0);
 
-        let count = store.record_token_consumption(token, b"consumer-a", 1000).unwrap();
+        let count = store
+            .record_token_consumption(token, b"consumer-a", 1000)
+            .unwrap();
         assert_eq!(count, 1);
 
-        let count = store.record_token_consumption(token, b"consumer-b", 2000).unwrap();
+        let count = store
+            .record_token_consumption(token, b"consumer-b", 2000)
+            .unwrap();
         assert_eq!(count, 2);
 
         assert_eq!(store.get_token_consumption_count(token).unwrap(), 2);
@@ -234,7 +240,9 @@ mod tests {
         let target = b"target-cid";
 
         assert!(!store.is_revoked(target).unwrap());
-        store.record_revocation(target, b"revocation-block").unwrap();
+        store
+            .record_revocation(target, b"revocation-block")
+            .unwrap();
         assert!(store.is_revoked(target).unwrap());
     }
 
@@ -290,7 +298,9 @@ mod tests {
             cluster_id: Some(b"cluster-1".to_vec()),
             bucket_id: None,
         };
-        store.insert_envelope(child_cid, b"child-data", &meta).unwrap();
+        store
+            .insert_envelope(child_cid, b"child-data", &meta)
+            .unwrap();
 
         // Verify the block was stored
         assert!(store.has_block(child_cid).unwrap());
@@ -312,7 +322,9 @@ mod tests {
                 cluster_id: None,
                 bucket_id: None,
             };
-            store.insert_envelope(cid.as_bytes(), b"data", &meta).unwrap();
+            store
+                .insert_envelope(cid.as_bytes(), b"data", &meta)
+                .unwrap();
         }
 
         let results = store.query_by_tag("app", "event", 0, 3).unwrap();

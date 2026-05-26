@@ -36,7 +36,10 @@ pub enum JoinResult {
         #[serde(default)]
         enrollment_block: Option<Vec<u8>>,
     },
-    Refuse { reason: JoinRefuseReason, try_peers: Vec<String> },
+    Refuse {
+        reason: JoinRefuseReason,
+        try_peers: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

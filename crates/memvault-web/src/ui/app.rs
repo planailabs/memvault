@@ -8,6 +8,8 @@ use super::layout::Layout;
 use super::pages::admin::dashboard::AdminDashboard;
 use super::pages::admin::tokens::TokenManagement;
 use super::pages::audit::AuditLog;
+use super::pages::buckets::detail::BucketDetail;
+use super::pages::buckets::list::BucketList;
 use super::pages::files::detail::FileDetail;
 use super::pages::files::explorer::FileExplorer;
 use super::pages::graph::detail::EntityDetail;
@@ -17,8 +19,6 @@ use super::pages::notes::detail::NoteDetail;
 use super::pages::notes::form::{NoteEdit, NoteForm};
 use super::pages::notes::history::NoteHistory;
 use super::pages::notes::list::NoteList;
-use super::pages::buckets::detail::BucketDetail;
-use super::pages::buckets::list::BucketList;
 use super::pages::vfs::explorer::VfsExplorer;
 use super::pages::views::ViewManager;
 
@@ -67,10 +67,20 @@ use plan_ai_design::theme_toggle::{THEME_INIT_SCRIPT, WASM_LOADING_INNER, WASM_L
 pub fn App() -> Element {
     let mut i18n = use_init_i18n(|| {
         let en: &'static str = Box::leak(
-            format!("{}\n{}", plan_ai_design::i18n::EN_US, include_str!("./en-US.ftl")).into_boxed_str(),
+            format!(
+                "{}\n{}",
+                plan_ai_design::i18n::EN_US,
+                include_str!("./en-US.ftl")
+            )
+            .into_boxed_str(),
         );
         let de: &'static str = Box::leak(
-            format!("{}\n{}", plan_ai_design::i18n::DE_DE, include_str!("./de-DE.ftl")).into_boxed_str(),
+            format!(
+                "{}\n{}",
+                plan_ai_design::i18n::DE_DE,
+                include_str!("./de-DE.ftl")
+            )
+            .into_boxed_str(),
         );
         I18nConfig::new(langid!("en-US"))
             .with_locale(Locale::new_static(langid!("en-US"), en))
