@@ -979,6 +979,88 @@ pub async fn run(cli: Cli) -> Result<()> {
                 println!("  No double-prefixed entity IDs found (data clean)");
             }
 
+            // Phase 3b: Adopt dangling VFS nodes into default bucket
+            println!("Phase 3b: Adopting dangling VFS nodes into default bucket...");
+            {
+                let default_bucket = memvault_api::vfs::default_bucket(&client).await;
+                let bucket_hex = hex::encode(default_bucket.0);
+                let entities = client.list_entities(10_000, None).await?;
+                let mut adopted = 0usize;
+                let mut retracted_dupes = 0usize;
+
+                // Find VFS root entities without a bucket tag.
+                let mut unbucketed_roots: Vec<[u8; 32]> = Vec::new();
+                let mut bucketed_root_exists = false;
+
+                for e in &entities {
+                    if e.kind != memvault_api::vfs::VFS_DIR_KIND { continue; }
+                    let node_id = format!("entity:{}", hex::encode(e.id.0));
+                    let tags = client.get_tags(&node_id).await.unwrap_or_default();
+                    let has_root = tags.iter().any(|(s, l)| s == "vfs" && l == "root");
+                    if !has_root { continue; }
+                    let has_bucket = tags.iter().any(|(s, _)| s == "bucket");
+                    if has_bucket {
+                        bucketed_root_exists = true;
+                    } else {
+                        unbucketed_roots.push(e.id.0);
+                    }
+                }
+
+                if !unbucketed_roots.is_empty() {
+                    if bucketed_root_exists {
+                        // A proper bucketed root already exists — retract the dangling ones.
+                        for root_id in &unbucketed_roots {
+                            let node_id = format!("entity:{}", hex::encode(root_id));
+                            if client.retract_node(&node_id, "dangling VFS root without bucket").await.is_ok() {
+                                retracted_dupes += 1;
+                                println!("  Retracted dangling VFS root {}", &node_id[..24]);
+                            }
+                        }
+                    } else {
+                        // No bucketed root — adopt the first unbucketed root into the default bucket.
+                        let adopt_id = unbucketed_roots[0];
+                        let node_id = format!("entity:{}", hex::encode(adopt_id));
+                        client.add_tags(&node_id, vec![
+                            ("bucket".into(), bucket_hex.clone()),
+                        ]).await?;
+                        adopted += 1;
+                        println!("  Adopted VFS root {} into bucket {}", &node_id[..24], &bucket_hex[..8]);
+
+                        // Retract any remaining unbucketed roots.
+                        for root_id in &unbucketed_roots[1..] {
+                            let dup_id = format!("entity:{}", hex::encode(root_id));
+                            if client.retract_node(&dup_id, "duplicate dangling VFS root").await.is_ok() {
+                                retracted_dupes += 1;
+                                println!("  Retracted duplicate VFS root {}", &dup_id[..24]);
+                            }
+                        }
+                    }
+                }
+
+                // Tag all VFS dir entities (not just roots) with the default bucket
+                // if they don't have a bucket tag yet.
+                for e in &entities {
+                    if e.kind != memvault_api::vfs::VFS_DIR_KIND { continue; }
+                    let node_id = format!("entity:{}", hex::encode(e.id.0));
+                    let tags = client.get_tags(&node_id).await.unwrap_or_default();
+                    if tags.iter().any(|(s, _)| s == "bucket") { continue; }
+                    // Check if retracted.
+                    let idx = client.index_ref().read().await;
+                    if idx.is_retracted(&node_id) { continue; }
+                    drop(idx);
+                    client.add_tags(&node_id, vec![
+                        ("bucket".into(), bucket_hex.clone()),
+                    ]).await?;
+                    adopted += 1;
+                }
+
+                if adopted > 0 || retracted_dupes > 0 {
+                    println!("  {adopted} VFS node(s) adopted into default bucket, {retracted_dupes} dangling root(s) retracted");
+                } else {
+                    println!("  No dangling VFS nodes found");
+                }
+            }
+
             // Phase 4: Repair VFS tree
             println!("Phase 4: Checking VFS tree integrity...");
             let vfs_repaired = repair_vfs_tree(&client).await?;
