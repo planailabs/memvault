@@ -13,7 +13,8 @@ use crate::types::{BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus
 /// The complete memvault API surface.
 ///
 /// All write and list operations accept an optional `bucket` parameter.
-/// When `None`, implementations should resolve the cluster's default bucket.
+/// When `None`, implementations query all accessible buckets (read) or
+/// require an explicit bucket (write).
 #[async_trait]
 pub trait MemvaultClient: Send + Sync {
     // -- Documents --
@@ -111,7 +112,7 @@ pub trait MemvaultClient: Send + Sync {
     /// Resolve a node_id (tag_label like "entity:<hex>") to a human-readable label.
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>>;
 
-    /// Resolve the default bucket for this client (cluster default or first available).
+    /// Resolve the legacy bucket (used only for adoption of pre-bucket data).
     async fn default_bucket_id(&self) -> Result<BucketId>;
 
     // -- History & Audit --
