@@ -121,6 +121,7 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
     margin: 0;
     padding: 0;
     background: transparent;
+    overflow: visible;
     font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
     font-size: 0.875rem;
     line-height: 1.625;
@@ -154,7 +155,13 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
 
   var lastH = 0;
   function postHeight() {{
-    var h = document.documentElement.scrollHeight;
+    // Use the maximum of multiple measurements to avoid clipping.
+    var h = Math.max(
+      document.documentElement.scrollHeight,
+      document.documentElement.offsetHeight,
+      document.body.scrollHeight,
+      document.body.offsetHeight
+    );
     if (h !== lastH) {{
       lastH = h;
       parent.postMessage({{ type: "sandboxResize", id: id, height: h }}, "*");
