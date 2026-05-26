@@ -40,11 +40,22 @@ impl VfsRow {
 // ── Server functions ───────────────────────────────────────────────
 
 #[server]
-async fn list_vfs_entries(path: String) -> Result<Vec<VfsRow>, ServerFnError> {
+async fn list_vfs_entries(path: String, bucket_hex: Option<String>) -> Result<Vec<VfsRow>, ServerFnError> {
     use memvault_core::NodeRef;
     let client = crate::ui::state::client()?;
 
-    let bucket = memvault_api::vfs::default_bucket(&*client).await;
+    let bucket = if let Some(ref h) = bucket_hex {
+        let bytes = hex::decode(h).map_err(|e| ServerFnError::new(e.to_string()))?;
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            memvault_core::BucketId(arr)
+        } else {
+            memvault_api::vfs::default_bucket(&*client).await
+        }
+    } else {
+        memvault_api::vfs::default_bucket(&*client).await
+    };
     let root_id = memvault_api::vfs::ensure_root(&*client, &bucket).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -320,9 +331,11 @@ pub fn VfsExplorer() -> Element {
         ));
     });
 
+    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
     let mut entries = use_server_future(move || {
         let p = path.read().clone();
-        async move { list_vfs_entries(p).await }
+        let b = active_bucket.read().id.clone();
+        async move { list_vfs_entries(p, b).await }
     })?;
     let mut grid_view = use_signal(|| true);
     let mut new_dir_name = use_signal(String::new);
