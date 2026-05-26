@@ -7,6 +7,8 @@ pub mod harness;
 
 #[cfg(test)]
 mod tests {
+    pub mod basic;
+    pub mod block_sync_divergence;
     pub mod bucket_sync;
     pub mod buckets;
     pub mod docs;

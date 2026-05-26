@@ -7,6 +7,7 @@ edition = "2024"
 memvault-core = { path = "../memvault-core" }
 memvault-store = { path = "../memvault-store" }
 memvault-net = { path = "../memvault-net" }
+memvault-attach = { path = "../memvault-attach" }
 libp2p = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -14,3 +15,4 @@ serde_ipld_dagcbor = "0.6"
 serde_json = "1"
 tracing = "0.1"
 hex = "0.4"
+prost = "0.13"
