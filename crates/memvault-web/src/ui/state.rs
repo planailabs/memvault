@@ -101,8 +101,7 @@ mod inner {
                         let _ = std::fs::remove_file(&cache_path);
                         tracing::info!(
                             blocks = report.blocks_total,
-                            docs_adopted = report.docs_adopted,
-                            entities_adopted = report.entities_adopted,
+                            rewritten = report.unbucketed_rewritten,
                             "blockstore rebuild complete"
                         );
                     }

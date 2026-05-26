@@ -1000,18 +1000,16 @@ mod native {
                 let client = create_client(store.clone());
                 let report = memvault_api::rebuild::rebuild_store(&client).await?;
 
-                println!("  Blocks:     {}", report.blocks_total);
-                println!("  Envelopes:  {}", report.envelopes_indexed);
-                println!("  Buckets:    {}", report.buckets_rebuilt);
-                println!("  Entities adopted: {}", report.entities_adopted);
-                println!("  Docs adopted:     {}", report.docs_adopted);
-                println!("  VFS adopted:      {}", report.vfs_nodes_adopted);
-                println!("  VFS retracted:    {}", report.vfs_roots_retracted);
-                println!("  VFS orphans:      {}", report.vfs_orphans_linked);
-                println!("  VFS pending:      {}", report.vfs_pending_migrated);
-                println!("  Docs indexed:     {}", report.docs_indexed);
-                println!("  Entities indexed: {}", report.entities_indexed);
-                println!("  Files indexed:    {}", report.attachments_indexed);
+                println!("  Blocks:       {}", report.blocks_total);
+                println!("  Rewritten:    {}", report.unbucketed_rewritten);
+                println!("  Envelopes:    {}", report.envelopes_indexed);
+                println!("  Buckets:      {}", report.buckets_rebuilt);
+                println!("  VFS orphans:  {}", report.vfs_orphans_linked);
+                println!("  VFS dupes:    {}", report.vfs_dupes_removed);
+                println!("  VFS pending:  {}", report.vfs_pending_migrated);
+                println!("  Docs indexed: {}", report.docs_indexed);
+                println!("  Entities:     {}", report.entities_indexed);
+                println!("  Files:        {}", report.attachments_indexed);
 
                 let cache_path = if let Some(ref db_path) = client_args.db {
                     db_path.with_extension("text_index.json")

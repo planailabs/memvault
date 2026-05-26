@@ -874,26 +874,6 @@ impl LocalClient {
         Ok(entities)
     }
 
-    /// List docs without bucket scoping.  Used only by repair-index /
-    /// migrations which need to see unbucketed items for adoption.
-    pub async fn list_doc_ids_unscoped(&self, limit: usize) -> Result<Vec<DocId>> {
-        let labels = self.store.query_unique_labels("doc", limit)?;
-        let mut ids = Vec::new();
-        for label in labels {
-            let id_bytes = hex::decode(&label).unwrap_or_default();
-            if id_bytes.len() != 32 {
-                continue;
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
-            ids.push(DocId(arr));
-        }
-        Ok(ids)
-    }
-
-    /// Adopt an unbucketed doc into a bucket by writing a no-op DocEdit
-    /// that carries the bucket_id.  Returns true if adopted, false if
-    /// already bucketed or not found.
     // ── Bucket grants (ACL) ──────────────────────────────────────────
 
     /// Issue a grant scoped to a bucket.  The grant is signed by the admin
@@ -1018,35 +998,6 @@ impl LocalClient {
         Ok(true)
     }
 
-    pub async fn adopt_entity_into_bucket(
-        &self,
-        entity_id: &EntityId,
-        bucket: &BucketId,
-    ) -> Result<bool> {
-        if self.inferred_entity_bucket(entity_id).is_some() {
-            return Ok(false);
-        }
-
-        // Only adopt entities that have at least one locally-authored block.
-        // Remote-authored entities should be adopted by their originating node.
-        if !self.entity_has_local_author(entity_id) {
-            return Ok(false);
-        }
-
-        let entity = match self.get_entity(entity_id).await? {
-            Some(entity) => entity,
-            None => return Ok(false),
-        };
-
-        let op = Op::EntityUpdate {
-            entity_id: entity_id.clone(),
-            props: entity.props.clone(),
-        };
-        let entity_label: String = entity_id.0.iter().map(|b| format!("{b:02x}")).collect();
-        let tags = vec![("entity".to_string(), entity_label)];
-        self.store_op(&op, &tags, &Visibility::Internal, Some(bucket))?;
-        Ok(true)
-    }
 }
 
 #[async_trait]

@@ -29,10 +29,6 @@ pub struct RebuildReport {
     pub unbucketed_rewritten: usize,
     pub envelopes_indexed: usize,
     pub buckets_rebuilt: usize,
-    pub entities_adopted: usize,
-    pub docs_adopted: usize,
-    pub vfs_nodes_adopted: usize,
-    pub vfs_roots_retracted: usize,
     pub vfs_orphans_linked: usize,
     pub vfs_dupes_removed: usize,
     pub vfs_pending_migrated: usize,
@@ -308,149 +304,8 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         }
     }
 
-    // ── Phase 3: Adopt unbucketed locally-authored data ────────────────
-    //
-    // Find or create a BucketRole::Legacy bucket for adoption.  Only
-    // created when there's actually unbucketed data to adopt.
-
-    let entities = client.list_entities_unscoped(50_000).await?;
-    let doc_ids = client.list_doc_ids_unscoped(50_000).await?;
-
-    // Lazily resolve or create the legacy bucket on first actual adoption.
-    let mut legacy_bucket: Option<BucketId> = client.legacy_bucket_id();
-
-    /// Ensure a Legacy-role bucket exists, creating one if needed.
-    async fn ensure_legacy_bucket(
-        client: &LocalClient,
-        cached: &mut Option<BucketId>,
-    ) -> Result<BucketId> {
-        if let Some(b) = cached.clone() {
-            return Ok(b);
-        }
-        let bid = client
-            .bucket_create(
-                "legacy",
-                Some("auto-created for adoption of pre-bucket data"),
-                memvault_core::Visibility::Internal,
-                memvault_core::classification::Classification::Internal,
-                memvault_doc::BucketRole::Legacy,
-            )
-            .await?;
-        tracing::info!(bucket = %bid, "created legacy bucket for adoption");
-        *cached = Some(bid.clone());
-        Ok(bid)
-    }
-
-    // 3a: Adopt entities
-    for entity in &entities {
-        let bucket = ensure_legacy_bucket(client, &mut legacy_bucket).await?;
-        if client
-            .adopt_entity_into_bucket(&entity.id, &bucket)
-            .await?
-        {
-            report.entities_adopted += 1;
-        }
-    }
-
-    // 3b: Adopt docs
-    for doc_id in &doc_ids {
-        let bucket = ensure_legacy_bucket(client, &mut legacy_bucket).await?;
-        if client
-            .adopt_doc_into_bucket(doc_id, &bucket)
-            .await?
-        {
-            report.docs_adopted += 1;
-        }
-    }
-
-    // 3c: Adopt VFS nodes
-    {
-        let bucket = ensure_legacy_bucket(client, &mut legacy_bucket).await?;
-        let bucket_hex = hex::encode(bucket.0);
-        let mut bucketed_root_exists = false;
-        let mut unbucketed_roots: Vec<[u8; 32]> = Vec::new();
-
-        for e in &entities {
-            if e.kind != crate::vfs::VFS_DIR_KIND {
-                continue;
-            }
-            let node_id = format!("entity:{}", hex::encode(e.id.0));
-            let tags = client.get_tags(&node_id).await.unwrap_or_default();
-            let has_root = tags.iter().any(|(s, l)| s == "vfs" && l == "root");
-            if !has_root {
-                continue;
-            }
-            if tags.iter().any(|(s, _)| s == "bucket") {
-                bucketed_root_exists = true;
-            } else {
-                unbucketed_roots.push(e.id.0);
-            }
-        }
-
-        if !unbucketed_roots.is_empty() {
-            if bucketed_root_exists {
-                for root_id in &unbucketed_roots {
-                    let node_id = format!("entity:{}", hex::encode(root_id));
-                    if client
-                        .retract_node(&node_id, "dangling VFS root without bucket")
-                        .await
-                        .is_ok()
-                    {
-                        report.vfs_roots_retracted += 1;
-                    }
-                }
-            } else {
-                let mut did_adopt = false;
-                for root_id in &unbucketed_roots {
-                    let eid = EntityId(*root_id);
-                    if !did_adopt && client.entity_has_local_author(&eid) {
-                        let node_id = format!("entity:{}", hex::encode(root_id));
-                        let _ = client
-                            .add_tags(
-                                &node_id,
-                                vec![("bucket".into(), bucket_hex.clone())],
-                            )
-                            .await;
-                        report.vfs_nodes_adopted += 1;
-                        did_adopt = true;
-                    } else if did_adopt {
-                        let dup_id = format!("entity:{}", hex::encode(root_id));
-                        if client
-                            .retract_node(&dup_id, "duplicate dangling VFS root")
-                            .await
-                            .is_ok()
-                        {
-                            report.vfs_roots_retracted += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tag unbucketed locally-authored VFS dirs
-        for e in &entities {
-            if e.kind != crate::vfs::VFS_DIR_KIND {
-                continue;
-            }
-            if !client.entity_has_local_author(&e.id) {
-                continue;
-            }
-            let node_id = format!("entity:{}", hex::encode(e.id.0));
-            let tags = client.get_tags(&node_id).await.unwrap_or_default();
-            if tags.iter().any(|(s, _)| s == "bucket") {
-                continue;
-            }
-            let idx = client.index_ref().read().await;
-            if idx.is_retracted(&node_id) {
-                continue;
-            }
-            drop(idx);
-            let _ = client
-                .add_tags(&node_id, vec![("bucket".into(), bucket_hex.clone())])
-                .await;
-            report.vfs_nodes_adopted += 1;
-        }
-    }
+    // Phase 3 (adoption) removed — Phase 0d rewrites all unbucketed
+    // envelopes in-place, making adoption unnecessary.
 
     // ── Phase 4: VFS tree repair ───────────────────────────────────────
     //
@@ -569,8 +424,7 @@ pub async fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildRep
         target_version = BLOCKSTORE_VERSION,
         blocks = report.blocks_total,
         envelopes = report.envelopes_indexed,
-        entities_adopted = report.entities_adopted,
-        docs_adopted = report.docs_adopted,
+        rewritten = report.unbucketed_rewritten,
         "blockstore rebuild complete"
     );
 
