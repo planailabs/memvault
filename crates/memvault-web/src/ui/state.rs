@@ -7,6 +7,7 @@ mod inner {
     use memvault_api::MemvaultClient;
 
     static CLIENT: OnceLock<Arc<dyn MemvaultClient>> = OnceLock::new();
+    static LOCAL_CLIENT: OnceLock<Arc<memvault_api::LocalClient>> = OnceLock::new();
 
     /// Set the client explicitly (used by the daemon).
     pub fn set_client(client: Arc<dyn MemvaultClient>) {
@@ -28,6 +29,16 @@ mod inner {
             .get()
             .cloned()
             .ok_or_else(|| dioxus::prelude::ServerFnError::new("memvault client init race"))
+    }
+
+    /// Get the concrete LocalClient (for grant/ACL operations).
+    pub fn local_client() -> Result<Arc<memvault_api::LocalClient>, dioxus::prelude::ServerFnError> {
+        // Ensure lazy init happened
+        let _ = client()?;
+        LOCAL_CLIENT
+            .get()
+            .cloned()
+            .ok_or_else(|| dioxus::prelude::ServerFnError::new("local client not available"))
     }
 
     fn init_local_client() -> Result<Arc<dyn MemvaultClient>, Box<dyn std::error::Error>> {
@@ -96,6 +107,7 @@ mod inner {
         })
         .join();
 
+        let _ = LOCAL_CLIENT.set(Arc::clone(&client));
         Ok(client as Arc<dyn MemvaultClient>)
     }
 }

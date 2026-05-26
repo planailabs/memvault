@@ -904,6 +904,101 @@ impl LocalClient {
     /// Adopt an unbucketed doc into a bucket by writing a no-op DocEdit
     /// that carries the bucket_id.  Returns true if adopted, false if
     /// already bucketed or not found.
+    // ── Bucket grants (ACL) ──────────────────────────────────────────
+
+    /// Issue a grant scoped to a bucket.  The grant is signed by the admin
+    /// key and stored as a tagged block for lookup.
+    pub async fn issue_bucket_grant(
+        &self,
+        bucket_id: &BucketId,
+        audience: memvault_auth::GrantAudience,
+        actions: Vec<memvault_auth::Action>,
+        ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        let admin_key = self.admin_signing_key.as_ref().ok_or_else(|| {
+            ApiError::Other("no admin signing key — cannot issue grants".into())
+        })?;
+
+        let now_ns = memvault_core::wall_ns();
+        let not_after_ns = now_ns + ttl_secs * 1_000_000_000;
+        let mut nonce = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+
+        let cluster_id_arr: [u8; 32] = self
+            .cluster_id
+            .clone()
+            .try_into()
+            .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))?;
+
+        let mut grant = memvault_auth::Grant {
+            issuer: memvault_core::PeerId(self.peer_id.clone()),
+            issuing_cluster: memvault_core::ClusterId(cluster_id_arr),
+            audience,
+            scopes: vec![],
+            actions,
+            not_before_ns: now_ns,
+            not_after_ns,
+            parent: None,
+            nonce,
+            bucket_scopes: vec![bucket_id.clone()],
+            signature: [0u8; 64],
+        };
+
+        // Sign
+        let signing_bytes = grant
+            .signing_bytes()
+            .map_err(|e| ApiError::Other(format!("grant signing failed: {e}")))?;
+        use ed25519_dalek::Signer;
+        let sig = admin_key.sign(&signing_bytes);
+        grant.signature = sig.to_bytes();
+
+        // Store as tagged block
+        let grant_json = serde_json::to_vec(&grant)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = memvault_core::cid_from_bytes(&grant_json);
+        let cid_bytes = cid.to_bytes();
+
+        let bucket_hex = hex::encode(bucket_id.0);
+        let meta = memvault_store::EnvelopeMeta {
+            author: self.effective_author(),
+            tags: vec![
+                ("grant".to_string(), bucket_hex),
+                ("kind".to_string(), "grant".to_string()),
+            ],
+            wall_ns: now_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(bucket_id.0.to_vec()),
+        };
+        self.store.insert_envelope(&cid_bytes, &grant_json, &meta)?;
+
+        tracing::info!(bucket = %bucket_id, cid = %hex::encode(&cid_bytes), "bucket grant issued");
+        Ok(cid_bytes)
+    }
+
+    /// List all grants scoped to a bucket.
+    pub fn list_bucket_grants(
+        &self,
+        bucket_id: &BucketId,
+    ) -> Result<Vec<(Vec<u8>, memvault_auth::Grant)>> {
+        let bucket_hex = hex::encode(bucket_id.0);
+        let cids = self
+            .store
+            .query_by_tag("grant", &bucket_hex, 0, 1000)
+            .unwrap_or_default();
+
+        let mut grants = Vec::new();
+        for cid in cids {
+            if let Ok(Some(data)) = self.store.get_block(&cid) {
+                if let Ok(grant) = serde_json::from_slice::<memvault_auth::Grant>(&data) {
+                    grants.push((cid, grant));
+                }
+            }
+        }
+        Ok(grants)
+    }
+
     pub async fn adopt_doc_into_bucket(
         &self,
         doc_id: &DocId,
