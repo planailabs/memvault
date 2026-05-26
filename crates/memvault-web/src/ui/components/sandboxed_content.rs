@@ -46,11 +46,9 @@ pub fn SandboxedContent(html: String, #[props(default)] class: String) -> Elemen
 }
 
 fn rand_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{n:08x}")
 }
 
