@@ -46,217 +46,131 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     let store = client.store();
     let mut report = RebuildReport::default();
 
-    // ── Phase 0: CID validation & cleanup ────────────────────────────
+    // ── Carry-over: classify every block, keep/rewrite/drop ──────────
     //
-    // Remove synthesized manifests with broken CIDs (legacy artefacts).
-    // These have a CID mismatch AND look like a manifest (content_size +
-    // filename fields) but are NOT envelopes (no payload field).
-
-    {
-        let blocks = store
-            .iter_blocks()
-            .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
-        for (cid, data) in &blocks {
-            match memvault_core::verify_cid(cid, data) {
-                Ok(true) => {
-                    report.cid_ok += 1;
-                }
-                Ok(false) => {
-                    // CID mismatch — check if it's a synthesized manifest.
-                    if let Some(val) = memvault_store::deserialize_block(data) {
-                        if val.get("payload").is_some() {
-                            // Legacy envelope with payload-based CID — will be
-                            // migrated in phase 0b.
-                            continue;
-                        }
-                        if val.get("content_size").is_some() && val.get("filename").is_some() {
-                            let _ = store.delete_block(cid);
-                            report.cid_mismatch_cleaned += 1;
-                        }
-                    }
-                }
-                Err(_) => {} // non-CID block, skip
-            }
-        }
-    }
-
-    // ── Phase 0b: Migrate legacy envelope CIDs ─────────────────────────
+    // Single pass over all blocks.  Each block gets a verdict:
+    //  - Keep:    valid CID, current format → untouched
+    //  - Rewrite: envelope with legacy CID or missing bucket → CBOR + bucket
+    //  - Drop:    cruft (broken manifests, legacy extraction blocks)
     //
-    // Envelopes created before content-addressed CIDs have a CID derived
-    // from the payload only, not the full envelope.  Re-hash them so
-    // verify_cid passes.
+    // Rewritten blocks get new CIDs; a mapping is maintained so
+    // causal/provenance references stay coherent.
 
-    {
-        let blocks = store
-            .iter_blocks()
-            .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
-        for (old_cid, data) in &blocks {
-            if let Ok(true) = memvault_core::verify_cid(old_cid, data) {
-                continue; // already content-addressed
-            }
-            let is_envelope = memvault_store::deserialize_block(data)
-                .and_then(|v| v.get("payload").map(|_| true))
-                .unwrap_or(false);
-            if !is_envelope {
-                continue;
-            }
-            let new_cid = memvault_core::cid_from_bytes(data);
-            let new_cid_bytes = new_cid.to_bytes();
-            if new_cid_bytes == *old_cid {
-                continue;
-            }
-            let _ = store.put_block(&new_cid_bytes, data);
-            let _ = store.delete_block(old_cid);
-            report.cid_legacy_migrated += 1;
-        }
-    }
+    let all_blocks = store
+        .iter_blocks()
+        .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
 
-    // ── Phase 0c: Drop legacy extraction blocks ─────────────────────────
-    //
-    // Old extraction results were stored as standalone blocks (no bucket,
-    // no envelope, never synced).  Delete them — text will be re-extracted
-    // and stored inline in annotations during populate_index.
-    {
-        let blocks = store
-            .iter_blocks()
-            .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
-        let mut dropped = 0usize;
-        for (cid, data) in &blocks {
-            if let Some(val) = memvault_store::deserialize_block(data) {
-                // Legacy extraction blocks have "source", "extractor", "text"
-                // but no "payload" (not an envelope) and no "kind".
-                let has_extractor = val.get("extractor").is_some();
-                let has_text = val.get("text").is_some();
-                let is_envelope = val.get("payload").is_some();
-                if has_extractor && has_text && !is_envelope {
-                    let _ = store.delete_block(cid);
-                    dropped += 1;
-                }
-            }
-        }
-        if dropped > 0 {
-            tracing::info!(dropped, "dropped legacy extraction blocks");
-        }
-    }
-
-    // ── Phase 0d: Rewrite non-bucketed envelopes as CBOR with bucket ──
-    //
-    // Non-bucketed data predates working sync — it's all locally authored.
-    // Rewrite each unbucketed envelope: add bucket_id, encode as CBOR,
-    // store under new CID, delete old.  Causal/provenance references are
-    // updated via a CID mapping built during the rewrite.
-    //
-    // After this phase, no unbucketed envelopes remain and Phase 3
-    // adoption becomes a no-op.
-    {
-        // We need a legacy bucket.  If none exists, create one.
-        let legacy_bid = match client.legacy_bucket_id() {
-            Some(b) => Some(b),
-            None => {
-                // Check if there are any unbucketed envelopes first.
-                let blocks = store
-                    .iter_blocks()
-                    .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
-                let has_unbucketed = blocks.iter().any(|(_, data)| {
-                    memvault_store::deserialize_block(data)
-                        .map(|v| v.get("payload").is_some() && v.get("bucket_id").is_none())
-                        .unwrap_or(false)
-                });
-                if has_unbucketed {
-                    let bid = client
-                        .bucket_create(
-                            "legacy",
-                            Some("auto-created for adoption of pre-bucket data"),
-                            memvault_core::Visibility::Internal,
-                            memvault_core::classification::Classification::Internal,
-                            memvault_doc::BucketRole::Legacy,
-                        )
-                        .await?;
-                    tracing::info!(bucket = %bid, "created legacy bucket for rewrite");
-                    Some(bid)
-                } else {
-                    None
-                }
-            }
-        };
-
-        if let Some(legacy_bucket) = legacy_bid {
-            let blocks = store
-                .iter_blocks()
-                .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
-
-            // Collect unbucketed envelopes, sorted by wall_ns for
-            // deterministic causal-chain ordering.
-            let mut unbucketed: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new(); // (cid, data, wall_ns)
-            for (cid, data) in &blocks {
-                if let Some(val) = memvault_store::deserialize_block(data) {
-                    let has_payload = val.get("payload").is_some();
-                    let has_bucket = val
+    // Pre-scan: do we need a legacy bucket for unbucketed envelopes?
+    let has_unbucketed = all_blocks.iter().any(|(_, data)| {
+        memvault_store::deserialize_block(data)
+            .map(|v| {
+                v.get("payload").is_some()
+                    && !v
                         .get("bucket_id")
                         .and_then(|v| v.as_array())
                         .map(|a| !a.is_empty())
-                        .unwrap_or(false);
-                    if has_payload && !has_bucket {
-                        let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-                        unbucketed.push((cid.clone(), data.clone(), wall_ns));
-                    }
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    });
+    let legacy_bucket = if has_unbucketed {
+        Some(match client.legacy_bucket_id() {
+            Some(b) => b,
+            None => {
+                let bid = client
+                    .bucket_create(
+                        "legacy",
+                        Some("auto-created for adoption of pre-bucket data"),
+                        memvault_core::Visibility::Internal,
+                        memvault_core::classification::Classification::Internal,
+                        memvault_doc::BucketRole::Legacy,
+                    )
+                    .await?;
+                tracing::info!(bucket = %bid, "created legacy bucket");
+                bid
+            }
+        })
+    } else {
+        client.legacy_bucket_id()
+    };
+
+    let mut to_rewrite: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new(); // (cid, data, wall_ns)
+
+    for (cid, data) in &all_blocks {
+        let verdict = classify_block(cid, data);
+        match verdict {
+            Verdict::Keep => {
+                report.cid_ok += 1;
+            }
+            Verdict::Drop => {
+                let _ = store.delete_block(cid);
+                report.cid_mismatch_cleaned += 1;
+            }
+            Verdict::Rehash => {
+                let new_cid = memvault_core::cid_from_bytes(data);
+                let new_cid_bytes = new_cid.to_bytes();
+                if new_cid_bytes != *cid {
+                    let _ = store.put_block(&new_cid_bytes, data);
+                    let _ = store.delete_block(cid);
+                    report.cid_legacy_migrated += 1;
                 }
             }
-            unbucketed.sort_by_key(|(_, _, ns)| *ns);
+            Verdict::Rewrite => {
+                let wall_ns = memvault_store::deserialize_block(data)
+                    .and_then(|v| v.get("wall_ns").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                to_rewrite.push((cid.clone(), data.clone(), wall_ns));
+            }
+        }
+    }
 
-            // Build CID mapping and rewrite.
-            let mut cid_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-                std::collections::HashMap::new();
+    // Apply rewrites in chronological order (causal refs point backward).
+    to_rewrite.sort_by_key(|(_, _, ns)| *ns);
+    let mut cid_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+        std::collections::HashMap::new();
 
-            for (old_cid, data, _) in &unbucketed {
-                let mut val: serde_json::Value = match memvault_store::deserialize_block(data) {
-                    Some(v) => v,
-                    None => continue,
-                };
+    if let Some(ref bucket) = legacy_bucket {
+        for (old_cid, data, _) in &to_rewrite {
+            let mut val = match memvault_store::deserialize_block(data) {
+                Some(v) => v,
+                None => continue,
+            };
 
-                // Set bucket_id.
-                val["bucket_id"] = serde_json::json!(legacy_bucket.0);
+            val["bucket_id"] = serde_json::json!(bucket.0);
 
-                // Update causal/provenance references using the CID mapping.
-                for field in &["causal", "provenance"] {
-                    if let Some(arr) = val.get_mut(field).and_then(|v| v.as_array_mut()) {
-                        for entry in arr.iter_mut() {
-                            if let Some(old_ref) =
-                                serde_json::from_value::<Vec<u8>>(entry.clone()).ok()
-                            {
-                                if let Some(new_ref) = cid_map.get(&old_ref) {
-                                    *entry = serde_json::json!(new_ref);
-                                }
+            // Remap causal/provenance references.
+            for field in &["causal", "provenance"] {
+                if let Some(arr) = val.get_mut(field).and_then(|v| v.as_array_mut()) {
+                    for entry in arr.iter_mut() {
+                        if let Some(old_ref) =
+                            serde_json::from_value::<Vec<u8>>(entry.clone()).ok()
+                        {
+                            if let Some(new_ref) = cid_map.get(&old_ref) {
+                                *entry = serde_json::json!(new_ref);
                             }
                         }
                     }
                 }
-
-                // Re-encode as CBOR.
-                let new_bytes = match serde_ipld_dagcbor::to_vec(&val) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let new_cid = memvault_core::cid_from_bytes(&new_bytes);
-                let new_cid_bytes = new_cid.to_bytes();
-
-                cid_map.insert(old_cid.clone(), new_cid_bytes.clone());
-
-                let _ = store.put_block(&new_cid_bytes, &new_bytes);
-                let _ = store.delete_block(old_cid);
-                report.unbucketed_rewritten += 1;
             }
 
-            if report.unbucketed_rewritten > 0 {
-                tracing::info!(
-                    rewritten = report.unbucketed_rewritten,
-                    "rewrote unbucketed envelopes as CBOR with bucket_id"
-                );
-            }
+            let new_bytes = match serde_ipld_dagcbor::to_vec(&val) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let new_cid_bytes = memvault_core::cid_from_bytes(&new_bytes).to_bytes();
+
+            cid_map.insert(old_cid.clone(), new_cid_bytes.clone());
+            let _ = store.put_block(&new_cid_bytes, &new_bytes);
+            let _ = store.delete_block(old_cid);
+            report.unbucketed_rewritten += 1;
         }
     }
 
-    // ── Phase 1: Rebuild secondary indexes ─────────────────────────────
+    if report.unbucketed_rewritten > 0 {
+        tracing::info!(rewritten = report.unbucketed_rewritten, "rewrote unbucketed envelopes");
+    }
+
+    // ── Rebuild secondary indexes from clean block set ─────────────────
 
     store
         .clear_secondary_indexes()
@@ -271,11 +185,7 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         if store.reindex_block(cid, data).unwrap_or(false) {
             report.envelopes_indexed += 1;
         }
-    }
-
-    // ── Phase 2: Rebuild bucket metadata ───────────────────────────────
-
-    for (cid, data) in &blocks {
+        // Bucket metadata
         if let Some(val) = memvault_store::deserialize_block(data) {
             let is_bucket_decl = val
                 .get("tags")
@@ -291,7 +201,6 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                     })
                 })
                 .unwrap_or(false);
-
             if is_bucket_decl {
                 if let Some(bucket_id) = val
                     .get("bucket_id")
@@ -303,9 +212,6 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             }
         }
     }
-
-    // Phase 3 (adoption) removed — Phase 0d rewrites all unbucketed
-    // envelopes in-place, making adoption unnecessary.
 
     // ── Phase 4: VFS tree repair ───────────────────────────────────────
     //
@@ -625,4 +531,80 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<(usize, usize)> {
     }
 
     Ok((linked, dupes))
+}
+
+// ── Block classification ──────────────────────────────────────────────
+
+/// Verdict for a single block during the carry-over pass.
+#[derive(Debug)]
+enum Verdict {
+    /// Valid CID, current format — keep untouched.
+    Keep,
+    /// Cruft — delete (broken manifests, legacy extraction blocks).
+    Drop,
+    /// Unbucketed envelope — rewrite with bucket_id as CBOR.
+    Rewrite,
+    /// Envelope with legacy (payload-based) CID — re-hash under correct CID.
+    Rehash,
+}
+
+fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
+    // Try to deserialize as structured data.
+    let val = match memvault_store::deserialize_block(data) {
+        Some(v) => v,
+        None => {
+            // Not JSON or CBOR — raw data block (file chunk, DAG-PB).
+            // Keep if CID is valid.
+            match memvault_core::verify_cid(cid, data) {
+                Ok(true) => return Verdict::Keep,
+                _ => return Verdict::Drop, // corrupted raw block
+            }
+        }
+    };
+
+    let is_envelope = val.get("payload").is_some();
+    let has_bucket = val
+        .get("bucket_id")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+
+    // Legacy extraction block: has extractor+text but no payload/kind.
+    if !is_envelope
+        && val.get("extractor").is_some()
+        && val.get("text").is_some()
+    {
+        return Verdict::Drop;
+    }
+
+    // Synthesized manifest with broken CID: content_size+filename, no payload.
+    if !is_envelope
+        && val.get("content_size").is_some()
+        && val.get("filename").is_some()
+    {
+        if !matches!(memvault_core::verify_cid(cid, data), Ok(true)) {
+            return Verdict::Drop;
+        }
+    }
+
+    if is_envelope {
+        // Check CID validity.
+        match memvault_core::verify_cid(cid, data) {
+            Ok(true) => {
+                // Valid CID. Bucketed? Keep. Unbucketed? Rewrite.
+                if has_bucket { Verdict::Keep } else { Verdict::Rewrite }
+            }
+            Ok(false) => {
+                // CID mismatch — legacy payload-based hash.
+                if has_bucket { Verdict::Rehash } else { Verdict::Rewrite }
+            }
+            Err(_) => Verdict::Rewrite, // unparseable CID, rewrite fixes it
+        }
+    } else {
+        // Non-envelope structured block (annotation, manifest, etc.)
+        match memvault_core::verify_cid(cid, data) {
+            Ok(true) => Verdict::Keep,
+            _ => Verdict::Drop,
+        }
+    }
 }
