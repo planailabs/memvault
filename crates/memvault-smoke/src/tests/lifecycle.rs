@@ -36,7 +36,7 @@ async fn full_genesis_workflow() {
                 doc,
                 vec![("kind".into(), "note".into())],
                 Visibility::Internal,
-                None,
+                Some(&bucket),
             )
             .await
             .unwrap();
@@ -53,7 +53,7 @@ async fn full_genesis_workflow() {
             edges_out: vec![],
         };
         node.client
-            .add_entity(e, Visibility::Internal, None)
+            .add_entity(e, Visibility::Internal, Some(&bucket))
             .await
             .unwrap();
     }
@@ -118,7 +118,7 @@ async fn two_node_independent_workflow() {
                 doc,
                 vec![("source".into(), "a".into())],
                 Visibility::Internal,
-                None,
+                Some(&bucket_a),
             )
             .await
             .unwrap();
@@ -133,7 +133,7 @@ async fn two_node_independent_workflow() {
                 doc,
                 vec![("source".into(), "b".into())],
                 Visibility::Internal,
-                None,
+                Some(&bucket_b),
             )
             .await
             .unwrap();

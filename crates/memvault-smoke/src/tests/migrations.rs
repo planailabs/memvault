@@ -137,7 +137,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
         let envelope = serde_json::json!({
             "version": 1,
             "payload": op,
-            "author": vec![7u8; 32],
+            "author": vec![9u8; 32],
             "tags": [["entity", entity_label]],
             "visibility": "Internal",
             "wall_ns": wall_ns,
@@ -146,7 +146,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
         let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
         let cid = cid_from_bytes(&envelope_bytes);
         let meta = EnvelopeMeta {
-            author: vec![7u8; 32],
+            author: vec![9u8; 32],
             tags: vec![("entity".to_string(), hex::encode(entity.id.0))],
             wall_ns,
             causal: vec![],

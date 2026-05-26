@@ -514,6 +514,7 @@ async fn block_exchange_request_response() {
         limit: None,
         range_fingerprints: vec![],
         token: None,
+        store_version: memvault_core::BLOCKSTORE_VERSION,
     };
     swarm_a
         .behaviour_mut()
@@ -594,6 +595,7 @@ async fn block_exchange_large_block() {
         limit: None,
         range_fingerprints: vec![],
         token: None,
+        store_version: memvault_core::BLOCKSTORE_VERSION,
     };
     swarm_a
         .behaviour_mut()
@@ -745,6 +747,7 @@ fn block_request_response_serialization_roundtrip() {
         limit: None,
         range_fingerprints: vec![],
         token: None,
+        store_version: memvault_core::BLOCKSTORE_VERSION,
     };
     let bytes = serde_ipld_dagcbor::to_vec(&req).unwrap();
     let decoded: memvault_net::BlockRequest = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
