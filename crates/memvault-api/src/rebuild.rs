@@ -26,6 +26,7 @@ pub struct RebuildReport {
     pub cid_ok: usize,
     pub cid_legacy_migrated: usize,
     pub cid_mismatch_cleaned: usize,
+    pub unbucketed_rewritten: usize,
     pub envelopes_indexed: usize,
     pub buckets_rebuilt: usize,
     pub entities_adopted: usize,
@@ -139,6 +140,123 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         }
         if dropped > 0 {
             tracing::info!(dropped, "dropped legacy extraction blocks");
+        }
+    }
+
+    // ── Phase 0d: Rewrite non-bucketed envelopes as CBOR with bucket ──
+    //
+    // Non-bucketed data predates working sync — it's all locally authored.
+    // Rewrite each unbucketed envelope: add bucket_id, encode as CBOR,
+    // store under new CID, delete old.  Causal/provenance references are
+    // updated via a CID mapping built during the rewrite.
+    //
+    // After this phase, no unbucketed envelopes remain and Phase 3
+    // adoption becomes a no-op.
+    {
+        // We need a legacy bucket.  If none exists, create one.
+        let legacy_bid = match client.legacy_bucket_id() {
+            Some(b) => Some(b),
+            None => {
+                // Check if there are any unbucketed envelopes first.
+                let blocks = store
+                    .iter_blocks()
+                    .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
+                let has_unbucketed = blocks.iter().any(|(_, data)| {
+                    memvault_store::deserialize_block(data)
+                        .map(|v| v.get("payload").is_some() && v.get("bucket_id").is_none())
+                        .unwrap_or(false)
+                });
+                if has_unbucketed {
+                    let bid = client
+                        .bucket_create(
+                            "legacy",
+                            Some("auto-created for adoption of pre-bucket data"),
+                            memvault_core::Visibility::Internal,
+                            memvault_core::classification::Classification::Internal,
+                            memvault_doc::BucketRole::Legacy,
+                        )
+                        .await?;
+                    tracing::info!(bucket = %bid, "created legacy bucket for rewrite");
+                    Some(bid)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(legacy_bucket) = legacy_bid {
+            let blocks = store
+                .iter_blocks()
+                .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
+
+            // Collect unbucketed envelopes, sorted by wall_ns for
+            // deterministic causal-chain ordering.
+            let mut unbucketed: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new(); // (cid, data, wall_ns)
+            for (cid, data) in &blocks {
+                if let Some(val) = memvault_store::deserialize_block(data) {
+                    let has_payload = val.get("payload").is_some();
+                    let has_bucket = val
+                        .get("bucket_id")
+                        .and_then(|v| v.as_array())
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false);
+                    if has_payload && !has_bucket {
+                        let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+                        unbucketed.push((cid.clone(), data.clone(), wall_ns));
+                    }
+                }
+            }
+            unbucketed.sort_by_key(|(_, _, ns)| *ns);
+
+            // Build CID mapping and rewrite.
+            let mut cid_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                std::collections::HashMap::new();
+
+            for (old_cid, data, _) in &unbucketed {
+                let mut val: serde_json::Value = match memvault_store::deserialize_block(data) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                // Set bucket_id.
+                val["bucket_id"] = serde_json::json!(legacy_bucket.0);
+
+                // Update causal/provenance references using the CID mapping.
+                for field in &["causal", "provenance"] {
+                    if let Some(arr) = val.get_mut(field).and_then(|v| v.as_array_mut()) {
+                        for entry in arr.iter_mut() {
+                            if let Some(old_ref) =
+                                serde_json::from_value::<Vec<u8>>(entry.clone()).ok()
+                            {
+                                if let Some(new_ref) = cid_map.get(&old_ref) {
+                                    *entry = serde_json::json!(new_ref);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Re-encode as CBOR.
+                let new_bytes = match serde_ipld_dagcbor::to_vec(&val) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let new_cid = memvault_core::cid_from_bytes(&new_bytes);
+                let new_cid_bytes = new_cid.to_bytes();
+
+                cid_map.insert(old_cid.clone(), new_cid_bytes.clone());
+
+                let _ = store.put_block(&new_cid_bytes, &new_bytes);
+                let _ = store.delete_block(old_cid);
+                report.unbucketed_rewritten += 1;
+            }
+
+            if report.unbucketed_rewritten > 0 {
+                tracing::info!(
+                    rewritten = report.unbucketed_rewritten,
+                    "rewrote unbucketed envelopes as CBOR with bucket_id"
+                );
+            }
         }
     }
 
