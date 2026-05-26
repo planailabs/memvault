@@ -59,7 +59,8 @@ pub async fn standalone_swarm(
 
             let block_exchange = request_response::Behaviour::new(
                 [(StreamProtocol::new(BLOCK_PROTOCOL), ProtocolSupport::Full)],
-                request_response::Config::default(),
+                request_response::Config::default()
+                    .with_request_timeout(std::time::Duration::from_secs(120)),
             );
 
             let gossipsub_config = gossipsub::Config::default();
