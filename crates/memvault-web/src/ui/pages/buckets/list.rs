@@ -1,7 +1,7 @@
 //! Bucket list page — shows all buckets with status, actions.
 
 use dioxus::prelude::*;
-use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant};
+use plan_ai_design::{Button, ButtonVariant, Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -15,6 +15,14 @@ struct BucketRow {
     cluster_hex: String,  // empty if unbound
     is_default: bool,
     envelope_count: u64,
+}
+
+impl BucketRow {
+    fn matches_search(&self, query: &str) -> bool {
+        self.name.to_lowercase().contains(query)
+            || self.status.contains(query)
+            || self.id_hex.contains(query)
+    }
 }
 
 #[server]
@@ -133,52 +141,7 @@ pub fn BucketList() -> Element {
 
             match &*buckets.read() {
                 Some(Ok(list)) if !list.is_empty() => rsx! {
-                    Card {
-                        div { class: "overflow-x-auto",
-                            table { class: "table table-sm w-full",
-                                thead {
-                                    tr {
-                                        th { class: "text-left", "Name" }
-                                        th { class: "text-left", "Status" }
-                                        th { class: "text-left", "Cluster" }
-                                        th { class: "text-right", "Items" }
-                                    }
-                                }
-                                tbody {
-                                    for b in list {
-                                        tr {
-                                            class: "cursor-pointer hover:bg-surface-3",
-                                            onclick: {
-                                                let id = b.id_hex.clone();
-                                                move |_| {
-                                                    navigator().push(Route::BucketDetail { id: id.clone() });
-                                                }
-                                            },
-                                            td {
-                                                span { class: "font-medium text-fg-strong", "{b.name}" }
-                                                if b.is_default {
-                                                    Pill { variant: PillVariant::Info, class: "ml-2", "default" }
-                                                }
-                                            }
-                                            td { {pill_for_status(&b.status)} }
-                                            td {
-                                                class: "text-fg-muted text-xs font-mono",
-                                                {
-                                                    let cluster_short = if b.cluster_hex.is_empty() {
-                                                        "\u{2014}".to_string()
-                                                    } else {
-                                                        b.cluster_hex.chars().take(8).collect::<String>()
-                                                    };
-                                                    rsx! { "{cluster_short}" }
-                                                }
-                                            }
-                                            td { class: "text-right tabular-nums", "{b.envelope_count}" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    BucketTable { list: list.clone() }
                 },
                 Some(Ok(_)) => rsx! {
                     Card {
@@ -190,6 +153,85 @@ pub fn BucketList() -> Element {
                 Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
                 None => rsx! { p { class: "text-fg-muted", "Loading..." } },
             }
+        }
+    }
+}
+
+#[component]
+fn BucketTable(list: Vec<BucketRow>) -> Element {
+    let search = use_signal(String::new);
+    let limit = use_signal(|| 20usize);
+    let sort = use_signal::<SortState>(|| ("name".to_string(), true));
+
+    let list_clone = list.clone();
+    let filtered = use_memo(move || {
+        let q = search.read().to_lowercase();
+        let mut items: Vec<BucketRow> = if q.is_empty() {
+            list_clone.clone()
+        } else {
+            list_clone
+                .iter()
+                .filter(|b| b.matches_search(&q))
+                .cloned()
+                .collect()
+        };
+        let (key, asc) = sort.read().clone();
+        items.sort_by(|a, b| {
+            let ord = match key.as_str() {
+                "status" => a.status.cmp(&b.status),
+                "items" => a.envelope_count.cmp(&b.envelope_count),
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            };
+            if asc { ord } else { ord.reverse() }
+        });
+        items
+    });
+
+    let total = list.len();
+    let filtered_count = filtered.read().len();
+    let limit_val = *limit.read();
+    let shown = filtered_count.min(limit_val);
+
+    rsx! {
+        DataTable {
+            search, limit, total, filtered: filtered_count, shown,
+            headers: rsx! {
+                SortableTh { label: "Name".to_string(), sort_key: "name".to_string(), sort }
+                SortableTh { label: "Status".to_string(), sort_key: "status".to_string(), sort }
+                th { class: "th", "Cluster" }
+                SortableTh { label: "Items".to_string(), sort_key: "items".to_string(), sort }
+            },
+            body: rsx! {
+                for b in filtered.read().iter().take(limit_val) {
+                    tr {
+                        key: "{b.id_hex}",
+                        class: "cursor-pointer hover:bg-surface-3",
+                        onclick: {
+                            let id = b.id_hex.clone();
+                            move |_| {
+                                navigator().push(Route::BucketDetail { id: id.clone() });
+                            }
+                        },
+                        Td {
+                            span { class: "font-medium text-fg-strong", "{b.name}" }
+                            if b.is_default {
+                                Pill { variant: PillVariant::Info, class: "ml-2", "default" }
+                            }
+                        }
+                        Td { {pill_for_status(&b.status)} }
+                        TdMuted {
+                            {
+                                if b.cluster_hex.is_empty() {
+                                    "\u{2014}".to_string()
+                                } else {
+                                    b.cluster_hex.chars().take(8).collect::<String>()
+                                }
+                            }
+                        }
+                        Td { class: "text-right tabular-nums", "{b.envelope_count}" }
+                    }
+                }
+            },
         }
     }
 }
