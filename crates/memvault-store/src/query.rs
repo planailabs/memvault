@@ -237,13 +237,6 @@ impl MemvaultStore {
         Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
     }
 
-    /// Get the default bucket for a cluster (DEPRECATED — use BucketRole::Legacy).
-    /// Kept for backwards compat during transition.
-    pub fn get_default_bucket(&self, cluster_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
-        let table = txn.open_table(CLUSTER_DEFAULT_BUCKET)?;
-        Ok(table.get(cluster_id)?.map(|v| v.value().to_vec()))
-    }
 
     /// Store a bucket declaration CID in the BUCKETS table.
     pub fn put_bucket(&self, bucket_id: &[u8], decl_cid: &[u8]) -> Result<(), StoreError> {

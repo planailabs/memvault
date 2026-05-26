@@ -18,7 +18,7 @@ pub mod rotation_state;
 pub mod tables;
 
 pub use error::StoreError;
-pub use insert::EnvelopeMeta;
+pub use insert::{EnvelopeMeta, deserialize_block, deserialize_block_as};
 
 /// The main memvault persistent store backed by redb.
 pub struct MemvaultStore {
@@ -50,7 +50,6 @@ impl MemvaultStore {
             txn.open_table(tables::BY_BUCKET)?;
             txn.open_table(tables::BUCKETS)?;
             txn.open_table(tables::BUCKET_CLUSTER)?;
-            txn.open_table(tables::CLUSTER_DEFAULT_BUCKET)?;
             // Share tables (B5)
             txn.open_table(tables::SHARE_INBOX)?;
             txn.open_table(tables::SHARE_OUTBOX)?;

@@ -488,9 +488,9 @@ fn check_block_access(
     token: &Option<memvault_net::BlockAccessToken>,
 ) -> bool {
     // Parse the block to check if it has a bucket_id.
-    let val: serde_json::Value = match serde_json::from_slice(block_data) {
-        Ok(v) => v,
-        Err(_) => return true, // Non-JSON blocks (raw file chunks) are allowed.
+    let val: serde_json::Value = match memvault_store::deserialize_block(block_data) {
+        Some(v) => v,
+        None => return true, // Raw file chunks are allowed.
     };
 
     // Check if the block belongs to a private bucket.
@@ -520,7 +520,7 @@ fn check_block_access(
     // A private bucket has `private_to_peer` set in its decl.
     if let Ok(Some(decl_cid)) = store.get_bucket(&bucket_id) {
         if let Ok(Some(decl_data)) = store.get_block(&decl_cid) {
-            if let Ok(decl) = serde_json::from_slice::<serde_json::Value>(&decl_data) {
+            if let Some(decl) = memvault_store::deserialize_block(&decl_data) {
                 // Check both envelope format and legacy raw decl.
                 let ptp = decl
                     .get("payload")
@@ -627,7 +627,7 @@ fn handle_block_response(
 /// entry) are invisible to RBSR and silently diverge between nodes.
 fn extract_dependent_cids(block_data: &[u8]) -> Vec<Vec<u8>> {
     // Try JSON first (envelopes, manifests).
-    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(block_data) {
+    if let Some(val) = memvault_store::deserialize_block(block_data) {
         let mut deps = Vec::new();
 
         // Attachment envelope → manifest_cid

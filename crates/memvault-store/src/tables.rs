@@ -51,10 +51,6 @@ pub const BUCKETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("buckets
 /// A bucket with no entry here is unbound (pre-genesis or standalone).
 pub const BUCKET_CLUSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bucket_cluster");
 
-/// Cluster → default bucket (DEPRECATED — kept for schema compat).
-/// Legacy bucket is now identified by BucketRole::Legacy.
-pub const CLUSTER_DEFAULT_BUCKET: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("cluster_default_bucket");
 
 // ── Share tables (added B5) ────────────────────────────────────────
 

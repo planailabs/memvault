@@ -66,7 +66,7 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                 }
                 Ok(false) => {
                     // CID mismatch — check if it's a synthesized manifest.
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                    if let Some(val) = memvault_store::deserialize_block(data) {
                         if val.get("payload").is_some() {
                             // Legacy envelope with payload-based CID — will be
                             // migrated in phase 0b.
@@ -97,8 +97,7 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             if let Ok(true) = memvault_core::verify_cid(old_cid, data) {
                 continue; // already content-addressed
             }
-            let is_envelope = serde_json::from_slice::<serde_json::Value>(data)
-                .ok()
+            let is_envelope = memvault_store::deserialize_block(data)
                 .and_then(|v| v.get("payload").map(|_| true))
                 .unwrap_or(false);
             if !is_envelope {
@@ -135,7 +134,7 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     // ── Phase 2: Rebuild bucket metadata ───────────────────────────────
 
     for (cid, data) in &blocks {
-        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+        if let Some(val) = memvault_store::deserialize_block(data) {
             let is_bucket_decl = val
                 .get("tags")
                 .and_then(|v| v.as_array())
@@ -324,7 +323,7 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         .unwrap_or_default();
     for cid in &pending_cids {
         if let Ok(Some(data)) = store.get_block(cid) {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+            if let Some(val) = memvault_store::deserialize_block(&data) {
                 let entity_tag = val
                     .get("tags")
                     .and_then(|v| v.as_array())

@@ -297,7 +297,7 @@ impl LocalClient {
             .iter_blocks()
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         for (_, data) in &blocks {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+            if let Some(val) = memvault_store::deserialize_block(data) {
                 if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
                     // Skip attachments without a bucket.
                     if val.get("bucket_id").and_then(|v| v.as_array()).is_none() {
@@ -331,7 +331,7 @@ impl LocalClient {
 
         // Replay tag updates and retractions
         for (_, data) in &blocks {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+            if let Some(val) = memvault_store::deserialize_block(data) {
                 let kind = val.get("kind").and_then(|v| v.as_str());
 
                 // Unified annotation format
@@ -558,7 +558,7 @@ impl LocalClient {
 
         for cid in ann_cids.iter().chain(legacy_cids.iter()) {
             let block_data = self.store.get_block(cid).ok()??;
-            let val: serde_json::Value = serde_json::from_slice(&block_data).ok()?;
+            let val: serde_json::Value = memvault_store::deserialize_block(&block_data)?;
 
             // Unified annotation format
             let data_field = val.get("data").unwrap_or(&val);
@@ -574,7 +574,7 @@ impl LocalClient {
                 .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
             {
                 let et_bytes = self.store.get_block(&et_cid).ok()??;
-                let et: serde_json::Value = serde_json::from_slice(&et_bytes).ok()?;
+                let et: serde_json::Value = memvault_store::deserialize_block(&et_bytes)?;
                 let text = et.get("text").and_then(|v| v.as_str())?.to_string();
                 return Some(ExtractionResult::Ok(text));
             }
@@ -613,7 +613,7 @@ impl LocalClient {
             .unwrap_or_default();
         for cid in &cids {
             if let Ok(Some(data)) = self.store.get_block(cid) {
-                if let Ok(env) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if let Some(env) = memvault_store::deserialize_block(&data) {
                     if let Some(tags_arr) = env.get("tags").and_then(|v| v.as_array()) {
                         return tags_arr
                             .iter()
@@ -664,28 +664,16 @@ impl LocalClient {
     }
 
     /// Find the legacy bucket (BucketRole::Legacy) for adoption of
-    /// pre-bucket data.  Falls back to the CLUSTER_DEFAULT_BUCKET table
-    /// for stores that predate the Legacy role.
+    /// pre-bucket data.
     pub fn legacy_bucket_id(&self) -> Option<BucketId> {
-        // Prefer a bucket with BucketRole::Legacy.
         if let Ok(buckets) = self.store.list_buckets() {
-            for (bucket_id_bytes, decl_cid) in &buckets {
+            for (_bucket_id_bytes, decl_cid) in &buckets {
                 if let Ok(Some(block)) = self.store.get_block(decl_cid) {
                     if let Some(decl) = Self::parse_bucket_decl(&block) {
                         if decl.role == memvault_doc::BucketRole::Legacy {
                             return Some(decl.bucket_id);
                         }
                     }
-                }
-            }
-        }
-        // Fallback: old CLUSTER_DEFAULT_BUCKET table.
-        if self.cluster_id.iter().any(|&b| b != 0) {
-            if let Ok(Some(bytes)) = self.store.get_default_bucket(&self.cluster_id) {
-                if bytes.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    return Some(BucketId(arr));
                 }
             }
         }
@@ -712,7 +700,7 @@ impl LocalClient {
     /// Parse a BucketDecl from a block: handles both the new envelope format
     /// (payload.BucketCreate) and the legacy raw BucketDecl JSON.
     fn parse_bucket_decl(block: &[u8]) -> Option<memvault_doc::BucketDecl> {
-        let val: serde_json::Value = serde_json::from_slice(block).ok()?;
+        let val: serde_json::Value = memvault_store::deserialize_block(block)?;
         if let Some(bc) = val.get("payload").and_then(|p| p.get("BucketCreate")) {
             serde_json::from_value(bc.clone()).ok()
         } else {
@@ -721,13 +709,13 @@ impl LocalClient {
     }
 
     fn bucket_id_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
-        let val: serde_json::Value = serde_json::from_slice(data).ok()?;
+        let val: serde_json::Value = memvault_store::deserialize_block(data)?;
         val.get("bucket_id")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
     fn author_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
-        let val: serde_json::Value = serde_json::from_slice(data).ok()?;
+        let val: serde_json::Value = memvault_store::deserialize_block(data)?;
         val.get("author")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
@@ -854,8 +842,8 @@ impl LocalClient {
             "cluster_id": meta.cluster_id,
             "bucket_id": meta.bucket_id,
         });
-        let envelope_bytes =
-            serde_json::to_vec(&envelope).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&envelope_bytes);
         let cid_bytes = cid.to_bytes();
 
@@ -997,7 +985,7 @@ impl LocalClient {
         let mut grants = Vec::new();
         for cid in cids {
             if let Ok(Some(data)) = self.store.get_block(&cid) {
-                if let Ok(grant) = serde_json::from_slice::<memvault_auth::Grant>(&data) {
+                if let Some(grant) = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&data) {
                     grants.push((cid, grant));
                 }
             }
@@ -1127,7 +1115,7 @@ impl MemvaultClient for LocalClient {
         for cid in &cids {
             if let Some(data) = self.store.get_block(cid)? {
                 // The block stores the envelope JSON; extract the payload op
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
                     if let Some(payload) = val.get("payload") {
                         if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
                             ops.push(op);
@@ -1209,7 +1197,7 @@ impl MemvaultClient for LocalClient {
                 }
             }
             if let Some(data) = self.store.get_block(cid)? {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
                     if let Some(payload) = val.get("payload") {
                         if let Some(dc) = payload.get("DocCreate") {
                             if let Ok(doc_id) =
@@ -1320,8 +1308,8 @@ impl MemvaultClient for LocalClient {
             "cluster_id": meta.cluster_id,
             "bucket_id": meta.bucket_id,
         });
-        let envelope_bytes =
-            serde_json::to_vec(&envelope).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let env_cid = cid_from_bytes(&envelope_bytes);
         self.store
             .insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
@@ -1365,8 +1353,8 @@ impl MemvaultClient for LocalClient {
             .get_block(manifest_cid)?
             .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
 
-        let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let manifest: AttachmentManifest = memvault_store::deserialize_block_as(&manifest_data)
+            .ok_or_else(|| ApiError::Serialization("cannot parse manifest".into()))?;
 
         // Read full content via UnixFS
         let data = memvault_attach::read_range::read_full(&self.store, &manifest.content_root)?;
@@ -1379,8 +1367,8 @@ impl MemvaultClient for LocalClient {
             .get_block(manifest_cid)?
             .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
 
-        let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let manifest: AttachmentManifest = memvault_store::deserialize_block_as(&manifest_data)
+            .ok_or_else(|| ApiError::Serialization("cannot parse manifest".into()))?;
 
         let data = memvault_attach::read_range::read_range(
             &self.store,
@@ -1398,8 +1386,8 @@ impl MemvaultClient for LocalClient {
             .get_block(manifest_cid)?
             .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
 
-        let manifest: AttachmentManifest = serde_json::from_slice(&manifest_data)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let manifest: AttachmentManifest = memvault_store::deserialize_block_as(&manifest_data)
+            .ok_or_else(|| ApiError::Serialization("cannot parse manifest".into()))?;
 
         let content = memvault_attach::read_range::read_full(&self.store, &manifest.content_root)?;
         Ok(self.extract_and_cache(manifest_cid, &content, &manifest.mime_type))
@@ -1512,7 +1500,7 @@ impl MemvaultClient for LocalClient {
         let mut ops = Vec::new();
         for cid in &cids {
             if let Some(data) = self.store.get_block(cid)? {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
                     if let Some(payload) = val.get("payload") {
                         if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
                             ops.push(op);
@@ -1533,7 +1521,7 @@ impl MemvaultClient for LocalClient {
         let mut records = Vec::new();
         for cid in &cids {
             if let Some(data) = self.store.get_block(cid)? {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
                     records.push(memvault_query::parse_audit_record(cid, &val));
                 }
             }
@@ -1648,7 +1636,7 @@ impl MemvaultClient for LocalClient {
 
         for cid in &all_cids {
             if let Some(data) = self.store.get_block(cid)? {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
                     if let Some(payload) = val.get("payload") {
                         match serde_json::from_value::<Op>(payload.clone()) {
                             Ok(Op::EdgeAdd { source, edge }) => {
@@ -1944,7 +1932,7 @@ impl MemvaultClient for LocalClient {
                 continue;
             }
             if let Some(data) = self.store.get_block(&cid_bytes)? {
-                if let Ok(mut view) = serde_json::from_slice::<crate::types::View>(&data) {
+                if let Some(mut view) = memvault_store::deserialize_block_as::<crate::types::View>(&data) {
                     view.cid = label.clone();
                     views.push(view);
                 }
@@ -2044,8 +2032,8 @@ impl MemvaultClient for LocalClient {
             "wall_ns": now_ns,
             "bucket_id": bucket_id.0,
         });
-        let envelope_bytes =
-            serde_json::to_vec(&envelope).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = memvault_core::cid_from_bytes(&envelope_bytes);
         let cid_bytes = cid.to_bytes();
 
@@ -2317,7 +2305,7 @@ impl MemvaultClient for LocalClient {
                 // Load the proposal to get bucket/cluster info
                 if let Some(proposal_block) = self.store.get_block(proposal_cid)? {
                     if let Ok(proposal) =
-                        serde_json::from_slice::<serde_json::Value>(&proposal_block)
+                        memvault_store::deserialize_block(&proposal_block).ok_or_else(|| ApiError::Other("cannot parse proposal".into()))
                     {
                         let from_bucket: Option<Vec<u8>> = proposal
                             .get("from_bucket")
