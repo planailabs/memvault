@@ -2123,41 +2123,13 @@ mod native {
                 .unwrap_or_default();
             let author_short = if author.len() > 16 { &author[..16] } else { &author };
 
-            let bucket = val
-                .get("bucket_id")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    let bytes: Vec<u8> = a.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect();
-                    hex::encode(&bytes)
-                });
-            let bucket_short = bucket.as_deref().map(|b| if b.len() > 16 { &b[..16] } else { b });
-
-            let tags: Vec<String> = val
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| {
-                            let a = t.as_array()?;
-                            let s = a.first()?.as_str()?;
-                            let l = a.get(1)?.as_str()?;
-                            Some(format!("{s}:{l}"))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
             println!("  {cid_hex}…  {kind:<16} {size:>6}B  author={author_short}…");
-            if let Some(bkt) = bucket_short {
-                println!("    bucket={bkt}…");
-            }
-            if !tags.is_empty() {
-                let tag_str = tags.join(", ");
-                let tag_display = if tag_str.len() > 80 { &tag_str[..80] } else { &tag_str };
-                println!("    tags=[{tag_display}]");
-            }
+            // Full deserialized content
+            println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+            println!();
         } else {
             println!("  {cid_hex}…  raw             {size:>6}B");
+            println!();
         }
     }
 
