@@ -182,6 +182,18 @@ mod native {
         Peers,
         /// Rebuild all indexes from blockstore, repair VFS tree (re-link orphaned directories)
         RepairIndex,
+        /// Export all raw blocks (one file per CID, hex-encoded name)
+        ExportBlocks {
+            /// Output path (directory or .tar/.tar.gz file)
+            #[arg(short, long, default_value = "./memvault-blocks")]
+            output: PathBuf,
+            /// Force tar output
+            #[arg(long)]
+            tar: bool,
+            /// Compress tar with gzip
+            #[arg(long)]
+            gzip: bool,
+        },
         /// Set cluster_id on envelopes that have null/missing cluster_id
         FixClusterId,
         /// Renew attestation
@@ -872,6 +884,13 @@ mod native {
             }
             Commands::Peers => {
                 println!("Connected peers: 0 (standalone mode)");
+            }
+            Commands::ExportBlocks { output, tar, gzip } => {
+                let store = make_store()?;
+                let mut sink = memvault_export::create_sink(&output, tar, gzip)?;
+                let count = memvault_export::blocks::export_blocks(&store, &mut *sink)?;
+                sink.finish()?;
+                println!("Exported {count} blocks to {}", output.display());
             }
             Commands::RepairIndex => {
                 let store = make_store()?;

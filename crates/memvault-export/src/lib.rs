@@ -2,6 +2,7 @@
 //!
 //! This crate provides the core export logic used by both the CLI binary and MCP tools.
 
+pub mod blocks;
 pub mod export;
 pub mod node;
 pub mod plan;
