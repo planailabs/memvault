@@ -927,7 +927,7 @@ impl LocalClient {
         grant.signature = sig.to_bytes();
 
         // Store as tagged block
-        let grant_json = serde_json::to_vec(&grant)
+        let grant_json = serde_ipld_dagcbor::to_vec(&grant)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = memvault_core::cid_from_bytes(&grant_json);
         let cid_bytes = cid.to_bytes();
@@ -1230,7 +1230,7 @@ impl MemvaultClient for LocalClient {
 
         // Encode manifest and store
         let manifest_bytes =
-            serde_json::to_vec(&manifest).map_err(|e| ApiError::Serialization(e.to_string()))?;
+            serde_ipld_dagcbor::to_vec(&manifest).map_err(|e| ApiError::Serialization(e.to_string()))?;
         let manifest_cid = cid_from_bytes(&manifest_bytes);
         let manifest_cid_bytes = manifest_cid.to_bytes();
         self.store.put_block(&manifest_cid_bytes, &manifest_bytes)?;
@@ -1894,7 +1894,7 @@ impl MemvaultClient for LocalClient {
 
     async fn create_view(&self, view: crate::types::View) -> Result<()> {
         let view_bytes =
-            serde_json::to_vec(&view).map_err(|e| ApiError::Serialization(e.to_string()))?;
+            serde_ipld_dagcbor::to_vec(&view).map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&view_bytes);
         let cid_bytes = cid.to_bytes();
         let cid_hex = hex::encode(&cid_bytes);
@@ -2053,7 +2053,7 @@ impl MemvaultClient for LocalClient {
             "wall_ns": memvault_core::wall_ns(),
         });
         let block_bytes =
-            serde_json::to_vec(&rename).map_err(|e| ApiError::Serialization(e.to_string()))?;
+            serde_ipld_dagcbor::to_vec(&rename).map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = memvault_core::cid_from_bytes(&block_bytes);
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
@@ -2075,7 +2075,7 @@ impl MemvaultClient for LocalClient {
             if let Some(block) = self.store.get_block(&decl_cid)? {
                 if let Some(mut decl) = Self::parse_bucket_decl(&block) {
                     decl.name = new_name.to_string();
-                    let new_bytes = serde_json::to_vec(&decl)
+                    let new_bytes = serde_ipld_dagcbor::to_vec(&decl)
                         .map_err(|e| ApiError::Serialization(e.to_string()))?;
                     let new_cid = memvault_core::cid_from_bytes(&new_bytes);
                     self.store.insert_envelope(
@@ -2134,7 +2134,7 @@ impl MemvaultClient for LocalClient {
 
         decl.private_to_peer = None;
         let new_bytes =
-            serde_json::to_vec(&decl).map_err(|e| ApiError::Serialization(e.to_string()))?;
+            serde_ipld_dagcbor::to_vec(&decl).map_err(|e| ApiError::Serialization(e.to_string()))?;
         let new_cid = memvault_core::cid_from_bytes(&new_bytes);
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
@@ -2169,7 +2169,7 @@ impl MemvaultClient for LocalClient {
             "reason": reason,
             "archived_at_ns": now_ns,
         });
-        let block_bytes = serde_json::to_vec(&archive_block)
+        let block_bytes = serde_ipld_dagcbor::to_vec(&archive_block)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = memvault_core::cid_from_bytes(&block_bytes);
         let meta = memvault_store::insert::EnvelopeMeta {
@@ -2197,7 +2197,7 @@ impl MemvaultClient for LocalClient {
                         reason,
                         decl.description.unwrap_or_default()
                     ));
-                    let new_bytes = serde_json::to_vec(&decl)
+                    let new_bytes = serde_ipld_dagcbor::to_vec(&decl)
                         .map_err(|e| ApiError::Serialization(e.to_string()))?;
                     let new_cid = memvault_core::cid_from_bytes(&new_bytes);
                     self.store.insert_envelope(
@@ -2292,7 +2292,7 @@ impl MemvaultClient for LocalClient {
                             match trust.sign(admin_key) {
                                 Ok(signed_trust) => {
                                     let trust_bytes =
-                                        serde_json::to_vec(&signed_trust).unwrap_or_default();
+                                        serde_ipld_dagcbor::to_vec(&signed_trust).unwrap_or_default();
                                     let trust_cid = memvault_core::cid_from_bytes(&trust_bytes);
 
                                     // Store the trust in BUCKET_TRUST
