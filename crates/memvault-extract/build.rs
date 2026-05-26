@@ -28,9 +28,11 @@ fn main() {
         .to_path_buf();
     let guest_manifest = workspace_root.join("memvault/crates/memvault-extract-guest/Cargo.toml");
 
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("target"));
+    // Always use the workspace-root target dir for the guest WASM,
+    // ignoring CARGO_TARGET_DIR. The Procfile sets per-node target dirs
+    // (e.g. target/node_a, target/node_b) to avoid lock conflicts, but
+    // the guest WASM is a shared prebuilt artifact in the default target/.
+    let target_dir = workspace_root.join("target");
     let wasm_path = target_dir.join("wasm32-unknown-unknown/release/memvault_extract_guest.wasm");
 
     if !wasm_path.exists() {
