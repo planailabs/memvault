@@ -18,6 +18,7 @@ pub struct ListDocsQuery {
     pub tag_ns: Option<String>,
     pub tag_val: Option<String>,
     pub limit: Option<usize>,
+    pub bucket: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,7 +77,15 @@ pub async fn list_docs(
     };
     let limit = params.limit.unwrap_or(100);
 
-    let docs = state.client.list_docs(tag_filter, limit, None).await?;
+    let bucket_id = params.bucket.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(memvault_core::BucketId(arr))
+    });
+
+    let docs = state.client.list_docs(tag_filter, limit, bucket_id.as_ref()).await?;
 
     let results: Vec<DocSummaryResponse> = docs
         .into_iter()

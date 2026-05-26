@@ -685,11 +685,16 @@ impl MemvaultClient for LocalClient {
         &self,
         tag_filter: Option<(String, String)>,
         limit: usize,
-        _bucket: Option<&BucketId>,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
-        // Use the "doc" tag index to find DocCreate envelopes directly,
-        // rather than scanning all envelopes by time (which can miss docs
-        // if non-doc operations fill the limit).
+        // When a bucket filter is active, restrict to CIDs in that bucket.
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
+            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
+            Some(bucket_cids.into_iter().collect())
+        } else {
+            None
+        };
+
         let cids = if let Some((ref scope, ref label)) = tag_filter {
             self.store.query_by_tag(scope, label, 0, limit * 5)?
         } else {
@@ -703,6 +708,10 @@ impl MemvaultClient for LocalClient {
         let mut seen_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
 
         for cid in &cids {
+            // Skip CIDs not in the active bucket (when filtered).
+            if let Some(ref bset) = bucket_cid_set {
+                if !bset.contains(cid) { continue; }
+            }
             if let Some(data) = self.store.get_block(cid)? {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
                     if let Some(payload) = val.get("payload") {
@@ -993,10 +1002,24 @@ impl MemvaultClient for LocalClient {
         Ok(records)
     }
 
-    async fn list_entities(&self, limit: usize, _bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
+    async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
+            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
+            Some(bucket_cids.into_iter().collect())
+        } else {
+            None
+        };
+
         let labels = self.store.query_unique_labels("entity", limit)?;
         let mut entities = Vec::new();
         for label in labels {
+            // When bucket-filtered, check if any of this entity's CIDs are in the bucket.
+            if let Some(ref bset) = bucket_cid_set {
+                let entity_cids = self.store.query_by_tag("entity", &label, 0, 10).unwrap_or_default();
+                if !entity_cids.iter().any(|c| bset.contains(c)) {
+                    continue;
+                }
+            }
             let id_bytes = hex::decode(&label).unwrap_or_default();
             if id_bytes.len() != 32 {
                 continue;

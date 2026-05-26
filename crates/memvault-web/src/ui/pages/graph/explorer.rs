@@ -57,8 +57,16 @@ struct EdgeDetail {
 // ── Server functions ───────────────────────────────────────────────────
 
 #[server]
-async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, ServerFnError> {
+async fn list_graph_nodes(view: Option<String>, bucket_hex: Option<String>) -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
+
+    let bucket_id = bucket_hex.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(memvault_core::BucketId(arr))
+    });
 
     // If a view is active, get all nodes matching the view.
     if let Some(ref view_name) = view {
@@ -98,7 +106,7 @@ async fn list_graph_nodes(view: Option<String>) -> Result<Vec<NodeSummary>, Serv
 
     // Load entities
     let entities = client
-        .list_entities(200, None)
+        .list_entities(200, bucket_id.as_ref())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -405,9 +413,11 @@ impl Viewport {
 pub fn GraphExplorer() -> Element {
     use_topbar(&t!("graph-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
+    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
     let nodes_res = use_server_future(move || {
         let v = active_view.read().name.clone();
-        async move { list_graph_nodes(v).await }
+        let b = active_bucket.read().id.clone();
+        async move { list_graph_nodes(v, b).await }
     })?;
 
     match &*nodes_res.read() {

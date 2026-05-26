@@ -32,8 +32,16 @@ impl NoteRow {
 }
 
 #[server]
-async fn list_notes(view: Option<String>) -> Result<Vec<NoteRow>, ServerFnError> {
+async fn list_notes(view: Option<String>, bucket_hex: Option<String>) -> Result<Vec<NoteRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
+
+    let bucket_id = bucket_hex.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(memvault_core::BucketId(arr))
+    });
 
     // If a view is active, use list_all (view-filtered) and filter to docs only.
     if let Some(ref view_name) = view {
@@ -48,7 +56,7 @@ async fn list_notes(view: Option<String>) -> Result<Vec<NoteRow>, ServerFnError>
             .collect());
     }
 
-    let docs = client.list_docs(None, 500, None).await
+    let docs = client.list_docs(None, 500, bucket_id.as_ref()).await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(docs.into_iter()
         .map(|d| NoteRow {
@@ -64,9 +72,11 @@ async fn list_notes(view: Option<String>) -> Result<Vec<NoteRow>, ServerFnError>
 pub fn NoteList() -> Element {
     use_topbar(&t!("notes-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
+    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
     let notes = use_server_future(move || {
         let v = active_view.read().name.clone();
-        async move { list_notes(v).await }
+        let b = active_bucket.read().id.clone();
+        async move { list_notes(v, b).await }
     })?;
 
     rsx! {
