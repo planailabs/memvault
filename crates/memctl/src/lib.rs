@@ -1340,8 +1340,22 @@ mod native {
                     std::sync::Arc::clone(&event_bus_shared),
                 );
 
-                // Load or rebuild the full-text search index
+                // Rebuild derived state if blockstore version is outdated.
                 let index_cache_path = data_dir.join("text_index.json");
+                match client.rebuild_if_needed().await {
+                    Ok(Some(report)) => {
+                        let _ = std::fs::remove_file(&index_cache_path);
+                        tracing::info!(
+                            blocks = report.blocks_total,
+                            rewritten = report.unbucketed_rewritten,
+                            "blockstore rebuild complete"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("blockstore rebuild error: {e}"),
+                }
+
+                // Load or rebuild the full-text search index
                 match client.load_or_rebuild_index(&index_cache_path).await {
                     Ok((d, e, a)) => {
                         tracing::info!("text index ready: {d} docs, {e} entities, {a} attachments")
