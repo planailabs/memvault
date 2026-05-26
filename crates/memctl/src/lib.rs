@@ -1531,6 +1531,7 @@ fn spawn_event_bridge(
                     let cid = match &event {
                         memvault_api::MemvaultEvent::DocCreated { cid, .. } => Some(cid.clone()),
                         memvault_api::MemvaultEvent::DocUpdated { cid, .. } => Some(cid.clone()),
+                        memvault_api::MemvaultEvent::BucketCreated { cid, .. } => Some(cid.clone()),
                         memvault_api::MemvaultEvent::Retracted { cid } => Some(cid.clone()),
                         memvault_api::MemvaultEvent::TokenConsumed { token_cid } => Some(token_cid.clone()),
                         _ => None,

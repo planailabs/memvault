@@ -48,5 +48,8 @@ fn event_to_sse(event: MemvaultEvent) -> Event {
         MemvaultEvent::TokenConsumed { token_cid } => Event::default()
             .event("token_consumed")
             .data(serde_json::json!({"token_cid": hex::encode(&token_cid)}).to_string()),
+        MemvaultEvent::BucketCreated { bucket_id, cid } => Event::default()
+            .event("bucket_created")
+            .data(serde_json::json!({"bucket_id": bucket_id.to_string(), "cid": hex::encode(&cid)}).to_string()),
     }
 }

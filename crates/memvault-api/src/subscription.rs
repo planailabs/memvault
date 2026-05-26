@@ -1,6 +1,6 @@
 //! Event subscription using tokio broadcast channel.
 
-use memvault_core::{DocId, EntityId};
+use memvault_core::{BucketId, DocId, EntityId};
 
 /// Events published by the memvault system.
 #[derive(Debug, Clone)]
@@ -9,6 +9,7 @@ pub enum MemvaultEvent {
     DocUpdated { doc_id: DocId, cid: Vec<u8> },
     FileAttached { doc_id: DocId, name: String },
     EntityCreated { entity_id: EntityId },
+    BucketCreated { bucket_id: BucketId, cid: Vec<u8> },
     Retracted { cid: Vec<u8> },
     TokenConsumed { token_cid: Vec<u8> },
 }

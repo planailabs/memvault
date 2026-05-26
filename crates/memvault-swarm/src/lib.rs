@@ -342,6 +342,8 @@ fn handle_block_response(
                 continue;
             }
             let _ = store.reindex_block(&entry.cid, &entry.data);
+            // Also try bucket-specific reindexing (BUCKETS table).
+            let _ = store.reindex_bucket_decl(&entry.cid, &entry.data);
             stored += 1;
             tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
         }

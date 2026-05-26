@@ -141,9 +141,58 @@ impl MemvaultStore {
                 let bucket_key = keys::pack_bucket_key(bucket_id, meta.wall_ns, cid_bytes);
                 bucket_table.insert(bucket_key.as_slice(), &[] as &[u8])?;
             }
+
+            // ── Bucket metadata reconstruction ──────────────────
+            // If this envelope is a bucket decl, also populate the BUCKETS table.
+            let has_bucket_tag = meta.tags.iter()
+                .any(|(s, l)| s == "kind" && l == "bucket-decl");
+            if has_bucket_tag {
+                // Try payload.BucketCreate.bucket_id (new envelope format)
+                // then fall back to root bucket_id (legacy raw BucketDecl).
+                let bid = val.get("payload")
+                    .and_then(|p| p.get("BucketCreate"))
+                    .and_then(|bc| bc.get("bucket_id"))
+                    .or_else(|| val.get("bucket_id"))
+                    .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok());
+                if let Some(bid) = bid {
+                    let mut bucket_table = txn.open_table(BUCKETS)?;
+                    bucket_table.insert(bid.as_slice(), cid_bytes)?;
+                }
+            }
         }
         txn.commit()?;
         tracing::debug!("reindexed block");
+        Ok(true)
+    }
+
+    /// Try to parse a block as a BucketDecl and register it in the BUCKETS table.
+    /// Call this after storing a synced block that might be a bucket declaration.
+    /// Returns true if the block was recognized as a bucket decl.
+    pub fn reindex_bucket_decl(&self, cid_bytes: &[u8], block_bytes: &[u8]) -> Result<bool, StoreError> {
+        let val: serde_json::Value = match serde_json::from_slice(block_bytes) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+
+        // A BucketDecl has bucket_id, name, default_visibility fields.
+        let bucket_id = match val.get("bucket_id")
+            .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok())
+        {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+        // Must also have "name" to distinguish from other bucket_id-bearing blocks.
+        if val.get("name").and_then(|v| v.as_str()).is_none() {
+            return Ok(false);
+        }
+
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(BUCKETS)?;
+            table.insert(bucket_id.as_slice(), cid_bytes)?;
+        }
+        txn.commit()?;
+        tracing::debug!(bucket = %hex::encode(bucket_id), "reindexed bucket decl");
         Ok(true)
     }
 

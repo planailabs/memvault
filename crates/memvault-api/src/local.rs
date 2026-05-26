@@ -144,9 +144,9 @@ impl LocalClient {
             None => return Ok(None),
         };
 
-        let decl: memvault_doc::BucketDecl = match serde_json::from_slice(&block) {
-            Ok(d) => d,
-            Err(_) => return Ok(None),
+        let decl = match Self::parse_bucket_decl(&block) {
+            Some(d) => d,
+            None => return Ok(None),
         };
 
         let cluster_bytes = self.store.get_bucket_cluster(bucket_id_bytes)?;
@@ -531,6 +531,17 @@ impl LocalClient {
             }
         }
         None
+    }
+
+    /// Parse a BucketDecl from a block: handles both the new envelope format
+    /// (payload.BucketCreate) and the legacy raw BucketDecl JSON.
+    fn parse_bucket_decl(block: &[u8]) -> Option<memvault_doc::BucketDecl> {
+        let val: serde_json::Value = serde_json::from_slice(block).ok()?;
+        if let Some(bc) = val.get("payload").and_then(|p| p.get("BucketCreate")) {
+            serde_json::from_value(bc.clone()).ok()
+        } else {
+            serde_json::from_value(val).ok()
+        }
     }
 
     fn store_op(&self, op: &Op, tags: &[(String, String)], vis: &Visibility, bucket: Option<&BucketId>) -> Result<Vec<u8>> {
@@ -1356,26 +1367,35 @@ impl MemvaultClient for LocalClient {
             private_to_peer: if has_cluster { None } else { Some(memvault_core::PeerId(self.peer_id.clone())) },
         };
 
-        // Serialize the BucketDecl as the block
-        let decl_bytes = serde_json::to_vec(&decl)
+        // Wrap BucketDecl in an envelope so the block is self-describing
+        // (carries its own tags/author/wall_ns for reindexing after sync).
+        let tags = vec![
+            ("kind".to_string(), "bucket-decl".to_string()),
+            ("bucket".to_string(), bucket_id.to_string()),
+        ];
+        let envelope = serde_json::json!({
+            "version": 1,
+            "payload": { "BucketCreate": decl },
+            "author": self.peer_id,
+            "tags": tags,
+            "wall_ns": now_ns,
+            "bucket_id": bucket_id.0,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&decl_bytes);
+        let cid = memvault_core::cid_from_bytes(&envelope_bytes);
         let cid_bytes = cid.to_bytes();
 
-        // Store the block
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
-            tags: vec![
-                ("kind".to_string(), "bucket-decl".to_string()),
-                ("bucket".to_string(), bucket_id.to_string()),
-            ],
+            tags,
             wall_ns: now_ns,
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
         };
-        self.store.insert_envelope(&cid_bytes, &decl_bytes, &meta)?;
+        self.store.insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
         // Record in BUCKETS table
         self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
@@ -1384,6 +1404,11 @@ impl MemvaultClient for LocalClient {
         if has_cluster {
             let _ = self.store.bind_bucket(&bucket_id.0, &self.cluster_id, false);
         }
+
+        self.event_bus.publish(MemvaultEvent::BucketCreated {
+            bucket_id: bucket_id.clone(),
+            cid: cid_bytes,
+        });
 
         tracing::info!(bucket = %bucket_id, name, has_cluster, "bucket created");
         Ok(bucket_id)
@@ -1439,7 +1464,7 @@ impl MemvaultClient for LocalClient {
         // Update the name in the bucket decl by storing a new decl with the updated name
         if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
             if let Some(block) = self.store.get_block(&decl_cid)? {
-                if let Ok(mut decl) = serde_json::from_slice::<memvault_doc::BucketDecl>(&block) {
+                if let Some(mut decl) = Self::parse_bucket_decl(&block) {
                     decl.name = new_name.to_string();
                     let new_bytes = serde_json::to_vec(&decl)
                         .map_err(|e| ApiError::Serialization(e.to_string()))?;
@@ -1482,8 +1507,8 @@ impl MemvaultClient for LocalClient {
             .ok_or_else(|| ApiError::NotFound(format!("bucket {id}")))?;
         let block = self.store.get_block(&decl_cid)?
             .ok_or_else(|| ApiError::NotFound("bucket decl block".into()))?;
-        let mut decl: memvault_doc::BucketDecl = serde_json::from_slice(&block)
-            .map_err(|e| ApiError::Other(format!("failed to decode bucket decl: {e}")))?;
+        let mut decl = Self::parse_bucket_decl(&block)
+            .ok_or_else(|| ApiError::Other("failed to decode bucket decl".into()))?;
 
         if decl.private_to_peer.is_none() {
             // Already attached, idempotent
@@ -1555,7 +1580,7 @@ impl MemvaultClient for LocalClient {
         // Mark the bucket decl as archived by storing an updated decl
         if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
             if let Some(block) = self.store.get_block(&decl_cid)? {
-                if let Ok(mut decl) = serde_json::from_slice::<memvault_doc::BucketDecl>(&block) {
+                if let Some(mut decl) = Self::parse_bucket_decl(&block) {
                     decl.name = format!("[ARCHIVED] {}", decl.name);
                     decl.description = Some(format!(
                         "Archived: {}. {}",
