@@ -242,13 +242,11 @@ fn NoteView(data: NoteData) -> Element {
                 }
             }
 
-            // Body (rendered in sandboxed iframe to prevent XSS from markdown content)
-            Card {
-                div { class: "p-5",
-                    SandboxedContent { html: data.body_html.clone() }
-                }
-                if !data.tags.is_empty() {
-                    div { class: "px-5 pb-4 border-t border-line pt-3",
+            // Body (rendered in sandboxed iframe — card is inside the iframe for correct bg)
+            SandboxedContent { html: data.body_html.clone() }
+            if !data.tags.is_empty() {
+                Card {
+                    div { class: "px-5 py-3",
                         TagPills { tags: data.tags.clone() }
                     }
                 }

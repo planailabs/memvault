@@ -146,7 +146,7 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
   hr {{ border: none; border-top: 1px solid rgba(128,128,128,0.2); margin: 1em 0; }}
 </style>
 </head>
-<body><div class="prose prose-sm dark:prose-invert max-w-none">{escaped_html}</div>
+<body><div class="card"><div class="p-5 prose prose-sm dark:prose-invert max-w-none">{escaped_html}</div></div>
 <script>
 (function() {{
   var id = "{id}";
