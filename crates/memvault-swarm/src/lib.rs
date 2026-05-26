@@ -212,8 +212,28 @@ pub async fn run_sync_loop(
                 let peers: Vec<_> = synced_peers.iter().copied().collect();
                 if !peers.is_empty() {
                     tracing::info!(peers = peers.len(), "periodic RBSR resync");
-                    for peer_id in peers {
-                        request_remote_heads(swarm, &store, &config, peer_id);
+                    for peer_id in &peers {
+                        request_remote_heads(swarm, &store, &config, *peer_id);
+                    }
+
+                    // Verify completeness: walk all stored blocks, find missing
+                    // dependencies (manifest → DAG chunks), and re-request them.
+                    let missing = collect_incomplete_cids(&store);
+                    if !missing.is_empty() {
+                        let target = peers[0]; // request from first connected peer
+                        tracing::info!(missing = missing.len(), %target, "requesting incomplete file chunks");
+                        for chunk in missing.chunks(FETCH_CHUNK_SIZE) {
+                            swarm.behaviour_mut().block_exchange.send_request(
+                                &target,
+                                BlockRequest {
+                                    cids: chunk.to_vec(),
+                                    since_ns: None,
+                                    limit: None,
+                                    range_fingerprints: vec![],
+                                    token: None,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -629,4 +649,29 @@ fn extract_dependent_cids(block_data: &[u8]) -> Vec<Vec<u8>> {
     }
 
     vec![]
+}
+
+/// Walk every stored block, extract its dependencies, and return CIDs that
+/// are referenced but missing from the store.  This catches incomplete file
+/// DAGs (envelope present but some chunks missing due to interrupted sync).
+fn collect_incomplete_cids(store: &MemvaultStore) -> Vec<Vec<u8>> {
+    let blocks = match store.iter_blocks() {
+        Ok(b) => b,
+        Err(_) => return vec![],
+    };
+
+    let mut missing: Vec<Vec<u8>> = Vec::new();
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+    for (_cid, data) in &blocks {
+        for dep in extract_dependent_cids(data) {
+            if seen.insert(dep.clone()) {
+                if store.get_block(&dep).ok().flatten().is_none() {
+                    missing.push(dep);
+                }
+            }
+        }
+    }
+
+    missing
 }
