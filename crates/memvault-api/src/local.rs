@@ -928,8 +928,21 @@ impl MemvaultClient for LocalClient {
             let idx = self.index.read().await;
             if idx.is_retracted(&node_id) || idx.is_retracted(&legacy_node_id) { return Ok(None); }
         }
-        let data = self.store.get_block(manifest_cid)?;
-        Ok(data)
+        if let Some(data) = self.store.get_block(manifest_cid)? {
+            return Ok(Some(data));
+        }
+        // Manifest block missing (legacy file). Fall back to the attachment
+        // envelope via the _manifest tag index (written by reindex_block).
+        let mcid_hex = hex::encode(manifest_cid);
+        let env_cids = self.store.query_by_tag("_manifest", &mcid_hex, 0, 1)?;
+        for env_cid in &env_cids {
+            if let Some(env_data) = self.store.get_block(env_cid)? {
+                // The envelope itself has filename/mime_type/size — return it
+                // as if it were the manifest. Callers parse the same fields.
+                return Ok(Some(env_data));
+            }
+        }
+        Ok(None)
     }
 
     async fn add_entity(&self, entity: Entity, vis: Visibility, bucket: Option<&BucketId>) -> Result<EntityId> {

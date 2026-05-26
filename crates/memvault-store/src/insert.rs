@@ -73,6 +73,16 @@ impl MemvaultStore {
                 }
             }
         }
+        // For attachment envelopes, add a manifest→envelope reverse lookup tag
+        // so get_file_manifest can find the envelope when the manifest block
+        // is missing (legacy files).
+        if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+            if let Some(mcid) = val.get("manifest_cid")
+                .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
+            {
+                tags.push(("_manifest".to_string(), hex::encode(&mcid)));
+            }
+        }
         let wall_ns: u64 = val.get("wall_ns")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);

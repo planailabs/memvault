@@ -808,19 +808,34 @@ pub async fn run(cli: Cli) -> Result<()> {
                         cid_envelope += 1;
                         continue;
                     }
-                    // Synthesized manifests (from Phase 1c) have content_size +
-                    // filename but their CID references the original manifest.
-                    if val.get("content_size").is_some() && val.get("filename").is_some() {
-                        cid_ok += 1;
-                        continue;
-                    }
                 }
                 cid_mismatch += 1;
                 eprintln!("  CID mismatch: {}", hex::encode(cid));
             }
             println!("  {cid_ok} verified, {cid_envelope} envelopes (legacy payload CID), {cid_mismatch} mismatched, {cid_unchecked} unchecked");
             if cid_mismatch > 0 {
-                eprintln!("  WARNING: {cid_mismatch} block(s) have CID mismatches (data corruption)");
+                // Remove previously synthesized manifests (CID doesn't match content).
+                // These were created by an older Phase 1c and break sync.
+                let blocks_cleanup = store.iter_blocks()?;
+                let mut cleaned = 0usize;
+                for (cid, data) in &blocks_cleanup {
+                    if let Ok(true) = memvault_core::verify_cid(cid, data) { continue; }
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                        if val.get("payload").is_some() { continue; } // envelope, not a synth manifest
+                        if val.get("content_size").is_some() && val.get("filename").is_some() {
+                            store.delete_block(cid)?;
+                            cleaned += 1;
+                        }
+                    }
+                }
+                if cleaned > 0 {
+                    println!("  Removed {cleaned} synthesized manifest(s) with broken CIDs");
+                    // Recount after cleanup.
+                    cid_mismatch -= cleaned;
+                }
+                if cid_mismatch > 0 {
+                    eprintln!("  WARNING: {cid_mismatch} block(s) have CID mismatches (data corruption)");
+                }
             }
 
             // Phase 0b: Migrate legacy envelopes
@@ -844,7 +859,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     if new_cid_bytes == *old_cid {
                         continue;
                     }
-                    store.put_block_unchecked(&new_cid_bytes, data)?;
+                    store.put_block(&new_cid_bytes, data)?;
                     store.delete_block(old_cid)?;
                     migrated += 1;
                 }
@@ -897,55 +912,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             println!("  {bucket_count} bucket declaration(s) rebuilt");
 
-            // Phase 1c: Rebuild missing file manifests from attachment envelopes
-            println!("Phase 1c: Rebuilding missing file manifests...");
-            let mut manifest_created = 0usize;
-            let mut manifest_ok = 0usize;
-            for (_cid, data) in &blocks {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
-                    if val.get("kind").and_then(|v| v.as_str()) != Some("attachment") {
-                        continue;
-                    }
-                    let mcid: Option<Vec<u8>> = val.get("manifest_cid")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok());
-                    let mcid = match mcid {
-                        Some(c) => c,
-                        None => continue,
-                    };
-                    // Check if manifest block exists.
-                    if store.get_block(&mcid).ok().flatten().is_some() {
-                        manifest_ok += 1;
-                        continue;
-                    }
-                    // Manifest block missing — synthesize from envelope metadata.
-                    let filename = val.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed");
-                    let mime_type = val.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream");
-                    let size = val.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let manifest = serde_json::json!({
-                        "content_root": [],
-                        "content_size": size,
-                        "chunk_layout": "flat",
-                        "filename": filename,
-                        "mime_type": mime_type,
-                        "sha256": null,
-                        "width_height": null,
-                        "duration_ms": null,
-                        "extracted_text": null,
-                        "derived_from": null,
-                        "pii_findings": null,
-                        "replication": { "min_copies": 1, "max_copies": 3, "strategy": "lazy" }
-                    });
-                    let manifest_bytes = serde_json::to_vec(&manifest).unwrap_or_default();
-                    // Store with the CID the envelope references.
-                    if store.put_block_unchecked(&mcid, &manifest_bytes).is_ok() {
-                        manifest_created += 1;
-                        println!("  Created manifest for {filename} ({})", hex::encode(&mcid[..8.min(mcid.len())]));
-                    }
-                }
-            }
-            println!("  {manifest_ok} manifests OK, {manifest_created} created from envelopes");
-
             // Phase 2: Rebuild full-text search index
+            // (Note: reindex_block now writes _manifest tags for attachment
+            // envelopes, so get_file_manifest can find the envelope when the
+            // manifest block is missing — no need to synthesize fake blocks.)
             println!("Phase 2: Rebuilding full-text search index...");
             let client = create_client(store.clone());
             let (doc_count, entity_count, attachment_count) = client.populate_index().await?;

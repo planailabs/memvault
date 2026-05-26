@@ -466,7 +466,7 @@ fn handle_block_response(
             if store.get_block(&entry.cid).ok().flatten().is_some() {
                 continue; // already have it
             }
-            if let Err(e) = store.put_block_unchecked(&entry.cid, &entry.data) {
+            if let Err(e) = store.put_block(&entry.cid, &entry.data) {
                 tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
                 continue;
             }

@@ -60,18 +60,6 @@ impl MemvaultStore {
         Ok(out)
     }
 
-    /// Delete a block by CID bytes.
-    /// Store a raw block without CID validation (for migrations).
-    pub fn put_block_unchecked(&self, cid: &[u8], data: &[u8]) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
-        {
-            let mut table = txn.open_table(BLOCKS)?;
-            table.insert(cid, data)?;
-        }
-        txn.commit()?;
-        Ok(())
-    }
-
     pub fn delete_block(&self, cid: &[u8]) -> Result<bool, StoreError> {
         let txn = self.db.begin_write()?;
         let removed = {
