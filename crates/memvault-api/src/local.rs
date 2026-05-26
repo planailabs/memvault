@@ -187,15 +187,6 @@ impl LocalClient {
             Some(memvault_core::ClusterId(arr))
         });
 
-        let is_default = if let Some(ref cid) = cluster_id {
-            self.store
-                .get_default_bucket(&cid.0)?
-                .map(|b| b == bucket_id_bytes)
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
         let envelope_count = self
             .store
             .query_by_bucket(bucket_id_bytes, 0, usize::MAX)?
@@ -207,7 +198,6 @@ impl LocalClient {
             description: decl.description,
             owner_agent: decl.owner_agent,
             cluster_id,
-            is_default,
             is_attached: decl.private_to_peer.is_none(),
             default_visibility: decl.default_visibility,
             default_classification: decl.default_classification,
@@ -2078,7 +2068,7 @@ impl MemvaultClient for LocalClient {
         if has_cluster {
             let _ = self
                 .store
-                .bind_bucket(&bucket_id.0, &self.cluster_id, false);
+                .bind_bucket(&bucket_id.0, &self.cluster_id);
         }
 
         self.event_bus.publish(MemvaultEvent::BucketCreated {
@@ -2178,11 +2168,10 @@ impl MemvaultClient for LocalClient {
         &self,
         bucket_id: &memvault_core::BucketId,
         cluster_id: &memvault_core::ClusterId,
-        is_default: bool,
     ) -> Result<()> {
         self.store
-            .bind_bucket(&bucket_id.0, &cluster_id.0, is_default)?;
-        tracing::info!(bucket = %bucket_id, cluster = %cluster_id, is_default, "bucket bound to cluster");
+            .bind_bucket(&bucket_id.0, &cluster_id.0)?;
+        tracing::info!(bucket = %bucket_id, cluster = %cluster_id, "bucket bound to cluster");
         Ok(())
     }
 
@@ -2226,7 +2215,7 @@ impl MemvaultClient for LocalClient {
 
         // Also bind to the cluster if not already bound.
         if self.cluster_id.iter().any(|&b| b != 0) {
-            let _ = self.store.bind_bucket(&id.0, &self.cluster_id, false);
+            let _ = self.store.bind_bucket(&id.0, &self.cluster_id);
         }
 
         tracing::info!(bucket = %id, "bucket attached to cluster");
@@ -2234,17 +2223,6 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
-        // Prevent archiving the cluster's default bucket.
-        if let Ok(Some(cluster_bytes)) = self.store.get_bucket_cluster(&id.0) {
-            if let Ok(Some(default_bytes)) = self.store.get_default_bucket(&cluster_bytes) {
-                if default_bytes == id.0 {
-                    return Err(ApiError::Other(
-                        "cannot archive the cluster's default bucket".into(),
-                    ));
-                }
-            }
-        }
-
         let now_ns = memvault_core::wall_ns();
         let archive_block = serde_json::json!({
             "op": "BucketArchive",

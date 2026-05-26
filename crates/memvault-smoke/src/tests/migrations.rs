@@ -126,7 +126,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
             .await
             .unwrap();
         store
-            .bind_bucket(&default_bucket.0, &cluster_id.0, true)
+            .bind_bucket(&default_bucket.0, &cluster_id.0)
             .unwrap();
 
         let entity_label = hex::encode(entity.id.0);

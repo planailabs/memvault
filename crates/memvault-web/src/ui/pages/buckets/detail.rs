@@ -24,8 +24,8 @@ struct BucketData {
     owner: String,
     status: String,
     cluster_hex: String,
-    is_default: bool,
     is_attached: bool,
+    role: String,
     visibility: String,
     classification: String,
     created_ns: u64,
@@ -66,8 +66,8 @@ async fn get_bucket(id: String) -> Result<Option<BucketData>, ServerFnError> {
                 .unwrap_or_else(|| "cluster".to_string()),
             status: status.to_string(),
             cluster_hex: b.cluster_id.map(|c| hex::encode(c.0)).unwrap_or_default(),
-            is_default: b.is_default,
             is_attached: b.is_attached,
+            role: format!("{:?}", b.role).to_lowercase(),
             visibility: format!("{:?}", b.default_visibility),
             classification: format!("{:?}", b.default_classification),
             created_ns: b.created_ns,
@@ -273,9 +273,6 @@ pub fn BucketDetail(id: String) -> Element {
             div { class: "flex items-center gap-3",
                 PageHeader { class: "mb-0", "{data.name}" }
                 Pill { variant: status_variant, "{data.status}" }
-                if data.is_default {
-                    Pill { variant: PillVariant::Info, "default" }
-                }
             }
 
             // Metadata card
@@ -287,6 +284,8 @@ pub fn BucketDetail(id: String) -> Element {
                         span { class: "font-mono text-xs", "{data.id_hex}" }
                         span { class: "text-fg-muted", "Owner" }
                         span { "{data.owner}" }
+                        span { class: "text-fg-muted", "Role" }
+                        span { "{data.role}" }
                         span { class: "text-fg-muted", "Visibility" }
                         span { "{data.visibility}" }
                         span { class: "text-fg-muted", "Classification" }

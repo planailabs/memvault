@@ -25,7 +25,7 @@ async fn full_genesis_workflow() {
         .await
         .unwrap();
     node.store
-        .bind_bucket(&bucket.0, &node.cluster_id.0, true)
+        .bind_bucket(&bucket.0, &node.cluster_id.0)
         .unwrap();
 
     // Create docs
@@ -68,7 +68,7 @@ async fn full_genesis_workflow() {
 
     let buckets = node.client.bucket_list().await.unwrap();
     assert_eq!(buckets.len(), 1);
-    assert!(buckets[0].is_default);
+    assert!(buckets[0].cluster_id.is_some());
 }
 
 #[tokio::test]
@@ -89,7 +89,7 @@ async fn two_node_independent_workflow() {
         .unwrap();
     node_a
         .store
-        .bind_bucket(&bucket_a.0, &node_a.cluster_id.0, true)
+        .bind_bucket(&bucket_a.0, &node_a.cluster_id.0)
         .unwrap();
 
     // Node B: cluster-join
@@ -106,7 +106,7 @@ async fn two_node_independent_workflow() {
         .unwrap();
     node_b
         .store
-        .bind_bucket(&bucket_b.0, &node_b.cluster_id.0, true)
+        .bind_bucket(&bucket_b.0, &node_b.cluster_id.0)
         .unwrap();
 
     // Node A writes docs

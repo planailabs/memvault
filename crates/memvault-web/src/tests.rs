@@ -338,7 +338,6 @@ impl MemvaultClient for MockClient {
         &self,
         _bucket: &memvault_core::BucketId,
         _cluster: &memvault_core::ClusterId,
-        _default: bool,
     ) -> memvault_api::Result<()> {
         Ok(())
     }

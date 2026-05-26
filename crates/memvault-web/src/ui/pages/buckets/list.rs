@@ -15,8 +15,8 @@ struct BucketRow {
     id_hex: String,
     name: String,
     status: String,      // "unbound", "private", "attached", "archived"
+    role: String,        // "standard", "legacy", "agent"
     cluster_hex: String, // empty if unbound
-    is_default: bool,
     envelope_count: u64,
 }
 
@@ -52,8 +52,8 @@ async fn list_buckets() -> Result<Vec<BucketRow>, ServerFnError> {
                 id_hex: hex::encode(b.id.0),
                 name: b.name,
                 status: status.to_string(),
+                role: format!("{:?}", b.role).to_lowercase(),
                 cluster_hex: b.cluster_id.map(|c| hex::encode(c.0)).unwrap_or_default(),
-                is_default: b.is_default,
                 envelope_count: b.envelope_count,
             }
         })
@@ -202,6 +202,7 @@ fn BucketTable(list: Vec<BucketRow>) -> Element {
             headers: rsx! {
                 SortableTh { label: "Name".to_string(), sort_key: "name".to_string(), sort }
                 SortableTh { label: "Status".to_string(), sort_key: "status".to_string(), sort }
+                th { class: "th", "Role" }
                 th { class: "th", "Cluster" }
                 SortableTh { label: "Items".to_string(), sort_key: "items".to_string(), sort }
             },
@@ -218,11 +219,15 @@ fn BucketTable(list: Vec<BucketRow>) -> Element {
                         },
                         Td {
                             span { class: "font-medium text-fg-strong", "{b.name}" }
-                            if b.is_default {
-                                Pill { variant: PillVariant::Info, class: "ml-2", "default" }
-                            }
                         }
                         Td { {pill_for_status(&b.status)} }
+                        Td {
+                            {match b.role.as_str() {
+                                "legacy" => rsx! { Pill { variant: PillVariant::Warn, "legacy" } },
+                                "agent" => rsx! { Pill { variant: PillVariant::Info, "agent" } },
+                                _ => rsx! { Pill { variant: PillVariant::Muted, "standard" } },
+                            }}
+                        }
                         TdMuted {
                             {
                                 if b.cluster_hex.is_empty() {

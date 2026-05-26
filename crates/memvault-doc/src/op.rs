@@ -64,7 +64,6 @@ pub enum Op {
     BucketBind {
         bucket_id: BucketId,
         cluster_id: ClusterId,
-        is_default: bool,
     },
     // added B1, removable never
     BucketRename {

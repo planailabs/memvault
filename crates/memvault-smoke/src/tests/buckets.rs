@@ -219,12 +219,11 @@ async fn bucket_bind_to_cluster() {
         .await
         .unwrap();
     node.client
-        .bucket_bind(&id, &node.cluster_id, true)
+        .bucket_bind(&id, &node.cluster_id)
         .await
         .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
-    assert!(info.is_default);
 }
 
 #[tokio::test]
@@ -242,12 +241,11 @@ async fn bucket_bind_non_default() {
         .await
         .unwrap();
     node.client
-        .bucket_bind(&id, &node.cluster_id, false)
+        .bucket_bind(&id, &node.cluster_id)
         .await
         .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
-    assert!(!info.is_default);
 }
 
 #[tokio::test]
@@ -266,10 +264,10 @@ async fn bucket_exclusive_binding() {
         .await
         .unwrap();
     node.client
-        .bucket_bind(&id, &node.cluster_id, false)
+        .bucket_bind(&id, &node.cluster_id)
         .await
         .unwrap();
-    let result = node.client.bucket_bind(&id, &other_cluster, false).await;
+    let result = node.client.bucket_bind(&id, &other_cluster).await;
     assert!(result.is_err());
 }
 
@@ -288,15 +286,15 @@ async fn bucket_rebind_same_cluster_ok() {
         .await
         .unwrap();
     node.client
-        .bucket_bind(&id, &node.cluster_id, false)
+        .bucket_bind(&id, &node.cluster_id)
         .await
         .unwrap();
     node.client
-        .bucket_bind(&id, &node.cluster_id, true)
+        .bucket_bind(&id, &node.cluster_id)
         .await
         .unwrap();
     let info = node.client.bucket_get(&id).await.unwrap().unwrap();
-    assert!(info.is_default);
+    assert_eq!(info.cluster_id, Some(node.cluster_id.clone()));
 }
 
 #[tokio::test]

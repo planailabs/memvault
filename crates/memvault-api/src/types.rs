@@ -89,8 +89,6 @@ pub struct BucketInfo {
     pub owner_agent: Option<memvault_core::AgentId>,
     /// Which cluster this bucket is bound to (None if unbound/standalone).
     pub cluster_id: Option<ClusterId>,
-    /// Whether this bucket is the cluster's default.
-    pub is_default: bool,
     /// Whether this bucket is attached to the cluster (private_to_peer is None).
     pub is_attached: bool,
     pub default_visibility: Visibility,

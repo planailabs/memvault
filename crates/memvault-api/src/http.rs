@@ -787,11 +787,9 @@ impl MemvaultClient for HttpApiClient {
         &self,
         bucket_id: &memvault_core::BucketId,
         cluster_id: &memvault_core::ClusterId,
-        is_default: bool,
     ) -> Result<()> {
         let body = serde_json::json!({
             "cluster_id": cluster_id.0,
-            "is_default": is_default,
         });
         self.client
             .post(self.url(&format!("/buckets/{}/bind", hex::encode(bucket_id.0))))
@@ -911,9 +909,6 @@ impl MemvaultClient for HttpApiClient {
 
     async fn default_bucket_id(&self) -> Result<BucketId> {
         let buckets = self.bucket_list().await?;
-        if let Some(b) = buckets.iter().find(|b| b.is_default) {
-            return Ok(b.id.clone());
-        }
         if let Some(b) = buckets.first() {
             return Ok(b.id.clone());
         }

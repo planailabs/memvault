@@ -405,13 +405,12 @@ async fn bucket_bind_to_cluster() {
 
     let cluster_id = memvault_core::ClusterId([1u8; 32]);
     client
-        .bucket_bind(&bucket_id, &cluster_id, true)
+        .bucket_bind(&bucket_id, &cluster_id)
         .await
         .unwrap();
 
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(cluster_id));
-    assert!(info.is_default);
 }
 
 #[tokio::test]
@@ -506,15 +505,16 @@ async fn bucket_archive_default_refused() {
         )
         .await
         .unwrap();
-    // Auto-bound by bucket_create. Make it the explicit default.
+    // Auto-bound by bucket_create. Bind explicitly.
     let mut cluster_arr = [0u8; 32];
     cluster_arr[..9].copy_from_slice(b"cluster-1");
     client
-        .bucket_bind(&bucket_id, &memvault_core::ClusterId(cluster_arr), true)
+        .bucket_bind(&bucket_id, &memvault_core::ClusterId(cluster_arr))
         .await
         .unwrap();
+    // Archiving is now allowed (no default-bucket guard).
     let result = client.bucket_archive(&bucket_id, "try to remove").await;
-    assert!(result.is_err(), "archiving default bucket should fail");
+    assert!(result.is_ok(), "archiving bucket should succeed");
 }
 
 #[tokio::test]
@@ -629,18 +629,18 @@ async fn bucket_bind_exclusive_to_one_cluster() {
 
     // Bind to cluster A succeeds
     client
-        .bucket_bind(&bucket_id, &cluster_a, false)
+        .bucket_bind(&bucket_id, &cluster_a)
         .await
         .unwrap();
 
     // Rebind to same cluster A is idempotent
     client
-        .bucket_bind(&bucket_id, &cluster_a, false)
+        .bucket_bind(&bucket_id, &cluster_a)
         .await
         .unwrap();
 
     // Bind to different cluster B fails
-    let result = client.bucket_bind(&bucket_id, &cluster_b, false).await;
+    let result = client.bucket_bind(&bucket_id, &cluster_b).await;
     assert!(
         result.is_err(),
         "should refuse rebinding to a different cluster"
@@ -675,19 +675,11 @@ async fn bucket_bind_idempotent_same_cluster() {
 
     // Bind as non-default
     client
-        .bucket_bind(&bucket_id, &cluster, false)
+        .bucket_bind(&bucket_id, &cluster)
         .await
         .unwrap();
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
-    assert!(!info.is_default);
-
-    // Rebind same cluster as default
-    client
-        .bucket_bind(&bucket_id, &cluster, true)
-        .await
-        .unwrap();
-    let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
-    assert!(info.is_default);
+    assert_eq!(info.cluster_id, Some(cluster));
 }
 
 #[test]
@@ -704,7 +696,7 @@ fn store_bind_unbound_buckets() {
 
     // Bind one to a cluster
     let cluster_id = [1u8; 32];
-    store.bind_bucket(&[10; 32], &cluster_id, false).unwrap();
+    store.bind_bucket(&[10; 32], &cluster_id).unwrap();
 
     // bind_unbound_buckets should bind the other 2
     let count = store.bind_unbound_buckets(&cluster_id).unwrap();

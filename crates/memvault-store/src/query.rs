@@ -237,7 +237,8 @@ impl MemvaultStore {
         Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
     }
 
-    /// Get the default bucket for a cluster.
+    /// Get the default bucket for a cluster (DEPRECATED — use BucketRole::Legacy).
+    /// Kept for backwards compat during transition.
     pub fn get_default_bucket(&self, cluster_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(CLUSTER_DEFAULT_BUCKET)?;
@@ -342,8 +343,7 @@ impl MemvaultStore {
         Ok(())
     }
 
-    /// Bind a bucket to a cluster. If `is_default`, also set it as the cluster's default.
-    /// Bind a bucket to a cluster. If `is_default`, also set it as the cluster's default.
+    /// Bind a bucket to a cluster.
     ///
     /// A bucket can only be bound to exactly one cluster (its home). Attempting
     /// to bind a bucket that is already bound to a *different* cluster returns
@@ -352,9 +352,7 @@ impl MemvaultStore {
         &self,
         bucket_id: &[u8],
         cluster_id: &[u8],
-        is_default: bool,
     ) -> Result<(), StoreError> {
-        // Check existing binding
         if let Some(existing) = self.get_bucket_cluster(bucket_id)? {
             if existing != cluster_id {
                 return Err(StoreError::Other(format!(
@@ -364,27 +362,13 @@ impl MemvaultStore {
                     hex::encode(cluster_id),
                 )));
             }
-            // Already bound to same cluster — just update default if needed
-            if is_default {
-                let txn = self.db.begin_write()?;
-                {
-                    let mut cdb = txn.open_table(CLUSTER_DEFAULT_BUCKET)?;
-                    cdb.insert(cluster_id, bucket_id)?;
-                }
-                txn.commit()?;
-            }
-            return Ok(());
+            return Ok(()); // already bound to same cluster
         }
 
         let txn = self.db.begin_write()?;
         {
             let mut bc = txn.open_table(BUCKET_CLUSTER)?;
             bc.insert(bucket_id, cluster_id)?;
-
-            if is_default {
-                let mut cdb = txn.open_table(CLUSTER_DEFAULT_BUCKET)?;
-                cdb.insert(cluster_id, bucket_id)?;
-            }
         }
         txn.commit()?;
         Ok(())
@@ -397,7 +381,7 @@ impl MemvaultStore {
         let mut count = 0;
         for (bucket_id, _decl_cid) in all_buckets {
             if self.get_bucket_cluster(&bucket_id)?.is_none() {
-                self.bind_bucket(&bucket_id, cluster_id, false)?;
+                self.bind_bucket(&bucket_id, cluster_id)?;
                 count += 1;
             }
         }

@@ -60,7 +60,4 @@ pub struct BucketBinding {
     pub bucket_id: BucketId,
     pub cluster_id: ClusterId,
     pub bound_at_ns: u64,
-    /// True if this is the cluster's default bucket — the one used when
-    /// no explicit bucket is specified on a write.
-    pub is_default: bool,
 }

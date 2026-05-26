@@ -157,12 +157,11 @@ pub trait MemvaultClient: Send + Sync {
     /// Rename a bucket (writes a BucketRename op, LWW by lamport).
     async fn bucket_rename(&self, id: &BucketId, new_name: &str) -> Result<()>;
 
-    /// Bind a bucket to a cluster. If `is_default`, set it as the cluster's default.
+    /// Bind a bucket to a cluster.
     async fn bucket_bind(
         &self,
         bucket_id: &BucketId,
         cluster_id: &ClusterId,
-        is_default: bool,
     ) -> Result<()>;
 
     /// Attach a private bucket to the cluster (flips private_to_peer to None, triggers gossip).

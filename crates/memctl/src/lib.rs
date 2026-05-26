@@ -47,9 +47,9 @@ mod native {
             /// Path to admin key file (Ed25519 public key)
             #[arg(long)]
             admin_key: Option<PathBuf>,
-            /// Bind an existing bucket as the cluster's default (hex or bs58)
+            /// Bind an existing bucket to the new cluster (hex)
             #[arg(long)]
-            default_bucket: Option<String>,
+            bucket: Option<String>,
         },
         /// Store a memory
         Put {
@@ -305,9 +305,6 @@ mod native {
             bucket_id: String,
             /// Cluster ID (hex)
             cluster_id: String,
-            /// Set as the cluster's default bucket
-            #[arg(long)]
-            default: bool,
         },
         /// Run a standalone memvault cluster node with P2P networking + API
         ///
@@ -592,7 +589,7 @@ mod native {
         match cli.command {
             Commands::Genesis {
                 admin_key,
-                default_bucket,
+                bucket,
             } => {
                 std::fs::create_dir_all(&data_dir)?;
                 let cluster_id = ClusterId::random();
@@ -602,11 +599,7 @@ mod native {
                 std::fs::create_dir_all(data_dir.join("identity"))?;
                 std::fs::create_dir_all(data_dir.join("trust"))?;
 
-                // Create or bind the default bucket
                 let store = make_store()?;
-
-                // Persist cluster_id in the store. PeerId is set by the daemon
-                // on first start (from the libp2p keypair).
                 store.set_local_cluster_id(&cluster_id.0)?;
 
                 // Generate admin signing key (for token issuance)
@@ -626,36 +619,20 @@ mod native {
                     }
                 }
 
-                let client = create_client(store.clone());
-                let bucket_id = if let Some(ref bucket_hex) = default_bucket {
-                    // Bind an existing bucket
+                // Optionally bind an existing bucket to the cluster.
+                if let Some(ref bucket_hex) = bucket {
                     let bucket_bytes = hex::decode(bucket_hex)?;
                     let bucket_arr: [u8; 32] = bucket_bytes
                         .try_into()
                         .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
-                    let bid = memvault_core::BucketId(bucket_arr);
-                    // Verify it exists
-                    if store.get_bucket(&bid.0)?.is_none() {
+                    if store.get_bucket(&bucket_arr)?.is_none() {
                         anyhow::bail!("bucket {} not found in store", bucket_hex);
                     }
-                    bid
-                } else {
-                    // Create a new default bucket
-                    use memvault_core::Visibility;
-                    use memvault_core::classification::Classification;
-                    client
-                        .bucket_create(
-                            "default",
-                            None,
-                            Visibility::Internal,
-                            Classification::Internal,
-                            memvault_doc::BucketRole::Standard,
-                        )
-                        .await?
-                };
-                store.bind_bucket(&bucket_id.0, &cluster_id.0, true)?;
+                    store.bind_bucket(&bucket_arr, &cluster_id.0)?;
+                    println!("  Bound bucket:    {bucket_hex}");
+                }
 
-                // Rebind any pre-existing unbound buckets to this cluster
+                // Bind any pre-existing unbound buckets to this cluster.
                 let rebound = store.bind_unbound_buckets(&cluster_id.0)?;
                 if rebound > 0 {
                     println!("  Rebound {rebound} pre-existing bucket(s) to new cluster.");
@@ -663,7 +640,6 @@ mod native {
 
                 println!("Cluster genesis complete.");
                 println!("  Cluster ID:      {id_hex}");
-                println!("  Default bucket:  {}", hex::encode(bucket_id.0));
                 println!("  Data dir:        {}", data_dir.display());
                 if let Some(key_path) = admin_key {
                     println!("  Admin key:       {}", key_path.display());
@@ -1203,13 +1179,11 @@ mod native {
                     } else {
                         "attached"
                     };
-                    let default_marker = if b.is_default { " [default]" } else { "" };
                     println!(
-                        "{} {} [{}]{} items={}",
+                        "{} {} [{}] items={}",
                         hex::encode(b.id.0),
                         b.name,
                         status,
-                        default_marker,
                         b.envelope_count
                     );
                 }
@@ -1241,7 +1215,6 @@ mod native {
                                 .map(|c| hex::encode(c.0))
                                 .unwrap_or_else(|| "unbound".into())
                         );
-                        println!("  Default:        {}", b.is_default);
                         println!("  Attached:       {}", b.is_attached);
                         println!("  Visibility:     {:?}", b.default_visibility);
                         println!("  Classification: {:?}", b.default_classification);
@@ -1286,7 +1259,6 @@ mod native {
             Commands::BucketBind {
                 bucket_id,
                 cluster_id,
-                default,
             } => {
                 let bucket_bytes = hex::decode(&bucket_id)?;
                 let bucket_arr: [u8; 32] = bucket_bytes
@@ -1299,11 +1271,8 @@ mod native {
                     .map_err(|_| anyhow::anyhow!("cluster id must be 32 bytes"))?;
                 let cid = ClusterId(cluster_arr);
                 let client = connect().connect().await?;
-                client.bucket_bind(&bid, &cid, default).await?;
-                println!(
-                    "Bucket bound to cluster{}.",
-                    if default { " (default)" } else { "" }
-                );
+                client.bucket_bind(&bid, &cid).await?;
+                println!("Bucket bound to cluster.");
             }
             Commands::Daemon {
                 listen,
@@ -1478,25 +1447,6 @@ mod native {
                 let id_path = data_dir.join("cluster_id");
                 std::fs::create_dir_all(&data_dir)?;
                 std::fs::write(&id_path, cluster_hex.as_bytes())?;
-
-                // Create a default bucket bound to this cluster if none exists
-                let has_default = store.get_default_bucket(&cluster_id.0)?.is_some();
-                if !has_default {
-                    let client = create_client(store.clone());
-                    use memvault_core::Visibility;
-                    use memvault_core::classification::Classification;
-                    let bucket_id = client
-                        .bucket_create(
-                            "default",
-                            None,
-                            Visibility::Internal,
-                            Classification::Internal,
-                            memvault_doc::BucketRole::Standard,
-                        )
-                        .await?;
-                    store.bind_bucket(&bucket_id.0, &cluster_id.0, true)?;
-                    println!("Created default bucket: {}", hex::encode(bucket_id.0));
-                }
 
                 // Bind any unbound buckets to this cluster
                 let rebound = store.bind_unbound_buckets(&cluster_id.0)?;
