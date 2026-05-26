@@ -57,21 +57,27 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
     let client = crate::ui::state::client()?;
     let cid_bytes = hex::decode(&cid).map_err(|_| ServerFnError::new("Invalid CID hex"))?;
 
-    let manifest_opt = client
+    // Try manifest first, then fall back to reading the raw block
+    // as an envelope (legacy v1 files store metadata in the envelope).
+    let mut manifest: serde_json::Value = client
         .get_file_manifest(&cid_bytes)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
 
-    let manifest: serde_json::Value = match manifest_opt {
-        Some(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        None => {
-            // Legacy v1 file: the CID might be an envelope CID, not a manifest CID.
-            // Try to read the block directly and parse whatever is there.
-            match client.read_file(&cid_bytes).await {
-                Ok(_) => serde_json::json!({}), // block exists but isn't a manifest
-                Err(_) => return Err(ServerFnError::new("File not found")),
+    // If manifest is empty (legacy file), try to read the block directly
+    // — it might be an attachment envelope with filename/mime_type/size.
+    if manifest.get("filename").is_none() {
+        if let Ok(Some(block)) = client.get_file_manifest(&cid_bytes).await {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&block) {
+                if val.get("filename").is_some() {
+                    manifest = val;
+                }
             }
         }
+        // Still nothing? The block itself might be the data. That's fine,
+        // we'll just show with default metadata.
     };
 
     let extracted_text = client

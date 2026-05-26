@@ -71,39 +71,40 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
         // Use the manifest CID from the envelope, not the envelope CID itself.
         let manifest_cid = match &record.attachment_cid {
             Some(cid) => cid.clone(),
-            None => continue, // skip records without a manifest CID
+            None => continue,
         };
         let cid_hex = hex::encode(&manifest_cid);
+
         // Try to fetch manifest for metadata.
+        let mut filename = None;
+        let mut mime_type = None;
+        let mut size = 0u64;
+
         if let Ok(Some(manifest_bytes)) = client.get_file_manifest(&manifest_cid).await {
-            if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) {
-                files.push(FileRow {
-                    cid: cid_hex,
-                    filename: manifest
-                        .get("filename")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unnamed")
-                        .to_string(),
-                    mime_type: manifest
-                        .get("mime_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("application/octet-stream")
-                        .to_string(),
-                    size: manifest
-                        .get("content_size")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0),
-                    wall_ns: record.wall_ns,
-                });
-                continue;
+            if let Ok(m) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) {
+                filename = m.get("filename").and_then(|v| v.as_str()).map(|s| s.to_string());
+                mime_type = m.get("mime_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+                size = m.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0);
             }
         }
-        // Fallback: just show CID with no metadata.
+
+        // Fallback: read filename/mime from the envelope block itself
+        // (the audit record's CID points to an envelope that has these fields).
+        if filename.is_none() {
+            if let Ok(Some(env_data)) = client.get_file_manifest(&record.cid).await {
+                if let Ok(env) = serde_json::from_slice::<serde_json::Value>(&env_data) {
+                    filename = env.get("filename").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    mime_type = mime_type.or_else(|| env.get("mime_type").and_then(|v| v.as_str()).map(|s| s.to_string()));
+                    if size == 0 { size = env.get("size").and_then(|v| v.as_u64()).unwrap_or(0); }
+                }
+            }
+        }
+
         files.push(FileRow {
             cid: cid_hex,
-            filename: "unknown".to_string(),
-            mime_type: "application/octet-stream".to_string(),
-            size: 0,
+            filename: filename.unwrap_or_else(|| "unnamed".to_string()),
+            mime_type: mime_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+            size,
             wall_ns: record.wall_ns,
         });
     }
