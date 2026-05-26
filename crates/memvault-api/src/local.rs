@@ -1167,18 +1167,15 @@ impl MemvaultClient for LocalClient {
         limit: usize,
         bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
-        // Require an explicit bucket.  Pre-genesis (no buckets) is the
-        // only case where None is tolerated.
-        let effective_bucket = bucket.map(|b| b.0.to_vec());
-        if effective_bucket.is_none() && !self.store.list_buckets().unwrap_or_default().is_empty() {
-            return Ok(vec![]); // no bucket specified post-genesis → empty
-        }
+        // Explicit bucket → scope to that bucket.
+        // None → scope to all accessible buckets (or unscoped pre-genesis).
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(ref bid) = effective_bucket {
-                let bucket_cids = self.store.query_by_bucket(bid, 0, limit * 10)?;
+            if let Some(bid) = bucket {
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
                 Some(bucket_cids.into_iter().collect())
             } else {
-                None // pre-genesis only
+                let all = self.accessible_bucket_cids(limit * 10)?;
+                if all.is_empty() { None } else { Some(all) }
             };
 
         let cids = if let Some((ref scope, ref label)) = tag_filter {
@@ -1539,18 +1536,15 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
-        // Require an explicit bucket.  Pre-genesis (no buckets) is the
-        // only case where None is tolerated.
-        let effective_bucket = bucket.map(|b| b.0.to_vec());
-        if effective_bucket.is_none() && !self.store.list_buckets().unwrap_or_default().is_empty() {
-            return Ok(vec![]); // no bucket specified post-genesis → empty
-        }
+        // Explicit bucket → scope to that bucket.
+        // None → scope to all accessible buckets (or unscoped pre-genesis).
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(ref bid) = effective_bucket {
-                let bucket_cids = self.store.query_by_bucket(bid, 0, limit * 10)?;
+            if let Some(bid) = bucket {
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
                 Some(bucket_cids.into_iter().collect())
             } else {
-                None // pre-genesis only
+                let all = self.accessible_bucket_cids(limit * 10)?;
+                if all.is_empty() { None } else { Some(all) }
             };
 
         let labels = self.store.query_unique_labels("entity", limit)?;
