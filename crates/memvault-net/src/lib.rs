@@ -18,7 +18,10 @@ pub mod visibility;
 
 pub use auth_proto::{AuthCodec, AuthRequest, AuthResponse, AUTH_PROTOCOL};
 pub use behaviour::MemvaultBehaviour;
-pub use block_proto::{BlockCodec, BlockEntry, BlockRequest, BlockResponse, BLOCK_PROTOCOL};
+pub use block_proto::{
+    BlockAccessToken, BlockCodec, BlockEntry, BlockRequest, BlockResponse,
+    RangeFingerprint, BLOCK_PROTOCOL,
+};
 pub use conn_state::{ConnectionRegistry, ConnectionState};
 pub use error::NetError;
 pub use federation::{FederationAnnouncement, FederationState, TrustedClusterInfo};

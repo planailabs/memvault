@@ -153,6 +153,34 @@ impl MemvaultStore {
         Ok(results)
     }
 
+    /// Compute a fingerprint over all CIDs in a time range.
+    /// Returns `(count, xor_fingerprint)` — the XOR of all CID bytes
+    /// (truncated/padded to 32 bytes) and the number of entries.
+    /// Two stores with the same set of blocks in the range will produce
+    /// the same fingerprint. Used for range-based set reconciliation.
+    pub fn range_fingerprint(
+        &self,
+        after_ns: u64,
+        before_ns: u64,
+    ) -> Result<(usize, [u8; 32]), StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TIME)?;
+        let start = keys::pack_time_key(after_ns, &[]);
+        let end = keys::pack_time_key(before_ns, &[]);
+
+        let mut xor = [0u8; 32];
+        let mut count = 0usize;
+        for entry in table.range(start.as_slice()..end.as_slice())? {
+            let (key, _) = entry?;
+            let cid = keys::unpack_time_cid(key.value())?;
+            for (i, b) in cid.iter().enumerate() {
+                if i < 32 { xor[i] ^= b; }
+            }
+            count += 1;
+        }
+        Ok((count, xor))
+    }
+
     // ── Bucket queries (added B1) ───────────────────────────────────
 
     /// Query CIDs by bucket, starting after `after_ns`, up to `limit` results.

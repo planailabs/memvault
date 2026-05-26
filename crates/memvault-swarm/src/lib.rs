@@ -11,7 +11,7 @@
 //!
 //! Used by `memctl daemon` and potentially the mac-mgmt daemon.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -19,7 +19,7 @@ use libp2p::swarm::SwarmEvent;
 use tokio::sync::mpsc;
 
 use memvault_net::{
-    BlockEntry, BlockRequest, BlockResponse, HeadAnnouncement,
+    BlockEntry, BlockRequest, BlockResponse, HeadAnnouncement, RangeFingerprint,
     StandaloneMemvaultBehaviour, StandaloneMemvaultBehaviourEvent,
 };
 use memvault_store::MemvaultStore;
@@ -62,6 +62,8 @@ pub async fn run_sync_loop(
     config: SyncConfig,
 ) {
     let mut synced_peers: HashSet<libp2p::PeerId> = HashSet::new();
+    // Track peer → cluster_id for visibility enforcement.
+    let mut peer_clusters: HashMap<libp2p::PeerId, Vec<u8>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -75,7 +77,7 @@ pub async fn run_sync_loop(
                     Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                         tracing::info!(%peer_id, "peer connected");
                         if synced_peers.insert(peer_id) {
-                            request_remote_heads(swarm, &config, peer_id);
+                            request_remote_heads(swarm, &store, &config, peer_id);
                         }
                     }
 
@@ -115,6 +117,13 @@ pub async fn run_sync_loop(
                         for addr in &info.listen_addrs {
                             swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
                         }
+                        // Extract cluster_id from the identify agent string if it
+                        // contains a hex-encoded cluster ID (convention: "memvault/<cluster_hex>").
+                        if let Some(cluster_hex) = info.agent_version.strip_prefix("memvault/") {
+                            if let Ok(cid_bytes) = hex::decode(cluster_hex) {
+                                peer_clusters.insert(peer_id, cid_bytes);
+                            }
+                        }
                         tracing::debug!(%peer_id, addrs = info.listen_addrs.len(), "identify received");
                     }
 
@@ -139,7 +148,7 @@ pub async fn run_sync_loop(
                             }
                         )
                     )) => {
-                        serve_block_request(swarm, &store, peer, channel, request);
+                        serve_block_request(swarm, &store, peer, channel, request, &config.cluster_id, &peer_clusters);
                     }
 
                     // ── Block exchange: process responses ──
@@ -209,21 +218,44 @@ pub fn head_channel() -> (mpsc::UnboundedSender<OutboundHead>, mpsc::UnboundedRe
 
 // ── Internal helpers ────────────────────────────────────────────────
 
-/// On new peer connect, send a "list heads" BlockRequest via request-response
-/// (works immediately, unlike gossipsub which needs mesh formation).
+/// Number of time windows for RBSR initial sync.
+const RBSR_WINDOWS: usize = 32;
+
+/// On new peer connect, send range fingerprints for RBSR reconciliation.
+/// The peer compares fingerprints and responds with CIDs from mismatched windows.
 fn request_remote_heads(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    store: &MemvaultStore,
     config: &SyncConfig,
     peer_id: libp2p::PeerId,
 ) {
-    let cutoff = memvault_core::wall_ns().saturating_sub(config.initial_sync_window_ns);
+    let now = memvault_core::wall_ns();
+    let cutoff = now.saturating_sub(config.initial_sync_window_ns);
+    let window_size = config.initial_sync_window_ns / RBSR_WINDOWS as u64;
+
+    let mut fingerprints = Vec::with_capacity(RBSR_WINDOWS);
+    for i in 0..RBSR_WINDOWS {
+        let start = cutoff + (i as u64) * window_size;
+        let end = if i == RBSR_WINDOWS - 1 { now + 1 } else { start + window_size };
+        let (count, xor) = store.range_fingerprint(start, end).unwrap_or((0, [0u8; 32]));
+        fingerprints.push(RangeFingerprint {
+            start_ns: start,
+            end_ns: end,
+            count: count as u32,
+            xor,
+        });
+    }
+
+    let total: u32 = fingerprints.iter().map(|f| f.count).sum();
     let request = BlockRequest {
         cids: vec![],
-        since_ns: Some(cutoff),
-        limit: Some(config.initial_sync_max_heads),
+        since_ns: None,
+        limit: None,
+        range_fingerprints: fingerprints,
+        token: None,
     };
     swarm.behaviour_mut().block_exchange.send_request(&peer_id, request);
-    tracing::debug!(%peer_id, "sent initial sync request");
+    tracing::debug!(%peer_id, windows = RBSR_WINDOWS, total_blocks = total, "sent RBSR sync request");
 }
 
 fn publish_head(
@@ -258,7 +290,7 @@ fn handle_gossip_message(
                 tracing::debug!(cid = %hex::encode(&ann.cid), %source, "missing block from gossip");
                 swarm.behaviour_mut().block_exchange.send_request(
                     &source,
-                    BlockRequest { cids: vec![ann.cid], since_ns: None, limit: None },
+                    BlockRequest { cids: vec![ann.cid], since_ns: None, limit: None, range_fingerprints: vec![], token: None },
                 );
             }
         }
@@ -267,8 +299,10 @@ fn handle_gossip_message(
     }
 }
 
-/// Serve a block exchange request. Two modes:
+/// Serve a block exchange request. Three modes:
 /// - **Fetch** (cids non-empty): return block data for each CID.
+/// - **RBSR** (range_fingerprints non-empty): compare fingerprints, return
+///   CIDs from mismatched windows (bandwidth ∝ diff, not total set size).
 /// - **List heads** (cids empty, since_ns set): return recent CIDs (no data).
 fn serve_block_request(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
@@ -276,18 +310,53 @@ fn serve_block_request(
     peer: libp2p::PeerId,
     channel: libp2p::request_response::ResponseChannel<BlockResponse>,
     request: BlockRequest,
+    cluster_id: &[u8],
+    peer_clusters: &std::collections::HashMap<libp2p::PeerId, Vec<u8>>,
 ) {
+    let peer_cluster = peer_clusters.get(&peer);
+    let is_local = peer_cluster.map(|c| c == cluster_id).unwrap_or(false);
+
     let entries = if !request.cids.is_empty() {
-        // Fetch mode: return block data.
+        // Fetch mode: return block data, with visibility check.
         tracing::debug!(%peer, cids = request.cids.len(), "block fetch request");
         request.cids.iter().map(|cid| {
             match store.get_block(cid) {
-                Ok(Some(data)) => BlockEntry { cid: cid.clone(), data, found: true },
+                Ok(Some(data)) => {
+                    // Visibility enforcement: check bucket access.
+                    if !is_local && !check_block_access(store, cid, &data, &request.token) {
+                        tracing::debug!(%peer, cid = %hex::encode(cid), "block access denied");
+                        BlockEntry { cid: cid.clone(), data: vec![], found: false }
+                    } else {
+                        BlockEntry { cid: cid.clone(), data, found: true }
+                    }
+                }
                 _ => BlockEntry { cid: cid.clone(), data: vec![], found: false },
             }
         }).collect()
+    } else if !request.range_fingerprints.is_empty() {
+        // RBSR mode: compare fingerprints, return CIDs from mismatched windows.
+        let mut diff_cids = Vec::new();
+        let mut matched = 0usize;
+        let mut mismatched = 0usize;
+        for rf in &request.range_fingerprints {
+            let (local_count, local_xor) = store.range_fingerprint(rf.start_ns, rf.end_ns)
+                .unwrap_or((0, [0u8; 32]));
+            if local_count as u32 == rf.count && local_xor == rf.xor {
+                matched += 1;
+                continue; // Same data in this window.
+            }
+            mismatched += 1;
+            // Return our CIDs from this window so the requester can diff.
+            if let Ok(cids) = store.query_by_time(rf.start_ns, rf.end_ns, 1000) {
+                for cid in cids {
+                    diff_cids.push(BlockEntry { cid, data: vec![], found: true });
+                }
+            }
+        }
+        tracing::debug!(%peer, matched, mismatched, diff = diff_cids.len(), "RBSR response");
+        diff_cids
     } else if let Some(since_ns) = request.since_ns {
-        // List-heads mode: return recent CIDs without data.
+        // List-heads fallback.
         let limit = request.limit.unwrap_or(500);
         tracing::debug!(%peer, since_ns, limit, "list-heads request");
         match store.query_by_time(since_ns, u64::MAX, limit) {
@@ -309,6 +378,63 @@ fn serve_block_request(
         .behaviour_mut()
         .block_exchange
         .send_response(channel, BlockResponse { blocks: entries });
+}
+
+/// Check whether a block should be served to a remote peer.
+/// For local cluster peers, always allow. For remote peers, check
+/// bucket visibility and BAT.
+fn check_block_access(
+    store: &MemvaultStore,
+    _cid: &[u8],
+    block_data: &[u8],
+    token: &Option<memvault_net::BlockAccessToken>,
+) -> bool {
+    // Parse the block to check if it has a bucket_id.
+    let val: serde_json::Value = match serde_json::from_slice(block_data) {
+        Ok(v) => v,
+        Err(_) => return true, // Non-JSON blocks (raw file chunks) are allowed.
+    };
+
+    // Check if the block belongs to a private bucket.
+    let bucket_id = val.get("bucket_id")
+        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+
+    let bucket_id = match bucket_id {
+        Some(bid) => bid,
+        None => return true, // No bucket association → public.
+    };
+
+    // If a BAT is provided and matches this bucket, allow.
+    if let Some(bat) = token {
+        if bat.bucket_id.as_slice() == bucket_id.as_slice() {
+            // BAT signature verification requires the admin key, which
+            // we'd need to look up. For now, check structural validity.
+            // Full verification requires the store to hold the issuer's
+            // public key — look up from BUCKET_TRUST or admin key.
+            if !bat.signature.is_empty() && bat.not_after_ns >= memvault_core::wall_ns() {
+                return true;
+            }
+        }
+    }
+
+    // No valid BAT → check if bucket is private.
+    // A private bucket has `private_to_peer` set in its decl.
+    if let Ok(Some(decl_cid)) = store.get_bucket(&bucket_id) {
+        if let Ok(Some(decl_data)) = store.get_block(&decl_cid) {
+            if let Ok(decl) = serde_json::from_slice::<serde_json::Value>(&decl_data) {
+                // Check both envelope format and legacy raw decl.
+                let ptp = decl.get("payload")
+                    .and_then(|p| p.get("BucketCreate"))
+                    .and_then(|bc| bc.get("private_to_peer"))
+                    .or_else(|| decl.get("private_to_peer"));
+                if ptp.is_some() && !ptp.unwrap().is_null() {
+                    return false; // Private bucket, no valid BAT.
+                }
+            }
+        }
+    }
+
+    true // Attached bucket, allow.
 }
 
 /// Handle a block exchange response. Two cases:
@@ -358,7 +484,7 @@ fn handle_block_response(
         tracing::info!(%peer, missing = missing_cids.len(), "requesting missing blocks from peer");
         swarm.behaviour_mut().block_exchange.send_request(
             &peer,
-            BlockRequest { cids: missing_cids, since_ns: None, limit: None },
+            BlockRequest { cids: missing_cids, since_ns: None, limit: None, range_fingerprints: vec![], token: None },
         );
     }
 }

@@ -483,7 +483,7 @@ async fn block_exchange_request_response() {
     // A requests blocks from B
     let request = memvault_net::BlockRequest {
         cids: vec![vec![1, 2, 3], vec![4, 5, 6]],
-        since_ns: None, limit: None,
+        since_ns: None, limit: None, range_fingerprints: vec![], token: None,
     };
     swarm_a.behaviour_mut().block_exchange.send_request(&peer_b, request);
 
@@ -556,7 +556,7 @@ async fn block_exchange_large_block() {
     // Request a single large block (1 MiB)
     let large_data = vec![0xABu8; 1024 * 1024];
     let request = memvault_net::BlockRequest {
-        cids: vec![vec![42; 32]], since_ns: None, limit: None,
+        cids: vec![vec![42; 32]], since_ns: None, limit: None, range_fingerprints: vec![], token: None,
     };
     swarm_a.behaviour_mut().block_exchange.send_request(&peer_b, request);
 
@@ -700,7 +700,7 @@ fn head_announcement_serialization_roundtrip() {
 #[test]
 fn block_request_response_serialization_roundtrip() {
     let req = memvault_net::BlockRequest {
-        cids: vec![vec![1; 32], vec![2; 32], vec![3; 32]], since_ns: None, limit: None,
+        cids: vec![vec![1; 32], vec![2; 32], vec![3; 32]], since_ns: None, limit: None, range_fingerprints: vec![], token: None,
     };
     let bytes = serde_ipld_dagcbor::to_vec(&req).unwrap();
     let decoded: memvault_net::BlockRequest =

@@ -15,5 +15,6 @@ tracing = "0.1"
 thiserror = "2"
 async-trait = "0.1"
 hex = "0.4"
+ed25519-dalek = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
