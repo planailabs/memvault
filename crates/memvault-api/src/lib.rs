@@ -61,14 +61,15 @@ impl ClientArgs {
                 std::fs::create_dir_all(parent)?;
             }
             let store = Arc::new(MemvaultStore::open(db_path)?);
-            let client = LocalClient::new(
+            let client = LocalClient::open(
                 store,
                 Arc::new(RwLock::new(TextIndex::new())),
                 Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
                 Arc::new(EventBus::new(64)),
                 vec![0u8; 32],
                 vec![0u8; 32],
-            );
+            )
+            .await?;
             Ok(Box::new(client))
         } else {
             let token = self
@@ -109,14 +110,15 @@ pub async fn connect(
             std::fs::create_dir_all(parent)?;
         }
         let store = Arc::new(MemvaultStore::open(db_path)?);
-        let client = LocalClient::new(
+        let client = LocalClient::open(
             store,
             Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
             Arc::new(EventBus::new(64)),
             vec![0u8; 32],
             vec![0u8; 32],
-        );
+        )
+        .await?;
         Ok(Box::new(client))
     } else {
         let url = opts

@@ -103,6 +103,24 @@ impl LocalClient {
         client
     }
 
+    /// Create a LocalClient and run a blockstore rebuild if the version
+    /// is outdated.  This is the recommended entry point — use `new()`
+    /// only when you need to skip the rebuild (e.g. tests).
+    pub async fn open(
+        store: Arc<MemvaultStore>,
+        index: Arc<RwLock<TextIndex>>,
+        quotas: Arc<RwLock<QuotaManager>>,
+        event_bus: Arc<EventBus>,
+        peer_id: Vec<u8>,
+        cluster_id: Vec<u8>,
+    ) -> Result<Self> {
+        let client = Self::new(store, index, quotas, event_bus, peer_id, cluster_id);
+        if let Err(e) = client.rebuild_if_needed().await {
+            tracing::warn!("blockstore rebuild error on open: {e}");
+        }
+        Ok(client)
+    }
+
     /// Set the admin signing key (enables real token issuance).
     pub fn set_admin_signing_key(&mut self, key: ed25519_dalek::SigningKey) {
         self.admin_signing_key = Some(key);
