@@ -673,9 +673,23 @@ impl LocalClient {
         ))
     }
 
-    /// The legacy bucket for adoption of pre-bucket data.
-    /// Only for use by migrations and repair-index.
+    /// Find the legacy bucket (BucketRole::Legacy) for adoption of
+    /// pre-bucket data.  Falls back to the CLUSTER_DEFAULT_BUCKET table
+    /// for stores that predate the Legacy role.
     pub fn legacy_bucket_id(&self) -> Option<BucketId> {
+        // Prefer a bucket with BucketRole::Legacy.
+        if let Ok(buckets) = self.store.list_buckets() {
+            for (bucket_id_bytes, decl_cid) in &buckets {
+                if let Ok(Some(block)) = self.store.get_block(decl_cid) {
+                    if let Some(decl) = Self::parse_bucket_decl(&block) {
+                        if decl.role == memvault_doc::BucketRole::Legacy {
+                            return Some(decl.bucket_id);
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: old CLUSTER_DEFAULT_BUCKET table.
         if self.cluster_id.iter().any(|&b| b != 0) {
             if let Ok(Some(bytes)) = self.store.get_default_bucket(&self.cluster_id) {
                 if bytes.len() == 32 {

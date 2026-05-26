@@ -164,16 +164,43 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     }
 
     // ── Phase 3: Adopt unbucketed locally-authored data ────────────────
+    //
+    // Find or create a BucketRole::Legacy bucket for adoption.  Only
+    // created when there's actually unbucketed data to adopt.
 
-    let legacy_bucket = client
-        .legacy_bucket_id()
-        .unwrap_or(BucketId([0u8; 32]));
+    let entities = client.list_entities_unscoped(50_000).await?;
+    let doc_ids = client.list_doc_ids_unscoped(50_000).await?;
+
+    // Lazily resolve or create the legacy bucket on first actual adoption.
+    let mut legacy_bucket: Option<BucketId> = client.legacy_bucket_id();
+
+    /// Ensure a Legacy-role bucket exists, creating one if needed.
+    async fn ensure_legacy_bucket(
+        client: &LocalClient,
+        cached: &mut Option<BucketId>,
+    ) -> Result<BucketId> {
+        if let Some(b) = cached.clone() {
+            return Ok(b);
+        }
+        let bid = client
+            .bucket_create(
+                "legacy",
+                Some("auto-created for adoption of pre-bucket data"),
+                memvault_core::Visibility::Internal,
+                memvault_core::classification::Classification::Internal,
+                memvault_doc::BucketRole::Legacy,
+            )
+            .await?;
+        tracing::info!(bucket = %bid, "created legacy bucket for adoption");
+        *cached = Some(bid.clone());
+        Ok(bid)
+    }
 
     // 3a: Adopt entities
-    let entities = client.list_entities_unscoped(50_000).await?;
     for entity in &entities {
+        let bucket = ensure_legacy_bucket(client, &mut legacy_bucket).await?;
         if client
-            .adopt_entity_into_bucket(&entity.id, &legacy_bucket)
+            .adopt_entity_into_bucket(&entity.id, &bucket)
             .await?
         {
             report.entities_adopted += 1;
@@ -181,10 +208,10 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     }
 
     // 3b: Adopt docs
-    let doc_ids = client.list_doc_ids_unscoped(50_000).await?;
     for doc_id in &doc_ids {
+        let bucket = ensure_legacy_bucket(client, &mut legacy_bucket).await?;
         if client
-            .adopt_doc_into_bucket(doc_id, &legacy_bucket)
+            .adopt_doc_into_bucket(doc_id, &bucket)
             .await?
         {
             report.docs_adopted += 1;
@@ -193,7 +220,8 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
 
     // 3c: Adopt VFS nodes
     {
-        let bucket_hex = hex::encode(legacy_bucket.0);
+        let bucket = ensure_legacy_bucket(client, &mut legacy_bucket).await?;
+        let bucket_hex = hex::encode(bucket.0);
         let mut bucketed_root_exists = false;
         let mut unbucketed_roots: Vec<[u8; 32]> = Vec::new();
 
