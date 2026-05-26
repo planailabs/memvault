@@ -1094,7 +1094,7 @@ mod native {
                 {
                     let default_bucket = memvault_api::vfs::default_bucket(&client).await;
                     let bucket_hex = hex::encode(default_bucket.0);
-                    let entities = client.list_entities(10_000, None).await?;
+                    let entities = client.list_entities_unscoped(10_000).await?;
                     let mut adopted = 0usize;
                     let mut retracted_dupes = 0usize;
 
@@ -1135,38 +1135,56 @@ mod native {
                                 }
                             }
                         } else {
-                            // No bucketed root — adopt the first unbucketed root into the default bucket.
-                            let adopt_id = unbucketed_roots[0];
-                            let node_id = format!("entity:{}", hex::encode(adopt_id));
-                            client
-                                .add_tags(&node_id, vec![("bucket".into(), bucket_hex.clone())])
-                                .await?;
-                            adopted += 1;
-                            println!(
-                                "  Adopted VFS root {} into bucket {}",
-                                &node_id[..24],
-                                &bucket_hex[..8]
-                            );
-
-                            // Retract any remaining unbucketed roots.
-                            for root_id in &unbucketed_roots[1..] {
-                                let dup_id = format!("entity:{}", hex::encode(root_id));
-                                if client
-                                    .retract_node(&dup_id, "duplicate dangling VFS root")
-                                    .await
-                                    .is_ok()
-                                {
-                                    retracted_dupes += 1;
-                                    println!("  Retracted duplicate VFS root {}", &dup_id[..24]);
+                            // No bucketed root — adopt the first locally-authored
+                            // unbucketed root into the default bucket. Skip roots
+                            // from remote peers; they should be adopted by their
+                            // originating node.
+                            let mut did_adopt = false;
+                            for root_id in &unbucketed_roots {
+                                let eid = memvault_core::EntityId(*root_id);
+                                if !did_adopt && client.entity_has_local_author(&eid) {
+                                    let node_id = format!("entity:{}", hex::encode(root_id));
+                                    client
+                                        .add_tags(
+                                            &node_id,
+                                            vec![("bucket".into(), bucket_hex.clone())],
+                                        )
+                                        .await?;
+                                    adopted += 1;
+                                    did_adopt = true;
+                                    println!(
+                                        "  Adopted VFS root {} into bucket {}",
+                                        &node_id[..24],
+                                        &bucket_hex[..8]
+                                    );
+                                } else if did_adopt {
+                                    // Retract remaining unbucketed roots after adoption.
+                                    let dup_id = format!("entity:{}", hex::encode(root_id));
+                                    if client
+                                        .retract_node(&dup_id, "duplicate dangling VFS root")
+                                        .await
+                                        .is_ok()
+                                    {
+                                        retracted_dupes += 1;
+                                        println!(
+                                            "  Retracted duplicate VFS root {}",
+                                            &dup_id[..24]
+                                        );
+                                    }
                                 }
+                                // else: remote-authored root without a local adoption yet — skip
                             }
                         }
                     }
 
-                    // Tag all VFS dir entities (not just roots) with the default bucket
-                    // if they don't have a bucket tag yet.
+                    // Tag all locally-authored VFS dir entities (not just roots)
+                    // with the default bucket if they don't have a bucket tag yet.
+                    // Remote-authored dirs are left for their originating node.
                     for e in &entities {
                         if e.kind != memvault_api::vfs::VFS_DIR_KIND {
+                            continue;
+                        }
+                        if !client.entity_has_local_author(&e.id) {
                             continue;
                         }
                         let node_id = format!("entity:{}", hex::encode(e.id.0));
@@ -1199,7 +1217,7 @@ mod native {
                 println!("Phase 3c: Adopting legacy unbucketed entities into default bucket...");
                 {
                     let default_bucket = memvault_api::vfs::default_bucket(&client).await;
-                    let entities = client.list_entities(10_000, None).await?;
+                    let entities = client.list_entities_unscoped(10_000).await?;
                     let mut adopted = 0usize;
                     let mut skipped = 0usize;
 
@@ -2368,7 +2386,7 @@ mod native {
         use memvault_core::{EdgeId, NodeRef};
         use std::collections::HashSet;
 
-        let entities = client.list_entities(10_000, None).await?;
+        let entities = client.list_entities_unscoped(10_000).await?;
         let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
         for e in &entities {
             if e.kind == VFS_DIR_KIND {

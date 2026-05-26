@@ -225,6 +225,10 @@ impl LocalClient {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&id_bytes);
             let doc_id = DocId(arr);
+            // Skip docs without a bucket — they are unbucketed foreign data.
+            if self.inferred_doc_bucket(&doc_id).is_none() {
+                continue;
+            }
             if let Ok(Some(doc)) = self.get_doc(&doc_id).await {
                 let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
                 // Recover creation-time tags from the envelope metadata.
@@ -248,6 +252,10 @@ impl LocalClient {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&id_bytes);
             let eid = EntityId(arr);
+            // Skip entities without a bucket — they are unbucketed foreign data.
+            if self.inferred_entity_bucket(&eid).is_none() {
+                continue;
+            }
             if let Ok(Some(entity)) = self.get_entity(&eid).await {
                 let creation_tags = self.extract_creation_tags("entity", label);
                 let mut idx = self.index.write().await;
@@ -264,6 +272,10 @@ impl LocalClient {
         for (_, data) in &blocks {
             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
                 if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                    // Skip attachments without a bucket.
+                    if val.get("bucket_id").and_then(|v| v.as_array()).is_none() {
+                        continue;
+                    }
                     let manifest_cid = val
                         .get("manifest_cid")
                         .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
@@ -625,6 +637,12 @@ impl LocalClient {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
+    fn author_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
+        let val: serde_json::Value = serde_json::from_slice(data).ok()?;
+        val.get("author")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
     fn latest_bucket_from_cids(&self, cids: &[Vec<u8>]) -> Option<Vec<u8>> {
         let mut bucket_id = None;
         for cid in cids {
@@ -650,6 +668,31 @@ impl LocalClient {
             .query_by_tag("entity", &label, 0, usize::MAX)
             .ok()?;
         self.latest_bucket_from_cids(&cids)
+    }
+
+    /// Returns true if at least one block in `cids` was authored by the local peer.
+    fn has_local_author(&self, cids: &[Vec<u8>]) -> bool {
+        let local = self.effective_author();
+        for cid in cids {
+            if let Ok(Some(data)) = self.store.get_block(cid) {
+                if let Some(author) = Self::author_from_envelope_bytes(&data) {
+                    if author == local {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns true if at least one block for this entity was authored locally.
+    pub fn entity_has_local_author(&self, id: &EntityId) -> bool {
+        let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let cids = self
+            .store
+            .query_by_tag("entity", &label, 0, usize::MAX)
+            .unwrap_or_default();
+        self.has_local_author(&cids)
     }
 
     fn inferred_attachment_bucket(&self, manifest_cid: &[u8]) -> Option<Vec<u8>> {
@@ -738,12 +781,38 @@ impl LocalClient {
         ("doc".to_string(), label)
     }
 
+    /// List entities without bucket scoping.  Used only by repair-index
+    /// which needs to see unbucketed items for adoption.
+    pub async fn list_entities_unscoped(&self, limit: usize) -> Result<Vec<Entity>> {
+        let labels = self.store.query_unique_labels("entity", limit)?;
+        let mut entities = Vec::new();
+        for label in labels {
+            let id_bytes = hex::decode(&label).unwrap_or_default();
+            if id_bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let entity_id = EntityId(arr);
+            if let Ok(Some(entity)) = self.get_entity(&entity_id).await {
+                entities.push(entity);
+            }
+        }
+        Ok(entities)
+    }
+
     pub async fn adopt_entity_into_bucket(
         &self,
         entity_id: &EntityId,
         bucket: &BucketId,
     ) -> Result<bool> {
         if self.inferred_entity_bucket(entity_id).is_some() {
+            return Ok(false);
+        }
+
+        // Only adopt entities that have at least one locally-authored block.
+        // Remote-authored entities should be adopted by their originating node.
+        if !self.entity_has_local_author(entity_id) {
             return Ok(false);
         }
 
@@ -871,13 +940,17 @@ impl MemvaultClient for LocalClient {
         limit: usize,
         bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
-        // When a bucket filter is active, restrict to CIDs in that bucket.
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
-            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
-            Some(bucket_cids.into_iter().collect())
-        } else {
-            None
-        };
+        // Always scope to a bucket.  Explicit > default > pre-genesis (None).
+        let effective_bucket = bucket
+            .map(|b| b.0.to_vec())
+            .or_else(|| self.resolve_bucket(None));
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
+            if let Some(ref bid) = effective_bucket {
+                let bucket_cids = self.store.query_by_bucket(bid, 0, limit * 10)?;
+                Some(bucket_cids.into_iter().collect())
+            } else {
+                None // pre-genesis only
+            };
 
         let cids = if let Some((ref scope, ref label)) = tag_filter {
             self.store.query_by_tag(scope, label, 0, limit * 5)?
@@ -1237,12 +1310,17 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
-            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
-            Some(bucket_cids.into_iter().collect())
-        } else {
-            None
-        };
+        // Always scope to a bucket.  Explicit > default > pre-genesis (None).
+        let effective_bucket = bucket
+            .map(|b| b.0.to_vec())
+            .or_else(|| self.resolve_bucket(None));
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
+            if let Some(ref bid) = effective_bucket {
+                let bucket_cids = self.store.query_by_bucket(bid, 0, limit * 10)?;
+                Some(bucket_cids.into_iter().collect())
+            } else {
+                None // pre-genesis only
+            };
 
         let labels = self.store.query_unique_labels("entity", limit)?;
         let mut entities = Vec::new();
@@ -1414,7 +1492,31 @@ impl MemvaultClient for LocalClient {
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let idx = self.index.read().await;
-        Ok(idx.search(query, limit))
+        let hits = idx.search(query, limit * 2);
+        drop(idx);
+        // Post-filter: only return hits whose doc belongs to the active bucket.
+        if let Some(bucket_bytes) = self.resolve_bucket(None) {
+            let bucket_cids: std::collections::HashSet<Vec<u8>> = self
+                .store
+                .query_by_bucket(&bucket_bytes, 0, limit * 20)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            Ok(hits
+                .into_iter()
+                .filter(|h| {
+                    let (_, label) = Self::doc_tag(&h.doc_id);
+                    self.store
+                        .query_by_tag("doc", &label, 0, 10)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|c| bucket_cids.contains(c))
+                })
+                .take(limit)
+                .collect())
+        } else {
+            Ok(hits.into_iter().take(limit).collect()) // pre-genesis
+        }
     }
 
     async fn search_unified(
@@ -1423,7 +1525,22 @@ impl MemvaultClient for LocalClient {
         limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
         let idx = self.index.read().await;
-        Ok(idx.search_unified(query, limit))
+        let hits = idx.search_unified(query, limit * 2);
+        drop(idx);
+        // Post-filter: only return hits whose node belongs to the active bucket.
+        if let Some(bucket_bytes) = self.resolve_bucket(None) {
+            Ok(hits
+                .into_iter()
+                .filter(|h| {
+                    self.inferred_bucket_for_node_id(&h.node_id)
+                        .map(|b| b == bucket_bytes)
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .collect())
+        } else {
+            Ok(hits.into_iter().take(limit).collect()) // pre-genesis
+        }
     }
 
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
@@ -1450,7 +1567,22 @@ impl MemvaultClient for LocalClient {
             None
         };
         let idx = self.index.read().await;
-        Ok(idx.list_all(view_tags.as_deref(), limit))
+        let all = idx.list_all(view_tags.as_deref(), limit * 2);
+        drop(idx);
+        // Post-filter: only return nodes belonging to the active bucket.
+        if let Some(bucket_bytes) = self.resolve_bucket(None) {
+            Ok(all
+                .into_iter()
+                .filter(|(node_id, _, _, _)| {
+                    self.inferred_bucket_for_node_id(node_id)
+                        .map(|b| b == bucket_bytes)
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .collect())
+        } else {
+            Ok(all.into_iter().take(limit).collect()) // pre-genesis
+        }
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {

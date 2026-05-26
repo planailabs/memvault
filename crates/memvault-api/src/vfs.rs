@@ -29,7 +29,7 @@ pub async fn default_bucket(client: &dyn MemvaultClient) -> BucketId {
 /// Creates a new root if none exists for this bucket.
 pub async fn ensure_root(client: &dyn MemvaultClient, bucket_id: &BucketId) -> Result<EntityId> {
     let bucket_hex = hex::encode(bucket_id.0);
-    let entities = client.list_entities(500, None).await?;
+    let entities = client.list_entities(500, Some(bucket_id)).await?;
     let mut candidates: Vec<[u8; 32]> = Vec::new();
 
     for e in &entities {
