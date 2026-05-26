@@ -49,5 +49,5 @@ fi
 if command -v diffoscope &>/dev/null; then
     echo ""
     echo "Running diffoscope..."
-    diffoscope "$DIR_A" "$DIR_B" || true
+    diffoscope --exclude-directory-metadata=yes "$DIR_A" "$DIR_B" || true
 fi
