@@ -2,20 +2,24 @@
 
 use redb::ReadableTable;
 
-/// Deserialize block bytes as a JSON Value — tries DAG-CBOR first (new
-/// format), falls back to JSON (legacy).  Returns None for non-envelope data.
+/// Deserialize block bytes as a JSON Value.  Detects format by first
+/// byte: `{` (0x7B) → JSON, otherwise → DAG-CBOR.
 pub fn deserialize_block(data: &[u8]) -> Option<serde_json::Value> {
-    serde_ipld_dagcbor::from_slice(data)
-        .ok()
-        .or_else(|| serde_json::from_slice(data).ok())
+    if data.first() == Some(&b'{') {
+        serde_json::from_slice(data).ok()
+    } else {
+        serde_ipld_dagcbor::from_slice(data).ok()
+    }
 }
 
-/// Deserialize block bytes into a typed struct — tries DAG-CBOR first,
-/// falls back to JSON.
+/// Deserialize block bytes into a typed struct.  Same detection as
+/// [`deserialize_block`].
 pub fn deserialize_block_as<T: serde::de::DeserializeOwned>(data: &[u8]) -> Option<T> {
-    serde_ipld_dagcbor::from_slice(data)
-        .ok()
-        .or_else(|| serde_json::from_slice(data).ok())
+    if data.first() == Some(&b'{') {
+        serde_json::from_slice(data).ok()
+    } else {
+        serde_ipld_dagcbor::from_slice(data).ok()
+    }
 }
 
 use crate::MemvaultStore;
@@ -88,14 +92,10 @@ impl MemvaultStore {
         cid_bytes: &[u8],
         envelope_bytes: &[u8],
     ) -> Result<bool, StoreError> {
-        let val: serde_json::Value =
-            match serde_ipld_dagcbor::from_slice(envelope_bytes) {
-                Ok(v) => v,
-                Err(_) => match serde_json::from_slice(envelope_bytes) {
-                    Ok(v) => v,
-                    Err(_) => return Ok(false), // not an envelope, skip
-                },
-            };
+        let val: serde_json::Value = match deserialize_block(envelope_bytes) {
+            Some(v) => v,
+            None => return Ok(false), // not an envelope, skip
+        };
 
         // Extract envelope metadata
         let author: Vec<u8> = val
