@@ -2,18 +2,18 @@
 //!
 //! Renders HTML inside an iframe with sandboxing to prevent XSS while
 //! allowing JavaScript for dynamic content. Auto-resizes to fit content.
+//! Inherits the parent page's stylesheets and dark/light theme.
 
 use dioxus::prelude::*;
 
 /// Renders HTML content inside a sandboxed iframe.
 ///
-/// The iframe uses:
-/// - `sandbox="allow-scripts"` — permits JS but blocks forms, popups, top-nav,
-///   and treats the iframe as a unique origin (no parent cookie/storage access)
-/// - `srcdoc` — injects content without a network request
-/// - `csp` meta tag — blocks external resources, inline event handlers
-/// - Transparent background — inherits parent theme
-/// - Auto-resizes height to fit content via postMessage from the iframe
+/// Features:
+/// - `sandbox="allow-scripts"` — JS for resize/theme, no forms/popups/nav
+/// - Inherits parent stylesheets via postMessage injection
+/// - Syncs dark/light/auto theme from parent via postMessage
+/// - Transparent background — inherits parent theme colors
+/// - Auto-resizes height to fit content
 #[component]
 pub fn SandboxedContent(html: String, #[props(default)] class: String) -> Element {
     let iframe_id = use_signal(|| format!("sandbox-{}", rand_id()));
@@ -23,9 +23,6 @@ pub fn SandboxedContent(html: String, #[props(default)] class: String) -> Elemen
         div { class: "sandboxed-content-wrapper {class}",
             iframe {
                 id: "{iframe_id.read()}",
-                // allow-scripts: needed for content JS and auto-resize.
-                // Everything else stays blocked: no forms, no popups,
-                // no top-navigation, unique origin.
                 "sandbox": "allow-scripts",
                 srcdoc: "{srcdoc}",
                 name: "__sandboxed_content",
@@ -35,11 +32,9 @@ pub fn SandboxedContent(html: String, #[props(default)] class: String) -> Elemen
                 referrerpolicy: "no-referrer",
                 "loading": "lazy",
             }
-            // Parent-side listener that resizes the iframe when the
-            // content posts its height.
             script {
                 r#type: "module",
-                dangerous_inner_html: resize_script(&iframe_id.read()),
+                dangerous_inner_html: parent_script(&iframe_id.read()),
             }
         }
     }
@@ -52,19 +47,59 @@ fn rand_id() -> String {
     format!("{n:08x}")
 }
 
-fn resize_script(iframe_id: &str) -> String {
+/// Parent-side script: handles resize messages AND pushes stylesheets + theme
+/// into the iframe once it's loaded.
+fn parent_script(iframe_id: &str) -> String {
     format!(
         r#"
-        (function() {{
-            const iframe = document.getElementById("{iframe_id}");
-            if (!iframe) return;
-            window.addEventListener("message", function(e) {{
-                if (e.data && e.data.type === "sandboxResize" && e.data.id === "{iframe_id}") {{
-                    iframe.style.height = e.data.height + "px";
-                }}
-            }});
-        }})();
-        "#
+(function() {{
+  const iframe = document.getElementById("{iframe_id}");
+  if (!iframe) return;
+
+  // Handle resize messages from iframe.
+  window.addEventListener("message", function(e) {{
+    if (e.data && e.data.type === "sandboxResize" && e.data.id === "{iframe_id}") {{
+      iframe.style.height = e.data.height + "px";
+    }}
+  }});
+
+  // Collect parent stylesheets and current theme, push to iframe.
+  function pushTheme() {{
+    if (!iframe.contentWindow) return;
+    var sheets = [];
+    document.querySelectorAll('link[rel="stylesheet"]').forEach(function(l) {{
+      if (l.href) sheets.push(l.href);
+    }});
+    // Detect theme: check html data-theme, class, or prefers-color-scheme.
+    var html = document.documentElement;
+    var theme = html.getAttribute("data-theme")
+      || (html.classList.contains("dark") ? "dark" : "")
+      || (html.classList.contains("light") ? "light" : "");
+    if (!theme) {{
+      theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }}
+    iframe.contentWindow.postMessage({{
+      type: "themeSync",
+      stylesheets: sheets,
+      theme: theme,
+      classes: html.className
+    }}, "*");
+  }}
+
+  // Push after iframe loads.
+  iframe.addEventListener("load", function() {{
+    setTimeout(pushTheme, 50);
+  }});
+  // Also push immediately in case it's already loaded.
+  setTimeout(pushTheme, 100);
+
+  // Re-push when parent theme changes.
+  var observer = new MutationObserver(function() {{ pushTheme(); }});
+  observer.observe(document.documentElement, {{ attributes: true, attributeFilter: ["class", "data-theme"] }});
+  // Also watch prefers-color-scheme.
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", pushTheme);
+}})();
+"#
     )
 }
 
@@ -79,7 +114,7 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
 <html>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' * 'self'; img-src data: blob:; font-src data: *;">
 <style>
   *, *::before, *::after {{ box-sizing: border-box; }}
   html, body {{
@@ -113,22 +148,51 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
 </head>
 <body>{escaped_html}
 <script>
-// Auto-resize: post height to parent so it can size the iframe.
 (function() {{
   var id = "{id}";
-  function post() {{
+  var stylesInjected = false;
+
+  // Auto-resize: post height to parent.
+  function postHeight() {{
     var h = document.documentElement.scrollHeight;
     parent.postMessage({{ type: "sandboxResize", id: id, height: h }}, "*");
   }}
-  // Post on load.
-  post();
-  // Re-post on any resize (images loading, dynamic content).
+  postHeight();
   if (typeof ResizeObserver !== "undefined") {{
-    new ResizeObserver(post).observe(document.body);
+    new ResizeObserver(postHeight).observe(document.body);
   }}
-  // Also post after a short delay for late-rendering content.
-  setTimeout(post, 200);
-  setTimeout(post, 1000);
+  setTimeout(postHeight, 200);
+  setTimeout(postHeight, 1000);
+
+  // Listen for theme sync from parent.
+  window.addEventListener("message", function(e) {{
+    if (!e.data || e.data.type !== "themeSync") return;
+
+    // Inject parent stylesheets (once).
+    if (!stylesInjected && e.data.stylesheets) {{
+      e.data.stylesheets.forEach(function(href) {{
+        var link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = href;
+        document.head.appendChild(link);
+      }});
+      stylesInjected = true;
+      // Re-measure after stylesheets load.
+      setTimeout(postHeight, 300);
+      setTimeout(postHeight, 1000);
+    }}
+
+    // Apply theme classes and data-theme.
+    if (e.data.theme) {{
+      document.documentElement.setAttribute("data-theme", e.data.theme);
+    }}
+    if (e.data.classes) {{
+      document.documentElement.className = e.data.classes;
+    }}
+
+    // Re-measure after theme change.
+    setTimeout(postHeight, 100);
+  }});
 }})();
 </script>
 </body>
