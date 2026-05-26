@@ -407,6 +407,12 @@ impl LocalClient {
     ) -> Result<()> {
         let tags = vec![("_ann".to_string(), target.to_string())];
         let bucket_id = self.inferred_bucket_for_node_id(target);
+
+        // Skip annotations for non-bucketed targets (legacy data).
+        if bucket_id.is_none() && !self.store.list_buckets().unwrap_or_default().is_empty() {
+            return Ok(());
+        }
+
         let wall_ns = memvault_core::wall_ns();
         let block = serde_json::json!({
             "kind": "annotation",
@@ -418,8 +424,8 @@ impl LocalClient {
             "cluster_id": self.cluster_id.clone(),
             "bucket_id": bucket_id.clone(),
         });
-        let block_bytes =
-            serde_json::to_vec(&block).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let block_bytes = serde_ipld_dagcbor::to_vec(&block)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&block_bytes);
         let meta = EnvelopeMeta {
             author: self.effective_author(),
