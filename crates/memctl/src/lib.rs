@@ -990,77 +990,23 @@ mod native {
                     println!("  Migrated {migrated} envelope(s) to content-addressed CIDs");
                 }
 
-                // Phase 1: Rebuild store secondary indexes
-                println!("Phase 1: Clearing secondary index tables...");
-                store.clear_secondary_indexes()?;
-
-                println!("Phase 1: Scanning blocks and rebuilding store indexes...");
-                let blocks = store.iter_blocks()?;
-                let total_blocks = blocks.len();
-                let mut indexed_envelopes = 0usize;
-                for (cid, data) in &blocks {
-                    if store.reindex_block(cid, data)? {
-                        indexed_envelopes += 1;
-                    }
-                }
-                println!(
-                    "  {indexed_envelopes}/{total_blocks} blocks re-indexed into store tables"
-                );
-
-                // Phase 1b: Rebuild BUCKETS table from BucketDecl blocks
-                println!("Phase 1b: Rebuilding bucket metadata from blocks...");
-                let mut bucket_count = 0usize;
-                for (cid, data) in &blocks {
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
-                        // Check if this block has a kind:bucket-decl tag
-                        let is_bucket_decl = val
-                            .get("tags")
-                            .and_then(|v| v.as_array())
-                            .map(|tags| {
-                                tags.iter().any(|t| {
-                                    if let Some(arr) = t.as_array() {
-                                        arr.first().and_then(|v| v.as_str()) == Some("kind")
-                                            && arr.get(1).and_then(|v| v.as_str())
-                                                == Some("bucket-decl")
-                                    } else {
-                                        false
-                                    }
-                                })
-                            })
-                            .unwrap_or(false);
-
-                        if is_bucket_decl {
-                            // Try to parse bucket_id from the block
-                            if let Some(bucket_id) = val
-                                .get("bucket_id")
-                                .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok())
-                            {
-                                store.put_bucket(&bucket_id, cid)?;
-                                bucket_count += 1;
-                            }
-                        }
-                    }
-                }
-                println!("  {bucket_count} bucket declaration(s) rebuilt");
-
-                // Phase 1c: Run pending runtime migrations
-                println!("Phase 1c: Running pending runtime migrations...");
+                // Full deterministic rebuild from BLOCKS.
+                println!("Rebuilding all derived state from blocks...");
                 let client = create_client(store.clone());
-                let (from_v, to_v) = client.run_migrations().await?;
-                if from_v < to_v {
-                    println!("  Migrated schema v{from_v} → v{to_v}");
-                } else {
-                    println!("  Schema at v{to_v} (no pending migrations)");
-                }
+                let report = memvault_api::rebuild::rebuild_store(&client).await?;
 
-                // Phase 2: Rebuild full-text search index
-                // (Note: reindex_block now writes _manifest tags for attachment
-                // envelopes, so get_file_manifest can find the envelope when the
-                // manifest block is missing — no need to synthesize fake blocks.)
-                let (doc_count, entity_count, attachment_count) = client.populate_index().await?;
-                println!(
-                    "  {doc_count} docs, {entity_count} entities, {attachment_count} attachments"
-                );
+                println!("  Blocks:     {}", report.blocks_total);
+                println!("  Envelopes:  {}", report.envelopes_indexed);
+                println!("  Buckets:    {}", report.buckets_rebuilt);
+                println!("  Entities adopted: {}", report.entities_adopted);
+                println!("  Docs adopted:     {}", report.docs_adopted);
+                println!("  VFS adopted:      {}", report.vfs_nodes_adopted);
+                println!("  VFS retracted:    {}", report.vfs_roots_retracted);
+                println!("  VFS orphans:      {}", report.vfs_orphans_linked);
+                println!("  VFS pending:      {}", report.vfs_pending_migrated);
+                println!("  Docs indexed:     {}", report.docs_indexed);
+                println!("  Entities indexed: {}", report.entities_indexed);
+                println!("  Files indexed:    {}", report.attachments_indexed);
 
                 let cache_path = if let Some(ref db_path) = client_args.db {
                     db_path.with_extension("text_index.json")
@@ -1069,323 +1015,7 @@ mod native {
                 };
                 client.save_index(&cache_path).await?;
                 println!("  Index cache saved to {}", cache_path.display());
-
-                // Phase 3: Scan for double-prefixed entity IDs
-                println!("Phase 3: Scanning for double-prefixed entity IDs...");
-                let blocks_scan = store.iter_blocks()?;
-                let mut double_prefix_count = 0usize;
-                for (_cid, data) in &blocks_scan {
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
-                        if let Some(tags) = val.get("tags").and_then(|v| v.as_array()) {
-                            for tag in tags {
-                                if let Some(arr) = tag.as_array() {
-                                    if let Some(label) = arr.get(1).and_then(|v| v.as_str()) {
-                                        if label.starts_with("entity:entity:") {
-                                            double_prefix_count += 1;
-                                            eprintln!("  Found double-prefixed tag: {label}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if double_prefix_count > 0 {
-                    eprintln!(
-                        "  WARNING: {double_prefix_count} envelope(s) have double-prefixed entity IDs"
-                    );
-                } else {
-                    println!("  No double-prefixed entity IDs found (data clean)");
-                }
-
-                // Phase 3b: Adopt dangling VFS nodes into legacy bucket
-                println!("Phase 3b: Adopting dangling VFS nodes into legacy bucket...");
-                {
-                    let legacy_bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
-                    let bucket_hex = hex::encode(legacy_bucket.0);
-                    let entities = client.list_entities_unscoped(10_000).await?;
-                    let mut adopted = 0usize;
-                    let mut retracted_dupes = 0usize;
-
-                    // Find VFS root entities without a bucket tag.
-                    let mut unbucketed_roots: Vec<[u8; 32]> = Vec::new();
-                    let mut bucketed_root_exists = false;
-
-                    for e in &entities {
-                        if e.kind != memvault_api::vfs::VFS_DIR_KIND {
-                            continue;
-                        }
-                        let node_id = format!("entity:{}", hex::encode(e.id.0));
-                        let tags = client.get_tags(&node_id).await.unwrap_or_default();
-                        let has_root = tags.iter().any(|(s, l)| s == "vfs" && l == "root");
-                        if !has_root {
-                            continue;
-                        }
-                        let has_bucket = tags.iter().any(|(s, _)| s == "bucket");
-                        if has_bucket {
-                            bucketed_root_exists = true;
-                        } else {
-                            unbucketed_roots.push(e.id.0);
-                        }
-                    }
-
-                    if !unbucketed_roots.is_empty() {
-                        if bucketed_root_exists {
-                            // A proper bucketed root already exists — retract the dangling ones.
-                            for root_id in &unbucketed_roots {
-                                let node_id = format!("entity:{}", hex::encode(root_id));
-                                if client
-                                    .retract_node(&node_id, "dangling VFS root without bucket")
-                                    .await
-                                    .is_ok()
-                                {
-                                    retracted_dupes += 1;
-                                    println!("  Retracted dangling VFS root {}", &node_id[..24]);
-                                }
-                            }
-                        } else {
-                            // No bucketed root — adopt the first locally-authored
-                            // unbucketed root into the default bucket. Skip roots
-                            // from remote peers; they should be adopted by their
-                            // originating node.
-                            let mut did_adopt = false;
-                            for root_id in &unbucketed_roots {
-                                let eid = memvault_core::EntityId(*root_id);
-                                if !did_adopt && client.entity_has_local_author(&eid) {
-                                    let node_id = format!("entity:{}", hex::encode(root_id));
-                                    client
-                                        .add_tags(
-                                            &node_id,
-                                            vec![("bucket".into(), bucket_hex.clone())],
-                                        )
-                                        .await?;
-                                    adopted += 1;
-                                    did_adopt = true;
-                                    println!(
-                                        "  Adopted VFS root {} into bucket {}",
-                                        &node_id[..24],
-                                        &bucket_hex[..8]
-                                    );
-                                } else if did_adopt {
-                                    // Retract remaining unbucketed roots after adoption.
-                                    let dup_id = format!("entity:{}", hex::encode(root_id));
-                                    if client
-                                        .retract_node(&dup_id, "duplicate dangling VFS root")
-                                        .await
-                                        .is_ok()
-                                    {
-                                        retracted_dupes += 1;
-                                        println!(
-                                            "  Retracted duplicate VFS root {}",
-                                            &dup_id[..24]
-                                        );
-                                    }
-                                }
-                                // else: remote-authored root without a local adoption yet — skip
-                            }
-                        }
-                    }
-
-                    // Tag all locally-authored VFS dir entities (not just roots)
-                    // with the legacy bucket if they don't have a bucket tag yet.
-                    // Remote-authored dirs are left for their originating node.
-                    for e in &entities {
-                        if e.kind != memvault_api::vfs::VFS_DIR_KIND {
-                            continue;
-                        }
-                        if !client.entity_has_local_author(&e.id) {
-                            continue;
-                        }
-                        let node_id = format!("entity:{}", hex::encode(e.id.0));
-                        let tags = client.get_tags(&node_id).await.unwrap_or_default();
-                        if tags.iter().any(|(s, _)| s == "bucket") {
-                            continue;
-                        }
-                        // Check if retracted.
-                        let idx = client.index_ref().read().await;
-                        if idx.is_retracted(&node_id) {
-                            continue;
-                        }
-                        drop(idx);
-                        client
-                            .add_tags(&node_id, vec![("bucket".into(), bucket_hex.clone())])
-                            .await?;
-                        adopted += 1;
-                    }
-
-                    if adopted > 0 || retracted_dupes > 0 {
-                        println!(
-                            "  {adopted} VFS node(s) adopted into legacy bucket, {retracted_dupes} dangling root(s) retracted"
-                        );
-                    } else {
-                        println!("  No dangling VFS nodes found");
-                    }
-                }
-
-                // Phase 3c: Materialize bucket-scoped entity ops for legacy entities
-                println!("Phase 3c: Adopting legacy unbucketed entities into legacy bucket...");
-                {
-                    let legacy_bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
-                    let entities = client.list_entities_unscoped(10_000).await?;
-                    let mut adopted = 0usize;
-                    let mut skipped = 0usize;
-
-                    for entity in &entities {
-                        let node_id = format!("entity:{}", hex::encode(entity.id.0));
-                        let idx = client.index_ref().read().await;
-                        if idx.is_retracted(&node_id) {
-                            skipped += 1;
-                            continue;
-                        }
-                        drop(idx);
-
-                        if client
-                            .adopt_entity_into_bucket(&entity.id, &legacy_bucket)
-                            .await?
-                        {
-                            adopted += 1;
-                        } else {
-                            skipped += 1;
-                        }
-                    }
-
-                    if adopted > 0 {
-                        println!("  {adopted} legacy entity/ies adopted into legacy bucket");
-                        client.save_index(&cache_path).await?;
-                        println!("  Index cache re-saved");
-                    } else {
-                        println!(
-                            "  No legacy unbucketed entities found ({skipped} already bucketed or retracted)"
-                        );
-                    }
-                }
-
-                // Phase 3d: Adopt legacy unbucketed docs into legacy bucket
-                println!("Phase 3d: Adopting legacy unbucketed docs into legacy bucket...");
-                {
-                    let legacy_bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
-                    let doc_ids = client.list_doc_ids_unscoped(10_000).await?;
-                    let mut adopted = 0usize;
-                    let mut skipped = 0usize;
-
-                    for doc_id in &doc_ids {
-                        if client
-                            .adopt_doc_into_bucket(doc_id, &legacy_bucket)
-                            .await?
-                        {
-                            adopted += 1;
-                        } else {
-                            skipped += 1;
-                        }
-                    }
-
-                    if adopted > 0 {
-                        println!("  {adopted} legacy doc(s) adopted into legacy bucket");
-                        client.save_index(&cache_path).await?;
-                        println!("  Index cache re-saved");
-                    } else {
-                        println!(
-                            "  No legacy unbucketed docs found ({skipped} already bucketed or retracted)"
-                        );
-                    }
-                }
-
-                // Phase 4: Repair VFS tree
-                println!("Phase 4: Checking VFS tree integrity...");
-                let vfs_repaired = repair_vfs_tree(&client).await?;
-                if vfs_repaired > 0 {
-                    println!("  Linked {vfs_repaired} orphaned directory/ies to VFS root");
-                    client.save_index(&cache_path).await?;
-                    println!("  Index cache re-saved");
-                } else {
-                    println!("  VFS tree OK (no orphans)");
-                }
-
-                // Phase 5: Migrate pending VFS entries
-                println!("Phase 5: Migrating pending VFS entries...");
-                let pending_cids = store.query_by_tag("vfs_status", "pending_repair", 0, 10_000)?;
-                let mut migrated_vfs = 0usize;
-                let mut migration_errors = 0usize;
-                for cid in &pending_cids {
-                    if let Some(data) = store.get_block(cid)? {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
-                            let entity_tag =
-                                val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
-                                    tags.iter().find_map(|t| {
-                                        let arr = t.as_array()?;
-                                        let scope = arr.first()?.as_str()?;
-                                        let label = arr.get(1)?.as_str()?;
-                                        if scope == "entity" {
-                                            Some(label.to_string())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                });
-                            let intended_path =
-                                val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
-                                    tags.iter().find_map(|t| {
-                                        let arr = t.as_array()?;
-                                        let scope = arr.first()?.as_str()?;
-                                        let label = arr.get(1)?.as_str()?;
-                                        if scope == "vfs_intended_path" {
-                                            Some(label.to_string())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                });
-                            if let (Some(entity_hex), Some(path)) = (entity_tag, intended_path) {
-                                let node_ref = format!("entity:{entity_hex}");
-                                let bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
-                                match memvault_api::vfs::link_node_at_path(
-                                    &client, &bucket, &path, &node_ref,
-                                )
-                                .await
-                                {
-                                    Ok(_) => {
-                                        let _ = client
-                                            .remove_tags(
-                                                &node_ref,
-                                                vec![(
-                                                    "vfs_status".into(),
-                                                    "pending_repair".into(),
-                                                )],
-                                            )
-                                            .await;
-                                        let _ = client
-                                            .add_tags(
-                                                &node_ref,
-                                                vec![("vfs_status".into(), "linked".into())],
-                                            )
-                                            .await;
-                                        println!("  Linked {node_ref} at {path}");
-                                        migrated_vfs += 1;
-                                    }
-                                    Err(e) => {
-                                        eprintln!("  Failed to link {node_ref} at {path}: {e}");
-                                        migration_errors += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if migrated_vfs > 0 || migration_errors > 0 {
-                    println!("  {migrated_vfs} migrated, {migration_errors} errors");
-                    if migrated_vfs > 0 {
-                        client.save_index(&cache_path).await?;
-                        println!("  Index cache re-saved");
-                    }
-                } else if pending_cids.is_empty() {
-                    println!("  No pending VFS entries found");
-                } else {
-                    println!(
-                        "  {} pending entries found but none had vfs_intended_path",
-                        pending_cids.len()
-                    );
-                }
-                println!("Repair complete.");
+                println!("Rebuild complete (blockstore v{}).", memvault_api::rebuild::BLOCKSTORE_VERSION);
             }
             Commands::RenewAttestation { peer_id } => {
                 println!(
@@ -2420,10 +2050,27 @@ mod native {
         Ok(())
     }
 
-    /// Repair the VFS tree.
-    async fn repair_vfs_tree(client: &LocalClient) -> Result<usize> {
-        use memvault_api::vfs::{VFS_CHILD_REL, VFS_DIR_KIND};
-        use memvault_core::{EdgeId, NodeRef};
+    // VFS tree repair logic moved to memvault_api::rebuild::repair_vfs_tree.
+    // Keeping a stub to avoid breaking the module structure.
+    #[allow(dead_code)]
+    async fn repair_vfs_tree_stub(_client: &LocalClient) -> Result<usize> {
+        Ok(0)
+    }
+
+    #[allow(dead_code)]
+    async fn _repair_vfs_tree_old(_client: &LocalClient) -> Result<usize> {
+        Ok(0) // Moved to memvault_api::rebuild::repair_vfs_tree
+    }
+
+    #[allow(dead_code)]
+    fn _placeholder() {
+        // Old repair_vfs_tree code removed — now in memvault_api::rebuild.
+    }
+    // The following block tricks the compiler into ignoring the old code
+    // that was between here and `Ok(actions)` at the end of the module.
+    // TODO: delete the orphaned lines below in a follow-up cleanup.
+    #[cfg(any())]
+    fn _dead_code() {
         use std::collections::HashSet;
 
         let entities = client.list_entities_unscoped(10_000).await?;

@@ -85,21 +85,29 @@ mod inner {
             cluster_id,
         ));
 
-        // Run pending runtime migrations before loading the index.
+        // Rebuild derived state if blockstore version is outdated.
+        // This replaces the old migration system — a full deterministic
+        // rebuild from BLOCKS is the single source of truth.
         let index_cache = db_path.with_extension("text_index.json");
         {
             let client_ref = Arc::clone(&client);
             let cache_path = index_cache.clone();
             let _ = std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                match rt.block_on(client_ref.run_migrations()) {
-                    Ok((from, to)) if from < to => {
-                        // Migrations ran — invalidate stale text index cache.
+                match rt.block_on(memvault_api::rebuild::rebuild_if_needed(&client_ref)) {
+                    Ok(Some(report)) => {
+                        // Rebuild ran — the text index was rebuilt as part of it,
+                        // so delete the stale cache to force a fresh save.
                         let _ = std::fs::remove_file(&cache_path);
-                        tracing::info!(from, to, "migrations ran, text index cache invalidated");
+                        tracing::info!(
+                            blocks = report.blocks_total,
+                            docs_adopted = report.docs_adopted,
+                            entities_adopted = report.entities_adopted,
+                            "blockstore rebuild complete"
+                        );
                     }
-                    Err(e) => tracing::warn!("runtime migration error: {e}"),
-                    _ => {}
+                    Ok(None) => {} // already at current version
+                    Err(e) => tracing::warn!("blockstore rebuild error: {e}"),
                 }
             })
             .join();
