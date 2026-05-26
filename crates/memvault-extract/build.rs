@@ -44,7 +44,6 @@ fn main() {
             .arg("--target")
             .arg("wasm32-unknown-unknown")
             .arg("--release")
-            .arg("--locked")
             .env("CARGO_TARGET_DIR", &target_dir)
             .status()
             .expect("failed to spawn cargo to build memvault-extract-guest WASM");
