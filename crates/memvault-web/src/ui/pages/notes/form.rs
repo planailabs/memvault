@@ -27,6 +27,7 @@ async fn create_note(
     title: String,
     tags_str: String,
     visibility: String,
+    bucket_hex: Option<String>,
 ) -> Result<CreateNoteResult, ServerFnError> {
     use memvault_core::DocId;
     use memvault_doc::Document;
@@ -44,7 +45,12 @@ async fn create_note(
     let tags = parse_tags_str(&tags_str);
     let vis = crate::api::docs::parse_visibility_str(Some(&visibility));
     client
-        .put_doc(doc, tags, vis, None)
+        .put_doc(doc, tags, vis, bucket_hex.as_deref().and_then(|h| {
+            let b = hex::decode(h).ok()?;
+            if b.len() != 32 { return None; }
+            let mut a = [0u8; 32]; a.copy_from_slice(&b);
+            Some(memvault_core::BucketId(a))
+        }).as_ref())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -139,6 +145,7 @@ pub fn NoteForm() -> Element {
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
 
+    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
     let on_submit = move |e: Event<FormData>| {
         e.prevent_default();
         saving.set(true);
@@ -147,8 +154,9 @@ pub fn NoteForm() -> Element {
         let b = body.read().clone();
         let tg = tags.read().clone();
         let v = visibility.read().clone();
+        let bkt = active_bucket.read().id.clone();
         spawn(async move {
-            match create_note(b, t, tg, v).await {
+            match create_note(b, t, tg, v, bkt).await {
                 Ok(result) => {
                     navigator.push(Route::NoteDetail { id: result.id });
                 }

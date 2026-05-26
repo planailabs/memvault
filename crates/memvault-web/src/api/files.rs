@@ -76,6 +76,8 @@ pub async fn list_doc_files(
 pub struct UploadQuery {
     /// Optional VFS path to place the file at.
     pub vfs_path: Option<String>,
+    /// Optional bucket ID (hex).
+    pub bucket: Option<String>,
 }
 
 pub async fn upload_file(
@@ -100,9 +102,15 @@ pub async fn upload_file(
         .await
         .map_err(|e| ApiError::bad_request(format!("Failed to read file: {e}")))?;
 
+    let bucket_id = query.bucket.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut a = [0u8; 32]; a.copy_from_slice(&bytes);
+        Some(memvault_core::BucketId(a))
+    });
     let (_cid, node_id) = memvault_api::files::upload_file(
         state.client.as_ref(), &data, Some(&name), &content_type,
-        vec![], "internal", query.vfs_path.as_deref(), None,
+        vec![], "internal", query.vfs_path.as_deref(), bucket_id.as_ref(),
     ).await?;
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
 

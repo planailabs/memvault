@@ -31,6 +31,9 @@ pub struct CreateDocRequest {
     /// Optional VFS path to place the new document at.
     #[serde(default)]
     pub vfs_path: Option<String>,
+    /// Optional bucket ID (hex) to scope this document to.
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -110,15 +113,23 @@ pub async fn create_doc(
 ) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
     let vis = parse_visibility_str(req.visibility.as_deref());
 
+    let bucket_id = req.bucket.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(memvault_core::BucketId(arr))
+    });
+
     let result = memvault_api::docs::create_doc(
         state.client.as_ref(),
         &req.body,
-        None, // title already in frontmatter if provided
+        None,
         req.frontmatter.clone(),
         req.tags.clone(),
         vis,
         req.vfs_path.as_deref(),
-        None,
+        bucket_id.as_ref(),
     ).await?;
     tracing::info!(doc_id = %result.node_id, "API: doc created");
 

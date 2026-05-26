@@ -28,6 +28,9 @@ pub struct CreateEntityRequest {
     /// Optional VFS path to place the new entity at.
     #[serde(default)]
     pub vfs_path: Option<String>,
+    /// Optional bucket ID (hex).
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -67,7 +70,13 @@ pub async fn create_entity(
         edges_out: vec![],
     };
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
-    let id = state.client.add_entity(entity, vis, None).await?;
+    let bucket_id = req.bucket.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut a = [0u8; 32]; a.copy_from_slice(&bytes);
+        Some(memvault_core::BucketId(a))
+    });
+    let id = state.client.add_entity(entity, vis, bucket_id.as_ref()).await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
 
