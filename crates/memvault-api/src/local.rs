@@ -312,11 +312,15 @@ impl LocalClient {
                         .and_then(|v| v.as_str())
                         .unwrap_or("application/octet-stream");
                     if let Some(mcid) = manifest_cid {
-                        let text = if let Ok(content) = self.read_file(&mcid).await {
-                            self.extract_and_cache(&mcid, &content, mime_type)
-                        } else {
-                            None
-                        };
+                        // Only use cached extraction during index rebuild.
+                        // Fresh extraction (which creates annotation blocks)
+                        // happens on interactive access, not here — avoids
+                        // per-node annotation divergence during rebuild.
+                        let text = self.load_cached_extraction(&mcid)
+                            .and_then(|r| match r {
+                                ExtractionResult::Ok(t) => Some(t),
+                                _ => None,
+                            });
                         let att_tags: Vec<(String, String)> = val
                             .get("tags")
                             .and_then(|v| serde_json::from_value(v.clone()).ok())
