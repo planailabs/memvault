@@ -686,6 +686,23 @@ impl LocalClient {
         None
     }
 
+    /// Collect all CIDs across all accessible buckets (for cross-bucket search).
+    /// Currently returns all cluster-bound buckets — grant-based filtering
+    /// can be layered on top when per-credential ACLs are enforced.
+    fn accessible_bucket_cids(
+        &self,
+        per_bucket_limit: usize,
+    ) -> Result<std::collections::HashSet<Vec<u8>>> {
+        let buckets = self.store.list_buckets().unwrap_or_default();
+        let mut all_cids = std::collections::HashSet::new();
+        for (bucket_id, _) in &buckets {
+            if let Ok(cids) = self.store.query_by_bucket(bucket_id, 0, per_bucket_limit) {
+                all_cids.extend(cids);
+            }
+        }
+        Ok(all_cids)
+    }
+
     /// Parse a BucketDecl from a block: handles both the new envelope format
     /// (payload.BucketCreate) and the legacy raw BucketDecl JSON.
     fn parse_bucket_decl(block: &[u8]) -> Option<memvault_doc::BucketDecl> {
@@ -865,6 +882,55 @@ impl LocalClient {
             }
         }
         Ok(entities)
+    }
+
+    /// List docs without bucket scoping.  Used only by repair-index /
+    /// migrations which need to see unbucketed items for adoption.
+    pub async fn list_doc_ids_unscoped(&self, limit: usize) -> Result<Vec<DocId>> {
+        let labels = self.store.query_unique_labels("doc", limit)?;
+        let mut ids = Vec::new();
+        for label in labels {
+            let id_bytes = hex::decode(&label).unwrap_or_default();
+            if id_bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            ids.push(DocId(arr));
+        }
+        Ok(ids)
+    }
+
+    /// Adopt an unbucketed doc into a bucket by writing a no-op DocEdit
+    /// that carries the bucket_id.  Returns true if adopted, false if
+    /// already bucketed or not found.
+    pub async fn adopt_doc_into_bucket(
+        &self,
+        doc_id: &DocId,
+        bucket: &BucketId,
+    ) -> Result<bool> {
+        if self.inferred_doc_bucket(doc_id).is_some() {
+            return Ok(false);
+        }
+
+        // Only adopt docs that have at least one locally-authored block.
+        let (_, label) = Self::doc_tag(doc_id);
+        let cids = self
+            .store
+            .query_by_tag("doc", &label, 0, usize::MAX)
+            .unwrap_or_default();
+        if !self.has_local_author(&cids) {
+            return Ok(false);
+        }
+
+        // Write a no-op edit that carries the bucket_id.
+        let op = Op::DocEdit {
+            doc_id: doc_id.clone(),
+            patch: memvault_doc::TextPatch { ops: vec![] },
+        };
+        let tags = vec![Self::doc_tag(doc_id)];
+        self.store_op(&op, &tags, &Visibility::Internal, Some(bucket))?;
+        Ok(true)
     }
 
     pub async fn adopt_entity_into_bucket(
@@ -1561,13 +1627,28 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        // search() has no bucket param — return empty post-genesis.
-        // Callers should use bucket-scoped search when buckets exist.
-        if !self.store.list_buckets().unwrap_or_default().is_empty() {
-            return Ok(vec![]);
-        }
         let idx = self.index.read().await;
-        Ok(idx.search(query, limit))
+        let hits = idx.search(query, limit * 2);
+        drop(idx);
+
+        // Post-filter: only return hits from accessible buckets.
+        let accessible = self.accessible_bucket_cids(limit * 20)?;
+        if accessible.is_empty() {
+            // Pre-genesis or no buckets — return unfiltered.
+            return Ok(hits.into_iter().take(limit).collect());
+        }
+        Ok(hits
+            .into_iter()
+            .filter(|h| {
+                let (_, label) = Self::doc_tag(&h.doc_id);
+                self.store
+                    .query_by_tag("doc", &label, 0, 10)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|c| accessible.contains(c))
+            })
+            .take(limit)
+            .collect())
     }
 
     async fn search_unified(
@@ -1575,12 +1656,27 @@ impl MemvaultClient for LocalClient {
         query: &str,
         limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
-        // search_unified() has no bucket param — return empty post-genesis.
-        if !self.store.list_buckets().unwrap_or_default().is_empty() {
-            return Ok(vec![]);
-        }
         let idx = self.index.read().await;
-        Ok(idx.search_unified(query, limit))
+        let hits = idx.search_unified(query, limit * 2);
+        drop(idx);
+
+        let buckets = self.store.list_buckets().unwrap_or_default();
+        if buckets.is_empty() {
+            return Ok(hits.into_iter().take(limit).collect());
+        }
+        // Filter to nodes in any accessible bucket.
+        let bucket_ids: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
+        Ok(hits
+            .into_iter()
+            .filter(|h| {
+                if let Some(node_bucket) = self.inferred_bucket_for_node_id(&h.node_id) {
+                    bucket_ids.iter().any(|b| *b == node_bucket)
+                } else {
+                    false
+                }
+            })
+            .take(limit)
+            .collect())
     }
 
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
@@ -1606,12 +1702,26 @@ impl MemvaultClient for LocalClient {
         } else {
             None
         };
-        // list_all() has no bucket param — return empty post-genesis.
-        if !self.store.list_buckets().unwrap_or_default().is_empty() {
-            return Ok(vec![]);
-        }
         let idx = self.index.read().await;
-        Ok(idx.list_all(view_tags.as_deref(), limit))
+        let all = idx.list_all(view_tags.as_deref(), limit * 2);
+        drop(idx);
+
+        let buckets = self.store.list_buckets().unwrap_or_default();
+        if buckets.is_empty() {
+            return Ok(all.into_iter().take(limit).collect()); // pre-genesis
+        }
+        let bucket_ids: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
+        Ok(all
+            .into_iter()
+            .filter(|(node_id, _, _, _)| {
+                if let Some(node_bucket) = self.inferred_bucket_for_node_id(node_id) {
+                    bucket_ids.iter().any(|b| *b == node_bucket)
+                } else {
+                    false
+                }
+            })
+            .take(limit)
+            .collect())
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {

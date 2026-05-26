@@ -1260,6 +1260,36 @@ mod native {
                     }
                 }
 
+                // Phase 3d: Adopt legacy unbucketed docs into legacy bucket
+                println!("Phase 3d: Adopting legacy unbucketed docs into legacy bucket...");
+                {
+                    let legacy_bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
+                    let doc_ids = client.list_doc_ids_unscoped(10_000).await?;
+                    let mut adopted = 0usize;
+                    let mut skipped = 0usize;
+
+                    for doc_id in &doc_ids {
+                        if client
+                            .adopt_doc_into_bucket(doc_id, &legacy_bucket)
+                            .await?
+                        {
+                            adopted += 1;
+                        } else {
+                            skipped += 1;
+                        }
+                    }
+
+                    if adopted > 0 {
+                        println!("  {adopted} legacy doc(s) adopted into legacy bucket");
+                        client.save_index(&cache_path).await?;
+                        println!("  Index cache re-saved");
+                    } else {
+                        println!(
+                            "  No legacy unbucketed docs found ({skipped} already bucketed or retracted)"
+                        );
+                    }
+                }
+
                 // Phase 4: Repair VFS tree
                 println!("Phase 4: Checking VFS tree integrity...");
                 let vfs_repaired = repair_vfs_tree(&client).await?;

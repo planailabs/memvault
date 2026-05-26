@@ -23,14 +23,21 @@ struct Migration {
 }
 
 /// The ordered list of all migrations.  **Append-only.**
-static MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "adopt unbucketed entities into legacy bucket",
-    run: |client| Box::pin(m0001_adopt_unbucketed(client)),
-}];
+static MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "adopt unbucketed entities into legacy bucket",
+        run: |client| Box::pin(m0001_adopt_unbucketed(client)),
+    },
+    Migration {
+        version: 2,
+        name: "adopt unbucketed docs into legacy bucket",
+        run: |client| Box::pin(m0002_adopt_unbucketed_docs(client)),
+    },
+];
 
 /// The latest schema version (highest migration version).
-pub const LATEST_VERSION: u32 = 1;
+pub const LATEST_VERSION: u32 = 2;
 
 /// Run all pending migrations.  Returns `(from_version, to_version)`.
 ///
@@ -68,8 +75,6 @@ pub async fn run_pending(client: &LocalClient) -> Result<(u32, u32)> {
 // ── Migration 0001 ─────────────────────────────────────────────────────
 //
 // Adopt locally-authored unbucketed entities into the legacy bucket.
-// "Legacy bucket" = the cluster's default bucket, used here only as the
-// adoption target for pre-bucket data.
 
 async fn m0001_adopt_unbucketed(client: &LocalClient) -> Result<()> {
     let legacy_bucket = match client.legacy_bucket_id() {
@@ -91,6 +96,35 @@ async fn m0001_adopt_unbucketed(client: &LocalClient) -> Result<()> {
 
     if adopted > 0 {
         tracing::info!(adopted, "adopted unbucketed entities into legacy bucket");
+    }
+    Ok(())
+}
+
+// ── Migration 0002 ─────────────────────────────────────────────────────
+//
+// Adopt locally-authored unbucketed docs into the legacy bucket.
+// Fixes notes going missing after the bucket-scoping enforcement.
+
+async fn m0002_adopt_unbucketed_docs(client: &LocalClient) -> Result<()> {
+    let legacy_bucket = match client.legacy_bucket_id() {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+
+    let doc_ids = client.list_doc_ids_unscoped(50_000).await?;
+    let mut adopted = 0usize;
+
+    for doc_id in &doc_ids {
+        if client
+            .adopt_doc_into_bucket(doc_id, &legacy_bucket)
+            .await?
+        {
+            adopted += 1;
+        }
+    }
+
+    if adopted > 0 {
+        tracing::info!(adopted, "adopted unbucketed docs into legacy bucket");
     }
     Ok(())
 }
