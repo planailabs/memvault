@@ -72,7 +72,10 @@ pub async fn run_pending(client: &LocalClient) -> Result<(u32, u32)> {
 // adoption target for pre-bucket data.
 
 async fn m0001_adopt_unbucketed(client: &LocalClient) -> Result<()> {
-    let legacy_bucket = crate::vfs::default_bucket(client).await;
+    let legacy_bucket = match client.legacy_bucket_id() {
+        Some(b) => b,
+        None => return Ok(()), // no cluster/bucket yet — nothing to adopt
+    };
 
     let entities = client.list_entities_unscoped(50_000).await?;
     let mut adopted = 0usize;

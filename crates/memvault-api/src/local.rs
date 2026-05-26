@@ -647,21 +647,40 @@ impl LocalClient {
         vec![]
     }
 
-    /// Resolve a bucket_id: use explicit if given, otherwise cluster default.
+    /// Resolve a bucket_id: explicit only, no fallback.
     fn resolve_bucket(&self, explicit: Option<&BucketId>) -> Option<Vec<u8>> {
+        explicit.map(|b| b.0.to_vec())
+    }
+
+    /// Require an explicit bucket for write operations.
+    ///
+    /// Returns the bucket bytes or an error.  Pre-genesis (no buckets in
+    /// the store) is tolerated — returns `None` so the write proceeds
+    /// without a bucket.
+    fn require_bucket(&self, explicit: Option<&BucketId>) -> Result<Option<Vec<u8>>> {
         if let Some(b) = explicit {
-            return Some(b.0.to_vec());
+            return Ok(Some(b.0.to_vec()));
         }
-        // Try cluster's default bucket from the store
+        // Pre-genesis: no buckets exist yet, allow unbucketed writes.
+        let buckets = self.store.list_buckets().unwrap_or_default();
+        if buckets.is_empty() {
+            return Ok(None);
+        }
+        Err(ApiError::Other(
+            "bucket required: pass an explicit bucket_id".into(),
+        ))
+    }
+
+    /// The legacy bucket for adoption of pre-bucket data.
+    /// Only for use by migrations and repair-index.
+    pub fn legacy_bucket_id(&self) -> Option<BucketId> {
         if self.cluster_id.iter().any(|&b| b != 0) {
-            if let Ok(Some(default_bytes)) = self.store.get_default_bucket(&self.cluster_id) {
-                return Some(default_bytes);
-            }
-        }
-        // Try first available bucket
-        if let Ok(buckets) = self.store.list_buckets() {
-            if let Some((bucket_id_bytes, _)) = buckets.first() {
-                return Some(bucket_id_bytes.clone());
+            if let Ok(Some(bytes)) = self.store.get_default_bucket(&self.cluster_id) {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    return Some(BucketId(arr));
+                }
             }
         }
         None
@@ -788,7 +807,7 @@ impl LocalClient {
         bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         let wall_ns = memvault_core::wall_ns();
-        let bucket_id = self.resolve_bucket(bucket);
+        let bucket_id = self.require_bucket(bucket)?;
 
         let meta = EnvelopeMeta {
             author: self.effective_author(),
@@ -987,10 +1006,12 @@ impl MemvaultClient for LocalClient {
         limit: usize,
         bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
-        // Always scope to a bucket.  Explicit > default > pre-genesis (None).
-        let effective_bucket = bucket
-            .map(|b| b.0.to_vec())
-            .or_else(|| self.resolve_bucket(None));
+        // Require an explicit bucket.  Pre-genesis (no buckets) is the
+        // only case where None is tolerated.
+        let effective_bucket = bucket.map(|b| b.0.to_vec());
+        if effective_bucket.is_none() && !self.store.list_buckets().unwrap_or_default().is_empty() {
+            return Ok(vec![]); // no bucket specified post-genesis → empty
+        }
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
             if let Some(ref bid) = effective_bucket {
                 let bucket_cids = self.store.query_by_bucket(bid, 0, limit * 10)?;
@@ -1357,10 +1378,12 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
-        // Always scope to a bucket.  Explicit > default > pre-genesis (None).
-        let effective_bucket = bucket
-            .map(|b| b.0.to_vec())
-            .or_else(|| self.resolve_bucket(None));
+        // Require an explicit bucket.  Pre-genesis (no buckets) is the
+        // only case where None is tolerated.
+        let effective_bucket = bucket.map(|b| b.0.to_vec());
+        if effective_bucket.is_none() && !self.store.list_buckets().unwrap_or_default().is_empty() {
+            return Ok(vec![]); // no bucket specified post-genesis → empty
+        }
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
             if let Some(ref bid) = effective_bucket {
                 let bucket_cids = self.store.query_by_bucket(bid, 0, limit * 10)?;
@@ -1538,32 +1561,13 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        let idx = self.index.read().await;
-        let hits = idx.search(query, limit * 2);
-        drop(idx);
-        // Post-filter: only return hits whose doc belongs to the active bucket.
-        if let Some(bucket_bytes) = self.resolve_bucket(None) {
-            let bucket_cids: std::collections::HashSet<Vec<u8>> = self
-                .store
-                .query_by_bucket(&bucket_bytes, 0, limit * 20)
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            Ok(hits
-                .into_iter()
-                .filter(|h| {
-                    let (_, label) = Self::doc_tag(&h.doc_id);
-                    self.store
-                        .query_by_tag("doc", &label, 0, 10)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|c| bucket_cids.contains(c))
-                })
-                .take(limit)
-                .collect())
-        } else {
-            Ok(hits.into_iter().take(limit).collect()) // pre-genesis
+        // search() has no bucket param — return empty post-genesis.
+        // Callers should use bucket-scoped search when buckets exist.
+        if !self.store.list_buckets().unwrap_or_default().is_empty() {
+            return Ok(vec![]);
         }
+        let idx = self.index.read().await;
+        Ok(idx.search(query, limit))
     }
 
     async fn search_unified(
@@ -1571,23 +1575,12 @@ impl MemvaultClient for LocalClient {
         query: &str,
         limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
-        let idx = self.index.read().await;
-        let hits = idx.search_unified(query, limit * 2);
-        drop(idx);
-        // Post-filter: only return hits whose node belongs to the active bucket.
-        if let Some(bucket_bytes) = self.resolve_bucket(None) {
-            Ok(hits
-                .into_iter()
-                .filter(|h| {
-                    self.inferred_bucket_for_node_id(&h.node_id)
-                        .map(|b| b == bucket_bytes)
-                        .unwrap_or(false)
-                })
-                .take(limit)
-                .collect())
-        } else {
-            Ok(hits.into_iter().take(limit).collect()) // pre-genesis
+        // search_unified() has no bucket param — return empty post-genesis.
+        if !self.store.list_buckets().unwrap_or_default().is_empty() {
+            return Ok(vec![]);
         }
+        let idx = self.index.read().await;
+        Ok(idx.search_unified(query, limit))
     }
 
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
@@ -1613,23 +1606,12 @@ impl MemvaultClient for LocalClient {
         } else {
             None
         };
-        let idx = self.index.read().await;
-        let all = idx.list_all(view_tags.as_deref(), limit * 2);
-        drop(idx);
-        // Post-filter: only return nodes belonging to the active bucket.
-        if let Some(bucket_bytes) = self.resolve_bucket(None) {
-            Ok(all
-                .into_iter()
-                .filter(|(node_id, _, _, _)| {
-                    self.inferred_bucket_for_node_id(node_id)
-                        .map(|b| b == bucket_bytes)
-                        .unwrap_or(false)
-                })
-                .take(limit)
-                .collect())
-        } else {
-            Ok(all.into_iter().take(limit).collect()) // pre-genesis
+        // list_all() has no bucket param — return empty post-genesis.
+        if !self.store.list_buckets().unwrap_or_default().is_empty() {
+            return Ok(vec![]);
         }
+        let idx = self.index.read().await;
+        Ok(idx.list_all(view_tags.as_deref(), limit))
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
@@ -2255,13 +2237,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn default_bucket_id(&self) -> Result<BucketId> {
-        if let Some(bytes) = self.resolve_bucket(None) {
-            if bytes.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                return Ok(BucketId(arr));
-            }
-        }
-        Ok(BucketId([0u8; 32]))
+        self.legacy_bucket_id()
+            .ok_or_else(|| ApiError::Other("no legacy bucket configured".into()))
     }
 }

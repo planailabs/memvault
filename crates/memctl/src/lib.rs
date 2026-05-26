@@ -1101,7 +1101,7 @@ mod native {
                 // Phase 3b: Adopt dangling VFS nodes into legacy bucket
                 println!("Phase 3b: Adopting dangling VFS nodes into legacy bucket...");
                 {
-                    let legacy_bucket = memvault_api::vfs::default_bucket(&client).await;
+                    let legacy_bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
                     let bucket_hex = hex::encode(legacy_bucket.0);
                     let entities = client.list_entities_unscoped(10_000).await?;
                     let mut adopted = 0usize;
@@ -1225,7 +1225,7 @@ mod native {
                 // Phase 3c: Materialize bucket-scoped entity ops for legacy entities
                 println!("Phase 3c: Adopting legacy unbucketed entities into legacy bucket...");
                 {
-                    let legacy_bucket = memvault_api::vfs::default_bucket(&client).await;
+                    let legacy_bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
                     let entities = client.list_entities_unscoped(10_000).await?;
                     let mut adopted = 0usize;
                     let mut skipped = 0usize;
@@ -1307,7 +1307,7 @@ mod native {
                                 });
                             if let (Some(entity_hex), Some(path)) = (entity_tag, intended_path) {
                                 let node_ref = format!("entity:{entity_hex}");
-                                let bucket = memvault_api::vfs::default_bucket(&client).await;
+                                let bucket = client.legacy_bucket_id().unwrap_or(memvault_core::BucketId([0u8; 32]));
                                 match memvault_api::vfs::link_node_at_path(
                                     &client, &bucket, &path, &node_ref,
                                 )
@@ -2079,7 +2079,7 @@ mod native {
         use rand::Rng;
 
         let mut rng = rand::thread_rng();
-        let bucket = memvault_api::vfs::default_bucket(client).await;
+        let bucket = client.default_bucket_id().await.unwrap_or(memvault_core::BucketId([0u8; 32]));
 
         // ── Vocabulary for generating plausible content ──────────────────
         let topics = [
