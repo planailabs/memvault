@@ -577,6 +577,18 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
         return Verdict::Drop;
     }
 
+    // Old-format extraction annotation: references extracted_text by CID
+    // instead of inline.  Drop — text will be re-extracted inline on access.
+    if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
+        if let Some(data) = val.get("data") {
+            if data.get("extracted_text").is_some()
+                && data.get("extracted_text_inline").is_none()
+            {
+                return Verdict::Drop;
+            }
+        }
+    }
+
     // Synthesized manifest with broken CID: content_size+filename, no payload.
     if !is_envelope
         && val.get("content_size").is_some()

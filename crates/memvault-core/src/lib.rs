@@ -26,4 +26,4 @@ pub use visibility::Visibility;
 /// Current blockstore version.  Peers with mismatched versions refuse to
 /// sync to prevent cross-version poisoning.  Bump when index structure,
 /// adoption logic, or derived-state semantics change.
-pub const BLOCKSTORE_VERSION: u32 = 4;
+pub const BLOCKSTORE_VERSION: u32 = 5;
