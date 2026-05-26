@@ -332,6 +332,22 @@ pub fn VfsExplorer() -> Element {
     });
 
     let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
+
+    // Each bucket has its own VFS root — "All buckets" has no single tree to show.
+    if active_bucket.read().id.is_none() {
+        return rsx! {
+            div { class: "space-y-4",
+                plan_ai_design::PageHeader { {t!("vfs-title")} }
+                plan_ai_design::Card {
+                    div { class: "p-8 text-center text-fg-muted space-y-2",
+                        p { "Each bucket has its own virtual filesystem." }
+                        p { "Select a bucket from the dropdown above to browse its files." }
+                    }
+                }
+            }
+        };
+    }
+
     let mut entries = use_server_future(move || {
         let p = path.read().clone();
         let b = active_bucket.read().id.clone();
