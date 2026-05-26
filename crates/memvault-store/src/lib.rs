@@ -109,6 +109,38 @@ impl MemvaultStore {
         txn.commit()?;
         Ok(())
     }
+
+    // ── Schema version ─────────────────────────────────────────────────
+
+    /// Current schema version.  Returns 0 for stores that pre-date the
+    /// migration system.
+    pub fn schema_version(&self) -> Result<u32, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(tables::LOCAL_IDENTITY)?;
+        match table.get("schema_version")? {
+            Some(v) => {
+                let bytes = v.value();
+                if bytes.len() >= 4 {
+                    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                } else {
+                    Ok(0)
+                }
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Set the schema version.  Called after a migration completes
+    /// successfully so the migration is not re-run.
+    pub fn set_schema_version(&self, version: u32) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(tables::LOCAL_IDENTITY)?;
+            table.insert("schema_version", version.to_le_bytes().as_slice())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

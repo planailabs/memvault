@@ -74,6 +74,18 @@ mod inner {
             cluster_id,
         ));
 
+        // Run pending runtime migrations before loading the index.
+        {
+            let client_ref = Arc::clone(&client);
+            let _ = std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                if let Err(e) = rt.block_on(client_ref.run_migrations()) {
+                    tracing::warn!("runtime migration error: {e}");
+                }
+            })
+            .join();
+        }
+
         // Load or rebuild the text index in a background thread to avoid
         // blocking the async runtime (we may be called from inside tokio).
         let index_cache = db_path.with_extension("text_index.json");

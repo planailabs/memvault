@@ -555,6 +555,16 @@ impl LocalClient {
         None
     }
 
+    /// Access the underlying store.
+    pub fn store(&self) -> &MemvaultStore {
+        &self.store
+    }
+
+    /// Run any pending runtime migrations.  Safe to call on every startup.
+    pub async fn run_migrations(&self) -> Result<(u32, u32)> {
+        crate::migrations::run_pending(self).await
+    }
+
     /// Access the text index (for direct queries in local backend).
     pub fn index_ref(&self) -> &Arc<RwLock<TextIndex>> {
         &self.index

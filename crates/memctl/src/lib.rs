@@ -1042,12 +1042,20 @@ mod native {
                 }
                 println!("  {bucket_count} bucket declaration(s) rebuilt");
 
+                // Phase 1c: Run pending runtime migrations
+                println!("Phase 1c: Running pending runtime migrations...");
+                let client = create_client(store.clone());
+                let (from_v, to_v) = client.run_migrations().await?;
+                if from_v < to_v {
+                    println!("  Migrated schema v{from_v} → v{to_v}");
+                } else {
+                    println!("  Schema at v{to_v} (no pending migrations)");
+                }
+
                 // Phase 2: Rebuild full-text search index
                 // (Note: reindex_block now writes _manifest tags for attachment
                 // envelopes, so get_file_manifest can find the envelope when the
                 // manifest block is missing — no need to synthesize fake blocks.)
-                println!("Phase 2: Rebuilding full-text search index...");
-                let client = create_client(store.clone());
                 let (doc_count, entity_count, attachment_count) = client.populate_index().await?;
                 println!(
                     "  {doc_count} docs, {entity_count} entities, {attachment_count} attachments"
@@ -1089,11 +1097,11 @@ mod native {
                     println!("  No double-prefixed entity IDs found (data clean)");
                 }
 
-                // Phase 3b: Adopt dangling VFS nodes into default bucket
-                println!("Phase 3b: Adopting dangling VFS nodes into default bucket...");
+                // Phase 3b: Adopt dangling VFS nodes into legacy bucket
+                println!("Phase 3b: Adopting dangling VFS nodes into legacy bucket...");
                 {
-                    let default_bucket = memvault_api::vfs::default_bucket(&client).await;
-                    let bucket_hex = hex::encode(default_bucket.0);
+                    let legacy_bucket = memvault_api::vfs::default_bucket(&client).await;
+                    let bucket_hex = hex::encode(legacy_bucket.0);
                     let entities = client.list_entities_unscoped(10_000).await?;
                     let mut adopted = 0usize;
                     let mut retracted_dupes = 0usize;
@@ -1178,7 +1186,7 @@ mod native {
                     }
 
                     // Tag all locally-authored VFS dir entities (not just roots)
-                    // with the default bucket if they don't have a bucket tag yet.
+                    // with the legacy bucket if they don't have a bucket tag yet.
                     // Remote-authored dirs are left for their originating node.
                     for e in &entities {
                         if e.kind != memvault_api::vfs::VFS_DIR_KIND {
@@ -1206,7 +1214,7 @@ mod native {
 
                     if adopted > 0 || retracted_dupes > 0 {
                         println!(
-                            "  {adopted} VFS node(s) adopted into default bucket, {retracted_dupes} dangling root(s) retracted"
+                            "  {adopted} VFS node(s) adopted into legacy bucket, {retracted_dupes} dangling root(s) retracted"
                         );
                     } else {
                         println!("  No dangling VFS nodes found");
@@ -1214,9 +1222,9 @@ mod native {
                 }
 
                 // Phase 3c: Materialize bucket-scoped entity ops for legacy entities
-                println!("Phase 3c: Adopting legacy unbucketed entities into default bucket...");
+                println!("Phase 3c: Adopting legacy unbucketed entities into legacy bucket...");
                 {
-                    let default_bucket = memvault_api::vfs::default_bucket(&client).await;
+                    let legacy_bucket = memvault_api::vfs::default_bucket(&client).await;
                     let entities = client.list_entities_unscoped(10_000).await?;
                     let mut adopted = 0usize;
                     let mut skipped = 0usize;
@@ -1231,7 +1239,7 @@ mod native {
                         drop(idx);
 
                         if client
-                            .adopt_entity_into_bucket(&entity.id, &default_bucket)
+                            .adopt_entity_into_bucket(&entity.id, &legacy_bucket)
                             .await?
                         {
                             adopted += 1;
@@ -1241,7 +1249,7 @@ mod native {
                     }
 
                     if adopted > 0 {
-                        println!("  {adopted} legacy entity/ies adopted into default bucket");
+                        println!("  {adopted} legacy entity/ies adopted into legacy bucket");
                         client.save_index(&cache_path).await?;
                         println!("  Index cache re-saved");
                     } else {
