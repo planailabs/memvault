@@ -57,28 +57,17 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
     let client = crate::ui::state::client()?;
     let cid_bytes = hex::decode(&cid).map_err(|_| ServerFnError::new("Invalid CID hex"))?;
 
-    // Try manifest first, then fall back to reading the raw block
-    // as an envelope (legacy v1 files store metadata in the envelope).
-    let mut manifest: serde_json::Value = client
+    // Resolve metadata using shared helper (tries manifest, then envelope).
+    let file_meta = super::resolve_file_meta(&*client, &cid_bytes).await;
+
+    // Also try to read manifest for extended fields (sha256, width_height, etc.)
+    let manifest: serde_json::Value = client
         .get_file_manifest(&cid_bytes)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok()
+        .flatten()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-
-    // If manifest is empty (legacy file), try to read the block directly
-    // — it might be an attachment envelope with filename/mime_type/size.
-    if manifest.get("filename").is_none() {
-        if let Ok(Some(block)) = client.get_file_manifest(&cid_bytes).await {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&block) {
-                if val.get("filename").is_some() {
-                    manifest = val;
-                }
-            }
-        }
-        // Still nothing? The block itself might be the data. That's fine,
-        // we'll just show with default metadata.
-    };
 
     let extracted_text = client
         .read_extracted_text(&cid_bytes)
@@ -87,20 +76,9 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
 
     Ok(FileData {
         cid,
-        filename: manifest
-            .get("filename")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unnamed")
-            .to_string(),
-        mime_type: manifest
-            .get("mime_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("application/octet-stream")
-            .to_string(),
-        content_size: manifest
-            .get("content_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        filename: file_meta.filename,
+        mime_type: file_meta.mime_type,
+        content_size: file_meta.size,
         sha256: manifest
             .get("sha256")
             .and_then(|v| v.as_str())
