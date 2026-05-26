@@ -149,6 +149,78 @@ impl LocalClient {
         Ok(Some(bid))
     }
 
+    /// Get the cluster ID.
+    pub fn cluster_id(&self) -> &[u8] {
+        &self.cluster_id
+    }
+
+    /// Create a bucket with a specific pre-determined ID (for deterministic
+    /// legacy bucket creation across cluster nodes).
+    pub async fn create_bucket_with_id(
+        &self,
+        bucket_id: BucketId,
+        name: &str,
+        description: Option<&str>,
+        default_visibility: Visibility,
+        default_classification: memvault_core::classification::Classification,
+        role: memvault_doc::BucketRole,
+    ) -> Result<()> {
+        use memvault_doc::BucketDecl;
+
+        let now_ns = memvault_core::wall_ns();
+        let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
+        let decl = BucketDecl {
+            bucket_id: bucket_id.clone(),
+            name: name.to_string(),
+            description: description.map(|s| s.to_string()),
+            owner_agent: self.agent_identity.as_ref().map(|i| i.agent_id.clone()),
+            default_visibility,
+            default_classification,
+            created_ns: now_ns,
+            private_to_peer: if has_cluster {
+                None
+            } else {
+                Some(memvault_core::PeerId(self.peer_id.clone()))
+            },
+            role,
+        };
+
+        let tags = vec![
+            ("kind".to_string(), "bucket-decl".to_string()),
+            ("bucket".to_string(), bucket_id.to_string()),
+        ];
+        let envelope = serde_json::json!({
+            "version": 1,
+            "payload": { "BucketCreate": decl },
+            "author": self.peer_id,
+            "tags": tags,
+            "wall_ns": now_ns,
+            "bucket_id": bucket_id.0,
+        });
+        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = memvault_core::cid_from_bytes(&envelope_bytes);
+        let cid_bytes = cid.to_bytes();
+
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.effective_author(),
+            tags,
+            wall_ns: now_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(bucket_id.0.to_vec()),
+        };
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
+
+        if has_cluster {
+            let _ = self.store.bind_bucket(&bucket_id.0, &self.cluster_id);
+        }
+        Ok(())
+    }
+
     /// Get the agent ID if set.
     pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
         self.agent_identity.as_ref().map(|i| &i.agent_id)
@@ -699,6 +771,10 @@ impl LocalClient {
 
     /// Parse a BucketDecl from a block: handles both the new envelope format
     /// (payload.BucketCreate) and the legacy raw BucketDecl JSON.
+    pub fn parse_bucket_decl_static(block: &[u8]) -> Option<memvault_doc::BucketDecl> {
+        Self::parse_bucket_decl(block)
+    }
+
     fn parse_bucket_decl(block: &[u8]) -> Option<memvault_doc::BucketDecl> {
         let val: serde_json::Value = memvault_store::deserialize_block(block)?;
         if let Some(bc) = val.get("payload").and_then(|p| p.get("BucketCreate")) {

@@ -73,31 +73,88 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             })
             .unwrap_or(false)
     });
-    let legacy_bucket = if has_unbucketed {
-        Some(match client.legacy_bucket_id() {
-            Some(b) => b,
-            None => {
-                let bid = client
-                    .bucket_create(
-                        "legacy",
-                        Some("auto-created for adoption of pre-bucket data"),
-                        memvault_core::Visibility::Internal,
-                        memvault_core::classification::Classification::Internal,
-                        memvault_doc::BucketRole::Legacy,
-                    )
-                    .await?;
-                tracing::info!(bucket = %bid, "created legacy bucket");
-                bid
-            }
-        })
+    // Compute the deterministic legacy bucket ID from cluster_id.
+    let cluster_id = client.cluster_id();
+    let det_legacy_id = if cluster_id.iter().any(|&b| b != 0) {
+        let mut input = cluster_id.to_vec();
+        input.extend_from_slice(b"::legacy");
+        let cid = memvault_core::cid_from_bytes(&input);
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&cid.to_bytes()[..32]);
+        Some(BucketId(id))
     } else {
-        client.legacy_bucket_id()
+        None
+    };
+
+    // If an existing legacy bucket has a different (random) ID, it's stale.
+    let existing_legacy = client.legacy_bucket_id();
+    let legacy_bucket = if has_unbucketed || existing_legacy.is_some() {
+        let target = det_legacy_id.clone().unwrap_or_else(|| {
+            existing_legacy.clone().unwrap_or(BucketId([0u8; 32]))
+        });
+        // Create deterministic bucket if it doesn't exist yet.
+        if existing_legacy.as_ref() != Some(&target) {
+            if let Some(ref det) = det_legacy_id {
+                // Check if deterministic bucket already exists in store.
+                if store.get_bucket(&det.0).ok().flatten().is_none() {
+                    client
+                        .create_bucket_with_id(
+                            det.clone(),
+                            "legacy",
+                            Some("auto-created for adoption of pre-bucket data"),
+                            memvault_core::Visibility::Internal,
+                            memvault_core::classification::Classification::Internal,
+                            memvault_doc::BucketRole::Legacy,
+                        )
+                        .await?;
+                    tracing::info!(bucket = %det, "created deterministic legacy bucket");
+                }
+            }
+        }
+        det_legacy_id.or(existing_legacy)
+    } else {
+        None
     };
 
     let mut to_rewrite: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new(); // (cid, data, wall_ns)
 
+    // Find and remove old non-deterministic legacy buckets.  Any bucket
+    // with BucketRole::Legacy whose ID doesn't match the deterministic one
+    // is a leftover from a prior rebuild — delete its BucketDecl block and
+    // force rewrite of all envelopes that reference it.
+    let det_legacy_bytes: Option<Vec<u8>> = legacy_bucket.as_ref().map(|b| b.0.to_vec());
+    let mut stale_legacy_ids: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    {
+        let buckets = store.list_buckets().unwrap_or_default();
+        for (bucket_id, decl_cid) in &buckets {
+            if let Ok(Some(block)) = store.get_block(decl_cid) {
+                if let Some(decl) = crate::local::LocalClient::parse_bucket_decl_static(&block) {
+                    if decl.role == memvault_doc::BucketRole::Legacy {
+                        if det_legacy_bytes.as_ref() != Some(bucket_id) {
+                            stale_legacy_ids.insert(bucket_id.clone());
+                            let _ = store.delete_block(decl_cid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     for (cid, data) in &all_blocks {
-        let verdict = classify_block(cid, data);
+        let mut verdict = classify_block(cid, data);
+
+        // Force rewrite for envelopes referencing a stale legacy bucket.
+        if matches!(verdict, Verdict::Keep) && !stale_legacy_ids.is_empty() {
+            if let Some(val) = memvault_store::deserialize_block(data) {
+                if let Some(bid) = val.get("bucket_id").and_then(|v| v.as_array()) {
+                    let bytes: Vec<u8> = bid.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect();
+                    if stale_legacy_ids.contains(&bytes) {
+                        verdict = Verdict::Rewrite;
+                    }
+                }
+            }
+        }
+
         match verdict {
             Verdict::Keep => {
                 report.cid_ok += 1;
@@ -105,15 +162,6 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             Verdict::Drop => {
                 let _ = store.delete_block(cid);
                 report.cid_mismatch_cleaned += 1;
-            }
-            Verdict::Rehash => {
-                let new_cid = memvault_core::cid_from_bytes(data);
-                let new_cid_bytes = new_cid.to_bytes();
-                if new_cid_bytes != *cid {
-                    let _ = store.put_block(&new_cid_bytes, data);
-                    let _ = store.delete_block(cid);
-                    report.cid_legacy_migrated += 1;
-                }
             }
             Verdict::Rewrite => {
                 let wall_ns = memvault_store::deserialize_block(data)
@@ -542,10 +590,8 @@ enum Verdict {
     Keep,
     /// Cruft — delete (broken manifests, legacy extraction blocks).
     Drop,
-    /// Unbucketed envelope — rewrite with bucket_id as CBOR.
+    /// Envelope needing rewrite — missing bucket, JSON format, or bad CID.
     Rewrite,
-    /// Envelope with legacy (payload-based) CID — re-hash under correct CID.
-    Rehash,
 }
 
 fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
@@ -600,18 +646,18 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
     }
 
     if is_envelope {
-        // Check CID validity.
-        match memvault_core::verify_cid(cid, data) {
-            Ok(true) => {
-                // Valid CID. Bucketed? Keep. Unbucketed? Rewrite.
-                if has_bucket { Verdict::Keep } else { Verdict::Rewrite }
-            }
-            Ok(false) => {
-                // CID mismatch — legacy payload-based hash.
-                if has_bucket { Verdict::Rehash } else { Verdict::Rewrite }
-            }
-            Err(_) => Verdict::Rewrite, // unparseable CID, rewrite fixes it
+        if !has_bucket {
+            return Verdict::Rewrite;
         }
+        // JSON envelope → rewrite as CBOR.
+        if data.first() == Some(&b'{') {
+            return Verdict::Rewrite;
+        }
+        // CID mismatch → rewrite.
+        if !matches!(memvault_core::verify_cid(cid, data), Ok(true)) {
+            return Verdict::Rewrite;
+        }
+        Verdict::Keep
     } else {
         // Non-envelope structured block (annotation, manifest, etc.)
         match memvault_core::verify_cid(cid, data) {
