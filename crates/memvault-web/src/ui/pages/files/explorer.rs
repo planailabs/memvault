@@ -73,13 +73,24 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
             None => continue,
         };
         let cid_hex = hex::encode(&manifest_cid);
-        let meta = super::resolve_file_meta(&*client, &manifest_cid).await;
+        // Read manifest block (always exists after repair-index).
+        let (filename, mime_type, size) = match client.get_file_manifest(&manifest_cid).await {
+            Ok(Some(bytes)) => {
+                let m: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                (
+                    m.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
+                    m.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string(),
+                    m.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0),
+                )
+            }
+            _ => ("unnamed".to_string(), "application/octet-stream".to_string(), 0),
+        };
 
         files.push(FileRow {
             cid: cid_hex,
-            filename: meta.filename,
-            mime_type: meta.mime_type,
-            size: meta.size,
+            filename,
+            mime_type,
+            size,
             wall_ns: record.wall_ns,
         });
     }

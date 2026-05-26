@@ -891,6 +891,54 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             println!("  {bucket_count} bucket declaration(s) rebuilt");
 
+            // Phase 1c: Rebuild missing file manifests from attachment envelopes
+            println!("Phase 1c: Rebuilding missing file manifests...");
+            let mut manifest_created = 0usize;
+            let mut manifest_ok = 0usize;
+            for (_cid, data) in &blocks {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
+                    if val.get("kind").and_then(|v| v.as_str()) != Some("attachment") {
+                        continue;
+                    }
+                    let mcid: Option<Vec<u8>> = val.get("manifest_cid")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+                    let mcid = match mcid {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    // Check if manifest block exists.
+                    if store.get_block(&mcid).ok().flatten().is_some() {
+                        manifest_ok += 1;
+                        continue;
+                    }
+                    // Manifest block missing — synthesize from envelope metadata.
+                    let filename = val.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed");
+                    let mime_type = val.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream");
+                    let size = val.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let manifest = serde_json::json!({
+                        "content_root": [],
+                        "content_size": size,
+                        "chunk_layout": "flat",
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "sha256": null,
+                        "width_height": null,
+                        "duration_ms": null,
+                        "extracted_text": null,
+                        "derived_from": null,
+                        "pii_findings": null,
+                        "replication": { "min_copies": 1, "max_copies": 3, "strategy": "lazy" }
+                    });
+                    let manifest_bytes = serde_json::to_vec(&manifest).unwrap_or_default();
+                    // Store with the CID the envelope references.
+                    if store.put_block_unchecked(&mcid, &manifest_bytes).is_ok() {
+                        manifest_created += 1;
+                        println!("  Created manifest for {filename} ({})", hex::encode(&mcid[..8.min(mcid.len())]));
+                    }
+                }
+            }
+            println!("  {manifest_ok} manifests OK, {manifest_created} created from envelopes");
+
             // Phase 2: Rebuild full-text search index
             println!("Phase 2: Rebuilding full-text search index...");
             let client = create_client(store.clone());

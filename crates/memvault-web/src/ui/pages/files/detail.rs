@@ -57,15 +57,11 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
     let client = crate::ui::state::client()?;
     let cid_bytes = hex::decode(&cid).map_err(|_| ServerFnError::new("Invalid CID hex"))?;
 
-    // Resolve metadata using shared helper (tries manifest, then envelope).
-    let file_meta = super::resolve_file_meta(&*client, &cid_bytes).await;
-
-    // Also try to read manifest for extended fields (sha256, width_height, etc.)
+    // Read manifest block (always exists after repair-index).
     let manifest: serde_json::Value = client
         .get_file_manifest(&cid_bytes)
         .await
-        .ok()
-        .flatten()
+        .map_err(|e| ServerFnError::new(e.to_string()))?
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
 
@@ -76,9 +72,9 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
 
     Ok(FileData {
         cid,
-        filename: file_meta.filename,
-        mime_type: file_meta.mime_type,
-        content_size: file_meta.size,
+        filename: manifest.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
+        mime_type: manifest.get("mime_type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string(),
+        content_size: manifest.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0),
         sha256: manifest
             .get("sha256")
             .and_then(|v| v.as_str())
