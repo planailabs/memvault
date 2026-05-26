@@ -219,24 +219,27 @@ pub fn head_channel() -> (mpsc::UnboundedSender<OutboundHead>, mpsc::UnboundedRe
 // ── Internal helpers ────────────────────────────────────────────────
 
 /// Number of time windows for RBSR initial sync.
-const RBSR_WINDOWS: usize = 32;
+const RBSR_WINDOWS: usize = 64;
 
-/// On new peer connect, send range fingerprints for RBSR reconciliation.
-/// The peer compares fingerprints and responds with CIDs from mismatched windows.
+/// On new peer connect, send range fingerprints covering the FULL store
+/// (not just recent data). RBSR makes this efficient: matching windows
+/// are skipped, so bandwidth is proportional to the diff.
 fn request_remote_heads(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: &MemvaultStore,
-    config: &SyncConfig,
+    _config: &SyncConfig,
     peer_id: libp2p::PeerId,
 ) {
     let now = memvault_core::wall_ns();
-    let cutoff = now.saturating_sub(config.initial_sync_window_ns);
-    let window_size = config.initial_sync_window_ns / RBSR_WINDOWS as u64;
+    // Cover all time: from epoch 0 to now. The first window catches
+    // all data created before the other windows.
+    let window_size = now / RBSR_WINDOWS as u64;
+    if window_size == 0 { return; }
 
     let mut fingerprints = Vec::with_capacity(RBSR_WINDOWS);
     for i in 0..RBSR_WINDOWS {
-        let start = cutoff + (i as u64) * window_size;
-        let end = if i == RBSR_WINDOWS - 1 { now + 1 } else { start + window_size };
+        let start = (i as u64) * window_size;
+        let end = if i == RBSR_WINDOWS - 1 { u64::MAX } else { start + window_size };
         let (count, xor) = store.range_fingerprint(start, end).unwrap_or((0, [0u8; 32]));
         fingerprints.push(RangeFingerprint {
             start_ns: start,
@@ -255,7 +258,7 @@ fn request_remote_heads(
         token: None,
     };
     swarm.behaviour_mut().block_exchange.send_request(&peer_id, request);
-    tracing::debug!(%peer_id, windows = RBSR_WINDOWS, total_blocks = total, "sent RBSR sync request");
+    tracing::info!(%peer_id, windows = RBSR_WINDOWS, total_blocks = total, "sent RBSR full sync request");
 }
 
 fn publish_head(

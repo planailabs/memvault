@@ -561,12 +561,14 @@ impl LocalClient {
         // CID is computed from the full envelope bytes so any peer
         // receiving the block can verify: CID == hash(block_bytes).
         let envelope = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "payload": op,
             "author": self.peer_id,
             "tags": tags,
             "visibility": vis,
             "wall_ns": wall_ns,
+            "cluster_id": meta.cluster_id,
+            "bucket_id": meta.bucket_id,
         });
         let envelope_bytes = serde_json::to_vec(&envelope)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
@@ -808,6 +810,8 @@ impl MemvaultClient for LocalClient {
             "visibility": visibility,
             "tags": tags,
             "wall_ns": meta.wall_ns,
+            "cluster_id": meta.cluster_id,
+            "bucket_id": meta.bucket_id,
         });
         let envelope_bytes = serde_json::to_vec(&envelope)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
