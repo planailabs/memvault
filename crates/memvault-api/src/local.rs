@@ -476,39 +476,18 @@ impl LocalClient {
         // Cache the result.
         match &result {
             ExtractionResult::Ok(text) => {
-                #[derive(serde::Serialize)]
-                struct CachedExtraction {
-                    source: Vec<u8>,
-                    extractor: String,
-                    extractor_version: String,
-                    extracted_at_ns: u64,
-                    text: String,
-                    page_breaks: Vec<u32>,
-                    warnings: Vec<String>,
-                }
-                let et = CachedExtraction {
-                    source: manifest_cid.to_vec(),
-                    extractor: "memvault-extract".to_string(),
-                    extractor_version: env!("CARGO_PKG_VERSION").to_string(),
-                    extracted_at_ns: memvault_core::wall_ns(),
-                    text: text.clone(),
-                    page_breaks: vec![],
-                    warnings: vec![],
-                };
-                if let Ok(et_bytes) = serde_json::to_vec(&et) {
-                    let et_cid = cid_from_bytes(&et_bytes);
-                    let _ = self.store.put_block(&et_cid.to_bytes(), &et_bytes);
-                    self.store_manifest_update(manifest_cid, Some(et_cid.to_bytes()), None);
-                }
+                // Embed extracted text directly in the annotation (syncs
+                // via gossip, bucket-scoped).  No separate raw block.
+                self.store_extraction_annotation(manifest_cid, Some(&text), None);
                 tracing::debug!(
                     mime_type,
                     text_len = text.len(),
-                    "extraction succeeded, cached"
+                    "extraction succeeded, cached in annotation"
                 );
             }
             ExtractionResult::Failed(err) => {
                 tracing::debug!(mime_type, error = %err, "extraction failed, cached failure");
-                self.store_manifest_update(manifest_cid, None, Some(err));
+                self.store_extraction_annotation(manifest_cid, None, Some(err));
             }
             ExtractionResult::Unsupported => {}
         }
@@ -519,10 +498,10 @@ impl LocalClient {
         }
     }
 
-    fn store_manifest_update(
+    fn store_extraction_annotation(
         &self,
         manifest_cid: &[u8],
-        extracted_text_cid: Option<Vec<u8>>,
+        text: Option<&str>,
         error: Option<&str>,
     ) {
         let target = format!("file:{}", hex::encode(manifest_cid));
@@ -530,8 +509,10 @@ impl LocalClient {
             &target,
             "extraction",
             serde_json::json!({
-                "extracted_text": extracted_text_cid,
+                "extracted_text_inline": text,
                 "extraction_error": error,
+                "extractor": "memvault-extract",
+                "extracted_at_ns": memvault_core::wall_ns(),
             }),
         );
     }
@@ -569,6 +550,15 @@ impl LocalClient {
                 }
             }
 
+            // New inline format: text embedded directly in annotation.
+            if let Some(text) = data_field
+                .get("extracted_text_inline")
+                .and_then(|v| v.as_str())
+            {
+                return Some(ExtractionResult::Ok(text.to_string()));
+            }
+
+            // Legacy format: text stored as separate block via CID ref.
             if let Some(et_cid) = data_field
                 .get("extracted_text")
                 .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
