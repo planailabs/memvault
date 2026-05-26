@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
@@ -64,6 +65,9 @@ pub async fn run_sync_loop(
     let mut synced_peers: HashSet<libp2p::PeerId> = HashSet::new();
     // Track peer → cluster_id for visibility enforcement.
     let mut peer_clusters: HashMap<libp2p::PeerId, Vec<u8>> = HashMap::new();
+    // Periodic resync timer to heal partial sync.
+    let mut resync_timer = tokio::time::interval(RESYNC_INTERVAL);
+    resync_timer.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
@@ -203,6 +207,17 @@ pub async fn run_sync_loop(
                 }
             }
 
+            // ── Periodic re-sync to heal partial sync ──
+            _ = resync_timer.tick() => {
+                let peers: Vec<_> = synced_peers.iter().copied().collect();
+                if !peers.is_empty() {
+                    tracing::info!(peers = peers.len(), "periodic RBSR resync");
+                    for peer_id in peers {
+                        request_remote_heads(swarm, &store, &config, peer_id);
+                    }
+                }
+            }
+
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutting down...");
                 break;
@@ -223,6 +238,13 @@ pub fn head_channel() -> (
 
 /// Number of time windows for RBSR initial sync.
 const RBSR_WINDOWS: usize = 64;
+
+/// Max CIDs per follow-up fetch request. Keeps the response (with full
+/// block data) well within the 512 MiB codec limit even for large blocks.
+const FETCH_CHUNK_SIZE: usize = 50;
+
+/// How often to re-run RBSR for connected peers to heal partial sync.
+const RESYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// On new peer connect, send range fingerprints covering the FULL store
 /// (not just recent data). RBSR makes this efficient: matching windows
@@ -371,8 +393,11 @@ fn serve_block_request(
                     continue; // Same data in this window.
                 }
                 mismatched += 1;
-                // Return our CIDs from this window so the requester can diff.
-                if let Ok(cids) = store.query_by_time(rf.start_ns, rf.end_ns, 1000) {
+                // Return ALL our CIDs from this window so the requester can diff.
+                // No limit — bandwidth is already bounded by the number of
+                // mismatched windows, and truncating here causes silent
+                // data loss when blocks cluster temporally (burst writes).
+                if let Ok(cids) = store.query_by_time(rf.start_ns, rf.end_ns, usize::MAX) {
                     for cid in cids {
                         diff_cids.push(BlockEntry {
                             cid,
@@ -476,6 +501,12 @@ fn check_block_access(
 /// Handle a block exchange response. Two cases:
 /// - Blocks with data → store them locally.
 /// - CID-only entries (from list-heads) → request the ones we're missing.
+///
+/// Also chases references: if a stored block is an attachment envelope
+/// (references manifest_cid) or an AttachmentManifest (references
+/// content_root / chunk CIDs), those dependent CIDs are queued for
+/// fetch. Without this, file data chunks are invisible to RBSR (they
+/// have no BY_TIME entry) and silently diverge between nodes.
 fn handle_block_response(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: &MemvaultStore,
@@ -508,6 +539,15 @@ fn handle_block_response(
             let _ = store.reindex_bucket_decl(&entry.cid, &entry.data);
             stored += 1;
             tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
+
+            // Chase references: envelopes → manifest, manifests → content_root.
+            // This ensures file data chunks are fetched even though they have
+            // no BY_TIME entry and are invisible to RBSR.
+            for dep_cid in extract_dependent_cids(&entry.data) {
+                if store.get_block(&dep_cid).ok().flatten().is_none() {
+                    missing_cids.push(dep_cid);
+                }
+            }
         }
     }
 
@@ -515,18 +555,78 @@ fn handle_block_response(
         tracing::info!(%peer, stored, "blocks synced from peer");
     }
 
-    // Follow up: fetch the blocks we're missing (from a list-heads response).
+    // Follow up: fetch the blocks we're missing in chunks.
+    // A single response with thousands of full blocks easily exceeds the
+    // 16 MiB codec limit, causing a silent OutboundFailure. Chunk into
+    // batches of FETCH_CHUNK_SIZE to keep responses within bounds.
     if !missing_cids.is_empty() {
         tracing::info!(%peer, missing = missing_cids.len(), "requesting missing blocks from peer");
-        swarm.behaviour_mut().block_exchange.send_request(
-            &peer,
-            BlockRequest {
-                cids: missing_cids,
-                since_ns: None,
-                limit: None,
-                range_fingerprints: vec![],
-                token: None,
-            },
-        );
+        for chunk in missing_cids.chunks(FETCH_CHUNK_SIZE) {
+            swarm.behaviour_mut().block_exchange.send_request(
+                &peer,
+                BlockRequest {
+                    cids: chunk.to_vec(),
+                    since_ns: None,
+                    limit: None,
+                    range_fingerprints: vec![],
+                    token: None,
+                },
+            );
+        }
     }
+}
+
+/// Extract CIDs referenced by a block so the sync loop can chase them.
+///
+/// Handles three cases:
+/// - **Attachment envelope** (kind: "attachment"): has `manifest_cid`
+/// - **AttachmentManifest**: has `content_root` (the UnixFS DAG root)
+/// - **DAG-PB node** (protobuf): has `links[].hash` pointing to child blocks
+///
+/// Without this, file data chunks (stored via `put_block`, no BY_TIME
+/// entry) are invisible to RBSR and silently diverge between nodes.
+fn extract_dependent_cids(block_data: &[u8]) -> Vec<Vec<u8>> {
+    // Try JSON first (envelopes, manifests).
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(block_data) {
+        let mut deps = Vec::new();
+
+        // Attachment envelope → manifest_cid
+        if let Some(mcid) = val
+            .get("manifest_cid")
+            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
+        {
+            deps.push(mcid);
+        }
+
+        // AttachmentManifest → content_root (UnixFS DAG root CID)
+        if let Some(root) = val
+            .get("content_root")
+            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
+        {
+            deps.push(root);
+        }
+
+        // Causal / provenance links (envelope references to prior blocks)
+        if let Some(arr) = val.get("causal").and_then(|v| v.as_array()) {
+            for v in arr {
+                if let Ok(cid) = serde_json::from_value::<Vec<u8>>(v.clone()) {
+                    deps.push(cid);
+                }
+            }
+        }
+
+        return deps;
+    }
+
+    // Try DAG-PB (protobuf UnixFS nodes): extract child CIDs from links.
+    use prost::Message;
+    if let Ok(node) = memvault_attach::proto::PbNode::decode(block_data) {
+        return node
+            .links
+            .into_iter()
+            .filter_map(|link| link.hash)
+            .collect();
+    }
+
+    vec![]
 }

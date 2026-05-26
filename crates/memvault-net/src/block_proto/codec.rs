@@ -5,8 +5,8 @@ use std::io;
 
 use super::{BlockRequest, BlockResponse};
 
-/// Max message size: 16 MiB (blocks can be large for file chunks).
-const MAX_MSG_SIZE: u64 = 16 * 1024 * 1024;
+/// Max message size: 512 MiB (future-proofing for large block batches).
+const MAX_MSG_SIZE: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct BlockCodec;
