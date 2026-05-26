@@ -10,7 +10,6 @@ pub mod health;
 pub mod http;
 pub mod local;
 pub mod metrics;
-pub mod migrations;
 pub mod rebuild;
 pub mod otel;
 pub mod quotas;

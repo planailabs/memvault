@@ -17,10 +17,7 @@ use crate::error::{ApiError, Result};
 use crate::local::LocalClient;
 use memvault_core::{BucketId, EntityId};
 
-/// Bump this when index structure, adoption logic, or derived-state
-/// semantics change.  Any store with a lower version will be fully
-/// rebuilt on next open.
-pub const BLOCKSTORE_VERSION: u32 = 1;
+pub use memvault_core::BLOCKSTORE_VERSION;
 
 /// Summary of what the rebuild did.
 #[derive(Debug, Default)]

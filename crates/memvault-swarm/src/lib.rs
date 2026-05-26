@@ -231,6 +231,7 @@ pub async fn run_sync_loop(
                                     limit: None,
                                     range_fingerprints: vec![],
                                     token: None,
+                                    store_version: memvault_core::BLOCKSTORE_VERSION,
                                 },
                             );
                         }
@@ -309,6 +310,7 @@ fn request_remote_heads(
         limit: None,
         range_fingerprints: fingerprints,
         token: None,
+        store_version: memvault_core::BLOCKSTORE_VERSION,
     };
     swarm
         .behaviour_mut()
@@ -355,6 +357,7 @@ fn handle_gossip_message(
                         limit: None,
                         range_fingerprints: vec![],
                         token: None,
+                        store_version: memvault_core::BLOCKSTORE_VERSION,
                     },
                 );
             }
@@ -378,6 +381,22 @@ fn serve_block_request(
     cluster_id: &[u8],
     peer_clusters: &std::collections::HashMap<libp2p::PeerId, Vec<u8>>,
 ) {
+    // Reject requests from peers with a different blockstore version.
+    let local_version = memvault_core::BLOCKSTORE_VERSION;
+    if request.store_version != local_version {
+        tracing::warn!(
+            %peer,
+            remote = request.store_version,
+            local = local_version,
+            "rejecting sync: blockstore version mismatch"
+        );
+        let _ = swarm
+            .behaviour_mut()
+            .block_exchange
+            .send_response(channel, BlockResponse { blocks: vec![] });
+        return;
+    }
+
     let peer_cluster = peer_clusters.get(&peer);
     let is_local = peer_cluster.map(|c| c == cluster_id).unwrap_or(false);
 
@@ -590,6 +609,7 @@ fn handle_block_response(
                     limit: None,
                     range_fingerprints: vec![],
                     token: None,
+                    store_version: memvault_core::BLOCKSTORE_VERSION,
                 },
             );
         }

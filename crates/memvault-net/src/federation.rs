@@ -13,7 +13,7 @@ pub enum FederationAnnouncement {
         head_cid: Vec<u8>,
         visibility: Visibility,
         scope_tags: Vec<(String, String)>,
-        /// Bucket this head belongs to (added B3). None = default bucket.
+        /// Bucket this head belongs to. None = unbucketed (legacy).
         #[serde(default)]
         bucket_id: Option<Vec<u8>>,
     },

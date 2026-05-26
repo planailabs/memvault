@@ -5,6 +5,8 @@
 
 pub mod codec;
 
+pub use memvault_core::BLOCKSTORE_VERSION;
+
 pub use codec::BlockCodec;
 
 use serde::{Deserialize, Serialize};
@@ -112,6 +114,12 @@ pub struct BlockRequest {
     /// from the specified bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<BlockAccessToken>,
+
+    /// Blockstore version of the requester. The responder MUST reject
+    /// requests where this doesn't match its own version to prevent
+    /// cross-version sync poisoning.
+    #[serde(default)]
+    pub store_version: u32,
 }
 
 /// Response with the requested blocks.

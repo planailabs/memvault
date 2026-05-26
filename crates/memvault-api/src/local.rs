@@ -597,12 +597,6 @@ impl LocalClient {
         &self.store
     }
 
-    /// Run any pending runtime migrations.  Safe to call on every startup.
-    #[deprecated(note = "use rebuild::rebuild_if_needed instead")]
-    pub async fn run_migrations(&self) -> Result<(u32, u32)> {
-        crate::migrations::run_pending(self).await
-    }
-
     /// Rebuild all derived state if the blockstore version is outdated.
     pub async fn rebuild_if_needed(
         &self,

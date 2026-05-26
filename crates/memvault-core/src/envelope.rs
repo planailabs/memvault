@@ -21,7 +21,7 @@ pub struct Signed<T> {
     pub lamport: u64,
     pub wall_ns: u64,
     pub capability: Option<Cid>,
-    /// Bucket this envelope belongs to. `None` = default bucket.
+    /// Bucket this envelope belongs to. `None` = unbucketed (legacy).
     /// Present in version 2+ envelopes; absent (deserialized as None) in v1.
     #[serde(default)]
     pub bucket_id: Option<BucketId>,
