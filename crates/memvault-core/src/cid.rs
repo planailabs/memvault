@@ -3,13 +3,24 @@ use multihash_codetable::{Code, MultihashDigest};
 
 use crate::error::{Error, Result};
 
-/// DAG-CBOR codec code for CID.
-const DAG_CBOR: u64 = 0x71;
+/// Multicodec identifiers for CID content types.
+pub mod codec {
+    pub const RAW: u64 = 0x55;
+    pub const DAG_PB: u64 = 0x70;
+    pub const DAG_CBOR: u64 = 0x71;
+    pub const DAG_JSON: u64 = 0x0129;
+}
 
 /// Compute a CID from raw bytes using BLAKE3 hash and DAG-CBOR codec.
+/// Use [`cid_with_codec`] when the content is not DAG-CBOR.
 pub fn cid_from_bytes(data: &[u8]) -> Cid {
+    cid_with_codec(data, codec::DAG_CBOR)
+}
+
+/// Compute a CID from raw bytes with an explicit multicodec.
+pub fn cid_with_codec(data: &[u8], multicodec: u64) -> Cid {
     let hash = Code::Blake3_256.digest(data);
-    Cid::new_v1(DAG_CBOR, hash)
+    Cid::new_v1(multicodec, hash)
 }
 
 /// Compute a CID from a serializable value (encodes to DAG-CBOR first).
