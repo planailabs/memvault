@@ -114,6 +114,34 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         }
     }
 
+    // ── Phase 0c: Drop legacy extraction blocks ─────────────────────────
+    //
+    // Old extraction results were stored as standalone blocks (no bucket,
+    // no envelope, never synced).  Delete them — text will be re-extracted
+    // and stored inline in annotations during populate_index.
+    {
+        let blocks = store
+            .iter_blocks()
+            .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
+        let mut dropped = 0usize;
+        for (cid, data) in &blocks {
+            if let Some(val) = memvault_store::deserialize_block(data) {
+                // Legacy extraction blocks have "source", "extractor", "text"
+                // but no "payload" (not an envelope) and no "kind".
+                let has_extractor = val.get("extractor").is_some();
+                let has_text = val.get("text").is_some();
+                let is_envelope = val.get("payload").is_some();
+                if has_extractor && has_text && !is_envelope {
+                    let _ = store.delete_block(cid);
+                    dropped += 1;
+                }
+            }
+        }
+        if dropped > 0 {
+            tracing::info!(dropped, "dropped legacy extraction blocks");
+        }
+    }
+
     // ── Phase 1: Rebuild secondary indexes ─────────────────────────────
 
     store
