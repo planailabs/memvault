@@ -40,7 +40,10 @@ impl VfsRow {
 // ── Server functions ───────────────────────────────────────────────
 
 #[server]
-async fn list_vfs_entries(path: String, bucket_hex: Option<String>) -> Result<Vec<VfsRow>, ServerFnError> {
+async fn list_vfs_entries(
+    path: String,
+    bucket_hex: Option<String>,
+) -> Result<Vec<VfsRow>, ServerFnError> {
     use memvault_core::NodeRef;
     let client = crate::ui::state::client()?;
 
@@ -56,33 +59,42 @@ async fn list_vfs_entries(path: String, bucket_hex: Option<String>) -> Result<Ve
     } else {
         memvault_api::vfs::default_bucket(&*client).await
     };
-    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket).await
+    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     let mut current = NodeRef::Entity(root_id);
     for component in &components {
-        let child = vfs_find_named_child(&*client, &current, component).await?
+        let child = vfs_find_named_child(&*client, &current, component)
+            .await?
             .ok_or_else(|| ServerFnError::new(format!("path component '{component}' not found")))?;
         current = child;
     }
 
-    let edges = client.edges_of(&current).await
+    let edges = client
+        .edges_of(&current)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // Collect entries, deduplicating by name (keep smallest edge ID on conflict).
-    let mut seen: std::collections::BTreeMap<String, (memvault_core::NodeRef, [u8; 32])> = std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeMap<String, (memvault_core::NodeRef, [u8; 32])> =
+        std::collections::BTreeMap::new();
     for (src, edge) in &edges {
         if src != &current || edge.relation != VFS_CHILD_REL {
             continue;
         }
-        let name = edge.props.get("name")
+        let name = edge
+            .props
+            .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("?")
             .to_string();
         match seen.get(&name) {
             Some((_, eid)) if *eid <= edge.id.0 => {}
-            _ => { seen.insert(name, (edge.target.clone(), edge.id.0)); }
+            _ => {
+                seen.insert(name, (edge.target.clone(), edge.id.0));
+            }
         }
     }
     let mut entries = Vec::new();
@@ -108,7 +120,8 @@ async fn vfs_mkdir(path: String) -> Result<String, ServerFnError> {
     use memvault_core::NodeRef;
     let client = crate::ui::state::client()?;
     let bucket = memvault_api::vfs::default_bucket(&*client).await;
-    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket).await
+    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if components.is_empty() {
@@ -119,7 +132,7 @@ async fn vfs_mkdir(path: String) -> Result<String, ServerFnError> {
         match vfs_find_named_child(&*client, &current, component).await? {
             Some(child) => current = child,
             None => {
-                let id = vfs_create_dir(&*client, component).await?;
+                let id = vfs_create_dir(&*client, &bucket, component).await?;
                 let child = NodeRef::Entity(id);
                 match vfs_create_edge(&*client, &current, &child, component).await {
                     Ok(_) => current = child,
@@ -127,9 +140,11 @@ async fn vfs_mkdir(path: String) -> Result<String, ServerFnError> {
                         // Race: another writer created this entry concurrently.
                         match vfs_find_named_child(&*client, &current, component).await? {
                             Some(existing) => current = existing,
-                            None => return Err(ServerFnError::new(
-                                format!("failed to create directory component '{component}'"),
-                            )),
+                            None => {
+                                return Err(ServerFnError::new(format!(
+                                    "failed to create directory component '{component}'"
+                                )));
+                            }
                         }
                     }
                 }
@@ -149,7 +164,9 @@ async fn vfs_ensure_root(
     use memvault_doc::Entity;
     use std::collections::BTreeMap;
 
-    let entities = client.list_entities(500, None).await
+    let entities = client
+        .list_entities(500, None)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // Pass 1: find roots by vfs:root tag (from text index).
@@ -179,7 +196,9 @@ async fn vfs_ensure_root(
         fallback_candidates.sort();
         let id = EntityId(fallback_candidates[0]);
         let node_id = format!("entity:{}", hex::encode(id.0));
-        let _ = client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await;
+        let _ = client
+            .add_tags(&node_id, vec![("vfs".into(), "root".into())])
+            .await;
         return Ok(id);
     }
     // Create a new root.
@@ -191,10 +210,14 @@ async fn vfs_ensure_root(
         props,
         edges_out: vec![],
     };
-    let id = client.add_entity(entity, Visibility::Internal, None).await
+    let id = client
+        .add_entity(entity, Visibility::Internal, None)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let node_id = format!("entity:{}", hex::encode(id.0));
-    client.add_tags(&node_id, vec![("vfs".into(), "root".into())]).await
+    client
+        .add_tags(&node_id, vec![("vfs".into(), "root".into())])
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(id)
 }
@@ -205,7 +228,9 @@ async fn vfs_find_named_child(
     parent: &memvault_core::NodeRef,
     name: &str,
 ) -> Result<Option<memvault_core::NodeRef>, ServerFnError> {
-    let edges = client.edges_of(parent).await
+    let edges = client
+        .edges_of(parent)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let mut best: Option<(memvault_core::NodeRef, [u8; 32])> = None;
     for (src, edge) in &edges {
@@ -215,7 +240,11 @@ async fn vfs_find_named_child(
         if edge.relation != VFS_CHILD_REL {
             continue;
         }
-        let edge_name = edge.props.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        let edge_name = edge
+            .props
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         if edge_name != name {
             continue;
         }
@@ -249,6 +278,7 @@ async fn vfs_resolve_type(
 #[cfg(feature = "server")]
 async fn vfs_create_dir(
     client: &dyn memvault_api::MemvaultClient,
+    bucket: &memvault_core::BucketId,
     name: &str,
 ) -> Result<memvault_core::EntityId, ServerFnError> {
     use memvault_core::{EntityId, Visibility};
@@ -263,7 +293,9 @@ async fn vfs_create_dir(
         props,
         edges_out: vec![],
     };
-    client.add_entity(entity, Visibility::Internal, None).await
+    client
+        .add_entity(entity, Visibility::Internal, Some(bucket))
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
@@ -280,11 +312,16 @@ async fn vfs_create_edge(
 
     // Prevent duplicate entries with the same name under the same parent.
     if vfs_find_named_child(client, parent, name).await?.is_some() {
-        return Err(ServerFnError::new(format!("entry '{name}' already exists in directory")));
+        return Err(ServerFnError::new(format!(
+            "entry '{name}' already exists in directory"
+        )));
     }
 
     let mut props = BTreeMap::new();
-    props.insert("name".to_string(), serde_json::Value::String(name.to_string()));
+    props.insert(
+        "name".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
     let edge = Edge {
         id: EdgeId::random(),
         relation: VFS_CHILD_REL.to_string(),
@@ -293,7 +330,9 @@ async fn vfs_create_edge(
         props,
         provenance: None,
     };
-    client.add_link(parent, edge, Visibility::Internal).await
+    client
+        .add_link(parent, edge, Visibility::Internal)
+        .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
@@ -325,7 +364,11 @@ pub fn VfsExplorer() -> Element {
     // Sync path to URL hash when it changes.
     use_effect(move || {
         let p = path.read().clone();
-        let hash = if p == "/" { String::new() } else { format!("#{p}") };
+        let hash = if p == "/" {
+            String::new()
+        } else {
+            format!("#{p}")
+        };
         document::eval(&format!(
             "try {{ history.replaceState(null, '', window.location.pathname + '{hash}'); }} catch(e) {{}}"
         ));
@@ -471,7 +514,11 @@ fn render_grid_card(entry: &VfsRow, mut path: Signal<String>) -> Element {
     if entry.node_type == "dir" {
         let target_path = {
             let current = path.read().clone();
-            if current == "/" { format!("/{}", entry.name) } else { format!("{current}/{}", entry.name) }
+            if current == "/" {
+                format!("/{}", entry.name)
+            } else {
+                format!("{current}/{}", entry.name)
+            }
         };
         rsx! {
             div {
@@ -530,7 +577,11 @@ fn VfsTable(list: Vec<VfsRow>, path: Signal<String>) -> Element {
         let mut items: Vec<VfsRow> = if q.is_empty() {
             list_clone.clone()
         } else {
-            list_clone.iter().filter(|e| e.matches_search(&q)).cloned().collect()
+            list_clone
+                .iter()
+                .filter(|e| e.matches_search(&q))
+                .cloned()
+                .collect()
         };
         let (key, asc) = sort.read().clone();
         items.sort_by(|a, b| {
@@ -591,7 +642,11 @@ fn VfsTableRow(entry: VfsRow, path: Signal<String>) -> Element {
 fn render_dir_button(entry: &VfsRow, mut path: Signal<String>) -> Element {
     let target_path = {
         let current = path.read().clone();
-        if current == "/" { format!("/{}", entry.name) } else { format!("{current}/{}", entry.name) }
+        if current == "/" {
+            format!("/{}", entry.name)
+        } else {
+            format!("{current}/{}", entry.name)
+        }
     };
     rsx! {
         button {
@@ -609,11 +664,15 @@ fn node_route(node_id: &str, node_type: &str) -> Option<Route> {
             Some(Route::NoteDetail { id })
         }
         "entity" => {
-            let id = node_id.strip_prefix("entity:").unwrap_or(node_id).to_string();
+            let id = node_id
+                .strip_prefix("entity:")
+                .unwrap_or(node_id)
+                .to_string();
             Some(Route::EntityDetail { id })
         }
         "file" | "attachment" => {
-            let cid = node_id.strip_prefix("file:")
+            let cid = node_id
+                .strip_prefix("file:")
                 .or_else(|| node_id.strip_prefix("attachment:"))
                 .unwrap_or(node_id)
                 .to_string();

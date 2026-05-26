@@ -8,11 +8,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use memvault_api::MemvaultClient;
-use memvault_core::*;
 use memvault_core::tags::Tag;
-use memvault_doc::Document;
+use memvault_core::*;
+use memvault_doc::{Document, Entity, Op, TextPatch};
+use memvault_query::{QuotaManager, TextIndex};
 use memvault_store::MemvaultStore;
 use memvault_store::insert::EnvelopeMeta;
+use tokio::sync::RwLock;
 
 use crate::harness::TestNode;
 
@@ -32,7 +34,8 @@ fn old_envelope_meta_without_bucket_id_deserializes() {
 
     // This should parse fine — bucket_id defaults to None
     let val: serde_json::Value = serde_json::from_str(json).unwrap();
-    let bucket_id: Option<Vec<u8>> = val.get("bucket_id")
+    let bucket_id: Option<Vec<u8>> = val
+        .get("bucket_id")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
     assert!(bucket_id.is_none());
 }
@@ -52,7 +55,9 @@ fn old_envelope_without_bucket_indexes_correctly() {
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: None, // old format
     };
-    store.insert_envelope(b"old-cid-001", b"old data", &meta).unwrap();
+    store
+        .insert_envelope(b"old-cid-001", b"old data", &meta)
+        .unwrap();
 
     // Should be queryable by tag
     let results = store.query_by_tag("doc", "abc123", 0, 100).unwrap();
@@ -86,6 +91,119 @@ fn old_envelope_reindexes_without_bucket() {
     assert!(indexed);
 }
 
+#[tokio::test]
+async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("blocks.redb");
+    let cluster_id = ClusterId::random();
+    let entity = Entity {
+        id: EntityId::random(),
+        kind: "person".to_string(),
+        props: BTreeMap::from([("name".to_string(), serde_json::json!("Legacy Alice"))]),
+        edges_out: vec![],
+    };
+    let default_bucket = {
+        let store = Arc::new(MemvaultStore::open(&db_path).unwrap());
+        store.set_local_cluster_id(&cluster_id.0).unwrap();
+        store.set_local_peer_id(&[9u8; 32]).unwrap();
+
+        let client = memvault_api::LocalClient::new(
+            Arc::clone(&store),
+            Arc::new(RwLock::new(TextIndex::new())),
+            Arc::new(RwLock::new(QuotaManager::default())),
+            Arc::new(memvault_api::EventBus::new(64)),
+            vec![9u8; 32],
+            cluster_id.0.to_vec(),
+        );
+        let default_bucket = client
+            .bucket_create(
+                "default",
+                None,
+                Visibility::Internal,
+                classification::Classification::Internal,
+            )
+            .await
+            .unwrap();
+        store
+            .bind_bucket(&default_bucket.0, &cluster_id.0, true)
+            .unwrap();
+
+        let entity_label = hex::encode(entity.id.0);
+        let wall_ns = wall_ns();
+        let op = Op::EntityCreate {
+            entity: entity.clone(),
+        };
+        let envelope = serde_json::json!({
+            "version": 1,
+            "payload": op,
+            "author": vec![7u8; 32],
+            "tags": [["entity", entity_label]],
+            "visibility": "Internal",
+            "wall_ns": wall_ns,
+            "cluster_id": cluster_id.0,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
+        let cid = cid_from_bytes(&envelope_bytes);
+        let meta = EnvelopeMeta {
+            author: vec![7u8; 32],
+            tags: vec![("entity".to_string(), hex::encode(entity.id.0))],
+            wall_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(cluster_id.0.to_vec()),
+            bucket_id: None,
+        };
+        store
+            .insert_envelope(&cid.to_bytes(), &envelope_bytes, &meta)
+            .unwrap();
+
+        let pre_client = memvault_api::LocalClient::new(
+            Arc::clone(&store),
+            Arc::new(RwLock::new(TextIndex::new())),
+            Arc::new(RwLock::new(QuotaManager::default())),
+            Arc::new(memvault_api::EventBus::new(64)),
+            vec![9u8; 32],
+            cluster_id.0.to_vec(),
+        );
+        pre_client.populate_index().await.unwrap();
+        assert!(
+            pre_client
+                .list_entities(100, Some(&default_bucket))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        default_bucket
+    };
+
+    let cli = memctl::Cli {
+        data_dir: Some(dir.path().to_path_buf()),
+        client: memctl::memvault_api::ClientArgs {
+            db: Some(db_path.clone()),
+            url: "http://127.0.0.1:8401".to_string(),
+            token_file: None,
+        },
+        command: memctl::Commands::RepairIndex,
+    };
+    memctl::run(cli).await.unwrap();
+
+    let reopened_store = Arc::new(MemvaultStore::open(&db_path).unwrap());
+    let post_client = memvault_api::LocalClient::new(
+        Arc::clone(&reopened_store),
+        Arc::new(RwLock::new(TextIndex::new())),
+        Arc::new(RwLock::new(QuotaManager::default())),
+        Arc::new(memvault_api::EventBus::new(64)),
+        reopened_store.get_local_peer_id().unwrap().unwrap(),
+        cluster_id.0.to_vec(),
+    );
+    post_client.populate_index().await.unwrap();
+    let entities = post_client
+        .list_entities(100, Some(&default_bucket))
+        .await
+        .unwrap();
+    assert!(entities.iter().any(|e| e.id == entity.id));
+}
+
 // ── Signed envelope v1 (no bucket_id) roundtrip ─────────────────────
 
 #[test]
@@ -99,12 +217,16 @@ fn v1_envelope_no_bucket_signs_and_verifies() {
         "old content".to_string(),
         &sk,
         PeerId(vk.as_bytes().to_vec()),
-        vec![], vec![],
+        vec![],
+        vec![],
         vec![Tag::new("classification", "internal")],
         Visibility::Internal,
-        1, 1000, None,
+        1,
+        1000,
+        None,
         None, // v1: no bucket
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(envelope.version, 1);
     assert!(envelope.bucket_id.is_none());
@@ -123,12 +245,16 @@ fn v1_envelope_serialization_compatible_with_v2_deserialize() {
         "compat test".to_string(),
         &sk,
         PeerId(vk.as_bytes().to_vec()),
-        vec![], vec![],
+        vec![],
+        vec![],
         vec![Tag::new("classification", "internal")],
         Visibility::Internal,
-        1, 1000, None,
+        1,
+        1000,
         None,
-    ).unwrap();
+        None,
+    )
+    .unwrap();
 
     // Serialize and deserialize — bucket_id should default to None
     let bytes = memvault_core::encode(&v1).unwrap();
@@ -139,13 +265,95 @@ fn v1_envelope_serialization_compatible_with_v2_deserialize() {
     deserialized.verify(&vk).unwrap();
 }
 
+#[tokio::test]
+async fn editing_docs_preserves_their_bucket() {
+    let node = TestNode::new();
+    let bucket = node
+        .client
+        .bucket_create(
+            "docs",
+            None,
+            Visibility::Internal,
+            classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
+
+    let doc = Document {
+        id: DocId::random(),
+        body: "hello".to_string(),
+        frontmatter: BTreeMap::new(),
+    };
+    node.client
+        .put_doc(doc.clone(), vec![], Visibility::Internal, Some(&bucket))
+        .await
+        .unwrap();
+    node.client
+        .edit_doc(
+            &doc.id,
+            TextPatch {
+                ops: vec![
+                    memvault_doc::TextOp::Retain(5),
+                    memvault_doc::TextOp::Insert(" world".to_string()),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+    let bucket_cids = node
+        .store
+        .query_by_bucket(&bucket.0, 0, usize::MAX)
+        .unwrap();
+    let doc_cids = node
+        .store
+        .query_by_tag("doc", &hex::encode(doc.id.0), 0, usize::MAX)
+        .unwrap();
+    assert_eq!(doc_cids.len(), 2);
+    assert!(doc_cids.iter().all(|cid| bucket_cids.contains(cid)));
+}
+
+#[tokio::test]
+async fn vfs_roots_and_dirs_are_created_in_the_requested_bucket() {
+    let node = TestNode::new();
+    let bucket = node
+        .client
+        .bucket_create(
+            "vfs",
+            None,
+            Visibility::Internal,
+            classification::Classification::Internal,
+        )
+        .await
+        .unwrap();
+
+    let root_id = memvault_api::vfs::ensure_root(&node.client, &bucket)
+        .await
+        .unwrap();
+    let bucket_entities = node.client.list_entities(500, Some(&bucket)).await.unwrap();
+    assert!(bucket_entities.iter().any(|e| e.id == root_id));
+
+    let path = memvault_api::vfs::ensure_dir_path(&node.client, &bucket, "/projects/alpha")
+        .await
+        .unwrap();
+    let dir_id = match path {
+        NodeRef::Entity(id) => id,
+        other => panic!("expected directory entity, got {other:?}"),
+    };
+    let bucket_entities = node.client.list_entities(500, Some(&bucket)).await.unwrap();
+    assert!(bucket_entities.iter().any(|e| e.id == dir_id));
+}
+
 // ── Old view (no bucket_id) ─────────────────────────────────────────
 
 #[test]
 fn old_view_without_bucket_id_deserializes() {
     use memvault_api::types::View;
     // View with no bucket_id field — should default to None
-    let view: View = serde_json::from_str(r#"{"name":"old-view","tags":[["topic","rust"]],"created_ns":1000,"cid":""}"#).unwrap();
+    let view: View = serde_json::from_str(
+        r#"{"name":"old-view","tags":[["topic","rust"]],"created_ns":1000,"cid":""}"#,
+    )
+    .unwrap();
     assert_eq!(view.name, "old-view");
     assert!(view.bucket_id.is_none());
 }
@@ -165,7 +373,11 @@ async fn vfs_double_prefix_entity_id_handled() {
         props,
         edges_out: vec![],
     };
-    let eid = node.client.add_entity(entity, Visibility::Internal, None).await.unwrap();
+    let eid = node
+        .client
+        .add_entity(entity, Visibility::Internal, None)
+        .await
+        .unwrap();
 
     // Construct both formats
     let hex_id = hex::encode(eid.0);
@@ -250,11 +462,11 @@ fn old_admin_announcement_variants_still_parse() {
         let ann: AdminAnnouncement = serde_json::from_value(v).unwrap();
         // Should parse without error
         match ann {
-            AdminAnnouncement::TokenConsumed(_) |
-            AdminAnnouncement::AdminKeyRotated(_) |
-            AdminAnnouncement::AgentKeyRotated(_) |
-            AdminAnnouncement::RotationAborted(_) |
-            AdminAnnouncement::Revoked(_) => {}
+            AdminAnnouncement::TokenConsumed(_)
+            | AdminAnnouncement::AdminKeyRotated(_)
+            | AdminAnnouncement::AgentKeyRotated(_)
+            | AdminAnnouncement::RotationAborted(_)
+            | AdminAnnouncement::Revoked(_) => {}
             _ => panic!("parsed as new variant unexpectedly"),
         }
     }
@@ -277,7 +489,9 @@ fn reindex_mixed_v1_v2_envelopes() {
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: None,
     };
-    store.insert_envelope(b"cid-v1", b"v1-data", &meta_v1).unwrap();
+    store
+        .insert_envelope(b"cid-v1", b"v1-data", &meta_v1)
+        .unwrap();
 
     // v2 envelope (with bucket_id)
     let bucket = [42u8; 32];
@@ -290,7 +504,9 @@ fn reindex_mixed_v1_v2_envelopes() {
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: Some(bucket.to_vec()),
     };
-    store.insert_envelope(b"cid-v2", b"v2-data", &meta_v2).unwrap();
+    store
+        .insert_envelope(b"cid-v2", b"v2-data", &meta_v2)
+        .unwrap();
 
     // Both should be queryable by tag
     let v1_results = store.query_by_tag("doc", "v1-doc", 0, 100).unwrap();
@@ -340,7 +556,13 @@ async fn unbound_buckets_rebind_on_cluster_join() {
 #[test]
 fn token_string_prefix_unchanged() {
     // The token prefix must stay "mvjoin1:" for backwards compat
-    assert_eq!(memvault_auth::decode_token_string("mvjoin1:invalid").unwrap_err().to_string().contains("decode"), true);
+    assert_eq!(
+        memvault_auth::decode_token_string("mvjoin1:invalid")
+            .unwrap_err()
+            .to_string()
+            .contains("decode"),
+        true
+    );
     // Wrong prefix should fail
     assert!(memvault_auth::decode_token_string("mvjoin2:something").is_err());
     assert!(memvault_auth::decode_token_string("bearer:something").is_err());
@@ -350,9 +572,9 @@ fn token_string_prefix_unchanged() {
 
 #[tokio::test]
 async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
-    use tokio::sync::RwLock;
     use memvault_api::{EventBus, LocalClient, MemvaultClient};
     use memvault_query::{QuotaManager, TextIndex};
+    use tokio::sync::RwLock;
 
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
@@ -369,14 +591,31 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
             vec![0u8; 32], // zero cluster_id = no cluster
         );
         // Create buckets — these will be private/unbound since no cluster
-        let b1 = client.bucket_create("pre-genesis-1", None,
-            Visibility::Internal, Classification::Internal).await.unwrap();
-        let b2 = client.bucket_create("pre-genesis-2", None,
-            Visibility::Internal, Classification::Internal).await.unwrap();
+        let b1 = client
+            .bucket_create(
+                "pre-genesis-1",
+                None,
+                Visibility::Internal,
+                Classification::Internal,
+            )
+            .await
+            .unwrap();
+        let b2 = client
+            .bucket_create(
+                "pre-genesis-2",
+                None,
+                Visibility::Internal,
+                Classification::Internal,
+            )
+            .await
+            .unwrap();
 
         // Verify they're unbound
         let info = client.bucket_get(&b1).await.unwrap().unwrap();
-        assert!(info.cluster_id.is_none(), "should be unbound with no cluster");
+        assert!(
+            info.cluster_id.is_none(),
+            "should be unbound with no cluster"
+        );
     }
 
     // Phase 2: re-open the store WITH a cluster_id (simulates post-genesis)
@@ -398,8 +637,12 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
         let buckets = client.bucket_list().await.unwrap();
         assert_eq!(buckets.len(), 2);
         for b in &buckets {
-            assert_eq!(b.cluster_id.as_ref().map(|c| c.0.to_vec()), Some(cluster_id.clone()),
-                "bucket '{}' should be auto-bound to cluster", b.name);
+            assert_eq!(
+                b.cluster_id.as_ref().map(|c| c.0.to_vec()),
+                Some(cluster_id.clone()),
+                "bucket '{}' should be auto-bound to cluster",
+                b.name
+            );
         }
     }
 }

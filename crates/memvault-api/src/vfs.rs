@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use memvault_core::{BucketId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Edge, Entity};
 
-use crate::error::Result;
 use crate::MemvaultClient;
+use crate::error::Result;
 
 pub const VFS_DIR_KIND: &str = "vfs:dir";
 pub const VFS_CHILD_REL: &str = "vfs:child";
@@ -17,7 +17,10 @@ pub const VFS_CHILD_REL: &str = "vfs:child";
 /// Get the default bucket for VFS operations.
 /// Returns a zero BucketId as fallback if no buckets exist (pre-genesis).
 pub async fn default_bucket(client: &dyn MemvaultClient) -> BucketId {
-    client.default_bucket_id().await.unwrap_or(BucketId([0u8; 32]))
+    client
+        .default_bucket_id()
+        .await
+        .unwrap_or(BucketId([0u8; 32]))
 }
 
 /// Find or create the VFS root entity for a specific bucket.
@@ -56,12 +59,16 @@ pub async fn ensure_root(client: &dyn MemvaultClient, bucket_id: &BucketId) -> R
         props,
         edges_out: vec![],
     };
-    let id = client.add_entity(entity, Visibility::Internal, None).await?;
+    let id = client
+        .add_entity(entity, Visibility::Internal, Some(bucket_id))
+        .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
-    client.add_tags(&node_id, vec![
-        ("vfs".into(), "root".into()),
-        ("bucket".into(), bucket_hex),
-    ]).await?;
+    client
+        .add_tags(
+            &node_id,
+            vec![("vfs".into(), "root".into()), ("bucket".into(), bucket_hex)],
+        )
+        .await?;
     Ok(id)
 }
 
@@ -78,17 +85,24 @@ pub async fn list_children(
         if src != parent || edge.relation != VFS_CHILD_REL {
             continue;
         }
-        let name = edge.props.get("name")
+        let name = edge
+            .props
+            .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
         let eid = EdgeId(edge.id.0);
         match seen.get(&name) {
             Some((_, existing)) if existing.0 <= eid.0 => {}
-            _ => { seen.insert(name, (edge.target.clone(), eid)); }
+            _ => {
+                seen.insert(name, (edge.target.clone(), eid));
+            }
         }
     }
-    Ok(seen.into_iter().map(|(name, (target, eid))| (name, target, eid)).collect())
+    Ok(seen
+        .into_iter()
+        .map(|(name, (target, eid))| (name, target, eid))
+        .collect())
 }
 
 /// Find a named child under a parent. If multiple edges match (CRDT conflict),
@@ -138,7 +152,11 @@ pub async fn resolve_path(
 }
 
 /// Create a vfs:dir entity with the given name.
-pub async fn create_dir(client: &dyn MemvaultClient, name: &str) -> Result<EntityId> {
+pub async fn create_dir(
+    client: &dyn MemvaultClient,
+    bucket_id: &BucketId,
+    name: &str,
+) -> Result<EntityId> {
     let mut props = BTreeMap::new();
     props.insert("name".to_string(), serde_json::json!(name));
     let entity = Entity {
@@ -147,7 +165,9 @@ pub async fn create_dir(client: &dyn MemvaultClient, name: &str) -> Result<Entit
         props,
         edges_out: vec![],
     };
-    client.add_entity(entity, Visibility::Internal, None).await
+    client
+        .add_entity(entity, Visibility::Internal, Some(bucket_id))
+        .await
 }
 
 /// Create a vfs:child edge from parent to child with a name prop.
@@ -159,12 +179,15 @@ pub async fn create_child_edge(
     name: &str,
 ) -> Result<EdgeId> {
     if find_named_child(client, parent, name).await?.is_some() {
-        return Err(crate::error::ApiError::Other(
-            format!("entry '{name}' already exists in directory"),
-        ));
+        return Err(crate::error::ApiError::Other(format!(
+            "entry '{name}' already exists in directory"
+        )));
     }
     let mut props = BTreeMap::new();
-    props.insert("name".to_string(), serde_json::Value::String(name.to_string()));
+    props.insert(
+        "name".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
     let edge = Edge {
         id: EdgeId::random(),
         relation: VFS_CHILD_REL.to_string(),
@@ -190,18 +213,20 @@ pub async fn ensure_dir_path(
         match find_named_child(client, &current, component).await? {
             Some((child, _)) => current = child,
             None => {
-                let id = create_dir(client, component).await?;
+                let id = create_dir(client, bucket_id, component).await?;
                 let child = NodeRef::Entity(id);
                 match create_child_edge(client, &current, &child, component).await {
                     Ok(_) => {}
                     Err(_) => {
-                        if let Some((existing, _)) = find_named_child(client, &current, component).await? {
+                        if let Some((existing, _)) =
+                            find_named_child(client, &current, component).await?
+                        {
                             current = existing;
                             continue;
                         }
-                        return Err(crate::error::ApiError::Other(
-                            format!("failed to create directory component '{component}'"),
-                        ));
+                        return Err(crate::error::ApiError::Other(format!(
+                            "failed to create directory component '{component}'"
+                        )));
                     }
                 }
                 current = child;
@@ -220,7 +245,9 @@ pub async fn link_at_path(
 ) -> Result<EdgeId> {
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if components.is_empty() {
-        return Err(crate::error::ApiError::Other("cannot link to root path".into()));
+        return Err(crate::error::ApiError::Other(
+            "cannot link to root path".into(),
+        ));
     }
     let (parent_parts, name) = components.split_at(components.len() - 1);
     let name = name[0];

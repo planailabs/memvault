@@ -12,6 +12,7 @@ memvault-store = { path = "../memvault-store" }
 memvault-query = { path = "../memvault-query" }
 memvault-auth = { path = "../memvault-auth" }
 memvault-net = { path = "../memvault-net" }
+memctl = { path = "../memctl", default-features = false }
 libp2p = { workspace = true }
 futures = "0.3"
 serde_ipld_dagcbor = "0.6"
