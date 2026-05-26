@@ -152,34 +152,47 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
   var id = "{id}";
   var stylesInjected = false;
 
-  // Auto-resize: post height to parent.
+  var lastH = 0;
   function postHeight() {{
     var h = document.documentElement.scrollHeight;
-    parent.postMessage({{ type: "sandboxResize", id: id, height: h }}, "*");
+    if (h !== lastH) {{
+      lastH = h;
+      parent.postMessage({{ type: "sandboxResize", id: id, height: h }}, "*");
+    }}
   }}
-  postHeight();
+
+  // ResizeObserver on <html> catches all layout changes: content,
+  // stylesheets loading, images, font swap, theme change.
   if (typeof ResizeObserver !== "undefined") {{
-    new ResizeObserver(postHeight).observe(document.body);
+    new ResizeObserver(postHeight).observe(document.documentElement);
   }}
-  setTimeout(postHeight, 200);
-  setTimeout(postHeight, 1000);
+  // MutationObserver catches DOM changes that may not trigger resize
+  // (e.g. class/attribute changes from theme sync).
+  new MutationObserver(postHeight).observe(document.body, {{
+    childList: true, subtree: true, attributes: true
+  }});
+  // Initial post.
+  postHeight();
 
   // Listen for theme sync from parent.
   window.addEventListener("message", function(e) {{
     if (!e.data || e.data.type !== "themeSync") return;
 
-    // Inject parent stylesheets (once).
+    // Inject parent stylesheets (once). Listen for each load event
+    // to re-measure (no timers needed).
     if (!stylesInjected && e.data.stylesheets) {{
+      var pending = e.data.stylesheets.length;
       e.data.stylesheets.forEach(function(href) {{
         var link = document.createElement("link");
         link.rel = "stylesheet";
         link.href = href;
+        link.onload = link.onerror = function() {{
+          pending--;
+          postHeight();
+        }};
         document.head.appendChild(link);
       }});
       stylesInjected = true;
-      // Re-measure after stylesheets load.
-      setTimeout(postHeight, 300);
-      setTimeout(postHeight, 1000);
     }}
 
     // Apply theme classes and data-theme.
@@ -189,9 +202,7 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
     if (e.data.classes) {{
       document.documentElement.className = e.data.classes;
     }}
-
-    // Re-measure after theme change.
-    setTimeout(postHeight, 100);
+    postHeight();
   }});
 }})();
 </script>
