@@ -786,6 +786,120 @@ fn vet_sync_block(
         }
     }
 
+    // AgentAttestation: signed by a node (not by admin). Verify against
+    // the embedded node_pubkey; the chain-up-to-admin check happens
+    // later in `scan_trusted_agents` (which filters by node_trust).
+    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(bytes) {
+        if att.verify_signature().is_ok() {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let author = author_peer_pubkey
+                .map(|p| p.to_vec())
+                .unwrap_or_else(|| att.node_pubkey.to_vec());
+            return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
+                author,
+                tags: vec![("sigchain".to_string(), "agent_att".to_string())],
+                wall_ns: now_ns,
+                cluster_id: Some(cluster_id.to_vec()),
+                ..Default::default()
+            });
+        } else {
+            tracing::warn!(
+                agent = %hex::encode(att.agent_pubkey),
+                "dropped sync'd AgentAttestation: bad node signature"
+            );
+            return SyncDisposition::Drop;
+        }
+    }
+
+    // AgentRevocation: signed by a node. Verify against embedded
+    // node_pubkey; trust-of-node check is deferred to the watcher.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentRevocation>(bytes) {
+        if rev.verify_signature().is_ok() {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
+                author: author_peer_pubkey
+                    .map(|p| p.to_vec())
+                    .unwrap_or_else(|| rev.node_pubkey.to_vec()),
+                tags: vec![("sigchain".to_string(), "agent_rev".to_string())],
+                wall_ns: now_ns,
+                cluster_id: Some(cluster_id.to_vec()),
+                ..Default::default()
+            });
+        } else {
+            tracing::warn!("dropped sync'd AgentRevocation: bad signature");
+            return SyncDisposition::Drop;
+        }
+    }
+
+    // NodeRevocation: admin-signed. Verify against the pinned admin
+    // pubkey AND require the embedded admin_pubkey matches the pin.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeRevocation>(bytes) {
+        if let Some(pin) = join_config.pinned_admin_pubkey {
+            if rev.admin_pubkey == pin && rev.verify_signature().is_ok() {
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
+                    author: author_peer_pubkey
+                        .map(|p| p.to_vec())
+                        .unwrap_or_else(|| rev.admin_pubkey.to_vec()),
+                    tags: vec![("sigchain".to_string(), "node_rev".to_string())],
+                    wall_ns: now_ns,
+                    cluster_id: Some(cluster_id.to_vec()),
+                    ..Default::default()
+                });
+            } else {
+                tracing::warn!("dropped sync'd NodeRevocation: bad signature or admin mismatch");
+                return SyncDisposition::Drop;
+            }
+        }
+        // No pinned admin → can't verify NodeRevocation; drop.
+        return SyncDisposition::Drop;
+    }
+
+    // EnvelopeAuthorship: signed by an agent. Verify against the
+    // embedded agent_pubkey; the agent-trust check happens at read time.
+    if let Ok(auth) =
+        serde_ipld_dagcbor::from_slice::<memvault_auth::EnvelopeAuthorship>(bytes)
+    {
+        // Heuristic to avoid colliding with other shapes: envelope_cid
+        // must be non-empty.
+        if !auth.envelope_cid.is_empty() {
+            if auth.verify_signature().is_ok() {
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let env_cid_hex = hex::encode(&auth.envelope_cid);
+                return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
+                    author: author_peer_pubkey
+                        .map(|p| p.to_vec())
+                        .unwrap_or_else(|| auth.agent_pubkey.to_vec()),
+                    tags: vec![
+                        ("sigchain".to_string(), "envelope_auth".to_string()),
+                        ("env_auth_by_cid".to_string(), env_cid_hex),
+                    ],
+                    wall_ns: now_ns,
+                    cluster_id: Some(cluster_id.to_vec()),
+                    ..Default::default()
+                });
+            } else {
+                tracing::warn!(
+                    agent = %hex::encode(auth.agent_pubkey),
+                    "dropped sync'd EnvelopeAuthorship: bad signature"
+                );
+                return SyncDisposition::Drop;
+            }
+        }
+    }
+
     // Non-sigchain (or sigchain-shaped but cluster mismatch — fall back
     // to opaque; receiver's existing indexer will handle docs / files).
     SyncDisposition::AsIs

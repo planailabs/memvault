@@ -453,3 +453,192 @@ async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
          (which after the fix == the libp2p pubkey)."
     );
 }
+
+/// Regression: synced `AgentAttestation` blocks must land with the
+/// `sigchain/agent_att` tag on the receiver so `scan_trusted_agents`
+/// can find them. Without this, admin's agent_ui shows up correctly on
+/// admin's own trust tree but never appears under admin's node row on
+/// peer's trust tree.
+#[tokio::test]
+async fn agent_attestation_syncs_with_correct_tag() {
+    // Admin keys + cluster.
+    let admin_sk = SigningKey::from_bytes(&random_seed());
+    let admin_pubkey = admin_sk.verifying_key().to_bytes();
+    let cluster_id = ClusterId::random();
+
+    // Admin's node identity (also serves as the agent-issuing node key).
+    let admin_kp = libp2p_keypair_from_seed(&random_seed());
+    let admin_node_pubkey = pubkey_from_libp2p(&admin_kp);
+    let admin_node_sk = {
+        // Extract the 32-byte seed from the libp2p keypair so we have
+        // both the libp2p Keypair and an ed25519_dalek::SigningKey for
+        // the same key.
+        let ed = admin_kp.clone().try_into_ed25519().unwrap();
+        let seed: [u8; 32] = ed.to_bytes()[..32].try_into().unwrap();
+        SigningKey::from_bytes(&seed)
+    };
+
+    // Peer's node identity.
+    let peer_kp = libp2p_keypair_from_seed(&random_seed());
+    let peer_node_pubkey = pubkey_from_libp2p(&peer_kp);
+
+    // ── Stores ─────────────────────────────────────────────────────
+    let admin_dir = tempfile::tempdir().unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let admin_store =
+        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store =
+        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
+    peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
+
+    // ── Admin publishes its agent_ui's AgentAttestation locally,
+    //    tagged sigchain/agent_att so the receiver expects the same. ─
+    let agent_seed = random_seed();
+    let agent_sk = SigningKey::from_bytes(&agent_seed);
+    let attestation = memvault_auth::sign_agent_attestation(
+        &admin_node_sk,
+        memvault_core::AgentId("test_ui".into()),
+        agent_sk.verifying_key().to_bytes(),
+        Role::AgentHost,
+        u64::MAX,
+    )
+    .expect("sign agent attestation");
+
+    let att_bytes = serde_ipld_dagcbor::to_vec(&attestation).unwrap();
+    let cid = memvault_core::cid_from_bytes(&att_bytes);
+    let cid_bytes = cid.to_bytes();
+    let meta = memvault_store::EnvelopeMeta {
+        author: admin_node_pubkey.to_vec(),
+        tags: vec![("sigchain".to_string(), "agent_att".to_string())],
+        wall_ns: memvault_core::wall_ns(),
+        cluster_id: Some(cluster_id.0.to_vec()),
+        ..Default::default()
+    };
+    admin_store
+        .insert_envelope(&cid_bytes, &att_bytes, &meta)
+        .expect("admin local insert");
+
+    // ── Two swarms ─────────────────────────────────────────────────
+    let mut admin_swarm = standalone_swarm(
+        admin_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let admin_listen = await_listen_addr(&mut admin_swarm).await;
+
+    let mut peer_swarm = standalone_swarm(
+        peer_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let _ = await_listen_addr(&mut peer_swarm).await;
+
+    peer_swarm.dial(admin_listen.clone()).unwrap();
+
+    let admin_join = JoinConfig {
+        pending_token: None,
+        node_pubkey: admin_node_pubkey,
+        admin_signing_key: Some(admin_sk.clone()),
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        on_join_success: None,
+    };
+    // Peer must complete /join/1.0 first — otherwise admin's
+    // `serve_block_request` refuses to serve blocks to it and sync
+    // never delivers the AgentAttestation. Issue a token here.
+    let admin_peer_for_token = PeerId(admin_node_pubkey.to_vec());
+    let admin_genesis = sign_admin_genesis(
+        &admin_sk,
+        cluster_id.clone(),
+        memvault_core::wall_ns(),
+    )
+    .expect("sign admin_genesis");
+    let token = issue_token(&admin_sk, &admin_peer_for_token, &cluster_id, &admin_genesis);
+    let token_str = encode_token_string(&token).expect("encode token");
+
+    let peer_join = JoinConfig {
+        pending_token: Some(token_str),
+        node_pubkey: peer_node_pubkey,
+        admin_signing_key: None,
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        on_join_success: None,
+    };
+
+    let (_admin_head_tx, admin_head_rx) = mpsc::unbounded_channel::<OutboundHead>();
+    let (_peer_head_tx, peer_head_rx) = mpsc::unbounded_channel::<OutboundHead>();
+
+    let admin_store_for_task = Arc::clone(&admin_store);
+    let admin_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut admin_swarm,
+            admin_store_for_task,
+            admin_head_rx,
+            SyncConfig {
+                cluster_id: cluster_id.0.to_vec(),
+                ..Default::default()
+            },
+            admin_join,
+        )
+        .await;
+    });
+
+    let peer_store_for_task = Arc::clone(&peer_store);
+    let peer_cluster = cluster_id.0;
+    let peer_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut peer_swarm,
+            peer_store_for_task,
+            peer_head_rx,
+            SyncConfig {
+                cluster_id: peer_cluster.to_vec(),
+                ..Default::default()
+            },
+            peer_join,
+        )
+        .await;
+    });
+
+    // ── Poll peer's store for the agent_att tag ─────────────────────
+    let found = timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(cids) = peer_store.query_by_tag("sigchain", "agent_att", 0, 64) {
+                for cid in cids {
+                    if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
+                        if let Ok(att) =
+                            serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(
+                                &bytes,
+                            )
+                        {
+                            if att.agent_pubkey == agent_sk.verifying_key().to_bytes() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    admin_task.abort();
+    peer_task.abort();
+    let _ = admin_task.await;
+    let _ = peer_task.await;
+
+    assert!(
+        found,
+        "AgentAttestation must reach the peer with the `sigchain/agent_att` \
+         tag. Pre-fix, vet_sync_block only recognized NodeAttestation \
+         and AgentAttestation arrived untagged — peer's scan_trusted_agents \
+         never saw it, so the agent never showed up under its node on the \
+         trust tree."
+    );
+}
