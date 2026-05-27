@@ -475,16 +475,16 @@ mod native {
     /// `dioxus::serve()` creates its own and they can't share.
     ///
     /// Returns the store (for sharing with the web client) and thread handle.
-    pub fn spawn_swarm_background(
+    /// Spawn the swarm with an already-opened store.  Call AFTER
+    /// `create_client_with_bus` (which runs the rebuild) to avoid
+    /// serving blocks while CIDs are being rewritten.
+    pub fn spawn_swarm_with_store(
+        store: Arc<MemvaultStore>,
         data_dir: &Path,
         event_bus: Arc<EventBus>,
-    ) -> Result<(Arc<MemvaultStore>, std::thread::JoinHandle<()>)> {
+    ) -> Result<std::thread::JoinHandle<()>> {
         let data_dir = data_dir.to_path_buf();
 
-        // Open the store (shared with the dioxus web client).
-        let store = open_store(&data_dir)?;
-
-        // Load or generate keypair.
         let key_path = data_dir.join("identity").join("libp2p.key");
         let keypair = load_or_generate_keypair(&key_path)?;
         let peer_id_bytes = keypair.public().to_peer_id().to_bytes();
@@ -492,7 +492,6 @@ mod native {
             .set_local_peer_id(&peer_id_bytes)
             .map_err(|e| anyhow::anyhow!("PeerId reconciliation: {e}"))?;
 
-        // Read cluster_id.
         let cluster_id = store
             .get_local_cluster_id()?
             .or_else(|| {
@@ -508,7 +507,6 @@ mod native {
             ..Default::default()
         };
 
-        let store_ret = Arc::clone(&store);
         let handle = std::thread::Builder::new()
             .name("memvault-swarm".into())
             .spawn(move || {
@@ -535,7 +533,7 @@ mod native {
                 });
             })?;
 
-        Ok((store_ret, handle))
+        Ok(handle)
     }
 
     /// Load a libp2p Ed25519 keypair from disk, or generate and save a new one.

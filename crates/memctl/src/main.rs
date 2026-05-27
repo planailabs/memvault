@@ -54,27 +54,44 @@ fn main() {
             // thread subscribes and announces heads over gossipsub.
             let event_bus = Arc::new(memvault_api::EventBus::new(256));
 
-            // Spawn P2P swarm on a background thread (its own tokio runtime).
-            // Returns the store so we can share it with the web client
-            // (redb only allows one open handle per database file).
-            let store = match memctl::spawn_swarm_background(&data_dir, Arc::clone(&event_bus)) {
-                Ok((store, _handle)) => {
-                    tracing::info!("P2P swarm spawned on background thread");
+            // Open store and run rebuild BEFORE starting the swarm.
+            // The rebuild rewrites blocks (changing CIDs) and must complete
+            // before any peer can request data.
+            let store = match memvault_store::MemvaultStore::open(
+                data_dir.join("blocks.redb"),
+            ) {
+                Ok(s) => {
+                    let store = std::sync::Arc::new(s);
+                    let client: Arc<dyn memvault_api::MemvaultClient> = Arc::new(
+                        memctl::create_client_with_bus(
+                            Arc::clone(&store),
+                            &data_dir,
+                            Arc::clone(&event_bus),
+                        ),
+                    );
+                    memvault_web::ui::state::set_client(Arc::clone(&client));
                     Some(store)
                 }
                 Err(e) => {
-                    tracing::warn!("failed to start P2P swarm: {e} (continuing without sync)");
+                    tracing::warn!("failed to open store: {e} (continuing without sync)");
                     None
                 }
             };
 
-            // Build LocalClient using the shared store + event bus, then
-            // set it BEFORE dioxus::serve() so server functions find it.
-            if let Some(store) = store {
-                let client: Arc<dyn memvault_api::MemvaultClient> = Arc::new(
-                    memctl::create_client_with_bus(store, &data_dir, Arc::clone(&event_bus)),
-                );
-                memvault_web::ui::state::set_client(Arc::clone(&client));
+            // NOW spawn the swarm — rebuild is complete, safe to serve blocks.
+            if let Some(store) = &store {
+                match memctl::spawn_swarm_with_store(
+                    Arc::clone(store),
+                    &data_dir,
+                    Arc::clone(&event_bus),
+                ) {
+                    Ok(_handle) => {
+                        tracing::info!("P2P swarm spawned on background thread");
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to start P2P swarm: {e} (continuing without sync)");
+                    }
+                }
             }
             // If swarm failed, let client() do its lazy init (opens its own store).
 
