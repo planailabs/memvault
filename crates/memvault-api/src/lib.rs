@@ -11,6 +11,7 @@ pub mod http;
 pub mod local;
 pub mod metrics;
 pub mod rebuild;
+pub mod sigchain;
 pub mod otel;
 pub mod quotas;
 pub mod rotation;

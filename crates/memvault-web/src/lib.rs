@@ -156,10 +156,6 @@ mod server_router {
         // Decide trust mode based on whether an admin key is configured.
         let (admin_pubkey, node_trust_entry) = match client.admin_signing_key().cloned() {
             Some(admin_sk) => {
-                // Post-genesis: admin signs a MembershipAttestation for the
-                // node (the node's pubkey is distinct from admin's unless the
-                // single-key dev convenience is in play). Insert as
-                // Attested(_) so the chain verifies fully.
                 let admin_pubkey = admin_sk.verifying_key();
                 let mut node_att = MembershipAttestation {
                     cluster_id: cluster_id.clone(),
@@ -176,17 +172,26 @@ mod server_router {
                     use ed25519_dalek::Signer;
                     admin_sk.sign(&bytes).to_bytes()
                 };
+                // Persist the attestation as a sigchain block so it survives
+                // restart and propagates via RBSR sync (phase 5).
+                let _ = memvault_api::sigchain::publish_node_attestation(client, &node_att)
+                    .map_err(|e| format!("publish node attestation: {e}"))?;
                 (Some(admin_pubkey), NodeTrust::Attested(node_att))
             }
-            None => {
-                // Pre-genesis: no admin key. The node signing key still
-                // signs the `_ui` agent attestation; trust is local-only.
-                (None, NodeTrust::PreGenesis)
-            }
+            None => (None, NodeTrust::PreGenesis),
         };
 
-        let mut node_trust = std::collections::HashMap::new();
+        // Start from any node attestations already in the sigchain (received
+        // via RBSR sync from peers in previous runs), then overlay the local
+        // node so the daemon's freshly-issued JWTs always verify.
+        let mut node_trust = memvault_api::sigchain::scan_trusted_nodes(client)
+            .map_err(|e| format!("scan trusted nodes: {e}"))?;
         node_trust.insert(node_pubkey_bytes, node_trust_entry);
+
+        // Hydrate revocation sets from persisted sigchain blocks.
+        let (revoked_agents_set, revoked_nodes_set) =
+            memvault_api::sigchain::scan_revocations(client)
+                .map_err(|e| format!("scan revocations: {e}"))?;
 
         // Generate the built-in UI agent, signed by the node's key.
         let ui_identity_dir = data_dir.join("identity").join("ui_agent");
@@ -204,8 +209,8 @@ mod server_router {
         Ok(WebAuthBootstrap {
             admin_pubkey,
             node_trust,
-            revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-            revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+            revoked_agents: Arc::new(std::sync::RwLock::new(revoked_agents_set)),
+            revoked_nodes: Arc::new(std::sync::RwLock::new(revoked_nodes_set)),
         })
     }
 
