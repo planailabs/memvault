@@ -6,7 +6,7 @@ use crate::title;
 use anyhow::Result;
 use memvault_api::MemvaultClient;
 use memvault_api::vfs::{self, VfsTreeNode};
-use memvault_core::NodeRef;
+use memvault_core::{BucketId, NodeRef};
 
 /// A symlink to create in the VFS export tree.
 pub struct VfsSymlink {
@@ -16,15 +16,16 @@ pub struct VfsSymlink {
     pub target: PathBuf,
 }
 
-/// Walk the VFS tree for the default bucket and produce symlink entries.
-pub async fn build_vfs_symlinks(client: &dyn MemvaultClient) -> Result<Vec<VfsSymlink>> {
-    let bucket = vfs::default_bucket(client).await;
-    // Bail if there's no VFS tree to walk.
-    if vfs::ensure_root(client, &bucket).await.is_err() {
+/// Walk the VFS tree for the given bucket and produce symlink entries.
+/// Returns an empty list if the bucket has no VFS root yet.
+pub async fn build_vfs_symlinks(
+    client: &dyn MemvaultClient,
+    bucket: &BucketId,
+) -> Result<Vec<VfsSymlink>> {
+    if vfs::ensure_root(client, bucket).await.is_err() {
         return Ok(Vec::new());
     }
-
-    let tree = vfs::walk_tree(client, &bucket, "/", usize::MAX).await?;
+    let tree = vfs::walk_tree(client, bucket, "/", usize::MAX).await?;
     let mut symlinks = Vec::new();
     collect_symlinks(client, &tree, Path::new(""), &mut symlinks).await?;
     Ok(symlinks)

@@ -27,15 +27,12 @@ pub async fn upload_file<C: MemvaultClient + ?Sized>(
     let node_id = format!("file:{}", hex::encode(&cid));
 
     if let Some(path) = vfs_path {
-        let bucket_id = match bucket {
-            Some(b) => b.clone(),
-            None => client
-                .default_bucket_id()
-                .await
-                .unwrap_or(BucketId([0u8; 32])),
-        };
-        if let Err(e) = crate::vfs::link_node_at_path(client, &bucket_id, path, &node_id).await {
-            tracing::warn!(path, error = %e, "VFS link failed after file upload");
+        if let Some(bucket_id) = bucket {
+            if let Err(e) = crate::vfs::link_node_at_path(client, bucket_id, path, &node_id).await {
+                tracing::warn!(path, error = %e, "VFS link failed after file upload");
+            }
+        } else {
+            tracing::warn!(path, "skipping VFS link: no bucket specified for file");
         }
     }
 

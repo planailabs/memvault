@@ -53,12 +53,23 @@ pub async fn run_export(
         export_entity(client, &mut *sink, &entry.entity_id, &mut stats).await?;
     }
 
-    // Export VFS symlinks
+    // Export VFS symlinks — VFS is per-bucket, so walk every bucket's tree
+    // and namespace symlinks under `vfs/<bucket-hex>/`.
     if opts.include_vfs {
-        let symlinks = vfs_tree::build_vfs_symlinks(client).await?;
-        for symlink in symlinks {
-            let link_path = PathBuf::from("vfs").join(&symlink.link_path);
-            sink.write_symlink(&link_path, &symlink.target)?;
+        let buckets = client.bucket_list().await.unwrap_or_default();
+        for bucket in &buckets {
+            let symlinks = vfs_tree::build_vfs_symlinks(client, &bucket.id).await?;
+            if symlinks.is_empty() {
+                continue;
+            }
+            let bucket_prefix = PathBuf::from("vfs").join(hex::encode(bucket.id.0));
+            for symlink in symlinks {
+                let link_path = bucket_prefix.join(&symlink.link_path);
+                // Symlink targets need an extra `..` segment to escape the
+                // new bucket-hex directory.
+                let target = PathBuf::from("..").join(&symlink.target);
+                sink.write_symlink(&link_path, &target)?;
+            }
         }
     }
 

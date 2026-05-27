@@ -87,12 +87,15 @@ pub async fn create_entity(
     tracing::info!(kind = %kind, "API: entity created");
 
     if let Some(vfs_path) = &req.vfs_path {
-        let bucket = memvault_api::vfs::default_bucket(state.client.as_ref()).await;
-        if let Err(e) =
-            memvault_api::vfs::link_node_at_path(state.client.as_ref(), &bucket, vfs_path, &node_id)
-                .await
-        {
-            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
+        if let Some(bucket) = bucket_id.as_ref() {
+            if let Err(e) =
+                memvault_api::vfs::link_node_at_path(state.client.as_ref(), bucket, vfs_path, &node_id)
+                    .await
+            {
+                tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
+            }
+        } else {
+            tracing::warn!(path = %vfs_path, "skipping VFS link: entity request omitted bucket");
         }
     }
 

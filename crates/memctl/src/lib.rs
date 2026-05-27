@@ -1702,7 +1702,9 @@ mod native {
         use rand::Rng;
 
         let mut rng = rand::thread_rng();
-        let bucket = client.default_bucket_id().await.unwrap_or(memvault_core::BucketId([0u8; 32]));
+        // Synth uses the legacy bucket if one exists; otherwise fail loudly
+        // rather than silently writing to the zero bucket.
+        let bucket = client.default_bucket_id().await?;
 
         // ── Vocabulary for generating plausible content ──────────────────
         let topics = [

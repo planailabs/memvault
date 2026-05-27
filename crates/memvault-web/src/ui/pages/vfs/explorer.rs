@@ -36,26 +36,14 @@ impl VfsRow {
 
 // ── Server functions ───────────────────────────────────────────────
 
-#[cfg(feature = "server")]
-async fn resolve_bucket(
-    client: &dyn memvault_api::MemvaultClient,
-    bucket_hex: Option<&str>,
-) -> memvault_core::BucketId {
-    if let Some(h) = bucket_hex {
-        if let Ok(b) = memvault_core::BucketId::from_hex(h) {
-            return b;
-        }
-    }
-    memvault_api::vfs::default_bucket(client).await
-}
-
 #[server]
 async fn list_vfs_entries(
     path: String,
-    bucket_hex: Option<String>,
+    bucket_hex: String,
 ) -> Result<Vec<VfsRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let bucket = resolve_bucket(&*client, bucket_hex.as_deref()).await;
+    let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
+        .map_err(|e| ServerFnError::new(format!("invalid bucket: {e}")))?;
 
     let entries = memvault_api::vfs::ls(&*client, &bucket, &path, false)
         .await
@@ -79,9 +67,10 @@ async fn list_vfs_entries(
 }
 
 #[server]
-async fn vfs_mkdir(path: String) -> Result<String, ServerFnError> {
+async fn vfs_mkdir(path: String, bucket_hex: String) -> Result<String, ServerFnError> {
     let client = crate::ui::state::client()?;
-    let bucket = memvault_api::vfs::default_bucket(&*client).await;
+    let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
+        .map_err(|e| ServerFnError::new(format!("invalid bucket: {e}")))?;
     let id = memvault_api::vfs::mkdir(&*client, &bucket, &path)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -145,7 +134,8 @@ pub fn VfsExplorer() -> Element {
 
     let mut entries = use_server_future(move || {
         let p = path.read().clone();
-        let b = active_bucket.read().id.clone();
+        // The early-return above guarantees `id` is Some when we get here.
+        let b = active_bucket.read().id.clone().unwrap_or_default();
         async move { list_vfs_entries(p, b).await }
     })?;
     let mut grid_view = use_signal(|| true);
@@ -217,9 +207,11 @@ pub fn VfsExplorer() -> Element {
                         } else {
                             format!("{current_path}/{dir_name}")
                         };
+                        // The early-return above guarantees `id` is Some when we get here.
+                        let bucket_hex = active_bucket.read().id.clone().unwrap_or_default();
                         creating.set(true);
                         spawn(async move {
-                            let _ = vfs_mkdir(mkdir_path).await;
+                            let _ = vfs_mkdir(mkdir_path, bucket_hex).await;
                             creating.set(false);
                             new_dir_name.set(String::new());
                             entries.restart();

@@ -49,15 +49,12 @@ pub async fn create_doc<C: MemvaultClient + ?Sized>(
     let node_id = format!("doc:{}", hex::encode(doc_id.0));
 
     if let Some(path) = vfs_path {
-        let bucket_id = match bucket {
-            Some(b) => b.clone(),
-            None => client
-                .default_bucket_id()
-                .await
-                .unwrap_or(BucketId([0u8; 32])),
-        };
-        if let Err(e) = crate::vfs::link_node_at_path(client, &bucket_id, path, &node_id).await {
-            tracing::warn!(path, error = %e, "VFS link failed after doc creation");
+        if let Some(bucket_id) = bucket {
+            if let Err(e) = crate::vfs::link_node_at_path(client, bucket_id, path, &node_id).await {
+                tracing::warn!(path, error = %e, "VFS link failed after doc creation");
+            }
+        } else {
+            tracing::warn!(path, "skipping VFS link: no bucket specified for doc");
         }
     }
 

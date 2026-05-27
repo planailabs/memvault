@@ -18,15 +18,6 @@ use crate::error::Result;
 pub const VFS_DIR_KIND: &str = "vfs:dir";
 pub const VFS_CHILD_REL: &str = "vfs:child";
 
-/// Get the default bucket for VFS operations.
-/// Returns a zero BucketId as fallback if no buckets exist (pre-genesis).
-pub async fn default_bucket<C: MemvaultClient + ?Sized>(client: &C) -> BucketId {
-    client
-        .default_bucket_id()
-        .await
-        .unwrap_or(BucketId([0u8; 32]))
-}
-
 /// Find or create the VFS root entity for a specific bucket.
 pub async fn ensure_root<C: MemvaultClient + ?Sized>(
     client: &C,
