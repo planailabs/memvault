@@ -90,10 +90,19 @@ fn load_blocks_by_label(
 }
 
 /// Walk the blockstore and reconstruct the trust map keyed by node pubkey.
-/// Each entry is `NodeTrust::Attested(_)`; pre-genesis entries are
-/// in-memory only and don't show up here.
-pub fn scan_trusted_nodes(client: &LocalClient) -> Result<HashMap<[u8; 32], NodeTrust>> {
+/// Each entry is `NodeTrust::Attested(_)`. When `admin_pubkey` is `Some`,
+/// each attestation's signature is verified against it; failures are
+/// logged and the entry is skipped. When `None` (pre-genesis), unverified
+/// entries are dropped — only the local self-trust seed counts.
+pub fn scan_trusted_nodes(
+    client: &LocalClient,
+    admin_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+) -> Result<HashMap<[u8; 32], NodeTrust>> {
     let mut out = HashMap::new();
+    let Some(pk) = admin_pubkey else {
+        // Pre-genesis: no trust root, so no attestation can be verified.
+        return Ok(out);
+    };
     for bytes in load_blocks_by_label(client, LABEL_NODE_ATT)? {
         let att: NodeAttestation = match serde_ipld_dagcbor::from_slice(&bytes) {
             Ok(a) => a,
@@ -102,33 +111,97 @@ pub fn scan_trusted_nodes(client: &LocalClient) -> Result<HashMap<[u8; 32], Node
                 continue;
             }
         };
+        if let Err(e) = att.verify_signature(pk) {
+            tracing::warn!(
+                error = %e,
+                member = %hex::encode(&att.member.0),
+                "skipping node attestation: signature does not verify against current admin"
+            );
+            continue;
+        }
         if att.member.0.len() != 32 {
             continue;
         }
-        let mut pk = [0u8; 32];
-        pk.copy_from_slice(&att.member.0);
-        out.insert(pk, NodeTrust::Attested(att));
+        let mut pkbytes = [0u8; 32];
+        pkbytes.copy_from_slice(&att.member.0);
+        out.insert(pkbytes, NodeTrust::Attested(att));
     }
     Ok(out)
 }
 
 /// Walk the blockstore and reconstruct the revoked-agents and revoked-nodes
-/// sets. Caller is responsible for verifying signatures against the relevant
-/// pubkeys (node for `AgentRevocation`, admin for `NodeRevocation`).
+/// sets, verifying every revocation signature.
+///
+/// `node_trust` is the trust map produced by [`scan_trusted_nodes`] — used
+/// to look up the issuing node's pubkey when verifying `AgentRevocation`
+/// signatures (the revocation must be signed by the same node that
+/// originally attested the agent).
+///
+/// `admin_pubkey` (post-genesis only) verifies `NodeRevocation` signatures.
 pub fn scan_revocations(
     client: &LocalClient,
+    admin_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+    node_trust: &HashMap<[u8; 32], NodeTrust>,
 ) -> Result<(HashSet<[u8; 32]>, HashSet<[u8; 32]>)> {
     let mut agents = HashSet::new();
     let mut nodes = HashSet::new();
+
     for bytes in load_blocks_by_label(client, LABEL_AGENT_REV)? {
-        if let Ok(rev) = serde_ipld_dagcbor::from_slice::<AgentRevocation>(&bytes) {
-            agents.insert(rev.agent_pubkey);
+        let rev: AgentRevocation = match serde_ipld_dagcbor::from_slice(&bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping corrupt agent revocation block");
+                continue;
+            }
+        };
+        // The revocation must be signed by a node that's currently trusted.
+        if !node_trust.contains_key(&rev.node_pubkey) {
+            tracing::warn!(
+                node = %hex::encode(rev.node_pubkey),
+                "skipping agent revocation from unknown node"
+            );
+            continue;
         }
+        if let Err(e) = rev.verify_signature() {
+            tracing::warn!(
+                error = %e,
+                agent = %hex::encode(rev.agent_pubkey),
+                "skipping agent revocation: bad signature"
+            );
+            continue;
+        }
+        agents.insert(rev.agent_pubkey);
     }
-    for bytes in load_blocks_by_label(client, LABEL_NODE_REV)? {
-        if let Ok(rev) = serde_ipld_dagcbor::from_slice::<NodeRevocation>(&bytes) {
+
+    if let Some(admin_pk) = admin_pubkey {
+        for bytes in load_blocks_by_label(client, LABEL_NODE_REV)? {
+            let rev: NodeRevocation = match serde_ipld_dagcbor::from_slice(&bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "skipping corrupt node revocation block");
+                    continue;
+                }
+            };
+            // Embedded admin_pubkey must match current admin AND signature
+            // must verify against it.
+            if rev.admin_pubkey != admin_pk.to_bytes() {
+                tracing::warn!(
+                    node = %hex::encode(rev.node_pubkey),
+                    "skipping node revocation: admin_pubkey doesn't match current admin"
+                );
+                continue;
+            }
+            if let Err(e) = rev.verify_signature() {
+                tracing::warn!(
+                    error = %e,
+                    node = %hex::encode(rev.node_pubkey),
+                    "skipping node revocation: bad signature"
+                );
+                continue;
+            }
             nodes.insert(rev.node_pubkey);
         }
     }
+
     Ok((agents, nodes))
 }

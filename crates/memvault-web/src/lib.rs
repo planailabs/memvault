@@ -183,15 +183,21 @@ mod server_router {
 
         // Start from any node attestations already in the sigchain (received
         // via RBSR sync from peers in previous runs), then overlay the local
-        // node so the daemon's freshly-issued JWTs always verify.
-        let mut node_trust = memvault_api::sigchain::scan_trusted_nodes(client)
-            .map_err(|e| format!("scan trusted nodes: {e}"))?;
+        // node so the daemon's freshly-issued JWTs always verify. Persisted
+        // attestations are verified against the current admin pubkey at
+        // load — any that don't chain to the current admin are dropped.
+        let mut node_trust =
+            memvault_api::sigchain::scan_trusted_nodes(client, admin_pubkey.as_ref())
+                .map_err(|e| format!("scan trusted nodes: {e}"))?;
         node_trust.insert(node_pubkey_bytes, node_trust_entry);
 
-        // Hydrate revocation sets from persisted sigchain blocks.
-        let (revoked_agents_set, revoked_nodes_set) =
-            memvault_api::sigchain::scan_revocations(client)
-                .map_err(|e| format!("scan revocations: {e}"))?;
+        // Hydrate revocation sets — also signature-verified.
+        let (revoked_agents_set, revoked_nodes_set) = memvault_api::sigchain::scan_revocations(
+            client,
+            admin_pubkey.as_ref(),
+            &node_trust,
+        )
+        .map_err(|e| format!("scan revocations: {e}"))?;
 
         // Generate the built-in UI agent, signed by the node's key.
         let ui_identity_dir = data_dir.join("identity").join("ui_agent");
