@@ -355,6 +355,20 @@ mod native {
             /// Join token (`mvjoin1:…`) issued by the cluster admin.
             token: String,
         },
+        /// Attest a peer node into the cluster (admin-only)
+        ///
+        /// Publishes a `NodeAttestation` for the given peer pubkey,
+        /// signed by this node's admin key. After the block syncs to
+        /// the peer, that peer's bootstrap stops registering itself
+        /// as pre-genesis. Manual interim step until /join/1.0
+        /// round-trip lands.
+        NodeAttest {
+            /// Hex-encoded peer ed25519 pubkey (32 bytes / 64 hex chars).
+            peer_pubkey: String,
+            /// Role to grant the peer (default: agent-host).
+            #[arg(long, default_value = "agent-host")]
+            role: String,
+        },
         /// Enroll an agent (e.g. openclaw, hermes) for API access
         ///
         /// Agents are CLIENTS that connect to a cluster node's HTTP API.
@@ -1552,6 +1566,29 @@ mod native {
 
                 println!("Joined cluster {cluster_hex}");
                 println!("  Data dir:  {}", data_dir.display());
+            }
+            Commands::NodeAttest { peer_pubkey, role } => {
+                let pk_bytes = hex::decode(&peer_pubkey)
+                    .map_err(|e| anyhow::anyhow!("decode peer_pubkey hex: {e}"))?;
+                let pk_arr: [u8; 32] = pk_bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("peer_pubkey must be 32 bytes"))?;
+                let role_enum = match role.as_str() {
+                    "admin" => memvault_auth::Role::Admin,
+                    "agent-host" | "agenthost" | "host" => memvault_auth::Role::AgentHost,
+                    "auditor" => memvault_auth::Role::Auditor,
+                    "service" => memvault_auth::Role::Service,
+                    other => anyhow::bail!("unknown role: {other}"),
+                };
+                let store = make_store()?;
+                let client = create_client(store);
+                let cid = client
+                    .attest_node(pk_arr, role_enum)
+                    .map_err(|e| anyhow::anyhow!("attest_node: {e}"))?;
+                println!("Attested peer {peer_pubkey}");
+                println!("  Attestation CID: {}", hex::encode(&cid));
+                println!("  Role:            {role}");
+                println!("  The peer's pre-genesis status will clear once this block syncs over.");
             }
             Commands::AgentEnroll {
                 token,

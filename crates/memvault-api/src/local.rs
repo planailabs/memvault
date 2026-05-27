@@ -310,6 +310,42 @@ impl LocalClient {
         Ok(())
     }
 
+    /// Issue a `NodeAttestation` for a peer's pubkey, signed by this
+    /// node's admin signing key. Used to admit a peer node into the
+    /// cluster after they've completed `cluster-join`. Returns the
+    /// attestation block's CID.
+    ///
+    /// Errors if no admin signing key is set on this client.
+    pub fn attest_node(
+        &self,
+        peer_pubkey: [u8; 32],
+        role: memvault_auth::Role,
+    ) -> Result<Vec<u8>> {
+        use ed25519_dalek::Signer;
+        let admin_sk = self
+            .admin_signing_key
+            .get()
+            .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
+        let cluster_id_arr: [u8; 32] = self
+            .cluster_id
+            .clone()
+            .try_into()
+            .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))?;
+        let mut node_att = memvault_auth::NodeAttestation {
+            cluster_id: memvault_core::ClusterId(cluster_id_arr),
+            member: memvault_core::PeerId(peer_pubkey.to_vec()),
+            role,
+            not_after_ns: u64::MAX,
+            issued_via: memvault_auth::AttestationOrigin::Direct,
+            signature: [0u8; 64],
+        };
+        let bytes = node_att
+            .signing_bytes()
+            .map_err(|e| ApiError::Other(format!("node attestation signing bytes: {e}")))?;
+        node_att.signature = admin_sk.sign(&bytes).to_bytes();
+        crate::sigchain::publish_node_attestation(self, &node_att)
+    }
+
     /// Revoke an agent that this node previously attested. Signs the
     /// revocation with the node signing key and persists it as a sigchain
     /// block (picked up by peers via RBSR sync).

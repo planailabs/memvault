@@ -159,8 +159,21 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
     };
 
     // (Step 3) Persisted attestations + local overlay.
+    //
+    // On the admin path, `node_trust_entry` is a freshly-signed
+    // attestation we just published — always overlay.
+    //
+    // On the peer path it's `NodeTrust::PreGenesis`, which is only a
+    // fallback for "we have no real attestation yet." If `scan_trusted_nodes`
+    // already loaded a real `NodeTrust::Attested(_)` for our pubkey
+    // (i.e. admin previously attested us and it synced over), do NOT
+    // clobber it.
     let mut node_trust_map = sigchain::scan_trusted_nodes(client, admin_pubkey.as_ref())?;
-    node_trust_map.insert(node_pubkey_bytes, node_trust_entry);
+    let local_is_pre_genesis = matches!(node_trust_entry, NodeTrust::PreGenesis);
+    let scanned_has_local = node_trust_map.contains_key(&node_pubkey_bytes);
+    if !(local_is_pre_genesis && scanned_has_local) {
+        node_trust_map.insert(node_pubkey_bytes, node_trust_entry);
+    }
 
     // (Step 4) Revocations.
     let (revoked_agents_set, revoked_nodes_set) =
