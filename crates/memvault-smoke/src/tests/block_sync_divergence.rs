@@ -368,6 +368,7 @@ fn upload_file_to_store(
         provenance: vec![],
         cluster_id: Some(vec![0u8; 32]),
         bucket_id: None,
+            ..Default::default()
     };
     store
         .insert_envelope(&env_cid_bytes, &envelope_bytes, &meta)

@@ -264,6 +264,7 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -655,6 +656,7 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
@@ -1042,6 +1044,39 @@ impl LocalClient {
         let wall_ns = memvault_core::wall_ns();
         let bucket_id = self.require_bucket(bucket)?;
 
+        // CID is computed from the envelope bytes so any peer receiving the
+        // block can verify: CID == hash(block_bytes).
+        let envelope = serde_json::json!({
+            "version": 2,
+            "payload": op,
+            "author": self.peer_id,
+            "tags": tags,
+            "visibility": vis,
+            "wall_ns": wall_ns,
+            "cluster_id": Some(self.cluster_id.clone()),
+            "bucket_id": bucket_id.clone(),
+        });
+        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid = cid_from_bytes(&envelope_bytes);
+        let cid_bytes = cid.to_bytes();
+
+        // Co-sign: if an agent identity is set on this client, the agent
+        // signs the canonical envelope bytes with its private key. The
+        // signature is stored as indexing metadata so the daemon can later
+        // attribute edits per-agent (audit). Phase 5 sync will publish the
+        // co-signature alongside the block so other nodes can verify too.
+        let (agent_pubkey, agent_signature) = if let Some(ref identity) = self.agent_identity {
+            use ed25519_dalek::Signer;
+            let sig = identity.signing_key.sign(&envelope_bytes);
+            (
+                Some(identity.verifying_key.to_bytes()),
+                Some(sig.to_bytes()),
+            )
+        } else {
+            (None, None)
+        };
+
         let meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: tags.to_vec(),
@@ -1050,24 +1085,9 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
+            agent_pubkey,
+            agent_signature,
         };
-
-        // CID is computed from the full envelope bytes so any peer
-        // receiving the block can verify: CID == hash(block_bytes).
-        let envelope = serde_json::json!({
-            "version": 2,
-            "payload": op,
-            "author": self.peer_id,
-            "tags": tags,
-            "visibility": vis,
-            "wall_ns": wall_ns,
-            "cluster_id": meta.cluster_id,
-            "bucket_id": meta.bucket_id,
-        });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&envelope_bytes);
-        let cid_bytes = cid.to_bytes();
 
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -1166,6 +1186,7 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
+                    ..Default::default()
         };
         self.store.insert_envelope(&cid_bytes, &grant_json, &meta)?;
 
@@ -1431,6 +1452,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
+                    ..Default::default()
         };
         let envelope = serde_json::json!({
             "version": 1,
@@ -2063,6 +2085,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: None,
+                    ..Default::default()
         };
         self.store.insert_envelope(&cid_bytes, &view_bytes, &meta)?;
         tracing::info!(name = %view.name, tag_count = view.tags.len(), "view created");
@@ -2153,6 +2176,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -2223,6 +2247,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
@@ -2249,6 +2274,7 @@ impl MemvaultClient for LocalClient {
                             provenance: vec![],
                             cluster_id: Some(self.cluster_id.clone()),
                             bucket_id: Some(id.0.to_vec()),
+                                                    ..Default::default()
                         },
                     )?;
                     self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
@@ -2304,6 +2330,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&new_cid.to_bytes(), &new_bytes, &meta)?;
@@ -2340,6 +2367,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
@@ -2371,6 +2399,7 @@ impl MemvaultClient for LocalClient {
                             provenance: vec![],
                             cluster_id: Some(self.cluster_id.clone()),
                             bucket_id: Some(id.0.to_vec()),
+                                                    ..Default::default()
                         },
                     )?;
                     self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
@@ -2472,6 +2501,7 @@ impl MemvaultClient for LocalClient {
                                         provenance: vec![],
                                         cluster_id: Some(self.cluster_id.clone()),
                                         bucket_id: Some(bucket_bytes),
+                                                                            ..Default::default()
                                     };
                                     let _ = self.store.insert_envelope(
                                         &trust_cid.to_bytes(),

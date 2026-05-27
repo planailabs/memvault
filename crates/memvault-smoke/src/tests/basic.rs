@@ -101,6 +101,7 @@ async fn put_sync_search_retract() {
         provenance: vec![],
         cluster_id: Some(vec![0u8; 32]),
         bucket_id: None,
+            ..Default::default()
     };
 
     // Insert envelope on nodes 2 and 3 so their indexes are populated.

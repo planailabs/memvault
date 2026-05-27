@@ -28,7 +28,7 @@ use crate::keys;
 use crate::tables::*;
 
 /// Metadata extracted from an envelope for indexing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EnvelopeMeta {
     pub author: Vec<u8>,
     pub tags: Vec<(String, String)>,
@@ -38,6 +38,15 @@ pub struct EnvelopeMeta {
     pub cluster_id: Option<Vec<u8>>,
     /// Bucket this envelope belongs to (extracted from the envelope's bucket_id field).
     pub bucket_id: Option<Vec<u8>>,
+    /// Co-signing agent's ed25519 pubkey. `None` for system-internal writes
+    /// (rebuild, migration, anonymous pre-auth writes); `Some` when an agent
+    /// initiated the op.
+    pub agent_pubkey: Option<[u8; 32]>,
+    /// Ed25519 signature over the envelope payload, produced with the agent's
+    /// private key. Pairs with `agent_pubkey`. Verifiers checking
+    /// authorship-of-edits cross-reference this against the agent attestation
+    /// chain (`AgentAttestation` → `MembershipAttestation` → admin).
+    pub agent_signature: Option<[u8; 64]>,
 }
 
 impl MemvaultStore {
@@ -154,6 +163,7 @@ impl MemvaultStore {
             provenance,
             cluster_id,
             bucket_id,
+                    ..Default::default()
         };
 
         // Write index entries (without re-inserting the block itself)

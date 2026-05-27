@@ -491,6 +491,7 @@ fn repair_vfs_sync(
                 provenance: vec![],
                 cluster_id: Some(client.cluster_id().to_vec()),
                 bucket_id: Some(legacy_bucket.0.to_vec()),
+                            ..Default::default()
             };
             let _ = store.insert_envelope(&cid.to_bytes(), &bytes, &meta);
             linked += 1;

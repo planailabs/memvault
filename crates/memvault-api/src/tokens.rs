@@ -67,6 +67,7 @@ pub fn issue_token(
         provenance: vec![],
         cluster_id: Some(cluster_id.0.to_vec()),
         bucket_id: None,
+            ..Default::default()
     };
     store.insert_envelope(&cid_bytes, &token_cbor, &meta)?;
 

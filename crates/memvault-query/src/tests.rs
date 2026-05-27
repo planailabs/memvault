@@ -561,6 +561,7 @@ fn audit_query_by_time_range() {
             provenance: vec![],
             cluster_id: None,
             bucket_id: None,
+                    ..Default::default()
         };
         store
             .insert_envelope(cid.as_bytes(), &serde_json::to_vec(&data).unwrap(), &meta)
