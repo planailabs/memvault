@@ -179,6 +179,12 @@ mod server_router {
             memvault_auth::Role::AgentHost,
             365 * 24 * 60 * 60 * 1_000_000_000,
         )?;
+
+        // Publish the agent attestation to the sigchain so peers can verify
+        // envelope authorship blocks from this agent after RBSR sync.
+        memvault_api::sigchain::publish_agent_attestation(client, &ui_identity.attestation)
+            .map_err(|e| format!("publish ui agent attestation: {e}"))?;
+
         super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
 
         Ok(WebAuthBootstrap {

@@ -195,6 +195,37 @@ impl LocalClient {
         self.agent_identity = Some(identity);
     }
 
+    /// Insert an envelope and, if an agent identity is bound, publish a
+    /// matching [`memvault_auth::EnvelopeAuthorship`] sidecar block.
+    ///
+    /// Existing write paths can opt-in to attribution by going through this
+    /// helper instead of calling `store().insert_envelope(...)` directly.
+    /// When no agent identity is configured (system writes, rebuild,
+    /// pre-genesis bootstrap), this is equivalent to a plain insert.
+    pub fn sign_and_insert_envelope(
+        &self,
+        cid_bytes: &[u8],
+        envelope_bytes: &[u8],
+        meta: &memvault_store::insert::EnvelopeMeta,
+    ) -> Result<()> {
+        self.store
+            .insert_envelope(cid_bytes, envelope_bytes, meta)?;
+        if let Some(identity) = self.agent_identity.as_ref() {
+            let auth = memvault_auth::sign_envelope_authorship(
+                &identity.signing_key,
+                cid_bytes.to_vec(),
+            )
+            .map_err(|e| ApiError::Other(format!("sign envelope authorship: {e}")))?;
+            if let Err(e) = crate::sigchain::publish_envelope_authorship(self, &auth) {
+                tracing::warn!(
+                    error = %e,
+                    "envelope inserted, but failed to publish authorship sidecar"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Revoke an agent that this node previously attested. Signs the
     /// revocation with the node signing key and persists it as a sigchain
     /// block (picked up by peers via RBSR sync).
@@ -1118,22 +1149,6 @@ impl LocalClient {
         let cid = cid_from_bytes(&envelope_bytes);
         let cid_bytes = cid.to_bytes();
 
-        // Co-sign: if an agent identity is set on this client, the agent
-        // signs the canonical envelope bytes with its private key. The
-        // signature is stored as indexing metadata so the daemon can later
-        // attribute edits per-agent (audit). Phase 5 sync will publish the
-        // co-signature alongside the block so other nodes can verify too.
-        let (agent_pubkey, agent_signature) = if let Some(ref identity) = self.agent_identity {
-            use ed25519_dalek::Signer;
-            let sig = identity.signing_key.sign(&envelope_bytes);
-            (
-                Some(identity.verifying_key.to_bytes()),
-                Some(sig.to_bytes()),
-            )
-        } else {
-            (None, None)
-        };
-
         let meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: tags.to_vec(),
@@ -1142,12 +1157,12 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
-            agent_pubkey,
-            agent_signature,
         };
 
-        self.store
-            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        // Inserts the envelope and, if an agent identity is bound, publishes
+        // a co-signed authorship sidecar block (rides on RBSR sync, verified
+        // on read against the agent attestation chain).
+        self.sign_and_insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
         Ok(cid_bytes)
     }
