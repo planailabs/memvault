@@ -62,11 +62,14 @@ fn main() {
             ) {
                 Ok(s) => {
                     let store = std::sync::Arc::new(s);
-                    let local_client = Arc::new(memctl::create_client_with_bus(
-                        Arc::clone(&store),
-                        &data_dir,
-                        Arc::clone(&event_bus),
-                    ));
+                    let local_client = Arc::new(
+                        memctl::create_client_with_bus(
+                            Arc::clone(&store),
+                            &data_dir,
+                            Arc::clone(&event_bus),
+                        )
+                        .expect("create_client_with_bus failed"),
+                    );
                     memvault_web::ui::state::set_client(Arc::clone(&local_client));
                     Some((store, local_client))
                 }

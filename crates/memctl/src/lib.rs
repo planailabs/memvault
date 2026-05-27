@@ -431,7 +431,10 @@ mod native {
         open_store_at(&db_path)
     }
 
-    fn create_client_with_data_dir(store: Arc<MemvaultStore>, data_dir: &Path) -> LocalClient {
+    fn create_client_with_data_dir(
+        store: Arc<MemvaultStore>,
+        data_dir: &Path,
+    ) -> Result<LocalClient> {
         create_client_with_bus(store, data_dir, Arc::new(EventBus::new(64)))
     }
 
@@ -439,27 +442,27 @@ mod native {
         store: Arc<MemvaultStore>,
         data_dir: &Path,
         event_bus: Arc<EventBus>,
-    ) -> LocalClient {
+    ) -> Result<LocalClient> {
         // Prefer the peer_id already persisted by a prior swarm spawn.
         // Otherwise derive it from the libp2p key file (loading / creating
         // it eagerly so the client sees a stable peer_id even when the
         // swarm hasn't been spawned yet — e.g. dx-serve dev mode where
         // the trust-tree UI reads peer_id before any P2P starts).
+        //
+        // Hard-fail if neither source is available: a zero peer_id would
+        // silently break attestation chains and is never what we want.
         let peer_id = match store.get_local_peer_id().ok().flatten() {
             Some(pid) => pid,
             None => {
                 let key_path = data_dir.join("identity").join("libp2p.key");
-                match load_or_generate_keypair(&key_path) {
-                    Ok(kp) => {
-                        let pid = kp.public().to_peer_id().to_bytes();
-                        let _ = store.set_local_peer_id(&pid);
-                        pid
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "could not derive peer_id; using zeros");
-                        vec![0u8; 32]
-                    }
-                }
+                let kp = load_or_generate_keypair(&key_path).map_err(|e| {
+                    anyhow::anyhow!("could not derive peer_id from {key_path:?}: {e}")
+                })?;
+                let pid = kp.public().to_peer_id().to_bytes();
+                store
+                    .set_local_peer_id(&pid)
+                    .map_err(|e| anyhow::anyhow!("persist peer_id: {e}"))?;
+                pid
             }
         };
         let cluster_id = store
@@ -467,7 +470,7 @@ mod native {
             .ok()
             .flatten()
             .unwrap_or_else(|| vec![0u8; 32]);
-        let mut client = LocalClient::open(
+        let client = LocalClient::open(
             store,
             Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
@@ -475,10 +478,7 @@ mod native {
             peer_id,
             cluster_id,
         )
-        .unwrap_or_else(|e| {
-            tracing::warn!("LocalClient::open failed: {e}, falling back to new()");
-            panic!("LocalClient::open failed: {e}");
-        });
+        .map_err(|e| anyhow::anyhow!("LocalClient::open: {e}"))?;
         // Load admin signing key if available (enables token issuance)
         let admin_key_path = data_dir.join("identity").join("admin.key");
         if admin_key_path.exists() {
@@ -505,10 +505,10 @@ mod native {
                 Err(e) => tracing::warn!(error = %e, "decode pinned admin_genesis"),
             }
         }
-        client
+        Ok(client)
     }
 
-    fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
+    fn create_client(store: Arc<MemvaultStore>) -> Result<LocalClient> {
         // Resolve data_dir from env or default (for admin key loading)
         let data_dir = std::env::var("MEMVAULT_DATA_DIR")
             .map(PathBuf::from)
@@ -533,7 +533,7 @@ mod native {
         data_dir: &Path,
         cluster_id: &[u8],
         keypair: &libp2p::identity::Keypair,
-    ) -> memvault_swarm::JoinConfig {
+    ) -> Result<memvault_swarm::JoinConfig> {
         let pending_token_path = data_dir.join("identity").join("pending_join_token.txt");
         let pending_token = std::fs::read_to_string(&pending_token_path)
             .ok()
@@ -549,12 +549,15 @@ mod native {
                 ed25519_dalek::SigningKey::from_bytes(&seed)
             });
 
+        // Hard-fail: the swarm-side node pubkey MUST match the libp2p
+        // identity it's serving with. A zero pubkey would silently break
+        // both incoming joins (PeerIdMismatch refusals) and outgoing
+        // joins (admin can't verify our key).
         let node_pubkey: [u8; 32] = keypair
             .public()
             .try_into_ed25519()
-            .ok()
-            .map(|pk| pk.to_bytes())
-            .unwrap_or([0u8; 32]);
+            .map_err(|e| anyhow::anyhow!("libp2p keypair is not ed25519: {e}"))?
+            .to_bytes();
 
         let mut cluster_arr = [0u8; 32];
         if cluster_id.len() == 32 {
@@ -568,13 +571,13 @@ mod native {
                 tracing::info!("/join/1.0 success; cleared pending token file");
             });
 
-        memvault_swarm::JoinConfig {
+        Ok(memvault_swarm::JoinConfig {
             pending_token,
             node_pubkey,
             admin_signing_key,
             cluster_id: cluster_arr,
             on_join_success: Some(on_join_success),
-        }
+        })
     }
 
     /// Spawn the swarm with an already-opened store.  Call AFTER
@@ -609,7 +612,7 @@ mod native {
             ..Default::default()
         };
 
-        let join_config = build_join_config(&data_dir, &cluster_id, &keypair);
+        let join_config = build_join_config(&data_dir, &cluster_id, &keypair)?;
 
         let handle = std::thread::Builder::new()
             .name("memvault-swarm".into())
@@ -813,7 +816,7 @@ mod native {
                     }
                 };
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tags = memvault_api::docs::parse_tags(&tag);
                 let vis = memvault_api::docs::parse_visibility(Some(&visibility));
                 let result = memvault_api::docs::create_doc(
@@ -841,7 +844,7 @@ mod native {
             }
             Commands::Search { query, limit } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let hits = client.search(&query, limit).await?;
                 for hit in hits {
                     println!("{} (score: {:.2})", hex::encode(hit.doc_id.0), hit.score);
@@ -851,7 +854,7 @@ mod native {
             }
             Commands::List { limit, scope } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tag_filter = scope.map(|s| (s, "*".to_string()));
                 let docs = client.list_docs(tag_filter, limit, None).await?;
                 for doc in docs {
@@ -861,7 +864,7 @@ mod native {
             }
             Commands::Status => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let status = client.status().await?;
                 println!("Memvault Node Status");
                 println!("  Blocks:   {}", status.block_count);
@@ -872,7 +875,7 @@ mod native {
             Commands::Retract { cid, reason } => {
                 let cid_bytes = hex::decode(&cid)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tombstone = client.retract(&cid_bytes, &reason).await?;
                 println!("Retracted. Tombstone: {}", hex::encode(&tombstone));
             }
@@ -889,13 +892,13 @@ mod native {
                     _ => Role::AgentHost,
                 };
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let token_str = client.issue_token(role, ttl, max_uses, label).await?;
                 println!("{token_str}");
             }
             Commands::TokenList => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tokens = client.list_tokens().await?;
                 for t in tokens {
                     let label = t.label.unwrap_or_else(|| "-".into());
@@ -914,13 +917,13 @@ mod native {
             Commands::TokenRevoke { cid, reason } => {
                 let cid_bytes = hex::decode(&cid)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 client.revoke_token(&cid_bytes, &reason).await?;
                 println!("Token revoked.");
             }
             Commands::Rotations => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let rotations = client.list_rotations().await?;
                 for r in rotations {
                     let status = if r.aborted { "ABORTED" } else { "active" };
@@ -949,7 +952,7 @@ mod native {
                 id[..len].copy_from_slice(&doc_id_bytes[..len]);
                 let did = DocId(id);
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let records = client.history_of(&did).await?;
                 println!("History for doc {doc_id}: {} ops", records.len());
                 for r in records {
@@ -958,7 +961,7 @@ mod native {
             }
             Commands::GraphAdd { kind, prop } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let props: BTreeMap<String, serde_json::Value> = prop
                     .iter()
                     .filter_map(|p| {
@@ -986,7 +989,7 @@ mod native {
                 let source_id = parse_entity_id(&source)?;
                 let target_id = parse_entity_id(&target)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let source_ref = memvault_core::NodeRef::Entity(source_id);
                 let edge = Edge {
                     id: memvault_core::EdgeId::random(),
@@ -1008,7 +1011,7 @@ mod native {
             } => {
                 let entity_id = parse_entity_id(&from)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let from_ref = memvault_core::NodeRef::Entity(entity_id);
                 let hits = client
                     .traverse_from(&from_ref, relation.as_deref(), max_depth)
@@ -1129,7 +1132,7 @@ mod native {
 
                 // Full deterministic rebuild from BLOCKS.
                 println!("Rebuilding all derived state from blocks...");
-                let client = create_client(store.clone());
+                let client = create_client(store.clone())?;
                 let report = memvault_api::rebuild::rebuild_store(&client)?;
 
                 println!("  Blocks:       {}", report.blocks_total);
@@ -1463,7 +1466,7 @@ mod native {
                     store.clone(),
                     &data_dir,
                     std::sync::Arc::clone(&event_bus_shared),
-                );
+                )?;
 
                 // Rebuild derived state if blockstore version is outdated.
                 // Load or rebuild the full-text search index
@@ -1566,7 +1569,7 @@ mod native {
 
                     // Build join_config BEFORE the keypair is moved into the swarm.
                     let join_config =
-                        build_join_config(&data_dir, &cluster_id_bytes, &keypair);
+                        build_join_config(&data_dir, &cluster_id_bytes, &keypair)?;
 
                     // Build standalone swarm
                     let mut swarm =
@@ -1598,7 +1601,7 @@ mod native {
                 #[cfg(not(feature = "daemon"))]
                 {
                     let join_config =
-                        build_join_config(&data_dir, &cluster_id_bytes, &keypair);
+                        build_join_config(&data_dir, &cluster_id_bytes, &keypair)?;
                     let mut swarm =
                         memvault_net::standalone_swarm(keypair, listen_addr, bootstrap_addrs)
                             .await
@@ -1690,7 +1693,7 @@ mod native {
                     other => anyhow::bail!("unknown role: {other}"),
                 };
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let cid = client
                     .attest_node(pk_arr, role_enum)
                     .map_err(|e| anyhow::anyhow!("attest_node: {e}"))?;
@@ -1845,7 +1848,7 @@ mod native {
                 links,
             } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 run_seed(&client, docs, entities, files, links).await?;
             }
         }
