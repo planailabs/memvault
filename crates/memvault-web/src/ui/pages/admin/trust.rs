@@ -10,7 +10,11 @@ use crate::ui::topbar::use_topbar;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AgentRow {
     pubkey: String,
+    agent_id: String,
+    role: String,
     revoked: bool,
+    not_after_ns: u64,
+    expired: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19,7 +23,13 @@ struct NodeRow {
     /// "attested" or "pre-genesis"
     kind: String,
     revoked: bool,
+    is_local: bool,
     role: Option<String>,
+    /// Only set for Attested nodes.
+    origin: Option<String>,
+    /// Only set for Attested nodes.
+    not_after_ns: Option<u64>,
+    expired: bool,
     agents: Vec<AgentRow>,
 }
 
@@ -27,6 +37,23 @@ struct NodeRow {
 struct TrustTree {
     admin_pubkey: Option<String>,
     nodes: Vec<NodeRow>,
+    /// Agents whose attestation is valid (signature checks) but whose
+    /// attesting node is not currently in `node_trust` — e.g. the
+    /// NodeAttestation hasn't synced yet, or admin never attested that
+    /// node. Surfaced separately because the chain to admin is broken.
+    orphan_agents: Vec<OrphanAgentRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct OrphanAgentRow {
+    pubkey: String,
+    agent_id: String,
+    role: String,
+    revoked: bool,
+    not_after_ns: u64,
+    expired: bool,
+    /// The (unknown) node pubkey this attestation claims.
+    node_pubkey: String,
 }
 
 #[server]
@@ -41,6 +68,7 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
     let admin_pubkey = client
         .admin_verifying_key()
         .map(|k| hex::encode(k.to_bytes()));
+    let local_node_pubkey = client.node_verifying_key().map(|k| k.to_bytes());
 
     let node_trust = state
         .node_trust
@@ -58,57 +86,100 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
         .map(|s| s.clone())
         .unwrap_or_default();
 
-    // Build a node-pk → list of attested agents map from persisted
-    // AgentAttestations. We re-scan rather than maintain a separate cache
-    // here — this page is read-only and not on a hot path.
-    let mut agents_by_node: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>> =
-        std::collections::HashMap::new();
-    if let Ok(atts) =
-        memvault_api::sigchain::scan_agent_attestations(&*client)
-    {
+    let now_ns = memvault_core::time::wall_ns();
+
+    // Group every persisted AgentAttestation by its node pubkey. Orphans
+    // (attesting node not in node_trust) get surfaced separately below.
+    let mut atts_by_node: std::collections::HashMap<
+        [u8; 32],
+        Vec<memvault_auth::AgentAttestation>,
+    > = std::collections::HashMap::new();
+    if let Ok(atts) = memvault_api::sigchain::scan_agent_attestations(&*client) {
         for att in atts {
-            agents_by_node
-                .entry(att.node_pubkey)
-                .or_default()
-                .push(att.agent_pubkey);
+            atts_by_node.entry(att.node_pubkey).or_default().push(att);
         }
     }
 
     let mut nodes: Vec<NodeRow> = node_trust
-        .into_iter()
+        .iter()
         .map(|(pk, trust)| {
-            let (kind, role) = match &trust {
+            let (kind, role, origin, not_after_ns) = match trust {
                 NodeTrust::Attested(att) => (
                     "attested".to_string(),
                     Some(format!("{:?}", att.role)),
+                    Some(format!("{:?}", att.issued_via)),
+                    Some(att.not_after_ns),
                 ),
-                NodeTrust::PreGenesis => ("pre-genesis".to_string(), None),
+                NodeTrust::PreGenesis => ("pre-genesis".to_string(), None, None, None),
             };
-            let agents = agents_by_node
-                .get(&pk)
+            let node_expired = not_after_ns
+                .map(|n| n != u64::MAX && n < now_ns)
+                .unwrap_or(false);
+            let agents: Vec<AgentRow> = atts_by_node
+                .get(pk)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|apk| AgentRow {
-                    pubkey: hex::encode(apk),
-                    revoked: revoked_agents.contains(&apk),
+                .map(|att| AgentRow {
+                    pubkey: hex::encode(att.agent_pubkey),
+                    agent_id: att.agent_id.0.clone(),
+                    role: format!("{:?}", att.role),
+                    revoked: revoked_agents.contains(&att.agent_pubkey),
+                    not_after_ns: att.not_after_ns,
+                    expired: att.not_after_ns != u64::MAX && att.not_after_ns < now_ns,
                 })
                 .collect();
             NodeRow {
                 pubkey: hex::encode(pk),
                 kind,
-                revoked: revoked_nodes.contains(&pk),
+                revoked: revoked_nodes.contains(pk),
+                is_local: local_node_pubkey
+                    .as_ref()
+                    .map(|local| local == pk)
+                    .unwrap_or(false),
                 role,
+                origin,
+                not_after_ns,
+                expired: node_expired,
                 agents,
             }
         })
         .collect();
-    // Stable sort: non-revoked first, then by pubkey hex.
-    nodes.sort_by(|a, b| a.revoked.cmp(&b.revoked).then_with(|| a.pubkey.cmp(&b.pubkey)));
+    // Stable sort: local node first, then non-revoked, then by pubkey hex.
+    nodes.sort_by(|a, b| {
+        a.is_local
+            .cmp(&b.is_local)
+            .reverse()
+            .then(a.revoked.cmp(&b.revoked))
+            .then_with(|| a.pubkey.cmp(&b.pubkey))
+    });
+
+    // Orphans: AgentAttestations whose `node_pubkey` is not in node_trust.
+    // These can't chain back to admin and so should not authenticate any
+    // write — surfaced for diagnostic visibility, not as trusted entries.
+    let revoked_agents_ref = &revoked_agents;
+    let mut orphan_agents: Vec<OrphanAgentRow> = atts_by_node
+        .iter()
+        .filter(|(node_pk, _)| !node_trust.contains_key(*node_pk))
+        .flat_map(|(node_pk, atts)| {
+            let node_pubkey_hex = hex::encode(node_pk);
+            atts.iter().map(move |att| OrphanAgentRow {
+                pubkey: hex::encode(att.agent_pubkey),
+                agent_id: att.agent_id.0.clone(),
+                role: format!("{:?}", att.role),
+                revoked: revoked_agents_ref.contains(&att.agent_pubkey),
+                not_after_ns: att.not_after_ns,
+                expired: att.not_after_ns != u64::MAX && att.not_after_ns < now_ns,
+                node_pubkey: node_pubkey_hex.clone(),
+            })
+        })
+        .collect();
+    orphan_agents.sort_by(|a, b| a.node_pubkey.cmp(&b.node_pubkey).then(a.pubkey.cmp(&b.pubkey)));
 
     Ok(TrustTree {
         admin_pubkey,
         nodes,
+        orphan_agents,
     })
 }
 
@@ -121,6 +192,25 @@ pub fn TrustTreePage() -> Element {
         Some(Ok(tree)) => rsx! { TrustTreeView { tree: tree.clone() } },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
         None => rsx! { p { class: "text-fg-muted", "Loading…" } },
+    }
+}
+
+fn fmt_expiry(not_after_ns: u64) -> String {
+    if not_after_ns == u64::MAX {
+        return "never".to_string();
+    }
+    let now_ns = memvault_core::time::wall_ns();
+    if not_after_ns <= now_ns {
+        return "expired".to_string();
+    }
+    let remaining = not_after_ns - now_ns;
+    let days = remaining / (24 * 60 * 60 * 1_000_000_000);
+    let hours = (remaining / (60 * 60 * 1_000_000_000)) % 24;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else {
+        let mins = (remaining / (60 * 1_000_000_000)) % 60;
+        format!("{hours}h {mins}m")
     }
 }
 
@@ -156,16 +246,31 @@ fn TrustTreeView(tree: TrustTree) -> Element {
                             for node in &tree.nodes {
                                 li { key: "{node.pubkey}", class: "border-l-2 border-border pl-4",
                                     div { class: "flex items-center gap-2 flex-wrap",
+                                        if node.is_local {
+                                            Pill { variant: PillVariant::Accent, "this node" }
+                                        }
                                         if node.revoked {
                                             Pill { variant: PillVariant::Bad, "revoked" }
                                         } else if node.kind == "attested" {
-                                            Pill { variant: PillVariant::Ok, "node" }
+                                            if node.expired {
+                                                Pill { variant: PillVariant::Warn, "expired" }
+                                            } else {
+                                                Pill { variant: PillVariant::Ok, "node" }
+                                            }
                                         } else {
                                             Pill { variant: PillVariant::Warn, "pre-genesis" }
                                         }
                                         CidDisplay { cid: node.pubkey.clone(), len: Some(16) }
                                         if let Some(role) = &node.role {
                                             Pill { variant: PillVariant::Info, "{role}" }
+                                        }
+                                        if let Some(origin) = &node.origin {
+                                            Pill { variant: PillVariant::Muted, "via {origin}" }
+                                        }
+                                        if let Some(exp) = node.not_after_ns {
+                                            span { class: "text-xs text-fg-muted",
+                                                "expires: {fmt_expiry(exp)}"
+                                            }
                                         }
                                     }
                                     if node.agents.is_empty() {
@@ -176,17 +281,59 @@ fn TrustTreeView(tree: TrustTree) -> Element {
                                         ul { class: "mt-2 ml-4 space-y-1",
                                             for agent in &node.agents {
                                                 li { key: "{agent.pubkey}",
-                                                    class: "flex items-center gap-2",
+                                                    class: "flex items-center gap-2 flex-wrap",
                                                     if agent.revoked {
                                                         Pill { variant: PillVariant::Bad, "agent (revoked)" }
+                                                    } else if agent.expired {
+                                                        Pill { variant: PillVariant::Warn, "agent (expired)" }
                                                     } else {
                                                         Pill { variant: PillVariant::Muted, "agent" }
                                                     }
+                                                    span { class: "font-mono text-sm", "{agent.agent_id}" }
                                                     CidDisplay { cid: agent.pubkey.clone(), len: Some(12) }
+                                                    Pill { variant: PillVariant::Info, "{agent.role}" }
+                                                    span { class: "text-xs text-fg-muted",
+                                                        "expires: {fmt_expiry(agent.not_after_ns)}"
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !tree.orphan_agents.is_empty() {
+                Card {
+                    div { class: "p-5 space-y-3",
+                        SectionHeading {
+                            "Orphan agents ({tree.orphan_agents.len()})"
+                        }
+                        p { class: "text-sm text-fg-muted",
+                            "Agent attestations whose attesting node is not (yet?) trusted on this daemon. "
+                            "They may appear once their NodeAttestation syncs in, or be permanently broken if admin never attested that node."
+                        }
+                        ul { class: "space-y-2",
+                            for agent in &tree.orphan_agents {
+                                li { key: "{agent.pubkey}",
+                                    class: "flex items-center gap-2 flex-wrap border-l-2 border-warn pl-3",
+                                    if agent.revoked {
+                                        Pill { variant: PillVariant::Bad, "revoked" }
+                                    } else if agent.expired {
+                                        Pill { variant: PillVariant::Warn, "expired" }
+                                    } else {
+                                        Pill { variant: PillVariant::Warn, "orphan" }
+                                    }
+                                    span { class: "font-mono text-sm", "{agent.agent_id}" }
+                                    CidDisplay { cid: agent.pubkey.clone(), len: Some(12) }
+                                    Pill { variant: PillVariant::Info, "{agent.role}" }
+                                    span { class: "text-xs text-fg-muted",
+                                        "claims node "
+                                    }
+                                    CidDisplay { cid: agent.node_pubkey.clone(), len: Some(12) }
                                 }
                             }
                         }
