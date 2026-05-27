@@ -139,10 +139,14 @@ mod server_router {
     pub fn init_web_auth(
         client: &memvault_api::LocalClient,
         data_dir: &std::path::Path,
-        node_signing_key: ed25519_dalek::SigningKey,
     ) -> Result<WebAuthBootstrap, Box<dyn std::error::Error + Send + Sync>> {
         use memvault_auth::jwt::NodeTrust;
         use memvault_auth::{AttestationOrigin, NodeAttestation, Role};
+
+        let node_signing_key = client
+            .node_signing_key()
+            .ok_or("node signing key not set on client; call set_node_signing_key first")?
+            .clone();
 
         let cluster_bytes = client.cluster_id();
         let mut cluster_arr = [0u8; 32];

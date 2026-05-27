@@ -27,19 +27,18 @@ fn main() {
                             return Ok(router);
                         }
                     };
-                    let node_key =
-                        match memvault_web::load_or_generate_node_key(&data_dir) {
-                            Ok(k) => k,
-                            Err(e) => {
-                                eprintln!("memvault: API routes NOT mounted (node key: {e})");
-                                return Ok(router);
-                            }
-                        };
-                    let auth = match memvault_web::init_web_auth(
-                        &local_client,
-                        &data_dir,
-                        node_key,
-                    ) {
+                    // Standalone mode: load (or generate) a per-daemon node
+                    // key and install it on the LocalClient. The daemon main
+                    // path does this with the libp2p host key; here we use a
+                    // file-backed key under `<data_dir>/identity/node.key`.
+                    match memvault_web::load_or_generate_node_key(&data_dir) {
+                        Ok(k) => local_client.set_node_signing_key(k),
+                        Err(e) => {
+                            eprintln!("memvault: API routes NOT mounted (node key: {e})");
+                            return Ok(router);
+                        }
+                    }
+                    let auth = match memvault_web::init_web_auth(&local_client, &data_dir) {
                         Ok(a) => a,
                         Err(e) => {
                             eprintln!("memvault: API routes NOT mounted (auth init: {e})");

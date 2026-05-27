@@ -103,7 +103,12 @@ pub struct LocalClient {
     peer_id: Vec<u8>,
     cluster_id: Vec<u8>,
     /// Optional admin signing key for token issuance and agent enrollment.
-    admin_signing_key: Option<ed25519_dalek::SigningKey>,
+    /// `OnceLock` allows write-once initialisation through a shared `Arc`.
+    admin_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
+    /// Optional node signing key — the daemon's libp2p ed25519 private key,
+    /// used to sign agent attestations and agent revocations. Distinct from
+    /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
+    node_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
     /// Optional agent identity for agent-scoped operations.
     agent_identity: Option<crate::agent_identity::AgentIdentity>,
     start_time: std::time::Instant,
@@ -125,7 +130,8 @@ impl LocalClient {
             event_bus,
             peer_id,
             cluster_id,
-            admin_signing_key: None,
+            admin_signing_key: std::sync::OnceLock::new(),
+            node_signing_key: std::sync::OnceLock::new(),
             agent_identity: None,
             start_time: std::time::Instant::now(),
         };
@@ -160,14 +166,67 @@ impl LocalClient {
         Ok(client)
     }
 
-    /// Set the admin signing key (enables real token issuance).
-    pub fn set_admin_signing_key(&mut self, key: ed25519_dalek::SigningKey) {
-        self.admin_signing_key = Some(key);
+    /// Set the admin signing key (enables real token issuance). Write-once;
+    /// subsequent calls are silently ignored so a daemon that re-enters
+    /// initialisation cannot accidentally swap admin identity.
+    pub fn set_admin_signing_key(&self, key: ed25519_dalek::SigningKey) {
+        let _ = self.admin_signing_key.set(key);
+    }
+
+    /// Set the node signing key (the daemon's libp2p ed25519 key, used to
+    /// sign agent attestations and revocations). Distinct from the admin
+    /// key on non-genesis-admin daemons. Write-once.
+    pub fn set_node_signing_key(&self, key: ed25519_dalek::SigningKey) {
+        let _ = self.node_signing_key.set(key);
+    }
+
+    /// Get the node signing key, if configured.
+    pub fn node_signing_key(&self) -> Option<&ed25519_dalek::SigningKey> {
+        self.node_signing_key.get()
+    }
+
+    /// Get the node verifying key, derived from the node signing key.
+    pub fn node_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
+        self.node_signing_key.get().map(|k| k.verifying_key())
     }
 
     /// Set the agent identity (enables agent-scoped operations).
     pub fn set_agent_identity(&mut self, identity: crate::agent_identity::AgentIdentity) {
         self.agent_identity = Some(identity);
+    }
+
+    /// Revoke an agent that this node previously attested. Signs the
+    /// revocation with the node signing key and persists it as a sigchain
+    /// block (picked up by peers via RBSR sync).
+    pub fn revoke_agent(
+        &self,
+        agent_pubkey: [u8; 32],
+        reason: impl Into<String>,
+    ) -> Result<Vec<u8>> {
+        let node_sk = self
+            .node_signing_key
+            .get()
+            .ok_or_else(|| ApiError::Other("no node signing key configured".into()))?;
+        let rev = memvault_auth::sign_agent_revocation(node_sk, agent_pubkey, reason)
+            .map_err(|e| ApiError::Other(format!("sign agent revocation: {e}")))?;
+        crate::sigchain::publish_agent_revocation(self, &rev)
+    }
+
+    /// Revoke a node. Requires the admin signing key. Persists as a sigchain
+    /// block; on next scan, downstream verifiers transitively reject every
+    /// JWT chained through that node.
+    pub fn revoke_node(
+        &self,
+        node_pubkey: [u8; 32],
+        reason: impl Into<String>,
+    ) -> Result<Vec<u8>> {
+        let admin_sk = self
+            .admin_signing_key
+            .get()
+            .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
+        let rev = memvault_auth::sign_node_revocation(admin_sk, node_pubkey, reason)
+            .map_err(|e| ApiError::Other(format!("sign node revocation: {e}")))?;
+        crate::sigchain::publish_node_revocation(self, &rev)
     }
 
     /// Find or create an `Agent`-role bucket for the given agent ID.
@@ -281,15 +340,13 @@ impl LocalClient {
     /// admin). Used by callers that need to derive the admin verifying key
     /// or sign admin-only operations.
     pub fn admin_signing_key(&self) -> Option<&ed25519_dalek::SigningKey> {
-        self.admin_signing_key.as_ref()
+        self.admin_signing_key.get()
     }
 
     /// The admin's verifying key, derived from the signing key. `None` on
     /// peer daemons that don't hold the admin key.
     pub fn admin_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
-        self.admin_signing_key
-            .as_ref()
-            .map(|sk| sk.verifying_key())
+        self.admin_signing_key.get().map(|sk| sk.verifying_key())
     }
 
     pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
@@ -1131,7 +1188,7 @@ impl LocalClient {
         actions: Vec<memvault_auth::Action>,
         ttl_secs: u64,
     ) -> Result<Vec<u8>> {
-        let admin_key = self.admin_signing_key.as_ref().ok_or_else(|| {
+        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
             ApiError::Other("no admin signing key — cannot issue grants".into())
         })?;
 
@@ -1988,7 +2045,7 @@ impl MemvaultClient for LocalClient {
         max_uses: u32,
         label: Option<String>,
     ) -> Result<String> {
-        let admin_key = self.admin_signing_key.as_ref().ok_or_else(|| {
+        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
             ApiError::Other("no admin signing key configured — cannot issue tokens".into())
         })?;
         let peer_id = memvault_core::PeerId(self.peer_id.clone());
@@ -2438,7 +2495,7 @@ impl MemvaultClient for LocalClient {
 
         // If approved and we have an admin signing key, issue a BucketTrust
         if approve {
-            if let Some(ref admin_key) = self.admin_signing_key {
+            if let Some(admin_key) = self.admin_signing_key.get() {
                 // Load the proposal to get bucket/cluster info
                 if let Some(proposal_block) = self.store.get_block(proposal_cid)? {
                     if let Ok(proposal) =
