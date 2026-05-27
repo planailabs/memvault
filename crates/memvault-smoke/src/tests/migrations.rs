@@ -182,7 +182,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
         client: memctl::memvault_api::ClientArgs {
             db: Some(db_path.clone()),
             url: "http://127.0.0.1:8401".to_string(),
-            token_file: None,
+            identity_dir: None,
         },
         command: memctl::Commands::RepairIndex,
     };
