@@ -122,8 +122,9 @@ pub struct LocalClient {
     /// used to sign agent attestations and agent revocations. Distinct from
     /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
     node_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
-    /// Optional agent identity for agent-scoped operations.
-    agent_identity: Option<crate::agent_identity::AgentIdentity>,
+    /// Optional agent identity for agent-scoped operations. Write-once
+    /// via `OnceLock` so it can be installed through a shared `Arc`.
+    agent_identity: std::sync::OnceLock<crate::agent_identity::AgentIdentity>,
     start_time: std::time::Instant,
 }
 
@@ -147,7 +148,7 @@ impl LocalClient {
             node_signing_key: std::sync::OnceLock::new(),
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
-            agent_identity: None,
+            agent_identity: std::sync::OnceLock::new(),
             start_time: std::time::Instant::now(),
         };
 
@@ -275,8 +276,9 @@ impl LocalClient {
     }
 
     /// Set the agent identity (enables agent-scoped operations).
-    pub fn set_agent_identity(&mut self, identity: crate::agent_identity::AgentIdentity) {
-        self.agent_identity = Some(identity);
+    /// Write-once; subsequent calls are silently ignored.
+    pub fn set_agent_identity(&self, identity: crate::agent_identity::AgentIdentity) {
+        let _ = self.agent_identity.set(identity);
     }
 
     /// Insert an envelope and, if an agent identity is bound, publish a
@@ -294,7 +296,7 @@ impl LocalClient {
     ) -> Result<()> {
         self.store
             .insert_envelope(cid_bytes, envelope_bytes, meta)?;
-        if let Some(identity) = self.agent_identity.as_ref() {
+        if let Some(identity) = self.agent_identity.get() {
             let auth = memvault_auth::sign_envelope_authorship(
                 &identity.signing_key,
                 cid_bytes.to_vec(),
@@ -507,14 +509,14 @@ impl LocalClient {
     }
 
     pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
-        self.agent_identity.as_ref().map(|i| &i.agent_id)
+        self.agent_identity.get().map(|i| &i.agent_id)
     }
 
     /// The effective author identity for write operations.
     /// Uses the agent's peer ID (derived from its public key) if an agent
     /// identity is set, otherwise falls back to the raw peer_id.
     fn effective_author(&self) -> Vec<u8> {
-        if let Some(ref identity) = self.agent_identity {
+        if let Some(identity) = self.agent_identity.get() {
             identity.verifying_key.as_bytes().to_vec()
         } else {
             self.peer_id.clone()
@@ -2336,7 +2338,7 @@ impl MemvaultClient for LocalClient {
             bucket_id: bucket_id.clone(),
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
-            owner_agent: self.agent_identity.as_ref().map(|i| i.agent_id.clone()),
+            owner_agent: self.agent_identity.get().map(|i| i.agent_id.clone()),
             default_visibility,
             default_classification,
             created_ns: now_ns,

@@ -33,6 +33,21 @@ mod native {
         #[arg(long, env = "MEMVAULT_DATA_DIR")]
         pub data_dir: Option<PathBuf>,
 
+        /// Operate as the given enrolled agent. When set, the
+        /// LocalClient binds the agent's identity (loaded from
+        /// `<data-dir>/agents/<agent-id>/`) before running the
+        /// command. Writes produced under this flag get an
+        /// `EnvelopeAuthorship` sidecar signed by the agent, and
+        /// future read-path enforcement (`verify_envelope_authorship`)
+        /// will name this agent as the author.
+        ///
+        /// Has effect on commands that go through `create_client*`
+        /// (`put`, `get`, `list`, `search`, etc.). Administrative
+        /// commands that read raw files (`genesis`, `cluster-join`,
+        /// `token-issue`, `agent-enroll`) ignore it.
+        #[arg(long, global = true, env = "MEMVAULT_AGENT_ID")]
+        pub agent_id: Option<String>,
+
         #[command(flatten)]
         pub client: memvault_api::ClientArgs,
 
@@ -505,6 +520,29 @@ mod native {
                 Err(e) => tracing::warn!(error = %e, "decode pinned admin_genesis"),
             }
         }
+        // Bind agent identity if `MEMVAULT_AGENT_ID` is set (the global
+        // `--agent-id` flag exports it). Writes through this client get
+        // signed for that agent (EnvelopeAuthorship sidecar).
+        if let Ok(agent_id) = std::env::var("MEMVAULT_AGENT_ID") {
+            if !agent_id.is_empty() {
+                let identity_dir = data_dir.join("agents").join(&agent_id);
+                if memvault_api::agent_identity::AgentIdentity::exists(&identity_dir) {
+                    match memvault_api::agent_identity::AgentIdentity::load(&identity_dir) {
+                        Ok(id) => client.set_agent_identity(id),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "could not load agent identity at {}; running as node",
+                            identity_dir.display()
+                        ),
+                    }
+                } else {
+                    tracing::warn!(
+                        "agent '{agent_id}' not enrolled at {}; running as node",
+                        identity_dir.display()
+                    );
+                }
+            }
+        }
         Ok(client)
     }
 
@@ -727,6 +765,19 @@ mod native {
     pub async fn run(cli: Cli) -> Result<()> {
         let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
         let client_args = cli.client;
+
+        // Bridge the global `--agent-id` flag to `create_client_with_bus`
+        // (which lives a few layers down and is also called from non-CLI
+        // contexts) via the same env var clap reads from. Setting it here
+        // means every `create_client*` call below this point picks up the
+        // agent identity without each match arm having to thread it.
+        if let Some(ref id) = cli.agent_id {
+            // SAFETY: single-threaded at this point — run() is called once
+            // from main before any tokio task spawning that reads env.
+            unsafe {
+                std::env::set_var("MEMVAULT_AGENT_ID", id);
+            }
+        }
 
         // For commands that need direct store access (RepairIndex, FixClusterId, etc.),
         // use the db path from client_args or fall back to data_dir.

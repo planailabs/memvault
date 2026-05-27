@@ -64,26 +64,29 @@ if [ ! -f "$IDENTITY_DIR/attestation.cbor" ]; then
 fi
 echo "  Identity dir: $IDENTITY_DIR"
 
-# 3. Write something into memvault. This goes through the node's
-#    LocalClient (not as the agent yet — memctl put uses the node
-#    identity). The agent identity is used for HTTP-side authentication;
-#    see the MCP server hint below.
+# 3. Write something into memvault — AS the enrolled agent. The global
+#    `--agent-id` flag binds the agent's identity to the LocalClient,
+#    so the resulting envelope gets an `EnvelopeAuthorship` sidecar
+#    signed by the agent (not by the node).
 echo ""
-echo "Step 3/4: Put a sample doc into memvault..."
+echo "Step 3/4: Put a sample doc into memvault (authored by agent)..."
 DOC_TEXT="Smoke test note for agent ${AGENT_ID} at $(date -u +%FT%TZ)"
 MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
     cargo run -q -p memctl --features daemon -- \
+        --agent-id "$AGENT_ID" \
         put --title "agent-${AGENT_ID}-smoke" \
             --tag "agent=${AGENT_ID}" \
             --tag "kind=smoke" \
             --visibility internal \
             "$DOC_TEXT"
 
-# 4. List docs and search to prove the write landed.
+# 4. List docs as the same agent — proves both the write landed AND the
+#    read path works under the agent's bound identity.
 echo ""
-echo "Step 4/4: List recent docs (should include the doc we just wrote)..."
+echo "Step 4/4: List recent docs as the agent..."
 MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
-    cargo run -q -p memctl --features daemon -- list --limit 5
+    cargo run -q -p memctl --features daemon -- \
+        --agent-id "$AGENT_ID" list --limit 5
 
 echo ""
 echo "=== Agent enrolled and write-path verified ==="

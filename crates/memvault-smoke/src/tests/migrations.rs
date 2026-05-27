@@ -181,6 +181,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
 
     let cli = memctl::Cli {
         data_dir: Some(dir.path().to_path_buf()),
+        agent_id: None,
         client: memctl::memvault_api::ClientArgs {
             db: Some(db_path.clone()),
             url: "http://127.0.0.1:8401".to_string(),
