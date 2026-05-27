@@ -208,16 +208,36 @@ mod server_router {
         let revoked_agents = Arc::new(std::sync::RwLock::new(revoked_agents_set));
         let revoked_nodes = Arc::new(std::sync::RwLock::new(revoked_nodes_set));
 
+        // Initial trusted-agents cache: scan AgentAttestations attested by a
+        // currently-trusted node and not in revoked_agents.
+        let trusted_agents_set = {
+            let nt = node_trust
+                .read()
+                .map(|m| m.clone())
+                .unwrap_or_default();
+            let ra = revoked_agents
+                .read()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            memvault_api::sigchain::scan_trusted_agents(client, &nt, &ra)
+                .map_err(|e| format!("scan trusted agents: {e}"))?
+        };
+        let trusted_agents = Arc::new(std::sync::RwLock::new(trusted_agents_set));
+
         // Spawn the sigchain watcher. It listens for SigchainBlock events
         // (emitted by local writes AND by sync — sync must publish them
         // after `insert_envelope` for received blocks) and updates the
-        // three trust handles below in place. The HTTP request path holds
+        // four trust handles below in place. The HTTP request path holds
         // the same Arc handles via AppState.
         let live = memvault_api::sigchain::LiveTrustState {
             node_trust: Arc::clone(&node_trust),
             revoked_agents: Arc::clone(&revoked_agents),
             revoked_nodes: Arc::clone(&revoked_nodes),
+            trusted_agents: Arc::clone(&trusted_agents),
         };
+        // Publish to the client so read-path enforcement
+        // (LocalClient::verify_envelope_authorship) sees the same handles.
+        client.set_trust_state(live.clone());
         let _watcher =
             memvault_api::sigchain::spawn_sigchain_watcher(Arc::clone(client), admin_pubkey, live);
         // We intentionally leak the join handle — the watcher is meant to

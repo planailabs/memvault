@@ -102,6 +102,12 @@ pub struct LocalClient {
     event_bus: Arc<EventBus>,
     peer_id: Vec<u8>,
     cluster_id: Vec<u8>,
+    /// Live trust state — `node_trust` + revocation sets + cached trusted
+    /// agents — shared with the web layer's `AppState` and updated in place
+    /// by the sigchain watcher. `None` on clients without an auth layer
+    /// (tests, headless tooling); when `None`, `verify_envelope_authorship`
+    /// reports `NoSidecar` for everything (fail-open).
+    trust_state: std::sync::OnceLock<crate::sigchain::LiveTrustState>,
     /// Optional admin signing key for token issuance and agent enrollment.
     /// `OnceLock` allows write-once initialisation through a shared `Arc`.
     admin_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
@@ -132,6 +138,7 @@ impl LocalClient {
             cluster_id,
             admin_signing_key: std::sync::OnceLock::new(),
             node_signing_key: std::sync::OnceLock::new(),
+            trust_state: std::sync::OnceLock::new(),
             agent_identity: None,
             start_time: std::time::Instant::now(),
         };
@@ -171,6 +178,35 @@ impl LocalClient {
     /// initialisation cannot accidentally swap admin identity.
     pub fn set_admin_signing_key(&self, key: ed25519_dalek::SigningKey) {
         let _ = self.admin_signing_key.set(key);
+    }
+
+    /// Publish the live trust state on this client. Write-once.
+    /// Subsequent reads via [`Self::verify_envelope_authorship`] consult it
+    /// instead of returning `NoSidecar` by default.
+    pub fn set_trust_state(&self, state: crate::sigchain::LiveTrustState) {
+        let _ = self.trust_state.set(state);
+    }
+
+    /// Verify an envelope's authorship sidecar against the currently-trusted
+    /// agent set. Read paths call this for envelopes whose authorship must
+    /// be enforced; data paths can ignore it (fail-open for backwards
+    /// compatibility).
+    ///
+    /// Returns [`memvault_api::sigchain::AuthorshipStatus::NoSidecar`] when
+    /// no trust state is installed (tests, headless tooling).
+    pub fn verify_envelope_authorship(
+        &self,
+        envelope_cid: &[u8],
+    ) -> Result<crate::sigchain::AuthorshipStatus> {
+        let Some(state) = self.trust_state.get() else {
+            return Ok(crate::sigchain::AuthorshipStatus::NoSidecar);
+        };
+        let trusted = state
+            .trusted_agents
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        crate::sigchain::verify_envelope_authorship(self, envelope_cid, &trusted)
     }
 
     /// Register the store's index notifier to bridge to the client's event

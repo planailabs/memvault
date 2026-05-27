@@ -208,6 +208,11 @@ pub struct LiveTrustState {
     >,
     pub revoked_agents: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
     pub revoked_nodes: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
+    /// Cached set of agent pubkeys currently trusted (attested by a node in
+    /// `node_trust` and not in `revoked_agents`). Recomputed by the watcher
+    /// whenever a relevant block lands. Verifiers use this for O(1) lookups
+    /// instead of rescanning the chain per request.
+    pub trusted_agents: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
 }
 
 /// Spawn a tokio task that subscribes to the client's event bus and, for
@@ -250,6 +255,28 @@ pub fn spawn_sigchain_watcher(
     })
 }
 
+/// Recompute the cached set of currently-trusted agent pubkeys from the
+/// node_trust + revoked_agents handles in `state`. Called by the watcher
+/// whenever an agent attestation or revocation lands.
+fn refresh_trusted_agents(client: &LocalClient, state: &LiveTrustState) {
+    let nt = state
+        .node_trust
+        .read()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+    let ra = state
+        .revoked_agents
+        .read()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let Ok(fresh) = scan_trusted_agents(client, &nt, &ra) else {
+        return;
+    };
+    if let Ok(mut w) = state.trusted_agents.write() {
+        *w = fresh;
+    }
+}
+
 /// Re-scan the entire sigchain and replace the live trust state. Used to
 /// recover when the watcher's broadcast channel lags (events dropped).
 fn rescan_into(
@@ -280,6 +307,7 @@ fn rescan_into(
             *w = nodes;
         }
     }
+    refresh_trusted_agents(client, state);
 }
 
 /// Apply a single sigchain block to the live trust state. Verifies the
@@ -318,6 +346,9 @@ fn apply_sigchain_block(
             if let Ok(mut w) = state.node_trust.write() {
                 w.insert(pkbytes, NodeTrust::Attested(att));
             }
+            // A newly-trusted node may make some previously-untrusted agents
+            // trusted (their AgentAttestation now chains back).
+            refresh_trusted_agents(client, state);
         }
         LABEL_AGENT_REV => {
             let Ok(rev) = serde_ipld_dagcbor::from_slice::<AgentRevocation>(&bytes) else {
@@ -341,6 +372,17 @@ fn apply_sigchain_block(
             if let Ok(mut w) = state.revoked_agents.write() {
                 w.insert(rev.agent_pubkey);
             }
+            // Drop from trusted_agents too — fail closed on subsequent reads.
+            if let Ok(mut w) = state.trusted_agents.write() {
+                w.remove(&rev.agent_pubkey);
+            }
+        }
+        LABEL_AGENT_ATT => {
+            // New agent attestation — refresh the trusted_agents cache. We
+            // could verify the single block, but a rescan covers cascading
+            // effects (e.g. an attestation referencing a node that was just
+            // added) and is bounded by the AgentAttestation block count.
+            refresh_trusted_agents(client, state);
         }
         LABEL_NODE_REV => {
             let Ok(rev) = serde_ipld_dagcbor::from_slice::<NodeRevocation>(&bytes) else {
@@ -357,6 +399,8 @@ fn apply_sigchain_block(
             if let Ok(mut w) = state.revoked_nodes.write() {
                 w.insert(rev.node_pubkey);
             }
+            // Every agent attested by this node is now transitively untrusted.
+            refresh_trusted_agents(client, state);
         }
         // AgentAttestation / EnvelopeAuthorship are looked up on demand by
         // the verifier — no live mutation needed.
