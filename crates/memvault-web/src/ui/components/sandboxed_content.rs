@@ -204,7 +204,7 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
     if (e.data.theme) {{
       document.documentElement.setAttribute("data-theme", e.data.theme);
     }}
-    if (e.data.classes) {{
+    if (typeof e.data.classes === "string") {{
       document.documentElement.className = e.data.classes;
     }}
     postHeight();
