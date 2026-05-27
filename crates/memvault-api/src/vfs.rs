@@ -301,6 +301,20 @@ pub struct VfsEntry {
     pub edge_id: String,
 }
 
+/// A node in the structured VFS tree returned by [`walk_tree`].
+///
+/// `name` is the path-component name (empty for the requested root).
+/// `edge_id` is the edge from this node's parent to this node, `None` for the root.
+/// `children` is populated only for directories; for leaves it is empty.
+#[derive(Debug, serde::Serialize)]
+pub struct VfsTreeNode {
+    pub name: String,
+    pub node: NodeRef,
+    pub node_type: String,
+    pub edge_id: Option<EdgeId>,
+    pub children: Vec<VfsTreeNode>,
+}
+
 fn split_path(path: &str) -> Result<Vec<&str>> {
     let path = path.trim();
     if !path.starts_with('/') {
@@ -373,108 +387,131 @@ pub async fn mv_path<C: MemvaultClient + ?Sized>(
     Ok(())
 }
 
-/// List entries under a VFS path. When `recursive`, names of nested entries
-/// are joined with `/` separators.
-pub fn ls<'a, C: MemvaultClient + ?Sized + Sync>(
-    client: &'a C,
-    bucket_id: &'a BucketId,
-    path: &'a str,
-    recursive: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<VfsEntry>>> + Send + 'a>> {
-    Box::pin(async move {
-        let (node, _) = resolve_path(client, bucket_id, path)
-            .await?
-            .ok_or_else(|| crate::error::ApiError::Other(format!("path not found: {path}")))?;
-        ls_node(client, &node, recursive).await
-    })
-}
-
-fn ls_node<'a, C: MemvaultClient + ?Sized + Sync>(
-    client: &'a C,
-    node: &'a NodeRef,
-    recursive: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<VfsEntry>>> + Send + 'a>> {
-    Box::pin(async move {
-        let children = list_children(client, node).await?;
-        let mut entries = Vec::new();
-        for (name, target, edge_id) in &children {
-            let node_type = resolve_node_type(client, target).await;
-            entries.push(VfsEntry {
-                name: name.clone(),
-                node_id: target.tag_label(),
-                node_type: node_type.clone(),
-                edge_id: hex::encode(edge_id.0),
-            });
-            if recursive && node_type == "dir" {
-                let sub = ls_node(client, target, true).await?;
-                for mut child in sub {
-                    child.name = format!("{name}/{}", child.name);
-                    entries.push(child);
-                }
-            }
-        }
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(entries)
-    })
-}
-
-/// Render an ASCII tree of the VFS under `path`.
-pub fn tree<'a, C: MemvaultClient + ?Sized + Sync>(
+/// Walk the VFS subtree rooted at `path` and return it as a [`VfsTreeNode`].
+///
+/// `max_depth` bounds the recursion: depth 0 returns just the root with no
+/// children; `usize::MAX` walks the full tree. Children are sorted by name.
+pub fn walk_tree<'a, C: MemvaultClient + ?Sized + Sync>(
     client: &'a C,
     bucket_id: &'a BucketId,
     path: &'a str,
     max_depth: usize,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<VfsTreeNode>> + Send + 'a>> {
     Box::pin(async move {
-        let (node, _) = resolve_path(client, bucket_id, path)
+        let (node, edge) = resolve_path(client, bucket_id, path)
             .await?
             .ok_or_else(|| crate::error::ApiError::Other(format!("path not found: {path}")))?;
-        let label = if path == "/" || path.is_empty() {
+        let name = if path == "/" || path.is_empty() {
             "/".to_string()
         } else {
             path.rsplit('/').next().unwrap_or(path).to_string()
         };
-        let mut buf = String::new();
-        buf.push_str(&format!("{label}/\n"));
-        tree_recurse(client, &node, &mut buf, "", max_depth, 0).await?;
-        Ok(buf)
+        walk_node(client, name, node, edge, max_depth, 0).await
     })
 }
 
-fn tree_recurse<'a, C: MemvaultClient + ?Sized + Sync>(
+fn walk_node<'a, C: MemvaultClient + ?Sized + Sync>(
     client: &'a C,
-    node: &'a NodeRef,
-    buf: &'a mut String,
-    prefix: &'a str,
+    name: String,
+    node: NodeRef,
+    edge_id: Option<EdgeId>,
     max_depth: usize,
     depth: usize,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<VfsTreeNode>> + Send + 'a>> {
     Box::pin(async move {
-        if depth >= max_depth {
-            return Ok(());
-        }
-        let entries = ls_node(client, node, false).await?;
-        let count = entries.len();
-        for (i, entry) in entries.iter().enumerate() {
-            let is_last = i == count - 1;
-            let connector = if is_last { "└── " } else { "├── " };
-            let child_prefix_str = if is_last { "    " } else { "│   " };
-            if entry.node_type == "dir" {
-                buf.push_str(&format!("{prefix}{connector}{}/\n", entry.name));
-                let next_prefix = format!("{prefix}{child_prefix_str}");
-                let child_ref = NodeRef::from_tag_label(&entry.node_id).ok_or_else(|| {
-                    crate::error::ApiError::Other(format!("invalid child node id: {}", entry.node_id))
-                })?;
-                tree_recurse(client, &child_ref, buf, &next_prefix, max_depth, depth + 1).await?;
-            } else {
-                buf.push_str(&format!(
-                    "{prefix}{connector}{} [{}] ({})\n",
-                    entry.name, entry.node_type, entry.node_id
-                ));
+        let node_type = resolve_node_type(client, &node).await;
+        let mut children = Vec::new();
+        if node_type == "dir" && depth < max_depth {
+            let kids = list_children(client, &node).await?;
+            for (kid_name, kid_node, kid_edge) in kids {
+                let child =
+                    walk_node(client, kid_name, kid_node, Some(kid_edge), max_depth, depth + 1)
+                        .await?;
+                children.push(child);
             }
+            children.sort_by(|a, b| a.name.cmp(&b.name));
         }
-        Ok(())
+        Ok(VfsTreeNode {
+            name,
+            node,
+            node_type,
+            edge_id,
+            children,
+        })
     })
+}
+
+/// List entries under a VFS path. When `recursive`, names of nested entries
+/// are joined with `/` separators.
+pub async fn ls<C: MemvaultClient + ?Sized + Sync>(
+    client: &C,
+    bucket_id: &BucketId,
+    path: &str,
+    recursive: bool,
+) -> Result<Vec<VfsEntry>> {
+    let depth = if recursive { usize::MAX } else { 1 };
+    let tree = walk_tree(client, bucket_id, path, depth).await?;
+    let mut out = Vec::new();
+    flatten_children(&tree, "", &mut out);
+    Ok(out)
+}
+
+fn flatten_children(node: &VfsTreeNode, prefix: &str, out: &mut Vec<VfsEntry>) {
+    for child in &node.children {
+        let display = if prefix.is_empty() {
+            child.name.clone()
+        } else {
+            format!("{prefix}/{}", child.name)
+        };
+        out.push(VfsEntry {
+            name: display.clone(),
+            node_id: child.node.tag_label(),
+            node_type: child.node_type.clone(),
+            edge_id: child
+                .edge_id
+                .as_ref()
+                .map(|e| hex::encode(e.0))
+                .unwrap_or_default(),
+        });
+        if child.node_type == "dir" {
+            flatten_children(child, &display, out);
+        }
+    }
+}
+
+/// Render an ASCII tree of the VFS under `path`.
+pub async fn tree<C: MemvaultClient + ?Sized + Sync>(
+    client: &C,
+    bucket_id: &BucketId,
+    path: &str,
+    max_depth: usize,
+) -> Result<String> {
+    let tree = walk_tree(client, bucket_id, path, max_depth).await?;
+    let mut buf = String::new();
+    buf.push_str(&format!("{}/\n", tree.name));
+    render_tree(&tree, &mut buf, "");
+    Ok(buf)
+}
+
+fn render_tree(node: &VfsTreeNode, buf: &mut String, prefix: &str) {
+    let count = node.children.len();
+    for (i, child) in node.children.iter().enumerate() {
+        let is_last = i == count - 1;
+        let connector = if is_last { "└── " } else { "├── " };
+        let child_prefix_str = if is_last { "    " } else { "│   " };
+        if child.node_type == "dir" {
+            buf.push_str(&format!("{prefix}{connector}{}/\n", child.name));
+            let next_prefix = format!("{prefix}{child_prefix_str}");
+            render_tree(child, buf, &next_prefix);
+        } else {
+            buf.push_str(&format!(
+                "{prefix}{connector}{} [{}] ({})\n",
+                child.name,
+                child.node_type,
+                child.node.tag_label()
+            ));
+        }
+    }
 }
 
 /// Find all VFS paths that lead to a given target node.
@@ -483,35 +520,26 @@ pub async fn find_paths<C: MemvaultClient + ?Sized + Sync>(
     bucket_id: &BucketId,
     target: &NodeRef,
 ) -> Result<Vec<String>> {
-    let root = ensure_root(client, bucket_id).await?;
+    let tree = walk_tree(client, bucket_id, "/", 20).await?;
     let mut paths = Vec::new();
-    find_paths_recurse(client, &NodeRef::Entity(root), target, "", &mut paths, 20).await?;
+    collect_target_paths(&tree, target, "", &mut paths);
     paths.sort();
     Ok(paths)
 }
 
-fn find_paths_recurse<'a, C: MemvaultClient + ?Sized + Sync>(
-    client: &'a C,
-    current: &'a NodeRef,
-    target: &'a NodeRef,
-    prefix: &'a str,
-    paths: &'a mut Vec<String>,
-    max_depth: usize,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-    Box::pin(async move {
-        if max_depth == 0 {
-            return Ok(());
+fn collect_target_paths(
+    node: &VfsTreeNode,
+    target: &NodeRef,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    for child in &node.children {
+        let child_path = format!("{prefix}/{}", child.name);
+        if &child.node == target {
+            out.push(child_path.clone());
         }
-        let children = list_children(client, current).await?;
-        for (name, child, _) in &children {
-            let child_path = format!("{prefix}/{name}");
-            if child == target {
-                paths.push(child_path.clone());
-            }
-            if resolve_node_type(client, child).await == "dir" {
-                find_paths_recurse(client, child, target, &child_path, paths, max_depth - 1).await?;
-            }
+        if child.node_type == "dir" {
+            collect_target_paths(child, target, &child_path, out);
         }
-        Ok(())
-    })
+    }
 }
