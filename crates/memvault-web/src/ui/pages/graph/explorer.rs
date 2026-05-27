@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use plan_ai_design::{Card, PageHeader, Pill};
+use plan_ai_design::{Card, Dot, PageHeader, Pill, PillVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -381,29 +381,58 @@ async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
     Ok(neighbors)
 }
 
-// ── Color & shape helpers ─────────────────────────────────────────────
+// ── Kind palette ──────────────────────────────────────────────────────
+//
+// Every kind maps to a `PillVariant`. SVG fills/strokes/halos derive
+// from that variant, so the graph reuses the same palette the rest of
+// the app uses for status pills — no per-kind hashes, no decorative use
+// of the brand color outside of the project kind.
 
-/// Deterministic HSL color from a string hash. Picks a hue on the color wheel,
-/// keeps saturation/lightness in a pleasant range.
-fn hash_color(s: &str) -> String {
-    let mut h: u32 = 0;
-    for b in s.bytes() {
-        h = h.wrapping_mul(31).wrapping_add(b as u32);
+/// Display kind for a node: the entity kind for entities, the node_type
+/// ("doc"/"file") otherwise.
+fn display_kind_for<'a>(node_type: &'a str, kind: &'a str) -> &'a str {
+    if node_type == "entity" {
+        kind
+    } else {
+        node_type
     }
-    let hue = h % 360;
-    format!("hsl({hue}, 55%, 55%)")
 }
 
-fn node_color(node_type: &str, kind: &str) -> String {
-    match node_type {
-        "doc" => "rgb(var(--c-warn))".to_string(),
-        "file" | "attachment" => "rgb(var(--c-success))".to_string(),
-        _ => match kind {
-            "person" => "rgb(var(--c-info))".to_string(),
-            "project" => "rgb(var(--c-brand))".to_string(),
-            "concept" => "rgb(var(--c-success))".to_string(),
-            _ => hash_color(kind),
-        },
+/// `PillVariant` (and by extension the SVG palette) for a display-kind.
+fn kind_variant(display_kind: &str) -> PillVariant {
+    match display_kind {
+        "person" => PillVariant::Info,
+        "project" => PillVariant::Accent,
+        "concept" => PillVariant::Ok,
+        "doc" | "document" => PillVariant::Warn,
+        "file" | "attachment" => PillVariant::Muted,
+        _ => PillVariant::Muted,
+    }
+}
+
+/// SVG `(fill, stroke)` CSS-var pair for a display-kind.
+fn kind_svg_palette(display_kind: &str) -> (&'static str, &'static str) {
+    match kind_variant(display_kind) {
+        PillVariant::Info => ("rgb(var(--c-info-soft))", "rgb(var(--c-info))"),
+        PillVariant::Accent => ("rgb(var(--c-brand-soft))", "rgb(var(--c-brand))"),
+        PillVariant::Ok => ("rgb(var(--c-success-soft))", "rgb(var(--c-success))"),
+        PillVariant::Warn => ("rgb(var(--c-warn-soft))", "rgb(var(--c-warn-strong))"),
+        PillVariant::Bad => ("rgb(var(--c-danger-soft))", "rgb(var(--c-danger))"),
+        PillVariant::Muted => ("rgb(var(--c-surface-2))", "rgb(var(--c-fg-faint))"),
+    }
+}
+
+/// Full-saturation halo color for a display-kind. Opacity is applied at
+/// the use site so the same color drives both the field halo (low α) and
+/// the brand "selected" emphasis (higher α via the brand variant).
+fn kind_halo_color(display_kind: &str) -> &'static str {
+    match kind_variant(display_kind) {
+        PillVariant::Info => "rgb(var(--c-info))",
+        PillVariant::Accent => "rgb(var(--c-brand))",
+        PillVariant::Ok => "rgb(var(--c-success))",
+        PillVariant::Warn => "rgb(var(--c-warn))",
+        PillVariant::Bad => "rgb(var(--c-danger))",
+        PillVariant::Muted => "rgb(var(--c-fg-faint))",
     }
 }
 
@@ -725,13 +754,22 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                     }
                 }
             } else {
-                // Toolbar
-                div { class: "flex items-center gap-2 text-sm flex-wrap",
-                    span { class: "text-fg-muted", {t!("graph-node-count", nodes: nodes.len(), edges: edges.len())} }
-                    span { class: "text-fg-faint", "|" }
-                    span { class: "text-fg-muted", {t!("graph-zoom", level: format!("{:.1}", vp.zoom))} }
+                // Toolbar — kicker-styled inline stats. Numbers use the
+                // mono stack so they line up across the bar.
+                div { class: "flex items-center gap-3 flex-wrap",
+                    span { class: "kicker", {t!("graph-stat-nodes")} }
+                    span { class: "font-mono text-sm font-semibold text-fg", "{nodes.len()}" }
+                    span { class: "text-fg-faint", "·" }
+                    span { class: "kicker", {t!("graph-stat-edges")} }
+                    span { class: "font-mono text-sm font-semibold text-fg", "{edges.len()}" }
+                    span { class: "text-fg-faint", "·" }
+                    span { class: "kicker", {t!("graph-stat-kinds")} }
+                    span { class: "font-mono text-sm font-semibold text-fg", "{kinds.len()}" }
+                    span { class: "text-fg-faint", "·" }
+                    span { class: "kicker", {t!("graph-stat-zoom")} }
+                    span { class: "font-mono text-sm font-semibold text-fg", "{vp.zoom:.1}×" }
                     button {
-                        class: "btn btn-xs btn-secondary",
+                        class: "btn btn-xs btn-secondary ml-auto",
                         onclick: move |_| {
                             let s = sim.read();
                             viewport.set(Viewport::fit_to_nodes(&s.nodes));
@@ -757,15 +795,16 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                             value: "{sidebar_search}",
                             oninput: move |e: Event<FormData>| sidebar_search.set(e.value()),
                         }
-                        // Kind filter pills
+                        // Kind filter pills — active picks up the kind's
+                        // own variant, inactive stays muted.
                         div { class: "flex flex-wrap gap-1",
                             for kind in &kinds {
                                 {
                                     let k = kind.clone();
                                     let is_active = active_kind.as_ref() == Some(kind);
+                                    let variant = kind_variant(kind);
                                     rsx! {
                                         button {
-                                            class: if is_active { "pill pill-accent" } else { "pill pill-muted" },
                                             onclick: move |_| {
                                                 if is_active {
                                                     kind_filter.set(None);
@@ -773,43 +812,51 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                     kind_filter.set(Some(k.clone()));
                                                 }
                                             },
-                                            "{kind}"
+                                            Pill {
+                                                variant: if is_active { variant } else { PillVariant::Muted },
+                                                Dot { variant }
+                                                "{kind}"
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        // Node list
-                        div { class: "space-y-1 overflow-y-auto max-h-[500px]",
+                        // Node list — dot + label + edge count, single row.
+                        div { class: "space-y-px overflow-y-auto max-h-[560px]",
                             for node in &filtered_list {
-                                div {
-                                    class: "card p-3 cursor-pointer hover:border-brand transition-colors",
-                                    class: if selected.read().as_ref() == Some(&node.id) { "border-brand" } else { "" },
-                                    onclick: {
-                                        let id = node.id.clone();
-                                        move |_| {
-                                            selected.set(Some(id.clone()));
-                                            // Lazy-load detail
-                                            let nid = id.clone();
-                                            spawn(async move {
-                                                if let Ok(d) = get_node_detail(nid).await {
-                                                    detail.set(Some(d));
+                                {
+                                    let id = node.id.clone();
+                                    let is_selected = selected.read().as_ref() == Some(&node.id);
+                                    let display_kind = display_kind_for(&node.node_type, &node.kind).to_string();
+                                    let variant = kind_variant(&display_kind);
+                                    let edge_count = node.edges.len();
+                                    rsx! {
+                                        div {
+                                            class: "flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer hover:bg-surface-2 transition-colors",
+                                            class: if is_selected { "bg-brand-soft" } else { "" },
+                                            onclick: {
+                                                let click_id = id.clone();
+                                                move |_| {
+                                                    selected.set(Some(click_id.clone()));
+                                                    let nid = click_id.clone();
+                                                    spawn(async move {
+                                                        if let Ok(d) = get_node_detail(nid).await {
+                                                            detail.set(Some(d));
+                                                        }
+                                                    });
                                                 }
-                                            });
-                                        }
-                                    },
-                                    div { class: "flex items-center gap-2",
-                                        {
-                                            let color = node_color(&node.node_type, &node.kind);
-                                            let display_kind = if node.node_type != "entity" { node.node_type.clone() } else { node.kind.clone() };
-                                            rsx! {
-                                                Pill { color: color, "{display_kind}" }
+                                            },
+                                            Dot { variant }
+                                            span {
+                                                class: "text-sm truncate flex-1",
+                                                class: if is_selected { "text-brand font-medium" } else { "text-fg" },
+                                                "{node.label}"
+                                            }
+                                            span { class: "text-xs font-mono text-fg-faint shrink-0",
+                                                "{edge_count}"
                                             }
                                         }
-                                        span { class: "text-sm font-medium truncate", "{node.label}" }
-                                    }
-                                    if !node.edges.is_empty() {
-                                        span { class: "text-xs text-fg-muted", {t!("graph-edges-count", count: node.edges.len())} }
                                     }
                                 }
                             }
@@ -818,9 +865,32 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
 
                     // ── Main canvas ─────────────────────────────────
                     Card { class: "flex-1",
+                        // Legend strip — kicker + a dot per kind currently
+                        // present in the graph. Mirrors the filter row but
+                        // anchors the palette as a visual key over the canvas.
+                        div {
+                            class: "flex items-center gap-3 flex-wrap px-4 py-2 bg-surface-2 border-b border-line text-xs text-fg-muted",
+                            span { class: "kicker", {t!("graph-legend-kinds")} }
+                            for (i, kind) in kinds.iter().enumerate() {
+                                {
+                                    let variant = kind_variant(kind);
+                                    rsx! {
+                                        if i > 0 {
+                                            span { class: "text-fg-faint", "·" }
+                                        }
+                                        span { class: "inline-flex items-center gap-1.5",
+                                            Dot { variant }
+                                            "{kind}"
+                                        }
+                                    }
+                                }
+                            }
+                            span { class: "ml-auto font-mono text-fg-faint", {t!("graph-hint")} }
+                        }
+
                         svg {
                             class: "w-full select-none",
-                            style: "min-height: 500px; cursor: grab",
+                            style: "min-height: 560px; cursor: grab",
                             view_box: "{vb}",
                             onwheel: on_wheel,
                             onmousedown: on_svg_mousedown,
@@ -831,7 +901,9 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                 panning.set(false);
                             },
 
-                            // Arrow marker definition
+                            // Arrow markers — neutral (`arrowhead`) for the
+                            // resting field, brand (`arrowhead-active`) for
+                            // edges incident to the current selection.
                             defs {
                                 marker {
                                     id: "arrowhead",
@@ -843,60 +915,141 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     marker_units: "strokeWidth",
                                     path {
                                         d: "M0,0 L10,3.5 L0,7",
-                                        fill: "rgb(var(--c-line))",
-                                        opacity: "0.6",
+                                        fill: "rgb(var(--c-line-soft))",
+                                        opacity: "0.7",
+                                    }
+                                }
+                                marker {
+                                    id: "arrowhead-active",
+                                    marker_width: "10",
+                                    marker_height: "7",
+                                    ref_x: "10",
+                                    ref_y: "3.5",
+                                    orient: "auto",
+                                    marker_units: "strokeWidth",
+                                    path {
+                                        d: "M0,0 L10,3.5 L0,7",
+                                        fill: "rgb(var(--c-brand))",
                                     }
                                 }
                             }
 
-                            // Edges with arrowheads
+                            // ── Kind halos (drawn first, behind edges) ──
+                            // Every node gets a kind-tinted halo at 10%
+                            // opacity. Together they read as a quiet
+                            // constellation; the selection halo (next
+                            // block) lifts the active node out.
+                            for node in nodes.iter() {
+                                {
+                                    let nt = if node.id.starts_with("doc:") { "doc" }
+                                        else if node.id.starts_with("file:") || node.id.starts_with("attachment:") { "file" }
+                                        else { "entity" };
+                                    let dk = display_kind_for(nt, &node.kind);
+                                    let halo = kind_halo_color(dk);
+                                    let r = node.radius + 14.0;
+                                    rsx! {
+                                        circle {
+                                            cx: "{node.x}", cy: "{node.y}", r: "{r}",
+                                            fill: "{halo}",
+                                            opacity: "0.10",
+                                            pointer_events: "none",
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Selected halo — brighter brand glow, sits
+                            // over the kind halos so the active node
+                            // visibly emanates.
+                            for node in nodes.iter() {
+                                if selected.read().as_ref() == Some(&node.id) {
+                                    {
+                                        let r = node.radius + 28.0;
+                                        rsx! {
+                                            circle {
+                                                cx: "{node.x}", cy: "{node.y}", r: "{r}",
+                                                fill: "rgb(var(--c-brand))",
+                                                opacity: "0.18",
+                                                pointer_events: "none",
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Edges — incident-to-selection edges render in
+                            // brand, all others in the soft hairline line
+                            // color. Labels sit on a small surface chip so
+                            // they read against busy node fields.
                             for edge in &edges {
                                 {
                                     let sn = &nodes[edge.source];
                                     let tn = &nodes[edge.target];
-                                    // Shorten line so arrow tip meets the node border, not center.
                                     let dx = tn.x - sn.x;
                                     let dy = tn.y - sn.y;
                                     let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-                                    let shorten = tn.radius + 4.0; // stop before node edge
+                                    let shorten = tn.radius + 4.0;
                                     let end_x = tn.x - dx / dist * shorten;
                                     let end_y = tn.y - dy / dist * shorten;
                                     let mid_x = (sn.x + tn.x) / 2.0;
                                     let mid_y = (sn.y + tn.y) / 2.0;
-                                    let thickness = 1.0 + edge.weight as f64;
+                                    let is_active = selected.read().as_ref().map_or(false, |sid| {
+                                        &nodes[edge.source].id == sid || &nodes[edge.target].id == sid
+                                    });
+                                    let stroke = if is_active { "rgb(var(--c-brand))" } else { "rgb(var(--c-line-soft))" };
+                                    let stroke_opacity = if is_active { "0.85" } else { "0.55" };
+                                    let thickness = if is_active { 1.5 } else { 1.0 + (edge.weight as f64 - 1.0).max(0.0) * 0.5 };
+                                    let marker = if is_active { "url(#arrowhead-active)" } else { "url(#arrowhead)" };
+                                    let chip_w = (edge.relation.len() as f64) * 6.2 + 10.0;
                                     rsx! {
                                         line {
                                             x1: "{sn.x}", y1: "{sn.y}",
                                             x2: "{end_x}", y2: "{end_y}",
-                                            stroke: "rgb(var(--c-line))",
+                                            stroke: "{stroke}",
                                             stroke_width: "{thickness}",
-                                            stroke_opacity: "0.6",
-                                            marker_end: "url(#arrowhead)",
+                                            stroke_opacity: "{stroke_opacity}",
+                                            marker_end: "{marker}",
+                                        }
+                                        rect {
+                                            x: "{mid_x - chip_w / 2.0}",
+                                            y: "{mid_y - 8.0}",
+                                            width: "{chip_w}",
+                                            height: "14",
+                                            rx: "3", ry: "3",
+                                            fill: "rgb(var(--c-surface))",
+                                            stroke: "rgb(var(--c-line))",
+                                            stroke_width: "0.5",
+                                            pointer_events: "none",
                                         }
                                         text {
-                                            x: "{mid_x}", y: "{mid_y}",
+                                            x: "{mid_x}", y: "{mid_y + 2.5}",
                                             text_anchor: "middle",
-                                            font_size: "9",
+                                            font_family: "var(--font-mono)",
+                                            font_size: "11",
                                             fill: "rgb(var(--c-fg-muted))",
+                                            pointer_events: "none",
                                             "{edge.relation}"
                                         }
                                     }
                                 }
                             }
 
-                            // Nodes — different shapes per type
+                            // Nodes — circle for entity, rounded rect for
+                            // doc, diamond for file. Fill/stroke come from
+                            // the kind palette; selection gets a slightly
+                            // heavier stroke (no opacity dip — translucent
+                            // node fills muddy the canvas in dark mode).
                             for (idx, node) in nodes.iter().enumerate() {
                                 {
-                                    // Determine node_type from the id prefix
                                     let nt = if node.id.starts_with("doc:") { "doc" }
                                         else if node.id.starts_with("file:") || node.id.starts_with("attachment:") { "file" }
                                         else { "entity" };
-                                    let color = node_color(nt, &node.kind);
+                                    let dk = display_kind_for(nt, &node.kind);
+                                    let (fill, stroke_color) = kind_svg_palette(dk);
                                     let is_selected = selected.read().as_ref() == Some(&node.id);
-                                    let stroke = if is_selected { "rgb(var(--c-brand))" } else { "transparent" };
+                                    let stroke_width = if is_selected { 2.5 } else { 1.5 };
                                     let id = node.id.clone();
                                     let expand_id = node.id.clone();
-                                    let _focus_id = node.id.clone();
                                     rsx! {
                                         g {
                                             style: "cursor: pointer",
@@ -946,7 +1099,6 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 }
                                             },
 
-                                            // Shape: circle for entity, rounded rect for doc, diamond for file
                                             match nt {
                                                 "doc" => rsx! {
                                                     rect {
@@ -955,14 +1107,12 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                         width: "{node.radius * 2.0}",
                                                         height: "{node.radius * 1.4}",
                                                         rx: "4", ry: "4",
-                                                        fill: "{color}",
-                                                        stroke: "{stroke}",
-                                                        stroke_width: "3",
-                                                        opacity: "0.85",
+                                                        fill: "{fill}",
+                                                        stroke: "{stroke_color}",
+                                                        stroke_width: "{stroke_width}",
                                                     }
                                                 },
                                                 "file" | "attachment" => {
-                                                    // Diamond shape via polygon
                                                     let r = node.radius;
                                                     let pts = format!(
                                                         "{},{} {},{} {},{} {},{}",
@@ -974,30 +1124,30 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                     rsx! {
                                                         polygon {
                                                             points: "{pts}",
-                                                            fill: "{color}",
-                                                            stroke: "{stroke}",
-                                                            stroke_width: "3",
-                                                            opacity: "0.85",
+                                                            fill: "{fill}",
+                                                            stroke: "{stroke_color}",
+                                                            stroke_width: "{stroke_width}",
                                                         }
                                                     }
                                                 },
                                                 _ => rsx! {
                                                     circle {
                                                         cx: "{node.x}", cy: "{node.y}", r: "{node.radius}",
-                                                        fill: "{color}",
-                                                        stroke: "{stroke}",
-                                                        stroke_width: "3",
-                                                        opacity: "0.85",
+                                                        fill: "{fill}",
+                                                        stroke: "{stroke_color}",
+                                                        stroke_width: "{stroke_width}",
                                                     }
                                                 },
                                             }
 
                                             text {
                                                 x: "{node.x}",
-                                                y: "{node.y + node.radius + 14.0}",
+                                                y: "{node.y + node.radius + 18.0}",
                                                 text_anchor: "middle",
-                                                font_size: "11",
-                                                fill: "rgb(var(--c-fg-strong))",
+                                                font_family: "var(--font-sans)",
+                                                font_size: "13.5",
+                                                font_weight: if is_selected { "600" } else { "500" },
+                                                fill: if is_selected { "rgb(var(--c-brand))" } else { "rgb(var(--c-fg-strong))" },
                                                 pointer_events: "none",
                                                 "{node.label}"
                                             }
@@ -1010,16 +1160,22 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
 
                     // ── Right detail panel ──────────────────────────
                     if let Some(d) = &*detail.read() {
+                        {
+                            let display_kind = display_kind_for(&d.node_type, &d.kind).to_string();
+                            let variant = kind_variant(&display_kind);
+                            let incoming: Vec<&EdgeDetail> = d.edges.iter().filter(|e| e.direction == "incoming").collect();
+                            let outgoing: Vec<&EdgeDetail> = d.edges.iter().filter(|e| e.direction == "outgoing").collect();
+                            rsx! {
                         div { class: "w-72 shrink-0 space-y-3",
                             Card {
                                 div { class: "p-4 space-y-3",
                                     div { class: "flex items-center gap-2",
-                                        {
-                                            let color = node_color(&d.node_type, &d.kind);
-                                            let display_kind = if d.node_type != "entity" { d.node_type.clone() } else { d.kind.clone() };
-                                            rsx! {
-                                                Pill { color: color, "{display_kind}" }
-                                            }
+                                        Pill { variant,
+                                            Dot { variant }
+                                            "{display_kind}"
+                                        }
+                                        Pill { variant: PillVariant::Muted, mono: true,
+                                            "{d.edges.len()} edges"
                                         }
                                     }
                                     h3 { class: "h-card font-semibold", "{d.label}" }
@@ -1037,8 +1193,8 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
 
                                     // Properties
                                     if !d.props.is_empty() {
-                                        div { class: "pt-2 border-t border-line",
-                                            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2", {t!("graph-section-properties")} }
+                                        div { class: "pt-3 border-t border-line",
+                                            div { class: "kicker mb-2", {t!("graph-section-properties")} }
                                             for (key, val) in &d.props {
                                                 div { class: "flex justify-between text-sm py-0.5",
                                                     span { class: "text-fg-muted truncate mr-2", "{key}" }
@@ -1048,19 +1204,37 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         }
                                     }
 
-                                    // Edges
-                                    if !d.edges.is_empty() {
-                                        div { class: "pt-2 border-t border-line",
-                                            h4 { class: "text-xs font-semibold text-fg-muted uppercase mb-2",
-                                                {t!("graph-section-edges", count: d.edges.len())}
+                                    // Incoming edges
+                                    if !incoming.is_empty() {
+                                        div { class: "pt-3 border-t border-line",
+                                            div { class: "kicker mb-2",
+                                                {t!("graph-section-incoming", count: incoming.len())}
                                             }
-                                            for edge in &d.edges {
-                                                div { class: "flex items-center gap-1 text-sm py-1 flex-wrap",
-                                                    span { class: "text-xs text-fg-faint",
-                                                        if edge.direction == "outgoing" { "\u{2192}" } else { "\u{2190}" }
+                                            for edge in &incoming {
+                                                div { class: "flex items-center justify-between gap-2 py-1",
+                                                    span { class: "font-mono text-xs text-fg-muted bg-surface-2 px-1.5 py-0.5 rounded border border-line",
+                                                        "{edge.relation}"
                                                     }
-                                                    span { class: "text-fg-muted", "{edge.relation}" }
-                                                    span { class: "text-xs font-mono text-fg-faint truncate",
+                                                    span { class: "text-xs text-fg truncate text-right",
+                                                        "{edge.other_node}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Outgoing edges
+                                    if !outgoing.is_empty() {
+                                        div { class: "pt-3 border-t border-line",
+                                            div { class: "kicker mb-2",
+                                                {t!("graph-section-outgoing", count: outgoing.len())}
+                                            }
+                                            for edge in &outgoing {
+                                                div { class: "flex items-center justify-between gap-2 py-1",
+                                                    span { class: "font-mono text-xs text-fg-muted bg-surface-2 px-1.5 py-0.5 rounded border border-line",
+                                                        "{edge.relation}"
+                                                    }
+                                                    span { class: "text-xs text-fg truncate text-right",
                                                         "{edge.other_node}"
                                                     }
                                                 }
@@ -1094,6 +1268,8 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         }
                                     }
                                 }
+                            }
+                        }
                             }
                         }
                     }
