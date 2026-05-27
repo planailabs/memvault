@@ -5,11 +5,10 @@ use dioxus_i18n::t;
 use plan_ai_design::{Card, DataTable, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
+use memvault_api::vfs::{VFS_CHILD_REL, VFS_DIR_KIND};
+
 use crate::ui::app::Route;
 use crate::ui::topbar::use_topbar;
-
-const VFS_DIR_KIND: &str = "vfs:dir";
-const VFS_CHILD_REL: &str = "vfs:child";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct VfsRow {

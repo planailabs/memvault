@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use memvault_core::{DocId, Visibility};
+use memvault_core::DocId;
 use memvault_doc::TextPatch;
 use serde::{Deserialize, Serialize};
 
@@ -249,21 +249,8 @@ pub async fn doc_history(
 
 /// Parse a document ID from either "doc:<hex>" or raw "<hex>" format.
 pub fn parse_doc_id(input: &str) -> Result<DocId, ApiError> {
-    let hex_str = input.strip_prefix("doc:").unwrap_or(input);
-    let bytes = hex::decode(hex_str)
-        .map_err(|_| ApiError::bad_request("Invalid document ID — expected hex or doc:<hex>"))?;
-    if bytes.len() != 32 {
-        return Err(ApiError::bad_request("Document ID must be 32 bytes"));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(DocId(arr))
+    DocId::from_hex(input)
+        .map_err(|_| ApiError::bad_request("Invalid document ID — expected hex or doc:<hex>"))
 }
 
-pub(crate) fn parse_visibility_str(s: Option<&str>) -> Visibility {
-    match s {
-        Some("public") => Visibility::Public,
-        Some("federated") => Visibility::Federated,
-        _ => Visibility::Internal,
-    }
-}
+pub(crate) use memvault_api::docs::parse_visibility as parse_visibility_str;

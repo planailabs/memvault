@@ -56,14 +56,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let tag_filter = cli.tag.as_deref().and_then(|t| {
-        let parts: Vec<&str> = t.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            Some((parts[0].to_string(), parts[1].to_string()))
-        } else {
-            None
-        }
-    });
+    let tag_filter = cli.tag.as_deref().and_then(memvault_api::docs::parse_tag_filter);
 
     let opts = ExportOptions {
         history: cli.history,

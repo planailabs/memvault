@@ -568,11 +568,7 @@ mod native {
     }
 
     fn parse_entity_id(hex_str: &str) -> Result<EntityId> {
-        let bytes = hex::decode(hex_str)?;
-        let mut id = [0u8; 32];
-        let len = bytes.len().min(32);
-        id[..len].copy_from_slice(&bytes[..len]);
-        Ok(EntityId(id))
+        EntityId::from_hex(hex_str).map_err(Into::into)
     }
 
     /// Run the memctl CLI with the given parsed arguments.
@@ -1078,14 +1074,7 @@ mod native {
                 view,
             } => {
                 let client = connect().connect().await?;
-                let tag_filter = tag.as_deref().and_then(|t| {
-                    let parts: Vec<&str> = t.splitn(2, ':').collect();
-                    if parts.len() == 2 {
-                        Some((parts[0].to_string(), parts[1].to_string()))
-                    } else {
-                        None
-                    }
-                });
+                let tag_filter = tag.as_deref().and_then(memvault_api::docs::parse_tag_filter);
                 let opts = memvault_export::ExportOptions {
                     history,
                     include_vfs: !no_vfs,

@@ -36,11 +36,30 @@ impl ClusterId {
     }
 }
 
+/// Parse a hex string (with an optional `prefix:` like `doc:` or `entity:`)
+/// into a 32-byte array. Used by the per-Id `from_hex` constructors below.
+fn parse_hex_id(s: &str, expected_prefix: &str) -> Result<[u8; 32], hex::FromHexError> {
+    let s = s
+        .strip_prefix(expected_prefix)
+        .unwrap_or(s);
+    let bytes = hex::decode(s)?;
+    if bytes.len() != 32 {
+        return Err(hex::FromHexError::InvalidStringLength);
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
 impl DocId {
     pub fn random() -> Self {
         let mut buf = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
         Self(buf)
+    }
+    /// Parse from a hex string, accepting either `doc:<hex>` or bare `<hex>`.
+    pub fn from_hex(s: &str) -> Result<Self, hex::FromHexError> {
+        parse_hex_id(s, "doc:").map(Self)
     }
 }
 
@@ -50,6 +69,10 @@ impl EntityId {
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
         Self(buf)
     }
+    /// Parse from a hex string, accepting either `entity:<hex>` or bare `<hex>`.
+    pub fn from_hex(s: &str) -> Result<Self, hex::FromHexError> {
+        parse_hex_id(s, "entity:").map(Self)
+    }
 }
 
 impl EdgeId {
@@ -58,6 +81,10 @@ impl EdgeId {
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
         Self(buf)
     }
+    /// Parse from a hex string.
+    pub fn from_hex(s: &str) -> Result<Self, hex::FromHexError> {
+        parse_hex_id(s, "edge:").map(Self)
+    }
 }
 
 impl BucketId {
@@ -65,6 +92,10 @@ impl BucketId {
         let mut buf = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
         Self(buf)
+    }
+    /// Parse from a hex string, accepting either `bucket:<hex>` or bare `<hex>`.
+    pub fn from_hex(s: &str) -> Result<Self, hex::FromHexError> {
+        parse_hex_id(s, "bucket:").map(Self)
     }
 }
 

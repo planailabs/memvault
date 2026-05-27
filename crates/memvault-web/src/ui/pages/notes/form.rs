@@ -42,7 +42,7 @@ async fn create_note(
     }
 
     let doc = Document::new(doc_id.clone(), body, frontmatter);
-    let tags = parse_tags_str(&tags_str);
+    let tags = memvault_api::docs::parse_tags_csv(&tags_str);
     let vis = crate::api::docs::parse_visibility_str(Some(&visibility));
     client
         .put_doc(
@@ -127,19 +127,6 @@ async fn update_note(id: String, body: String, title: String) -> Result<(), Serv
     }
 
     Ok(())
-}
-
-fn parse_tags_str(s: &str) -> Vec<(String, String)> {
-    s.split(',')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| {
-            let s = s.trim();
-            let mut parts = s.splitn(2, ':');
-            let scope = parts.next().unwrap_or("").to_string();
-            let label = parts.next().unwrap_or("").to_string();
-            (scope, label)
-        })
-        .collect()
 }
 
 // ── Create form ────────────────────────────────────────────────────────

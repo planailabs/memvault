@@ -69,6 +69,13 @@ pub async fn create_doc<C: MemvaultClient + ?Sized>(
     })
 }
 
+/// Parse a single `"scope:label"` filter string into a `(scope, label)` tuple.
+/// Returns `None` if the string lacks a colon.
+pub fn parse_tag_filter(s: &str) -> Option<(String, String)> {
+    let (scope, label) = s.split_once(':')?;
+    Some((scope.trim().to_string(), label.trim().to_string()))
+}
+
 /// Parse tags from "scope:label" strings.
 pub fn parse_tags(tags: &[String]) -> Vec<(String, String)> {
     tags.iter()
@@ -76,6 +83,14 @@ pub fn parse_tags(tags: &[String]) -> Vec<(String, String)> {
             let (s, l) = t.split_once(':')?;
             Some((s.trim().to_string(), l.trim().to_string()))
         })
+        .collect()
+}
+
+/// Parse a comma-separated list of `"scope:label"` tags.
+/// Entries without a colon are skipped.
+pub fn parse_tags_csv(s: &str) -> Vec<(String, String)> {
+    s.split(',')
+        .filter_map(parse_tag_filter)
         .collect()
 }
 

@@ -372,7 +372,7 @@ async fn vfs_double_prefix_entity_id_handled() {
     props.insert("name".to_string(), serde_json::json!("test-dir"));
     let entity = memvault_doc::Entity {
         id: EntityId::random(),
-        kind: "vfs:dir".to_string(),
+        kind: memvault_api::vfs::VFS_DIR_KIND.to_string(),
         props,
         edges_out: vec![],
     };

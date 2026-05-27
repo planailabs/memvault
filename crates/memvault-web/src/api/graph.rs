@@ -152,13 +152,6 @@ pub async fn delete_entity(
 
 /// Parse an entity ID from either "entity:<hex>" or raw "<hex>" format.
 fn parse_entity_id(input: &str) -> Result<EntityId, ApiError> {
-    let hex_str = input.strip_prefix("entity:").unwrap_or(input);
-    let bytes = hex::decode(hex_str)
-        .map_err(|_| ApiError::bad_request("Invalid entity ID — expected hex or entity:<hex>"))?;
-    if bytes.len() != 32 {
-        return Err(ApiError::bad_request("Entity ID must be 32 bytes"));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(EntityId(arr))
+    EntityId::from_hex(input)
+        .map_err(|_| ApiError::bad_request("Invalid entity ID — expected hex or entity:<hex>"))
 }
