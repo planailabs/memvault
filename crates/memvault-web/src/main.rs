@@ -27,10 +27,18 @@ fn main() {
                             return Ok(router);
                         }
                     };
+                    let node_key =
+                        match memvault_web::load_or_generate_node_key(&data_dir) {
+                            Ok(k) => k,
+                            Err(e) => {
+                                eprintln!("memvault: API routes NOT mounted (node key: {e})");
+                                return Ok(router);
+                            }
+                        };
                     let auth = match memvault_web::init_web_auth(
                         &local_client,
                         &data_dir,
-                        Vec::new(),
+                        node_key,
                     ) {
                         Ok(a) => a,
                         Err(e) => {

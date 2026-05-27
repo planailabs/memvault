@@ -64,6 +64,35 @@ mod server_router {
     ///
     /// Call once before constructing [`AppState`]; the returned pubkey is the
     /// root of trust for JWT verification on every API request.
+    /// Load (or generate + persist) a per-daemon node signing key at
+    /// `<data_dir>/identity/node.key`. Used by dev / non-libp2p callers
+    /// (memctl, memvault-web standalone main). The full daemon reuses its
+    /// libp2p host key instead (design A-1).
+    pub fn load_or_generate_node_key(
+        data_dir: &std::path::Path,
+    ) -> std::io::Result<ed25519_dalek::SigningKey> {
+        let path = data_dir.join("identity").join("node.key");
+        if let Ok(bytes) = std::fs::read(&path) {
+            if bytes.len() >= 32 {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&bytes[..32]);
+                return Ok(ed25519_dalek::SigningKey::from_bytes(&seed));
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut seed = [0u8; 32];
+        rand::Rng::fill(&mut rand::thread_rng(), &mut seed);
+        std::fs::write(&path, &seed)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+    }
+
     /// Bootstrap result from [`init_web_auth`].
     pub struct WebAuthBootstrap {
         /// `None` pre-genesis. `Some` once the daemon holds an admin key.
@@ -95,7 +124,7 @@ mod server_router {
     pub fn init_web_auth(
         client: &memvault_api::LocalClient,
         data_dir: &std::path::Path,
-        _peer_id: Vec<u8>,
+        node_signing_key: ed25519_dalek::SigningKey,
     ) -> Result<WebAuthBootstrap, Box<dyn std::error::Error + Send + Sync>> {
         use memvault_auth::jwt::NodeTrust;
         use memvault_auth::{AttestationOrigin, MembershipAttestation, Role};
@@ -107,18 +136,16 @@ mod server_router {
         }
         let cluster_id = memvault_core::ClusterId(cluster_arr);
 
-        // Decide which signing key the *node* will use to sign agent
-        // attestations, and whether the admin chain is wired up.
-        let (admin_pubkey, node_signing_key, node_trust_entry) = match client
-            .admin_signing_key()
-            .cloned()
-        {
+        let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
+
+        // Decide trust mode based on whether an admin key is configured.
+        let (admin_pubkey, node_trust_entry) = match client.admin_signing_key().cloned() {
             Some(admin_sk) => {
-                // Post-genesis: admin key present. Admin self-attests the
-                // local node (single-key mode: node == admin until peer split
-                // lands). Insert as Attested(_) so the chain verifies fully.
+                // Post-genesis: admin signs a MembershipAttestation for the
+                // node (the node's pubkey is distinct from admin's unless the
+                // single-key dev convenience is in play). Insert as
+                // Attested(_) so the chain verifies fully.
                 let admin_pubkey = admin_sk.verifying_key();
-                let node_pubkey_bytes = admin_pubkey.to_bytes();
                 let mut node_att = MembershipAttestation {
                     cluster_id: cluster_id.clone(),
                     member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
@@ -134,26 +161,15 @@ mod server_router {
                     use ed25519_dalek::Signer;
                     admin_sk.sign(&bytes).to_bytes()
                 };
-                (
-                    Some(admin_pubkey),
-                    admin_sk,
-                    NodeTrust::Attested(node_att),
-                )
+                (Some(admin_pubkey), NodeTrust::Attested(node_att))
             }
             None => {
-                // Pre-genesis: no admin key. Fall back to deriving a
-                // deterministic node signing key from the daemon's local
-                // ed25519 seed if available; otherwise generate an ephemeral
-                // one (note: ephemeral means JWTs issued in one daemon run
-                // won't verify across a restart, by design).
-                let mut seed = [0u8; 32];
-                rand::Rng::fill(&mut rand::thread_rng(), &mut seed);
-                let node_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
-                (None, node_sk, NodeTrust::PreGenesis)
+                // Pre-genesis: no admin key. The node signing key still
+                // signs the `_ui` agent attestation; trust is local-only.
+                (None, NodeTrust::PreGenesis)
             }
         };
 
-        let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
         let mut node_trust = std::collections::HashMap::new();
         node_trust.insert(node_pubkey_bytes, node_trust_entry);
 

@@ -97,7 +97,9 @@ fn main() {
                 .as_ref()
                 .map(|(_, c)| Arc::clone(c))
                 .expect("daemon mode requires a successfully-opened store");
-            let auth = memvault_web::init_web_auth(&local_client, &data_dir, Vec::new())
+            let node_key = memvault_web::load_or_generate_node_key(&data_dir)
+                .expect("load node key");
+            let auth = memvault_web::init_web_auth(&local_client, &data_dir, node_key)
                 .expect("init_web_auth failed");
 
             let client_arc =

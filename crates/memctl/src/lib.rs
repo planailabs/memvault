@@ -1355,8 +1355,13 @@ mod native {
                 // handles port negotiation with dx serve automatically.
                 #[cfg(feature = "daemon")]
                 {
-                    let local_peer_id_vec = local_peer_id.to_bytes();
-                    let auth = memvault_web::init_web_auth(&client, &data_dir, local_peer_id_vec)
+                    let _ = local_peer_id;
+                    // Dev daemon mode: derive a node key from a local file
+                    // (or generate one) — keeps node identity stable across
+                    // restarts without depending on a libp2p host key.
+                    let node_key = memvault_web::load_or_generate_node_key(&data_dir)
+                        .map_err(|e| anyhow::anyhow!("node key: {e}"))?;
+                    let auth = memvault_web::init_web_auth(&client, &data_dir, node_key)
                         .map_err(|e| anyhow::anyhow!("web auth init: {e}"))?;
 
                     let local_client = std::sync::Arc::new(client);
