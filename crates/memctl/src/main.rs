@@ -119,24 +119,30 @@ fn main() {
             });
 
             // Sync `fn main()` — no tokio runtime yet. Defer the watcher
-            // spawn into the dioxus::serve async closure so it lives on
-            // the runtime dioxus creates.
+            // spawn until inside the async block, which IS driven by
+            // dioxus' runtime. The sync portion of dioxus' callback runs
+            // outside any runtime, so `tokio::spawn` would panic there.
+            // `OnceLock` guards against double-spawn if dioxus rebuilds
+            // the router (e.g. on HMR / reconnect).
             let watcher_client = Arc::clone(&local_client);
             let watcher_admin = trust.admin_pubkey;
             let watcher_state = trust.trust_state.clone();
-            let mut spawned = false;
+            let watcher_spawned = Arc::new(std::sync::OnceLock::<()>::new());
 
             dioxus::serve(move || {
                 let state = Arc::clone(&app_state);
-                if !spawned {
-                    let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
-                        Arc::clone(&watcher_client),
-                        watcher_admin,
-                        watcher_state.clone(),
-                    );
-                    spawned = true;
-                }
+                let watcher_client = Arc::clone(&watcher_client);
+                let watcher_state = watcher_state.clone();
+                let watcher_spawned = Arc::clone(&watcher_spawned);
                 async move {
+                    if watcher_spawned.get().is_none() {
+                        let _ = memvault_api::sigchain::spawn_sigchain_watcher(
+                            watcher_client,
+                            watcher_admin,
+                            watcher_state,
+                        );
+                        let _ = watcher_spawned.set(());
+                    }
                     let router = axum::Router::new()
                         .serve_dioxus_application(ServeConfig::new(), memvault_web::ui::app::App)
                         .nest("/api/v1", memvault_web::api::routes(state));
