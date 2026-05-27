@@ -342,7 +342,7 @@ fn apply_sigchain_block(
             };
             // Verify against admin if we have one. Pre-genesis: nothing to
             // verify against, so peer attestations are ignored — only the
-            // local self-trust seed (installed by init_web_auth) counts.
+            // local self-trust seed (installed by bootstrap_cluster_trust) counts.
             let Some(admin) = admin_pubkey else { return };
             if att.verify_signature(admin).is_err() {
                 tracing::warn!("sigchain watcher: NodeAttestation signature invalid");

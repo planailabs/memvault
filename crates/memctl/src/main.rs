@@ -100,8 +100,10 @@ fn main() {
             local_client.set_node_signing_key(
                 memvault_api::node_key::load_or_generate(&data_dir).expect("load node key"),
             );
-            let auth = memvault_web::init_web_auth(&local_client, &data_dir)
-                .expect("init_web_auth failed");
+            let trust = memvault_api::bootstrap::bootstrap_cluster_trust(&local_client)
+                .expect("cluster trust bootstrap failed");
+            memvault_web::init_ui_agent(&local_client, &data_dir)
+                .expect("init_ui_agent failed");
 
             let client_arc =
                 memvault_web::ui::state::client().expect("failed to initialize memvault client");
@@ -109,26 +111,23 @@ fn main() {
             let app_state = Arc::new(memvault_web::AppState {
                 client: client_arc,
                 event_bus,
-                admin_pubkey: auth.admin_pubkey,
-                node_trust: Arc::clone(&auth.trust_state.node_trust),
-                revoked_agents: Arc::clone(&auth.trust_state.revoked_agents),
-                revoked_nodes: Arc::clone(&auth.trust_state.revoked_nodes),
+                admin_pubkey: trust.admin_pubkey,
+                node_trust: Arc::clone(&trust.trust_state.node_trust),
+                revoked_agents: Arc::clone(&trust.trust_state.revoked_agents),
+                revoked_nodes: Arc::clone(&trust.trust_state.revoked_nodes),
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
             });
 
-            // We're in sync `fn main()` here — no tokio runtime yet. Move
-            // the watcher spawn into the dioxus::serve async closure so it
-            // lives on the runtime dioxus creates.
+            // Sync `fn main()` — no tokio runtime yet. Defer the watcher
+            // spawn into the dioxus::serve async closure so it lives on
+            // the runtime dioxus creates.
             let watcher_client = Arc::clone(&local_client);
-            let watcher_admin = auth.admin_pubkey;
-            let watcher_state = auth.trust_state.clone();
+            let watcher_admin = trust.admin_pubkey;
+            let watcher_state = trust.trust_state.clone();
             let mut spawned = false;
 
             dioxus::serve(move || {
                 let state = Arc::clone(&app_state);
-                // First invocation of the serve callback runs inside dioxus'
-                // tokio runtime — spawn the sigchain watcher there. Guard
-                // with `spawned` so we don't double-spawn on reconnects.
                 if !spawned {
                     let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
                         Arc::clone(&watcher_client),

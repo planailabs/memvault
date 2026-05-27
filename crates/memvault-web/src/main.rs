@@ -38,29 +38,36 @@ fn main() {
                             return Ok(router);
                         }
                     }
-                    let auth = match memvault_web::init_web_auth(&local_client, &data_dir) {
-                        Ok(a) => a,
+                    let trust = match memvault_api::bootstrap::bootstrap_cluster_trust(
+                        &local_client,
+                    ) {
+                        Ok(t) => t,
                         Err(e) => {
-                            eprintln!("memvault: API routes NOT mounted (auth init: {e})");
+                            eprintln!("memvault: API routes NOT mounted (trust bootstrap: {e})");
                             return Ok(router);
                         }
                     };
 
-                    // We're inside dioxus::serve's async closure, so a tokio
-                    // runtime is active — spawn the watcher onto it.
+                    // Inside dioxus::serve's async closure, a tokio runtime
+                    // is active — spawn the watcher onto it.
                     let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
                         Arc::clone(&local_client),
-                        auth.admin_pubkey,
-                        auth.trust_state.clone(),
+                        trust.admin_pubkey,
+                        trust.trust_state.clone(),
                     );
+
+                    if let Err(e) = memvault_web::init_ui_agent(&local_client, &data_dir) {
+                        eprintln!("memvault: API routes NOT mounted (ui agent: {e})");
+                        return Ok(router);
+                    }
 
                     let app_state = Arc::new(memvault_web::AppState {
                         client,
                         event_bus: Arc::new(memvault_api::EventBus::new(64)),
-                        admin_pubkey: auth.admin_pubkey,
-                        node_trust: Arc::clone(&auth.trust_state.node_trust),
-                        revoked_agents: Arc::clone(&auth.trust_state.revoked_agents),
-                        revoked_nodes: Arc::clone(&auth.trust_state.revoked_nodes),
+                        admin_pubkey: trust.admin_pubkey,
+                        node_trust: Arc::clone(&trust.trust_state.node_trust),
+                        revoked_agents: Arc::clone(&trust.trust_state.revoked_agents),
+                        revoked_nodes: Arc::clone(&trust.trust_state.revoked_nodes),
                         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                     });
                     router = axum::Router::new()

@@ -74,51 +74,25 @@ mod server_router {
         pub metrics: Arc<memvault_api::metrics::Metrics>,
     }
 
-    /// Bootstrap result from [`init_web_auth`].
-    pub struct WebAuthBootstrap {
-        /// `None` pre-genesis. `Some` once the daemon holds an admin key.
-        pub admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
-        /// Live trust state — shared handles to node_trust, revoked_*, and
-        /// trusted_agents. The same `Arc`s are wired into `AppState` and
-        /// passed to [`memvault_api::sigchain::spawn_sigchain_watcher`] so
-        /// the watcher mutates exactly what the verifier reads.
-        pub trust_state: memvault_api::sigchain::LiveTrustState,
-    }
-
-    /// Bootstrap per-agent web auth.
+    /// Generate (or rotate) the built-in `_ui` agent identity used by the
+    /// web UI to issue per-session JWTs, and publish its attestation to
+    /// the sigchain.
     ///
-    /// Two paths:
+    /// **Prerequisite**: cluster trust must already be bootstrapped on the
+    /// client via [`memvault_api::bootstrap::bootstrap_cluster_trust`].
+    /// That installs the node signing key and trust state; this function
+    /// just hangs the UI agent off it.
     ///
-    /// **Post-genesis** (daemon holds the admin signing key):
-    /// 1. Derive admin pubkey.
-    /// 2. Self-attest the local node (admin signs `NodeAttestation`).
-    ///    Insert as `NodeTrust::Attested(_)`.
-    /// 3. Generate `_ui` agent signed by the node key.
-    ///
-    /// **Pre-genesis** (no admin key yet):
-    /// 1. `admin_pubkey = None`.
-    /// 2. Insert the local node as `NodeTrust::PreGenesis` — no attestation
-    ///    persisted; the entry is in-memory only.
-    /// 3. Generate `_ui` agent signed by the node key.
-    ///
-    /// In the single-node admin case the node signing key equals the admin
-    /// signing key; the chain still verifies end-to-end.
-    pub fn init_web_auth(
-        client: &Arc<memvault_api::LocalClient>,
+    /// Called only by web-serving callers (full daemon, memvault-web
+    /// standalone, memctl daemon-mode). Headless / CLI consumers skip it.
+    pub fn init_ui_agent(
+        client: &memvault_api::LocalClient,
         data_dir: &std::path::Path,
-    ) -> Result<WebAuthBootstrap, Box<dyn std::error::Error + Send + Sync>> {
-        use memvault_auth::jwt::NodeTrust;
-        use memvault_auth::{AttestationOrigin, NodeAttestation, Role};
-
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let node_signing_key = client
             .node_signing_key()
-            .ok_or("node signing key not set on client; call set_node_signing_key first")?
+            .ok_or("node signing key not set on client")?
             .clone();
-
-        // Bridge the store's index notifier to the event bus so the sigchain
-        // watcher (spawned below) sees blocks arriving from both local writes
-        // and RBSR sync without the sync layer knowing about events.
-        client.install_sigchain_notifier();
 
         let cluster_bytes = client.cluster_id();
         let mut cluster_arr = [0u8; 32];
@@ -127,57 +101,6 @@ mod server_router {
         }
         let cluster_id = memvault_core::ClusterId(cluster_arr);
 
-        let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
-
-        // Decide trust mode based on whether an admin key is configured.
-        let (admin_pubkey, node_trust_entry) = match client.admin_signing_key().cloned() {
-            Some(admin_sk) => {
-                let admin_pubkey = admin_sk.verifying_key();
-                let mut node_att = NodeAttestation {
-                    cluster_id: cluster_id.clone(),
-                    member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
-                    role: Role::AgentHost,
-                    not_after_ns: u64::MAX,
-                    issued_via: AttestationOrigin::Direct,
-                    signature: [0u8; 64],
-                };
-                let bytes = node_att
-                    .signing_bytes()
-                    .map_err(|e| format!("node attestation signing bytes: {e}"))?;
-                node_att.signature = {
-                    use ed25519_dalek::Signer;
-                    admin_sk.sign(&bytes).to_bytes()
-                };
-                // Persist the attestation as a sigchain block so it survives
-                // restart and propagates via RBSR sync (phase 5).
-                let _ = memvault_api::sigchain::publish_node_attestation(client, &node_att)
-                    .map_err(|e| format!("publish node attestation: {e}"))?;
-                (Some(admin_pubkey), NodeTrust::Attested(node_att))
-            }
-            None => (None, NodeTrust::PreGenesis),
-        };
-
-        // Start from any node attestations already in the sigchain (received
-        // via RBSR sync from peers in previous runs), then overlay the local
-        // node so the daemon's freshly-issued JWTs always verify. Persisted
-        // attestations are verified against the current admin pubkey at
-        // load — any that don't chain to the current admin are dropped.
-        let mut node_trust_map =
-            memvault_api::sigchain::scan_trusted_nodes(client, admin_pubkey.as_ref())
-                .map_err(|e| format!("scan trusted nodes: {e}"))?;
-        node_trust_map.insert(node_pubkey_bytes, node_trust_entry);
-
-        // Hydrate revocation sets — also signature-verified.
-        let (revoked_agents_set, revoked_nodes_set) = memvault_api::sigchain::scan_revocations(
-            client,
-            admin_pubkey.as_ref(),
-            &node_trust_map,
-        )
-        .map_err(|e| format!("scan revocations: {e}"))?;
-
-        let node_trust = Arc::new(std::sync::RwLock::new(node_trust_map));
-
-        // Generate the built-in UI agent, signed by the node's key.
         let ui_identity_dir = data_dir.join("identity").join("ui_agent");
         let _ = std::fs::remove_dir_all(&ui_identity_dir);
         let ui_identity = memvault_api::agent_identity::AgentIdentity::generate_local(
@@ -189,50 +112,13 @@ mod server_router {
             365 * 24 * 60 * 60 * 1_000_000_000,
         )?;
 
-        // Publish the agent attestation to the sigchain so peers can verify
-        // envelope authorship blocks from this agent after RBSR sync.
+        // Publish the attestation so peers can verify envelope authorship
+        // from this agent after RBSR sync.
         memvault_api::sigchain::publish_agent_attestation(client, &ui_identity.attestation)
             .map_err(|e| format!("publish ui agent attestation: {e}"))?;
 
         super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
-
-        let revoked_agents = Arc::new(std::sync::RwLock::new(revoked_agents_set));
-        let revoked_nodes = Arc::new(std::sync::RwLock::new(revoked_nodes_set));
-
-        // Initial trusted-agents cache: scan AgentAttestations attested by a
-        // currently-trusted node and not in revoked_agents.
-        let trusted_agents_set = {
-            let nt = node_trust
-                .read()
-                .map(|m| m.clone())
-                .unwrap_or_default();
-            let ra = revoked_agents
-                .read()
-                .map(|s| s.clone())
-                .unwrap_or_default();
-            memvault_api::sigchain::scan_trusted_agents(client, &nt, &ra)
-                .map_err(|e| format!("scan trusted agents: {e}"))?
-        };
-        let trusted_agents = Arc::new(std::sync::RwLock::new(trusted_agents_set));
-
-        // Assemble the live trust state and publish it to the client so
-        // read-path enforcement (LocalClient::verify_envelope_authorship)
-        // sees the same handles. The caller is responsible for spawning
-        // `memvault_api::sigchain::spawn_sigchain_watcher` from inside an
-        // async context — this keeps init_web_auth itself sync and free of
-        // tokio-runtime assumptions.
-        let trust_state = memvault_api::sigchain::LiveTrustState {
-            node_trust,
-            revoked_agents,
-            revoked_nodes,
-            trusted_agents,
-        };
-        client.set_trust_state(trust_state.clone());
-
-        Ok(WebAuthBootstrap {
-            admin_pubkey,
-            trust_state,
-        })
+        Ok(())
     }
 
     /// Build the API-only memvault router (no web UI).
