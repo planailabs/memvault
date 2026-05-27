@@ -503,6 +503,63 @@ mod native {
         create_client_with_data_dir(store, &data_dir)
     }
 
+    /// Assemble the `JoinConfig` for the swarm:
+    /// - Reads the pending join token from
+    ///   `<data_dir>/identity/pending_join_token.txt` if present (the
+    ///   joining peer's redemption credential, written by `cluster-join`).
+    /// - Reads the admin signing key from `admin.key` if present (admin
+    ///   node serves incoming joins).
+    /// - Extracts the local ed25519 pubkey from the libp2p keypair so
+    ///   the request carries proof-of-key.
+    /// - Wires `on_join_success` to remove the pending-token file.
+    fn build_join_config(
+        data_dir: &Path,
+        cluster_id: &[u8],
+        keypair: &libp2p::identity::Keypair,
+    ) -> memvault_swarm::JoinConfig {
+        let pending_token_path = data_dir.join("identity").join("pending_join_token.txt");
+        let pending_token = std::fs::read_to_string(&pending_token_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.starts_with("mvjoin1:"));
+
+        let admin_signing_key = std::fs::read(data_dir.join("identity").join("admin.key"))
+            .ok()
+            .filter(|b| b.len() >= 32)
+            .map(|b| {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&b[..32]);
+                ed25519_dalek::SigningKey::from_bytes(&seed)
+            });
+
+        let node_pubkey: [u8; 32] = keypair
+            .public()
+            .try_into_ed25519()
+            .ok()
+            .map(|pk| pk.to_bytes())
+            .unwrap_or([0u8; 32]);
+
+        let mut cluster_arr = [0u8; 32];
+        if cluster_id.len() == 32 {
+            cluster_arr.copy_from_slice(cluster_id);
+        }
+
+        let pending_token_path_for_cb = pending_token_path.clone();
+        let on_join_success: std::sync::Arc<dyn Fn() + Send + Sync> =
+            std::sync::Arc::new(move || {
+                let _ = std::fs::remove_file(&pending_token_path_for_cb);
+                tracing::info!("/join/1.0 success; cleared pending token file");
+            });
+
+        memvault_swarm::JoinConfig {
+            pending_token,
+            node_pubkey,
+            admin_signing_key,
+            cluster_id: cluster_arr,
+            on_join_success: Some(on_join_success),
+        }
+    }
+
     /// Spawn the swarm with an already-opened store.  Call AFTER
     /// `create_client_with_bus` (which runs the rebuild) to avoid
     /// serving blocks while CIDs are being rewritten.
@@ -531,9 +588,11 @@ mod native {
             .unwrap_or_else(|| vec![0u8; 32]);
 
         let sync_config = memvault_swarm::SyncConfig {
-            cluster_id,
+            cluster_id: cluster_id.clone(),
             ..Default::default()
         };
+
+        let join_config = build_join_config(&data_dir, &cluster_id, &keypair);
 
         let handle = std::thread::Builder::new()
             .name("memvault-swarm".into())
@@ -557,7 +616,14 @@ mod native {
                             }
                         };
                     tracing::info!("P2P swarm started on background thread");
-                    memvault_swarm::run_sync_loop(&mut swarm, store, head_rx, sync_config).await;
+                    memvault_swarm::run_sync_loop(
+                        &mut swarm,
+                        store,
+                        head_rx,
+                        sync_config,
+                        join_config,
+                    )
+                    .await;
                 });
             })?;
 
@@ -1481,6 +1547,10 @@ mod native {
                         }
                     });
 
+                    // Build join_config BEFORE the keypair is moved into the swarm.
+                    let join_config =
+                        build_join_config(&data_dir, &cluster_id_bytes, &keypair);
+
                     // Build standalone swarm
                     let mut swarm =
                         memvault_net::standalone_swarm(keypair, listen_addr, bootstrap_addrs)
@@ -1497,12 +1567,21 @@ mod native {
                     };
 
                     println!("Daemon running. Press Ctrl+C to stop.");
-                    memvault_swarm::run_sync_loop(&mut swarm, store, head_rx, sync_config).await;
+                    memvault_swarm::run_sync_loop(
+                        &mut swarm,
+                        store,
+                        head_rx,
+                        sync_config,
+                        join_config,
+                    )
+                    .await;
                 }
 
                 // Without the daemon feature, run P2P only (no web UI)
                 #[cfg(not(feature = "daemon"))]
                 {
+                    let join_config =
+                        build_join_config(&data_dir, &cluster_id_bytes, &keypair);
                     let mut swarm =
                         memvault_net::standalone_swarm(keypair, listen_addr, bootstrap_addrs)
                             .await
@@ -1517,7 +1596,14 @@ mod native {
                     };
 
                     println!("Daemon running (P2P only, no web UI). Press Ctrl+C to stop.");
-                    memvault_swarm::run_sync_loop(&mut swarm, store, head_rx, sync_config).await;
+                    memvault_swarm::run_sync_loop(
+                        &mut swarm,
+                        store,
+                        head_rx,
+                        sync_config,
+                        join_config,
+                    )
+                    .await;
                 }
             }
             Commands::ClusterJoin { token } => {
@@ -1561,6 +1647,12 @@ mod native {
                 let pin_path = data_dir.join("identity").join("cluster_admin_genesis.cbor");
                 std::fs::write(&pin_path, serde_ipld_dagcbor::to_vec(&genesis)?)?;
                 println!("  Admin pinned:  {}", hex::encode(genesis.admin_pubkey));
+
+                // Stash the token so the swarm can redeem it via /join/1.0
+                // on next daemon start. Removed after a successful Success.
+                let token_path = data_dir.join("identity").join("pending_join_token.txt");
+                std::fs::write(&token_path, &token)?;
+                println!("  Token stashed: {}", token_path.display());
 
                 // NOTE: do NOT mint a local admin.key. Peers are not admins.
 

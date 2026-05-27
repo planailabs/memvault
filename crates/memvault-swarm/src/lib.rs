@@ -20,8 +20,9 @@ use libp2p::swarm::SwarmEvent;
 use tokio::sync::mpsc;
 
 use memvault_net::{
-    BlockEntry, BlockRequest, BlockResponse, HeadAnnouncement, RangeFingerprint,
-    StandaloneMemvaultBehaviour, StandaloneMemvaultBehaviourEvent,
+    BlockEntry, BlockRequest, BlockResponse, HeadAnnouncement, JoinRefuseReason, JoinRequest,
+    JoinResponse, JoinResult, RangeFingerprint, StandaloneMemvaultBehaviour,
+    StandaloneMemvaultBehaviourEvent,
 };
 use memvault_store::MemvaultStore;
 
@@ -53,6 +54,29 @@ pub struct OutboundHead {
     pub bucket_id: Option<Vec<u8>>,
 }
 
+/// Configuration for the `/ai-memvault/join/1.0` protocol — both the
+/// client-side (we have a pending token, looking for admin to accept it)
+/// and server-side (we are admin, accept tokens and mint `NodeAttestation`).
+#[derive(Clone, Default)]
+pub struct JoinConfig {
+    /// Encoded `mvjoin1:…` token. If present, the sync loop sends a
+    /// `JoinRequest` to each peer on first connect until one returns
+    /// `Success`. Cleared by [`on_join_success`].
+    pub pending_token: Option<String>,
+    /// This node's ed25519 verifying key (sent as `peer_id` in the request).
+    /// Used by admin to verify the requester controls the key it claims.
+    pub node_pubkey: [u8; 32],
+    /// Admin signing key, set only on the admin node. When present, this
+    /// node serves incoming `JoinRequest`s by minting a `NodeAttestation`.
+    pub admin_signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Cluster ID — bound into NodeAttestations we mint as admin.
+    pub cluster_id: [u8; 32],
+    /// Called once after a successful join. Callers typically use this to
+    /// delete the pending-token file on disk so we don't try to redeem it
+    /// again on the next restart.
+    pub on_join_success: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
 /// Run the swarm event loop with full block sync.
 ///
 /// This function blocks until ctrl+c is received.
@@ -61,6 +85,7 @@ pub async fn run_sync_loop(
     store: Arc<MemvaultStore>,
     mut head_rx: mpsc::UnboundedReceiver<OutboundHead>,
     config: SyncConfig,
+    mut join_config: JoinConfig,
 ) {
     let mut synced_peers: HashSet<libp2p::PeerId> = HashSet::new();
     // Track peer → cluster_id for visibility enforcement.
@@ -82,6 +107,12 @@ pub async fn run_sync_loop(
                         tracing::info!(%peer_id, "peer connected");
                         if synced_peers.insert(peer_id) {
                             request_remote_heads(swarm, &store, &config, peer_id);
+                        }
+                        // If we have a pending join token, redeem it with
+                        // this peer. Only admin will reply Success — other
+                        // peers respond NotAdminPeer and we keep waiting.
+                        if let Some(token) = &join_config.pending_token {
+                            send_join_request(swarm, peer_id, token, join_config.node_pubkey);
                         }
                     }
 
@@ -188,6 +219,43 @@ pub async fn run_sync_loop(
                         )
                     )) => {
                         tracing::warn!(%peer, %error, "block exchange inbound failure");
+                    }
+
+                    // ── /join/1.0 server: incoming JoinRequest ──
+                    Some(SwarmEvent::Behaviour(
+                        StandaloneMemvaultBehaviourEvent::Join(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message: libp2p::request_response::Message::Request {
+                                    channel, request, ..
+                                },
+                                ..
+                            }
+                        )
+                    )) => {
+                        serve_join_request(swarm, &store, peer, channel, request, &join_config);
+                    }
+
+                    // ── /join/1.0 client: response to our JoinRequest ──
+                    Some(SwarmEvent::Behaviour(
+                        StandaloneMemvaultBehaviourEvent::Join(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message: libp2p::request_response::Message::Response {
+                                    response, ..
+                                },
+                                ..
+                            }
+                        )
+                    )) => {
+                        if handle_join_response(&store, peer, response) {
+                            // Success. Clear pending token + fire callback
+                            // (caller removes the pending-token file).
+                            join_config.pending_token = None;
+                            if let Some(cb) = join_config.on_join_success.take() {
+                                cb();
+                            }
+                        }
                     }
 
                     Some(SwarmEvent::Behaviour(_)) => {}
@@ -694,4 +762,210 @@ fn collect_incomplete_cids(store: &MemvaultStore) -> Vec<Vec<u8>> {
     }
 
     missing
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// /ai-memvault/join/1.0 — node-attestation handshake.
+//
+// Server: any node that holds the cluster admin signing key accepts incoming
+// JoinRequests. The request carries a join-token issued by admin and the
+// requester's ed25519 pubkey. We verify the token's admin-signature with
+// the local admin key, verify the requester's libp2p PeerId matches the
+// claimed pubkey, then mint a NodeAttestation for the requester and return
+// it. The mint is persisted via insert_envelope so the store's index
+// notifier fires the usual sigchain pipeline (gossip, watcher updates).
+//
+// Client: any node carrying a pending token sends a JoinRequest to every
+// peer that connects. Only the admin will return Success; others return
+// NotAdminPeer (or other refuse codes). On Success we put_block the
+// returned attestation locally; reindex_block fires the notifier so our
+// own trust state picks it up live and we cease to be PreGenesis.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn send_join_request(
+    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    peer_id: libp2p::PeerId,
+    token: &str,
+    node_pubkey: [u8; 32],
+) {
+    let req = JoinRequest {
+        version: 1,
+        token_block: token.as_bytes().to_vec(),
+        peer_id: node_pubkey.to_vec(),
+        requested_ttl: None,
+        agent_id: None,
+        public_key: None,
+    };
+    let _ = swarm.behaviour_mut().join.send_request(&peer_id, req);
+    tracing::debug!(%peer_id, "sent /join/1.0 request");
+}
+
+fn serve_join_request(
+    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    store: &MemvaultStore,
+    peer: libp2p::PeerId,
+    channel: libp2p::request_response::ResponseChannel<JoinResponse>,
+    request: JoinRequest,
+    join_config: &JoinConfig,
+) {
+    let response = build_join_response(store, peer, &request, join_config);
+    let _ = swarm.behaviour_mut().join.send_response(channel, response);
+}
+
+fn build_join_response(
+    store: &MemvaultStore,
+    peer: libp2p::PeerId,
+    request: &JoinRequest,
+    join_config: &JoinConfig,
+) -> JoinResponse {
+    if request.version != 1 {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+    let Some(admin_sk) = &join_config.admin_signing_key else {
+        return refuse(JoinRefuseReason::NotAdminPeer);
+    };
+
+    // Decode the token. token_block is the raw mvjoin1: string bytes.
+    let token_str = match std::str::from_utf8(&request.token_block) {
+        Ok(s) => s,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    let token = match memvault_auth::decode_token_string(token_str) {
+        Ok(t) => t,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+
+    // Verify the token signature against our admin pubkey.
+    let admin_vk = admin_sk.verifying_key();
+    if token.verify_signature(&admin_vk).is_err() {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+
+    // Time bounds.
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    if let Err(e) = token.verify_time_bounds(now_ns) {
+        return match e {
+            memvault_auth::AuthError::GrantExpired => refuse(JoinRefuseReason::TokenExpired),
+            memvault_auth::AuthError::GrantNotYetValid => {
+                refuse(JoinRefuseReason::TokenNotYetValid)
+            }
+            _ => refuse(JoinRefuseReason::TokenInvalidSignature),
+        };
+    }
+
+    // Cluster_id must match ours.
+    if token.cluster_id.0 != join_config.cluster_id {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+
+    // Verify the libp2p peer's PeerId derives from the claimed pubkey.
+    // This proves the requester controls the key they're asking us to attest.
+    let claimed: [u8; 32] = match request.peer_id.as_slice().try_into() {
+        Ok(arr) => arr,
+        Err(_) => return refuse(JoinRefuseReason::PeerIdMismatch),
+    };
+    if !peer_id_matches_pubkey(peer, &claimed) {
+        return refuse(JoinRefuseReason::PeerIdMismatch);
+    }
+
+    // Mint the NodeAttestation and persist it. The store's index notifier
+    // will publish a `SigchainBlock` event so our own watcher updates trust
+    // state, and the post-create gossip bridge announces the CID to peers.
+    use ed25519_dalek::Signer;
+    let mut node_att = memvault_auth::NodeAttestation {
+        cluster_id: memvault_core::ClusterId(join_config.cluster_id),
+        member: memvault_core::PeerId(claimed.to_vec()),
+        role: token.role,
+        not_after_ns: u64::MAX,
+        issued_via: memvault_auth::AttestationOrigin::Direct,
+        signature: [0u8; 64],
+    };
+    let signing_bytes = match node_att.signing_bytes() {
+        Ok(b) => b,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    node_att.signature = admin_sk.sign(&signing_bytes).to_bytes();
+
+    let att_bytes = match serde_ipld_dagcbor::to_vec(&node_att) {
+        Ok(b) => b,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    let cid = memvault_core::cid_from_bytes(&att_bytes);
+    let cid_bytes = cid.to_bytes();
+    let meta = memvault_store::EnvelopeMeta {
+        author: claimed.to_vec(),
+        tags: vec![("sigchain".to_string(), "node_att".to_string())],
+        wall_ns: now_ns,
+        cluster_id: Some(join_config.cluster_id.to_vec()),
+        ..Default::default()
+    };
+    if store.insert_envelope(&cid_bytes, &att_bytes, &meta).is_err() {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+
+    tracing::info!(%peer, "minted NodeAttestation via /join/1.0");
+    JoinResponse {
+        version: 1,
+        result: JoinResult::Success {
+            attestation_block: att_bytes,
+            enrollment_block: None,
+        },
+    }
+}
+
+fn refuse(reason: JoinRefuseReason) -> JoinResponse {
+    JoinResponse {
+        version: 1,
+        result: JoinResult::Refuse {
+            reason,
+            try_peers: vec![],
+        },
+    }
+}
+
+fn peer_id_matches_pubkey(peer: libp2p::PeerId, pubkey: &[u8; 32]) -> bool {
+    let ed_pk = match libp2p::identity::ed25519::PublicKey::try_from_bytes(pubkey) {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+    let pk: libp2p::identity::PublicKey = ed_pk.into();
+    pk.to_peer_id() == peer
+}
+
+/// Returns `true` if the response was a successful node attestation that
+/// we persisted; `false` for refuse, decode failures, or any other case.
+fn handle_join_response(
+    store: &MemvaultStore,
+    peer: libp2p::PeerId,
+    response: JoinResponse,
+) -> bool {
+    match response.result {
+        JoinResult::Success {
+            attestation_block, ..
+        } => {
+            // Store the block + reindex; the index notifier fires the
+            // SigchainBlock event so the watcher promotes us from
+            // PreGenesis to Attested.
+            let cid = memvault_core::cid_from_bytes(&attestation_block);
+            let cid_bytes = cid.to_bytes();
+            if let Err(e) = store.put_block(&cid_bytes, &attestation_block) {
+                tracing::warn!(%peer, %e, "failed to store join attestation");
+                return false;
+            }
+            if let Err(e) = store.reindex_block(&cid_bytes, &attestation_block) {
+                tracing::warn!(%peer, %e, "failed to reindex join attestation");
+                return false;
+            }
+            tracing::info!(%peer, "received node attestation via /join/1.0");
+            true
+        }
+        JoinResult::Refuse { reason, .. } => {
+            tracing::debug!(%peer, ?reason, "join refused");
+            false
+        }
+    }
 }
