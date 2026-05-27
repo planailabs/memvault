@@ -549,6 +549,16 @@ mod native {
                 ed25519_dalek::SigningKey::from_bytes(&seed)
             });
 
+        // Pinned admin verifying key — sync uses it to reject foreign
+        // NodeAttestations BEFORE storing them.
+        let pinned_admin_pubkey = std::fs::read(
+            data_dir.join("identity").join("cluster_admin_genesis.cbor"),
+        )
+        .ok()
+        .and_then(|b| serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok())
+        .filter(|g| g.verify_self_signature().is_ok())
+        .map(|g| g.admin_pubkey);
+
         // Hard-fail: the swarm-side node pubkey MUST match the libp2p
         // identity it's serving with. A zero pubkey would silently break
         // both incoming joins (PeerIdMismatch refusals) and outgoing
@@ -575,6 +585,7 @@ mod native {
             pending_token,
             node_pubkey,
             admin_signing_key,
+            pinned_admin_pubkey,
             cluster_id: cluster_arr,
             on_join_success: Some(on_join_success),
         })

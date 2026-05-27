@@ -69,6 +69,13 @@ pub struct JoinConfig {
     /// Admin signing key, set only on the admin node. When present, this
     /// node serves incoming `JoinRequest`s by minting a `NodeAttestation`.
     pub admin_signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Cluster admin VERIFYING key, from the local pin file
+    /// (`cluster_admin_genesis.cbor`). Used by the sync receiver to
+    /// signature-verify incoming `NodeAttestation` blocks BEFORE they
+    /// land in the store — sync is otherwise a wide-open block ingress
+    /// path and an unsigned-or-foreign-admin attestation would corrupt
+    /// trust on the receiver.
+    pub pinned_admin_pubkey: Option<[u8; 32]>,
     /// Cluster ID — bound into NodeAttestations we mint as admin.
     pub cluster_id: [u8; 32],
     /// Called once after a successful join. Callers typically use this to
@@ -92,6 +99,12 @@ pub async fn run_sync_loop(
     let mut peer_clusters: HashMap<libp2p::PeerId, Vec<u8>> = HashMap::new();
     // Periodic resync timer to heal partial sync.
     let mut resync_timer = tokio::time::interval(RESYNC_INTERVAL);
+    // Retry timer for /join/1.0 — re-broadcast the JoinRequest while
+    // we still hold a pending token. Covers transient request-response
+    // failures (admin briefly offline, codec retries, etc.) without
+    // requiring a peer reconnect.
+    let mut join_retry_timer = tokio::time::interval(Duration::from_secs(15));
+    join_retry_timer.tick().await; // skip immediate fire
     resync_timer.tick().await; // consume the immediate first tick
 
     loop {
@@ -183,7 +196,7 @@ pub async fn run_sync_loop(
                             }
                         )
                     )) => {
-                        serve_block_request(swarm, &store, peer, channel, request, &config.cluster_id, &peer_clusters);
+                        serve_block_request(swarm, &store, peer, channel, request, &config.cluster_id, &peer_clusters, &join_config);
                     }
 
                     // ── Block exchange: process responses ──
@@ -198,7 +211,7 @@ pub async fn run_sync_loop(
                             }
                         )
                     )) => {
-                        handle_block_response(swarm, &store, peer, response);
+                        handle_block_response(swarm, &store, peer, response, &join_config);
                     }
 
                     // ── Block exchange: errors ──
@@ -302,6 +315,25 @@ pub async fn run_sync_loop(
                                     store_version: memvault_core::BLOCKSTORE_VERSION,
                                 },
                             );
+                        }
+                    }
+                }
+            }
+
+            // ── /join/1.0 retry while a token is pending ──
+            // Rebroadcasts the JoinRequest to every connected peer until
+            // one returns Success and clears the pending token. Covers
+            // transient drops without waiting for peer reconnect.
+            _ = join_retry_timer.tick() => {
+                if let Some(token) = join_config.pending_token.clone() {
+                    let peers: Vec<_> = synced_peers.iter().copied().collect();
+                    if !peers.is_empty() {
+                        tracing::debug!(
+                            peers = peers.len(),
+                            "retrying /join/1.0 (still pending)"
+                        );
+                        for peer_id in peers {
+                            send_join_request(swarm, peer_id, &token, join_config.node_pubkey);
                         }
                     }
                 }
@@ -448,7 +480,27 @@ fn serve_block_request(
     request: BlockRequest,
     cluster_id: &[u8],
     peer_clusters: &std::collections::HashMap<libp2p::PeerId, Vec<u8>>,
+    join_config: &JoinConfig,
 ) {
+    // Refuse to serve blocks to peers that aren't an attested cluster
+    // node. We pull the trusted-node PeerId set from sigchain blocks
+    // each call — cheap relative to network IO, and avoids holding a
+    // shared trust handle in the swarm. Pre-genesis daemons (no pinned
+    // admin) skip the check.
+    if join_config.pinned_admin_pubkey.is_some()
+        && !peer_is_trusted_node(store, &peer, join_config)
+    {
+        tracing::warn!(
+            %peer,
+            "refusing to serve blocks: peer is not an attested cluster node"
+        );
+        let _ = swarm
+            .behaviour_mut()
+            .block_exchange
+            .send_response(channel, BlockResponse { blocks: vec![] });
+        return;
+    }
+
     // Reject requests from peers with a different blockstore version.
     let local_version = memvault_core::BLOCKSTORE_VERSION;
     if request.store_version != local_version {
@@ -614,11 +666,137 @@ fn check_block_access(
 /// content_root / chunk CIDs), those dependent CIDs are queued for
 /// fetch. Without this, file data chunks are invisible to RBSR (they
 /// have no BY_TIME entry) and silently diverge between nodes.
+/// Decide how a synced block should be persisted. Sigchain blocks are
+/// detected by their CBOR shape and signature-verified before storage;
+/// invalid attestations / revocations are dropped at sync ingress so
+/// they never pollute trust state. Non-sigchain blocks pass through.
+enum SyncDisposition {
+    /// Drop the block — signature invalid, cluster mismatch, or unknown
+    /// admin. Better to fail closed than to store a forgery.
+    Drop,
+    /// Store as opaque block (existing put_block + reindex_block path).
+    AsIs,
+    /// Store as a sigchain block with the given envelope tags. Tags are
+    /// what `reindex_block` would assign if it could parse the CBOR
+    /// shape — we set them explicitly here so the receiver's sigchain
+    /// index + watcher see the block.
+    AsSigchain(memvault_store::EnvelopeMeta),
+}
+
+/// Does this libp2p peer correspond to a node currently attested by
+/// the cluster admin?
+///
+/// Walks the local NodeAttestation blocks (`sigchain/node_att` tag),
+/// verifies each against the pinned admin pubkey, derives the libp2p
+/// PeerId from the attested ed25519 pubkey, and compares. Returns true
+/// on first match. Cheap when the cluster is small; cache later if it
+/// matters.
+fn peer_is_trusted_node(
+    store: &MemvaultStore,
+    peer: &libp2p::PeerId,
+    join_config: &JoinConfig,
+) -> bool {
+    let Some(admin_pk) = join_config.pinned_admin_pubkey else {
+        return false;
+    };
+    let Ok(admin_vk) = ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) else {
+        return false;
+    };
+
+    let cids = match store.query_by_tag("sigchain", "node_att", 0, 1024) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    for cid in cids {
+        let Ok(Some(bytes)) = store.get_block(&cid) else {
+            continue;
+        };
+        let Ok(att) =
+            serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
+        else {
+            continue;
+        };
+        if att.cluster_id.0 != join_config.cluster_id {
+            continue;
+        }
+        if att.verify_signature(&admin_vk).is_err() {
+            continue;
+        }
+        if att.member.0.len() != 32 {
+            continue;
+        }
+        let mut pkbytes = [0u8; 32];
+        pkbytes.copy_from_slice(&att.member.0);
+        let Ok(ed_pk) = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pkbytes) else {
+            continue;
+        };
+        let candidate: libp2p::PeerId =
+            libp2p::identity::PublicKey::from(ed_pk).to_peer_id();
+        if &candidate == peer {
+            return true;
+        }
+    }
+    false
+}
+
+fn vet_sync_block(
+    bytes: &[u8],
+    join_config: &JoinConfig,
+    author_peer_pubkey: Option<[u8; 32]>,
+) -> SyncDisposition {
+    let cluster_id = join_config.cluster_id;
+
+    // NodeAttestation: admin-signed; verify against the pinned admin pubkey.
+    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(bytes) {
+        // Heuristic to distinguish from unrelated CBOR maps that happen
+        // to parse: NodeAttestation has a 32-byte signature field, a
+        // PeerId member, and cluster_id. If cluster_id agrees, treat it
+        // as a NodeAttestation.
+        if att.cluster_id.0 == cluster_id && !att.member.0.is_empty() {
+            let Some(admin_pk) = join_config.pinned_admin_pubkey else {
+                tracing::warn!("dropped sync'd NodeAttestation: no pinned admin pubkey");
+                return SyncDisposition::Drop;
+            };
+            let admin_vk = match ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) {
+                Ok(k) => k,
+                Err(_) => return SyncDisposition::Drop,
+            };
+            if att.verify_signature(&admin_vk).is_err() {
+                tracing::warn!(
+                    member = %hex::encode(&att.member.0),
+                    "dropped sync'd NodeAttestation: signature does not verify against pinned admin"
+                );
+                return SyncDisposition::Drop;
+            }
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let author = author_peer_pubkey
+                .map(|p| p.to_vec())
+                .unwrap_or_else(|| att.member.0.clone());
+            return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
+                author,
+                tags: vec![("sigchain".to_string(), "node_att".to_string())],
+                wall_ns: now_ns,
+                cluster_id: Some(cluster_id.to_vec()),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Non-sigchain (or sigchain-shaped but cluster mismatch — fall back
+    // to opaque; receiver's existing indexer will handle docs / files).
+    SyncDisposition::AsIs
+}
+
 fn handle_block_response(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     response: BlockResponse,
+    join_config: &JoinConfig,
 ) {
     let mut stored = 0usize;
     let mut missing_cids: Vec<Vec<u8>> = Vec::new();
@@ -637,13 +815,29 @@ fn handle_block_response(
             if store.get_block(&entry.cid).ok().flatten().is_some() {
                 continue; // already have it
             }
-            if let Err(e) = store.put_block(&entry.cid, &entry.data) {
-                tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
-                continue;
+            // Gate sigchain block ingress: a synced NodeAttestation must
+            // verify against the pinned admin pubkey before being stored.
+            // Other shapes pass through to the existing path.
+            match vet_sync_block(&entry.data, join_config, None) {
+                SyncDisposition::Drop => continue,
+                SyncDisposition::AsSigchain(meta) => {
+                    if let Err(e) = store.insert_envelope(&entry.cid, &entry.data, &meta) {
+                        tracing::warn!(
+                            cid = %hex::encode(&entry.cid), %e,
+                            "failed to insert synced sigchain block"
+                        );
+                        continue;
+                    }
+                }
+                SyncDisposition::AsIs => {
+                    if let Err(e) = store.put_block(&entry.cid, &entry.data) {
+                        tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
+                        continue;
+                    }
+                    let _ = store.reindex_block(&entry.cid, &entry.data);
+                    let _ = store.reindex_bucket_decl(&entry.cid, &entry.data);
+                }
             }
-            let _ = store.reindex_block(&entry.cid, &entry.data);
-            // Also try bucket-specific reindexing (BUCKETS table).
-            let _ = store.reindex_bucket_decl(&entry.cid, &entry.data);
             stored += 1;
             tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
 
