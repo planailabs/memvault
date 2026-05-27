@@ -1942,7 +1942,7 @@ mod native {
                 ));
             }
             let cid = client
-                .put_doc(doc.clone(), tags, Visibility::Internal, None)
+                .put_doc(doc.clone(), tags, Visibility::Internal, Some(&bucket))
                 .await?;
             all_nodes.push(NodeRef::Doc(doc.id.clone()));
 
@@ -2008,7 +2008,7 @@ mod native {
                 edges_out: vec![],
             };
             let eid = client
-                .add_entity(entity.clone(), Visibility::Internal, None)
+                .add_entity(entity.clone(), Visibility::Internal, Some(&bucket))
                 .await?;
             all_nodes.push(NodeRef::Entity(eid));
 
@@ -2060,7 +2060,14 @@ mod native {
             };
 
             let cid = client
-                .upload_file(&content, Some(&filename), mime, vec![], "internal", None)
+                .upload_file(
+                    &content,
+                    Some(&filename),
+                    mime,
+                    vec![],
+                    "internal",
+                    Some(&bucket),
+                )
                 .await?;
             all_nodes.push(NodeRef::Attachment(cid.clone()));
 
