@@ -12,7 +12,6 @@
 //! **Determinism**: same BLOCKS + same version + same peer identity =
 //! identical derived state on every node.
 
-use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
 use crate::local::LocalClient;
 use memvault_core::{BucketId, EntityId};
@@ -286,6 +285,13 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     report.vfs_orphans_linked = orphans;
     report.vfs_dupes_removed = dupes;
 
+    // ── Phase 5: Rebuild text index (sync) ─────────────────────────────
+
+    let (d, e, a) = client.populate_index_sync()?;
+    report.docs_indexed = d;
+    report.entities_indexed = e;
+    report.attachments_indexed = a;
+
     // ── Stamp the version ──────────────────────────────────────────────
     //
     store
@@ -333,254 +339,10 @@ pub fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildReport>> 
 
 /// Async phases that run after the sync rebuild: VFS repair, pending VFS
 /// entries, and text index rebuild.
-pub async fn rebuild_async_phases(client: &LocalClient) -> Result<(usize, usize, usize)> {
-    use crate::client::MemvaultClient;
+// Async phases removed — VFS repair in repair_vfs_sync, text index
+// in populate_index_sync.  Everything runs sync during rebuild.
+// (Old async functions deleted — see git history.)
 
-    let (orphans, dupes) = repair_vfs_tree(client).await?;
-    if orphans > 0 || dupes > 0 {
-        tracing::info!(orphans, dupes, "VFS tree repaired");
-    }
-
-    // Pending VFS entries
-    let store = client.store();
-    let pending_cids = store
-        .query_by_tag("vfs_status", "pending_repair", 0, 10_000)
-        .unwrap_or_default();
-    for cid in &pending_cids {
-        if let Ok(Some(data)) = store.get_block(cid) {
-            if let Some(val) = memvault_store::deserialize_block(&data) {
-                let entity_tag = val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
-                    tags.iter().find_map(|t| {
-                        let arr = t.as_array()?;
-                        if arr.first()?.as_str()? == "entity" {
-                            Some(arr.get(1)?.as_str()?.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                });
-                let path = val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
-                    tags.iter().find_map(|t| {
-                        let arr = t.as_array()?;
-                        if arr.first()?.as_str()? == "vfs_intended_path" {
-                            Some(arr.get(1)?.as_str()?.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                });
-                if let (Some(hex), Some(p)) = (entity_tag, path) {
-                    let node = format!("entity:{hex}");
-                    let bucket = client.legacy_bucket_id().unwrap_or(BucketId([0u8; 32]));
-                    if crate::vfs::link_node_at_path(client, &bucket, &p, &node).await.is_ok() {
-                        let _ = client.remove_tags(&node, vec![("vfs_status".into(), "pending_repair".into())]).await;
-                        let _ = client.add_tags(&node, vec![("vfs_status".into(), "linked".into())]).await;
-                    }
-                }
-            }
-        }
-    }
-
-    // Text index
-    let (d, e, a) = client.populate_index().await?;
-    Ok((d, e, a))
-}
-
-// ── VFS tree repair ────────────────────────────────────────────────────
-//
-// Returns (orphans_linked, dupes_removed).
-
-async fn repair_vfs_tree(client: &LocalClient) -> Result<(usize, usize)> {
-    use memvault_core::{EdgeId, NodeRef};
-    use std::collections::{BTreeMap, HashSet};
-
-    let entities = client.list_entities_unscoped(10_000).await?;
-    let mut all_dirs: Vec<(EntityId, String)> = Vec::new();
-
-    for e in &entities {
-        if e.kind != crate::vfs::VFS_DIR_KIND {
-            continue;
-        }
-        let node_id = format!("entity:{}", hex::encode(e.id.0));
-        let idx = client.index_ref().read().await;
-        if idx.is_retracted(&node_id) {
-            continue;
-        }
-        drop(idx);
-        let name = e
-            .props
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        all_dirs.push((e.id.clone(), name));
-    }
-
-    if all_dirs.is_empty() {
-        return Ok((0, 0));
-    }
-
-    // Find root candidates (dirs named "/").
-    let mut root_candidates: Vec<[u8; 32]> = all_dirs
-        .iter()
-        .filter(|(_, name)| name == "/")
-        .map(|(id, _)| id.0)
-        .collect();
-    root_candidates.sort();
-    let root_bytes = match root_candidates.first() {
-        Some(id) => *id,
-        None => return Ok((0, 0)),
-    };
-
-    // Ensure canonical root has vfs:root tag.
-    let root_node_id = format!("entity:{}", hex::encode(root_bytes));
-    let _ = client
-        .add_tags(&root_node_id, vec![("vfs".into(), "root".into())])
-        .await;
-    let root_ref = NodeRef::Entity(EntityId(root_bytes));
-
-    let mut dupes = 0usize;
-
-    // Re-parent children from duplicate roots, then retract the dupes.
-    for &dup_bytes in &root_candidates[1..] {
-        let dup_ref = NodeRef::Entity(EntityId(dup_bytes));
-        let edges = client.edges_of(&dup_ref).await.unwrap_or_default();
-        for (src, edge) in &edges {
-            if *src != dup_ref || edge.relation != crate::vfs::VFS_CHILD_REL {
-                continue;
-            }
-            let child_name = edge
-                .props
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-                .to_string();
-            // Skip if canonical root already has this child.
-            let root_edges = client.edges_of(&root_ref).await.unwrap_or_default();
-            let exists = root_edges.iter().any(|(s, e)| {
-                *s == root_ref
-                    && e.relation == crate::vfs::VFS_CHILD_REL
-                    && e.props.get("name").and_then(|v| v.as_str()) == Some(&child_name)
-            });
-            if exists {
-                continue;
-            }
-            let mut props = BTreeMap::new();
-            props.insert("name".to_string(), serde_json::json!(child_name));
-            let new_edge = memvault_doc::Edge {
-                id: EdgeId::random(),
-                relation: crate::vfs::VFS_CHILD_REL.to_string(),
-                target: edge.target.clone(),
-                weight: None,
-                props,
-                provenance: None,
-            };
-            let _ = client
-                .add_link(&root_ref, new_edge, memvault_core::Visibility::Internal)
-                .await;
-        }
-        let dup_node_id = format!("entity:{}", hex::encode(dup_bytes));
-        let _ = client
-            .retract_node(&dup_node_id, "duplicate VFS root")
-            .await;
-        dupes += 1;
-    }
-
-    // Deduplicate same-name entries within each directory.
-    {
-        let mut stack: Vec<NodeRef> = vec![root_ref.clone()];
-        let mut visited: HashSet<[u8; 32]> = HashSet::new();
-        visited.insert(root_bytes);
-        while let Some(current) = stack.pop() {
-            let edges = client.edges_of(&current).await.unwrap_or_default();
-            let mut by_name: BTreeMap<String, Vec<([u8; 32], NodeRef)>> = BTreeMap::new();
-            for (src, edge) in &edges {
-                if *src != current || edge.relation != crate::vfs::VFS_CHILD_REL {
-                    continue;
-                }
-                let name = edge
-                    .props
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                by_name
-                    .entry(name)
-                    .or_default()
-                    .push((edge.id.0, edge.target.clone()));
-            }
-            for (_name, mut entries) in by_name {
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                if let Some((_, target)) = entries.first() {
-                    if let NodeRef::Entity(eid) = target {
-                        if visited.insert(eid.0) {
-                            stack.push(target.clone());
-                        }
-                    }
-                }
-                for (dup_eid, _) in &entries[1..] {
-                    let _ = client
-                        .remove_link_from(&current, &EdgeId(*dup_eid))
-                        .await;
-                    dupes += 1;
-                }
-            }
-        }
-    }
-
-    // Walk tree from root to find all reachable dirs.
-    let mut reachable: HashSet<[u8; 32]> = HashSet::new();
-    reachable.insert(root_bytes);
-    {
-        let mut stack: Vec<NodeRef> = vec![root_ref.clone()];
-        while let Some(current) = stack.pop() {
-            let edges = client.edges_of(&current).await.unwrap_or_default();
-            for (src, edge) in &edges {
-                if *src != current || edge.relation != crate::vfs::VFS_CHILD_REL {
-                    continue;
-                }
-                if let NodeRef::Entity(child_eid) = &edge.target {
-                    if reachable.insert(child_eid.0) {
-                        stack.push(edge.target.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    // Link orphaned dirs to root.
-    let retracted: HashSet<[u8; 32]> = root_candidates[1..].iter().copied().collect();
-    let mut linked = 0usize;
-    for (eid, name) in &all_dirs {
-        if reachable.contains(&eid.0) || retracted.contains(&eid.0) {
-            continue;
-        }
-        let entry_name = if name.is_empty() {
-            hex::encode(eid.0)[..8].to_string()
-        } else {
-            name.clone()
-        };
-        let mut props = BTreeMap::new();
-        props.insert("name".to_string(), serde_json::json!(entry_name));
-        let edge = memvault_doc::Edge {
-            id: EdgeId::random(),
-            relation: crate::vfs::VFS_CHILD_REL.to_string(),
-            target: NodeRef::Entity(eid.clone()),
-            weight: None,
-            props,
-            provenance: None,
-        };
-        if client
-            .add_link(&root_ref, edge, memvault_core::Visibility::Internal)
-            .await
-            .is_ok()
-        {
-            linked += 1;
-        }
-    }
-
-    Ok((linked, dupes))
-}
 
 // ── Sync VFS tree repair ──────────────────────────────────────────────
 //
@@ -591,7 +353,7 @@ fn repair_vfs_sync(
     store: &memvault_store::MemvaultStore,
     client: &LocalClient,
 ) -> Result<(usize, usize)> {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::HashSet;
     use memvault_core::{EdgeId, NodeRef};
     use memvault_doc::Op;
 

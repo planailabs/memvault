@@ -328,6 +328,164 @@ impl LocalClient {
     }
 
     /// Populate the in-memory TextIndex from the blockstore.
+    /// Sync version of populate_index for use during rebuild.
+    /// Uses try_read/try_write on the RwLock (safe at startup, no contention).
+    pub fn populate_index_sync(&self) -> Result<(usize, usize, usize)> {
+        tracing::info!("populating text index from blockstore (sync)...");
+        let mut doc_count = 0usize;
+        let mut entity_count = 0usize;
+        let mut attachment_count = 0usize;
+
+        let doc_labels = self.store.query_unique_labels("doc", usize::MAX)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for label in &doc_labels {
+            let id_bytes = hex::decode(label).unwrap_or_default();
+            if id_bytes.len() != 32 { continue; }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let doc_id = DocId(arr);
+            if self.inferred_doc_bucket(&doc_id).is_none() { continue; }
+            if let Some(doc) = self.get_doc_sync(&doc_id)? {
+                let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
+                let creation_tags = self.extract_creation_tags("doc", label);
+                if let Ok(mut idx) = self.index.try_write() {
+                    idx.index_doc(doc_id, &doc.body, title, creation_tags);
+                    doc_count += 1;
+                }
+            }
+        }
+
+        let entity_labels = self.store.query_unique_labels("entity", usize::MAX)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for label in &entity_labels {
+            let id_bytes = hex::decode(label).unwrap_or_default();
+            if id_bytes.len() != 32 { continue; }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let eid = EntityId(arr);
+            if self.inferred_entity_bucket(&eid).is_none() { continue; }
+            if let Some(entity) = self.get_entity_sync(&eid)? {
+                let creation_tags = self.extract_creation_tags("entity", label);
+                if let Ok(mut idx) = self.index.try_write() {
+                    idx.index_entity(&eid, &entity.kind, &entity.props, creation_tags);
+                    entity_count += 1;
+                }
+            }
+        }
+
+        let blocks = self.store.iter_blocks()
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for (_, data) in &blocks {
+            if let Some(val) = memvault_store::deserialize_block(data) {
+                if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                    if val.get("bucket_id").and_then(|v| v.as_array()).is_none() { continue; }
+                    let manifest_cid = val.get("manifest_cid")
+                        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+                    let filename = val.get("filename").and_then(|v| v.as_str());
+                    let mime_type = val.get("mime_type").and_then(|v| v.as_str())
+                        .unwrap_or("application/octet-stream");
+                    if let Some(mcid) = manifest_cid {
+                        let text = self.load_cached_extraction(&mcid)
+                            .and_then(|r| match r {
+                                ExtractionResult::Ok(t) => Some(t),
+                                _ => None,
+                            });
+                        let att_tags: Vec<(String, String)> = val.get("tags")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        if let Ok(mut idx) = self.index.try_write() {
+                            idx.index_attachment(&mcid, filename, mime_type, text.as_deref(), att_tags);
+                            attachment_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Replay tag updates and retractions (sync)
+        for (_, data) in &blocks {
+            if let Some(val) = memvault_store::deserialize_block(data) {
+                if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
+                    if let Some(ann_type) = val.get("type").and_then(|v| v.as_str()) {
+                        if ann_type == "tag_update" {
+                            if let Some(target) = val.get("target").and_then(|v| v.as_str()) {
+                                if let Some(data_field) = val.get("data") {
+                                    let add: Vec<(String, String)> = data_field.get("add")
+                                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                        .unwrap_or_default();
+                                    let remove: Vec<(String, String)> = data_field.get("remove")
+                                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                        .unwrap_or_default();
+                                    if let Ok(mut idx) = self.index.try_write() {
+                                        idx.apply_tag_update(target, &add, &remove);
+                                    }
+                                }
+                            }
+                        } else if ann_type == "retraction" {
+                            if let Some(target) = val.get("target").and_then(|v| v.as_str()) {
+                                if let Ok(mut idx) = self.index.try_write() {
+                                    idx.retract_node(target);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((doc_count, entity_count, attachment_count))
+    }
+
+    /// Sync doc reconstruction from store (no async RwLock).
+    fn get_doc_sync(&self, id: &DocId) -> Result<Option<Document>> {
+        let node_id = format!("doc:{}", hex::encode(id.0));
+        if let Ok(idx) = self.index.try_read() {
+            if idx.is_retracted(&node_id) { return Ok(None); }
+        }
+        let (_, label) = Self::doc_tag(id);
+        let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX)?;
+        if cids.is_empty() { return Ok(None); }
+        let mut ops = Vec::new();
+        for cid in &cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
+                            ops.push(op);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(memvault_doc::apply_doc_ops(&ops).ok())
+    }
+
+    /// Sync entity reconstruction from store (no async RwLock).
+    fn get_entity_sync(&self, id: &EntityId) -> Result<Option<memvault_doc::Entity>> {
+        let node_id = format!("entity:{}", hex::encode(id.0));
+        if let Ok(idx) = self.index.try_read() {
+            if idx.is_retracted(&node_id) { return Ok(None); }
+        }
+        let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;
+        if cids.is_empty() { return Ok(None); }
+        let mut ops = Vec::new();
+        for cid in &cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
+                            ops.push(op);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(memvault_doc::apply_graph_ops(&ops)
+            .ok()
+            .and_then(|gs| gs.entities.into_values().next()))
+    }
+
     pub async fn populate_index(&self) -> Result<(usize, usize, usize)> {
         tracing::info!("populating text index from blockstore...");
         let mut doc_count = 0usize;
