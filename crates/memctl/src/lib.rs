@@ -665,7 +665,27 @@ mod native {
     ///
     /// Stores the 32-byte Ed25519 secret seed (not the 64-byte expanded keypair)
     /// so that `Keypair::ed25519_from_bytes` can reload it.
-    fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
+    /// Extract the 32-byte ed25519 seed from `<data_dir>/identity/libp2p.key`
+    /// and return it as an `ed25519_dalek::SigningKey` — the daemon's
+    /// cluster-node signing key. Same bytes as the libp2p host key, so
+    /// the pubkey `bootstrap_cluster_trust` keys trust state by is the
+    /// same pubkey the JoinRequest carries.
+    pub fn libp2p_node_signing_key(data_dir: &Path) -> Result<ed25519_dalek::SigningKey> {
+        let key_path = data_dir.join("identity").join("libp2p.key");
+        let mut key_bytes = std::fs::read(&key_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", key_path.display()))?;
+        // `load_or_generate_keypair` accepts both 32-byte seed-only files
+        // and 64-byte seed+public files — mirror that here.
+        if key_bytes.len() == 64 {
+            key_bytes.truncate(32);
+        }
+        let seed: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("libp2p.key must contain a 32-byte seed"))?;
+        Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+    }
+
+    pub fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
         if key_path.exists() {
             let mut key_bytes = std::fs::read(key_path)?;
             // ed25519_from_bytes expects the 32-byte seed. If we accidentally
@@ -1511,13 +1531,18 @@ mod native {
                 #[cfg(feature = "daemon")]
                 {
                     let _ = local_peer_id;
-                    // Dev daemon mode: derive a node key from a local file
-                    // (or generate one) — keeps node identity stable across
-                    // restarts without depending on a libp2p host key.
-                    client.set_node_signing_key(
-                        memvault_api::node_key::load_or_generate(&data_dir)
-                            .map_err(|e| anyhow::anyhow!("node key: {e}"))?,
-                    );
+                    // Design A-1: node signing key == libp2p host key.
+                    // Pulling the seed from the same `libp2p.key` file the
+                    // swarm uses guarantees that the pubkey
+                    // `bootstrap_cluster_trust` keys trust state by matches
+                    // the pubkey the JoinRequest carries — otherwise admin
+                    // mints a NodeAttestation for libp2p_pk but bootstrap
+                    // looks for node_pk and the local node stays PreGenesis
+                    // (regression test:
+                    // `tests::join_protocol::node_key_and_libp2p_key_must_be_the_same`).
+                    let node_sk = libp2p_node_signing_key(&data_dir)
+                        .map_err(|e| anyhow::anyhow!("node signing key: {e}"))?;
+                    client.set_node_signing_key(node_sk);
                     let local_client = std::sync::Arc::new(client);
                     let trust = memvault_api::bootstrap::bootstrap_cluster_trust(&local_client)
                         .map_err(|e| anyhow::anyhow!("cluster trust bootstrap: {e}"))?;

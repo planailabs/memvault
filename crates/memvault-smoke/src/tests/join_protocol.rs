@@ -249,3 +249,207 @@ async fn join_protocol_promotes_peer_to_attested() {
     // is the load-bearing assertion.
     let _ = admin_libp2p_peerid;
 }
+
+/// Regression test for the production bug where memctl daemon loaded
+/// `<data_dir>/identity/node.key` for `set_node_signing_key` and
+/// `<data_dir>/identity/libp2p.key` for the swarm — different files,
+/// different pubkeys. Admin then minted `NodeAttestation` for the
+/// libp2p key (what the JoinRequest carried), but
+/// `bootstrap_cluster_trust` looked for the node-key entry in
+/// `node_trust` and never found it, so the trust tree showed the local
+/// node as PreGenesis indefinitely.
+///
+/// Asserts the memctl daemon's two helpers produce the same pubkey from
+/// the same `libp2p.key` file. Pre-fix this fails because the daemon
+/// reads two different files; post-fix both routes go through
+/// `libp2p.key`.
+#[test]
+fn libp2p_key_drives_both_swarm_and_node_signing_key() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("identity")).unwrap();
+
+    // Generate a libp2p keypair and persist it the way memctl's
+    // load_or_generate_keypair does (32-byte seed file).
+    let kp = libp2p::identity::Keypair::generate_ed25519();
+    let ed_kp = kp.clone().try_into_ed25519().expect("ed25519");
+    let full = ed_kp.to_bytes(); // 64 bytes (seed + pub)
+    std::fs::write(
+        dir.path().join("identity").join("libp2p.key"),
+        &full[..32],
+    )
+    .unwrap();
+
+    let kp_loaded = memctl::load_or_generate_keypair(
+        &dir.path().join("identity").join("libp2p.key"),
+    )
+    .expect("load_or_generate_keypair");
+    let swarm_pubkey: [u8; 32] = kp_loaded
+        .public()
+        .try_into_ed25519()
+        .expect("ed25519")
+        .to_bytes();
+
+    let node_sk = memctl::libp2p_node_signing_key(dir.path())
+        .expect("libp2p_node_signing_key");
+    let bootstrap_pubkey = node_sk.verifying_key().to_bytes();
+
+    assert_eq!(
+        swarm_pubkey, bootstrap_pubkey,
+        "memctl's swarm-side libp2p pubkey must equal memctl's \
+         bootstrap-side node signing key. They both come from \
+         <data_dir>/identity/libp2p.key by design A-1 (node key = \
+         libp2p key). If this diverges, admin mints a NodeAttestation \
+         for the libp2p key but bootstrap_cluster_trust looks for the \
+         node-key entry and the local node stays PreGenesis."
+    );
+}
+
+/// End-to-end version of the regression: drive the full swarm
+/// handshake with the daemon helpers and confirm the peer ends up with
+/// a NodeAttestation for the pubkey `bootstrap_cluster_trust` would
+/// treat as its own.
+#[tokio::test]
+async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
+    // Drives the post-fix daemon flow end-to-end: the peer's libp2p key
+    // (carried in the JoinRequest) IS the same key that
+    // `bootstrap_cluster_trust` would use as the node signing key.
+    // After the handshake, the peer must have a NodeAttestation in its
+    // store whose `member` equals that single shared pubkey.
+    let admin_seed = random_seed();
+    let admin_sk = SigningKey::from_bytes(&admin_seed);
+    let admin_pubkey = admin_sk.verifying_key().to_bytes();
+    let cluster_id = ClusterId::random();
+    let genesis = sign_admin_genesis(&admin_sk, cluster_id.clone(), memvault_core::wall_ns())
+        .expect("sign admin_genesis");
+
+    let admin_kp = libp2p_keypair_from_seed(&random_seed());
+    let admin_node_pubkey = pubkey_from_libp2p(&admin_kp);
+
+    // Peer's libp2p key — this single key is used by BOTH the swarm
+    // (PeerId on the wire) AND `bootstrap_cluster_trust`'s notion of
+    // "my pubkey". Mirror the memctl daemon post-fix.
+    let peer_kp = libp2p_keypair_from_seed(&random_seed());
+    let peer_libp2p_pubkey = pubkey_from_libp2p(&peer_kp);
+    // The pubkey bootstrap would key trust state by — same key.
+    let peer_bootstrap_pubkey = peer_libp2p_pubkey;
+
+    let admin_peer_for_token = PeerId(admin_node_pubkey.to_vec());
+    let token = issue_token(&admin_sk, &admin_peer_for_token, &cluster_id, &genesis);
+    let token_str = encode_token_string(&token).expect("encode token");
+
+    let admin_dir = tempfile::tempdir().unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let admin_store =
+        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store =
+        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
+    peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
+
+    let mut admin_swarm = standalone_swarm(
+        admin_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let admin_listen = await_listen_addr(&mut admin_swarm).await;
+
+    let mut peer_swarm = standalone_swarm(
+        peer_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let _ = await_listen_addr(&mut peer_swarm).await;
+
+    peer_swarm.dial(admin_listen.clone()).unwrap();
+
+    let admin_join = JoinConfig {
+        pending_token: None,
+        node_pubkey: admin_node_pubkey,
+        admin_signing_key: Some(admin_sk.clone()),
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        on_join_success: None,
+    };
+    // Peer announces its LIBP2P pubkey in the JoinRequest — that's what
+    // the production daemon does today.
+    let peer_join = JoinConfig {
+        pending_token: Some(token_str.clone()),
+        node_pubkey: peer_libp2p_pubkey,
+        admin_signing_key: None,
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        on_join_success: None,
+    };
+
+    let (_admin_head_tx, admin_head_rx) = mpsc::unbounded_channel::<OutboundHead>();
+    let (_peer_head_tx, peer_head_rx) = mpsc::unbounded_channel::<OutboundHead>();
+
+    let admin_store_for_task = Arc::clone(&admin_store);
+    let admin_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut admin_swarm,
+            admin_store_for_task,
+            admin_head_rx,
+            SyncConfig {
+                cluster_id: cluster_id.0.to_vec(),
+                ..Default::default()
+            },
+            admin_join,
+        )
+        .await;
+    });
+
+    let peer_store_for_task = Arc::clone(&peer_store);
+    let peer_cluster = cluster_id.0;
+    let peer_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut peer_swarm,
+            peer_store_for_task,
+            peer_head_rx,
+            SyncConfig {
+                cluster_id: peer_cluster.to_vec(),
+                ..Default::default()
+            },
+            peer_join,
+        )
+        .await;
+    });
+
+    // Wait for the NodeAttestation that has `member == peer_bootstrap_pubkey`.
+    let found = timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(cids) = peer_store.query_by_tag("sigchain", "node_att", 0, 64) {
+                for cid in cids {
+                    if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
+                        if let Ok(att) = serde_ipld_dagcbor::from_slice::<
+                            memvault_auth::NodeAttestation,
+                        >(&bytes)
+                        {
+                            if att.member.0 == peer_bootstrap_pubkey.to_vec() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    admin_task.abort();
+    peer_task.abort();
+    let _ = admin_task.await;
+    let _ = peer_task.await;
+
+    assert!(
+        found,
+        "NodeAttestation must exist for the daemon's bootstrap pubkey \
+         (which after the fix == the libp2p pubkey)."
+    );
+}
