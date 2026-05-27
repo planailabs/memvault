@@ -100,8 +100,12 @@ fn main() {
                 .as_ref()
                 .map(|(_, c)| Arc::clone(c))
                 .expect("daemon mode requires a successfully-opened store");
+            // Design A-1: node signing key == libp2p host key. Same
+            // file the swarm uses, so bootstrap_cluster_trust and the
+            // /join/1.0 request carry the same ed25519 pubkey. See
+            // tests::join_protocol::libp2p_key_drives_both_swarm_and_node_signing_key.
             local_client.set_node_signing_key(
-                memvault_api::node_key::load_or_generate(&data_dir).expect("load node key"),
+                memctl::libp2p_node_signing_key(&data_dir).expect("load node signing key"),
             );
             let trust = memvault_api::bootstrap::bootstrap_cluster_trust(&local_client)
                 .expect("cluster trust bootstrap failed");
