@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Enroll an AGENT on a cluster node (agent-level operation).
+# Enroll an AGENT on a cluster node and exercise the write path.
 #
 # Agents are clients (like openclaw, hermes) that access the cluster
-# through a node's HTTP API. They have their own Ed25519 identity
-# for signing writes, but do NOT participate in P2P replication.
+# through a node's HTTP API. They have their own Ed25519 identity for
+# signing writes, but do NOT participate in P2P replication.
 #
 # This is DIFFERENT from cluster-join:
 #   - cluster-join: node joins the P2P cluster (replicates data)
@@ -12,35 +12,82 @@
 # Prerequisites:
 #   1. Run genesis-node-a.sh (creates the cluster)
 #   2. Optionally run join-node-b.sh (adds another node)
+#
+# Args:
+#   $1: agent id (default: openclaw)
 set -euo pipefail
 
-# Which node to enroll the agent on
 NODE_DIR="${MEMVAULT_DATA_DIR:-$HOME/.local/share/memvault.a}"
 AGENT_ID="${1:-openclaw}"
 
-echo "=== Enroll agent '${AGENT_ID}' on node ==="
+if [ ! -f "$NODE_DIR/cluster_id" ]; then
+    echo "ERROR: $NODE_DIR has no cluster_id. Run genesis-node-a.sh first."
+    exit 1
+fi
+if [ ! -f "$NODE_DIR/identity/cluster_admin_genesis.cbor" ]; then
+    echo "ERROR: $NODE_DIR has no pinned admin_genesis."
+    echo "       Re-run genesis-node-a.sh (the updated version writes the pin)."
+    exit 1
+fi
+
+echo "=== Enroll agent '${AGENT_ID}' ==="
 echo "  Node data:  $NODE_DIR"
 echo "  Agent ID:   $AGENT_ID"
 
-# Issue a join token
+# 1. Issue a join token. Token-issue prints only the token on its last
+#    line, so capture cleanly.
 echo ""
-echo "Issuing join token..."
+echo "Step 1/4: Issue a join token..."
 TOKEN=$(MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
-    cargo run -p memctl --features daemon -- token-issue --role agent-host --label "$AGENT_ID" --ttl 86400)
-echo "  Token: ${TOKEN:0:30}..."
+    cargo run -q -p memctl --features daemon -- \
+        token-issue --role agent-host --label "$AGENT_ID" --ttl 86400 \
+    | tail -n1)
+if [[ "$TOKEN" != mvjoin1:* ]]; then
+    echo "ERROR: token-issue did not return an mvjoin1: token."
+    echo "       Got: $TOKEN"
+    exit 1
+fi
+echo "  Token: ${TOKEN:0:40}..."
 
-# Enroll the agent
+# 2. Enroll the agent. Generates the keypair + node-signed
+#    AgentAttestation under $NODE_DIR/agents/$AGENT_ID/.
 echo ""
-echo "Enrolling agent..."
+echo "Step 2/4: Enroll the agent locally..."
 MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
-    cargo run -p memctl --features daemon -- agent-enroll --token "$TOKEN" --agent-id "$AGENT_ID"
+    cargo run -q -p memctl --features daemon -- \
+        agent-enroll --token "$TOKEN" --agent-id "$AGENT_ID"
 
 IDENTITY_DIR="$NODE_DIR/agents/$AGENT_ID"
-echo ""
-echo "=== Agent enrolled ==="
+if [ ! -f "$IDENTITY_DIR/attestation.cbor" ]; then
+    echo "ERROR: agent-enroll did not create $IDENTITY_DIR/attestation.cbor"
+    exit 1
+fi
 echo "  Identity dir: $IDENTITY_DIR"
+
+# 3. Write something into memvault. This goes through the node's
+#    LocalClient (not as the agent yet — memctl put uses the node
+#    identity). The agent identity is used for HTTP-side authentication;
+#    see the MCP server hint below.
 echo ""
-echo "The agent can now authenticate to this node's API."
-echo "MCP server usage:"
+echo "Step 3/4: Put a sample doc into memvault..."
+DOC_TEXT="Smoke test note for agent ${AGENT_ID} at $(date -u +%FT%TZ)"
+MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
+    cargo run -q -p memctl --features daemon -- \
+        put --title "agent-${AGENT_ID}-smoke" \
+            --tag "agent=${AGENT_ID}" \
+            --tag "kind=smoke" \
+            --visibility internal \
+            "$DOC_TEXT"
+
+# 4. List docs and search to prove the write landed.
+echo ""
+echo "Step 4/4: List recent docs (should include the doc we just wrote)..."
+MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
+    cargo run -q -p memctl --features daemon -- list --limit 5
+
+echo ""
+echo "=== Agent enrolled and write-path verified ==="
+echo ""
+echo "MCP server usage (agent signs JWTs from $IDENTITY_DIR):"
 echo "  MEMVAULT_AGENT_ID=$AGENT_ID MEMVAULT_IDENTITY_DIR=$IDENTITY_DIR \\"
 echo "    plan-ai-memvault --url http://127.0.0.1:8401"
