@@ -261,8 +261,13 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         }
     }
 
-    // Phases 4-6 (VFS repair, pending VFS, text index) run async after
-    // this sync rebuild via rebuild_async_phases().
+    // ── Phase 4: Sync VFS tree repair ────────────────────────────────
+    //
+    // Operates directly on the store — no async trait methods needed.
+
+    let (orphans, dupes) = repair_vfs_sync(store, client)?;
+    report.vfs_orphans_linked = orphans;
+    report.vfs_dupes_removed = dupes;
 
     // ── Stamp the version ──────────────────────────────────────────────
 
@@ -550,6 +555,205 @@ async fn repair_vfs_tree(client: &LocalClient) -> Result<(usize, usize)> {
             .await
             .is_ok()
         {
+            linked += 1;
+        }
+    }
+
+    Ok((linked, dupes))
+}
+
+// ── Sync VFS tree repair ──────────────────────────────────────────────
+//
+// Operates directly on the store — no async trait methods.
+// Returns (orphans_linked, dupes_removed).
+
+fn repair_vfs_sync(
+    store: &memvault_store::MemvaultStore,
+    client: &LocalClient,
+) -> Result<(usize, usize)> {
+    use std::collections::{BTreeMap, HashSet};
+    use memvault_core::{EdgeId, NodeRef};
+    use memvault_doc::Op;
+
+    let vfs_dir_kind = crate::vfs::VFS_DIR_KIND;
+    let vfs_child_rel = crate::vfs::VFS_CHILD_REL;
+
+    // 1. Collect all VFS dir entities with names.
+    let labels = store.query_unique_labels("entity", 50_000)
+        .map_err(|e| ApiError::Other(format!("query entities: {e}")))?;
+    let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
+
+    for label in &labels {
+        let id_bytes = hex::decode(label).unwrap_or_default();
+        if id_bytes.len() != 32 { continue; }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&id_bytes);
+
+        // Get the latest block for this entity to read kind + props.
+        let cids = store.query_by_tag("entity", label, 0, 10).unwrap_or_default();
+        let mut kind = String::new();
+        let mut name = String::new();
+        for cid in cids.iter().rev() {
+            if let Ok(Some(data)) = store.get_block(cid) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Some(ec) = payload.get("EntityCreate") {
+                            if let Some(k) = ec.get("kind").and_then(|v| v.as_str()) {
+                                kind = k.to_string();
+                            }
+                            if let Some(n) = ec.get("initial_props")
+                                .and_then(|p| p.get("name"))
+                                .and_then(|v| v.as_str()) {
+                                name = n.to_string();
+                            }
+                        }
+                        if let Some(eu) = payload.get("EntityUpdate") {
+                            if let Some(n) = eu.get("props")
+                                .and_then(|p| p.get("name"))
+                                .and_then(|v| v.as_str()) {
+                                name = n.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if kind == vfs_dir_kind {
+            all_dirs.push((id, name));
+        }
+    }
+
+    if all_dirs.is_empty() {
+        return Ok((0, 0));
+    }
+
+    // 2. Find root candidates.
+    let mut root_candidates: Vec<[u8; 32]> = all_dirs
+        .iter()
+        .filter(|(_, name)| name == "/")
+        .map(|(id, _)| *id)
+        .collect();
+    root_candidates.sort();
+    let root_bytes = match root_candidates.first() {
+        Some(id) => *id,
+        None => return Ok((0, 0)),
+    };
+    let root_label = hex::encode(root_bytes);
+
+    let mut dupes = 0usize;
+
+    // 3. Retract duplicate roots.
+    for &dup in &root_candidates[1..] {
+        // Retract by creating a retraction block.
+        let dup_label = hex::encode(dup);
+        let dup_cids = store.query_by_tag("entity", &dup_label, 0, 1).unwrap_or_default();
+        for target_cid in &dup_cids {
+            let _ = store.record_retraction(target_cid, target_cid);
+        }
+        dupes += 1;
+    }
+
+    // 4. Walk edges from root to find reachable dirs.
+    let mut reachable: HashSet<[u8; 32]> = HashSet::new();
+    reachable.insert(root_bytes);
+    let mut stack: Vec<[u8; 32]> = vec![root_bytes];
+
+    while let Some(current) = stack.pop() {
+        let current_label = hex::encode(current);
+        let source_label = format!("entity:{current_label}");
+        let edge_cids = store.query_by_tag("edge_source", &source_label, 0, 1000).unwrap_or_default();
+        for cid in &edge_cids {
+            if let Ok(Some(data)) = store.get_block(cid) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Some(edge_add) = payload.get("EdgeAdd") {
+                            if let Some(edge) = edge_add.get("edge") {
+                                let rel = edge.get("relation").and_then(|v| v.as_str()).unwrap_or("");
+                                if rel != vfs_child_rel { continue; }
+                                // Extract target entity ID.
+                                if let Some(target) = edge.get("target") {
+                                    if let Some(eid) = target.get("Entity")
+                                        .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok())
+                                    {
+                                        if reachable.insert(eid) {
+                                            stack.push(eid);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Link orphaned dirs to root.
+    let retracted: HashSet<[u8; 32]> = root_candidates[1..].iter().copied().collect();
+    let mut linked = 0usize;
+    let legacy_bucket = client.legacy_bucket_id().unwrap_or(BucketId([0u8; 32]));
+
+    for (id, name) in &all_dirs {
+        if reachable.contains(id) || retracted.contains(id) {
+            continue;
+        }
+        let entry_name = if name.is_empty() {
+            hex::encode(id)[..8].to_string()
+        } else {
+            name.clone()
+        };
+
+        // Create EdgeAdd envelope directly.
+        let edge_id = EdgeId::random();
+        let source = NodeRef::Entity(EntityId(root_bytes));
+        let target = NodeRef::Entity(EntityId(*id));
+        let edge = memvault_doc::Edge {
+            id: edge_id.clone(),
+            relation: vfs_child_rel.to_string(),
+            target: target.clone(),
+            weight: None,
+            props: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("name".to_string(), serde_json::json!(entry_name));
+                m
+            },
+            provenance: None,
+        };
+        let op = Op::EdgeAdd {
+            source: source.clone(),
+            edge,
+        };
+
+        let wall_ns = memvault_core::wall_ns();
+        let source_label = source.tag_label();
+        let target_label = target.tag_label();
+        let tags = vec![
+            ("edge_source".to_string(), source_label),
+            ("edge_target".to_string(), target_label),
+            ("entity".to_string(), root_label.clone()),
+        ];
+        let envelope = serde_json::json!({
+            "version": 2,
+            "payload": op,
+            "author": client.cluster_id(),
+            "tags": tags,
+            "visibility": memvault_core::Visibility::Internal,
+            "wall_ns": wall_ns,
+            "cluster_id": client.cluster_id(),
+            "bucket_id": legacy_bucket.0,
+        });
+        if let Ok(bytes) = serde_ipld_dagcbor::to_vec(&envelope) {
+            let cid = memvault_core::cid_from_bytes(&bytes);
+            let meta = memvault_store::EnvelopeMeta {
+                author: client.cluster_id().to_vec(),
+                tags,
+                wall_ns,
+                causal: vec![],
+                provenance: vec![],
+                cluster_id: Some(client.cluster_id().to_vec()),
+                bucket_id: Some(legacy_bucket.0.to_vec()),
+            };
+            let _ = store.insert_envelope(&cid.to_bytes(), &bytes, &meta);
             linked += 1;
         }
     }
