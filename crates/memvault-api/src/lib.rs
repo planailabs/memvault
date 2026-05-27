@@ -86,10 +86,9 @@ impl ClientArgs {
             )?;
             Ok(Box::new(client))
         } else {
-            // Load the agent identity and issue a JWT signed with its private
-            // key. The daemon verifies the JWT against the cluster admin's
-            // pubkey (the attestation is admin-signed and embedded in the
-            // token).
+            // Load the agent identity and hand it to HttpApiClient. Every
+            // outgoing request gets a freshly-issued JWT signed with the
+            // agent's private key, auto-renewed near expiry.
             let identity_dir = self.identity_dir.clone().unwrap_or_else(default_identity_dir);
             let identity =
                 crate::agent_identity::AgentIdentity::load(&identity_dir).map_err(|e| {
@@ -98,12 +97,7 @@ impl ClientArgs {
                         identity_dir.display()
                     )
                 })?;
-            // 1h TTL is plenty for typical CLI sessions; longer-running clients
-            // will get 401 and should reconnect.
-            let jwt = identity
-                .issue_jwt("read write admin", 3600)
-                .map_err(|e| anyhow::anyhow!("issue jwt: {e}"))?;
-            let client = HttpApiClient::new(&self.url, &jwt)?;
+            let client = HttpApiClient::new(&self.url, Some(std::sync::Arc::new(identity)))?;
             Ok(Box::new(client))
         }
     }
@@ -148,8 +142,11 @@ pub async fn connect(
         let url = opts
             .url
             .unwrap_or_else(|| "http://127.0.0.1:8401".to_string());
-        let token = opts.token.unwrap_or_default();
-        let client = HttpApiClient::new(&url, &token)?;
+        // ConnectOptions::token is preserved for callers that already issued
+        // their own JWT externally — but the canonical path now wires through
+        // an AgentIdentity via ClientArgs. Unauthenticated client is the
+        // fallback here.
+        let client = HttpApiClient::new(&url, None)?;
         Ok(Box::new(client))
     }
 }
