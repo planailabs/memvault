@@ -74,14 +74,23 @@ mod server_router {
         pub metrics: Arc<memvault_api::metrics::Metrics>,
     }
 
-    /// Generate (or rotate) the built-in `_ui` agent identity used by the
+    /// Load (or generate) the built-in `_ui` agent identity used by the
     /// web UI to issue per-session JWTs, and publish its attestation to
     /// the sigchain.
     ///
+    /// The identity is persisted under `<data_dir>/identity/ui_agent/`
+    /// across restarts: the keypair, the node-signed `AgentAttestation`,
+    /// and metadata. On startup we reuse the saved identity iff:
+    ///   1. The attestation's `node_pubkey` matches the daemon's current
+    ///      node signing key (no key rotation), AND
+    ///   2. The attestation hasn't expired.
+    /// Otherwise we rotate. This keeps the agent stable across restarts
+    /// (so existing JWTs and envelope-authorship blocks remain valid)
+    /// without leaving an orphaned identity behind after a node-key
+    /// rotation.
+    ///
     /// **Prerequisite**: cluster trust must already be bootstrapped on the
     /// client via [`memvault_api::bootstrap::bootstrap_cluster_trust`].
-    /// That installs the node signing key and trust state; this function
-    /// just hangs the UI agent off it.
     ///
     /// Called only by web-serving callers (full daemon, memvault-web
     /// standalone, memctl daemon-mode). Headless / CLI consumers skip it.
@@ -93,6 +102,7 @@ mod server_router {
             .node_signing_key()
             .ok_or("node signing key not set on client")?
             .clone();
+        let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
 
         let cluster_bytes = client.cluster_id();
         let mut cluster_arr = [0u8; 32];
@@ -102,18 +112,49 @@ mod server_router {
         let cluster_id = memvault_core::ClusterId(cluster_arr);
 
         let ui_identity_dir = data_dir.join("identity").join("ui_agent");
-        let _ = std::fs::remove_dir_all(&ui_identity_dir);
-        let ui_identity = memvault_api::agent_identity::AgentIdentity::generate_local(
-            &ui_identity_dir,
-            "_ui",
-            &cluster_id,
-            &node_signing_key,
-            memvault_auth::Role::AgentHost,
-            365 * 24 * 60 * 60 * 1_000_000_000,
-        )?;
+
+        let now_ns = memvault_core::time::wall_ns();
+        let existing = if memvault_api::agent_identity::AgentIdentity::exists(&ui_identity_dir) {
+            match memvault_api::agent_identity::AgentIdentity::load(&ui_identity_dir) {
+                Ok(id)
+                    if id.attestation.node_pubkey == node_pubkey_bytes
+                        && id.attestation.not_after_ns > now_ns =>
+                {
+                    Some(id)
+                }
+                Ok(_) => {
+                    tracing::info!(
+                        "ui agent attestation no longer valid (node key rotated or expired); \
+                         rotating"
+                    );
+                    let _ = std::fs::remove_dir_all(&ui_identity_dir);
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ui agent identity unreadable; regenerating");
+                    let _ = std::fs::remove_dir_all(&ui_identity_dir);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let ui_identity = match existing {
+            Some(id) => id,
+            None => memvault_api::agent_identity::AgentIdentity::generate_local(
+                &ui_identity_dir,
+                "_ui",
+                &cluster_id,
+                &node_signing_key,
+                memvault_auth::Role::AgentHost,
+                365 * 24 * 60 * 60 * 1_000_000_000,
+            )?,
+        };
 
         // Publish the attestation so peers can verify envelope authorship
-        // from this agent after RBSR sync.
+        // from this agent. Idempotent on the redb side (keyed by CID), so
+        // re-publishing a reused identity is a no-op.
         memvault_api::sigchain::publish_agent_attestation(client, &ui_identity.attestation)
             .map_err(|e| format!("publish ui agent attestation: {e}"))?;
 
