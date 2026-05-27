@@ -13,7 +13,7 @@ use memvault_core::{BucketId, NodeRef};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
 
 // ── Request / Response types ───────────────────────────────────────
@@ -123,7 +123,7 @@ pub async fn vfs_resolve(
 
 /// POST /api/v1/vfs/mkdir  body: { path, bucket }
 pub async fn vfs_mkdir(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsMkdirRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
@@ -143,7 +143,7 @@ pub async fn vfs_mkdir(
 
 /// POST /api/v1/vfs/link  body: { path, target, bucket }
 pub async fn vfs_link(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsLinkRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
@@ -167,7 +167,7 @@ pub async fn vfs_link(
 
 /// DELETE /api/v1/vfs?bucket=<hex>&path=/projects/old.md
 pub async fn vfs_unlink(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsUnlinkQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
@@ -180,7 +180,7 @@ pub async fn vfs_unlink(
 
 /// POST /api/v1/vfs/mv  body: { from, to, bucket }
 pub async fn vfs_mv(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsMvRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {

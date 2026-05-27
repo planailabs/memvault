@@ -73,6 +73,22 @@ impl IntoResponse for AuthRejection {
     }
 }
 
+async fn verify_bearer(
+    parts: &mut Parts,
+    state: &Arc<AppState>,
+) -> Result<AgentTokenClaims, AuthRejection> {
+    let header = parts
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| AuthRejection("missing authorization header".into()))?;
+    let token = header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| AuthRejection("expected Bearer scheme".into()))?;
+    memvault_auth::jwt::verify(token, &state.admin_pubkey)
+        .map_err(|e| AuthRejection(format!("token: {e}")))
+}
+
 impl FromRequestParts<Arc<AppState>> for RequireAuth {
     type Rejection = AuthRejection;
 
@@ -80,19 +96,73 @@ impl FromRequestParts<Arc<AppState>> for RequireAuth {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let header = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AuthRejection("missing authorization header".into()))?;
-
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| AuthRejection("expected Bearer scheme".into()))?;
-
-        let claims = memvault_auth::jwt::verify(token, &state.admin_pubkey)
-            .map_err(|e| AuthRejection(format!("token: {e}")))?;
-
-        Ok(RequireAuth { claims })
+        Ok(RequireAuth {
+            claims: verify_bearer(parts, state).await?,
+        })
     }
 }
+
+/// Returns 403 Forbidden when the JWT lacks the required scope (vs 401 for
+/// missing/invalid auth).
+#[derive(Debug)]
+pub struct ForbiddenScope(&'static str);
+
+impl IntoResponse for ForbiddenScope {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "Forbidden",
+                "status": 403,
+                "required_scope": self.0,
+            })),
+        )
+            .into_response()
+    }
+}
+
+/// Either an auth failure (401) or a scope failure (403).
+#[derive(Debug)]
+pub enum ScopeRejection {
+    Auth(AuthRejection),
+    Forbidden(ForbiddenScope),
+}
+
+impl IntoResponse for ScopeRejection {
+    fn into_response(self) -> Response {
+        match self {
+            ScopeRejection::Auth(a) => a.into_response(),
+            ScopeRejection::Forbidden(f) => f.into_response(),
+        }
+    }
+}
+
+macro_rules! scoped_extractor {
+    ($name:ident, $scope:literal) => {
+        /// Verified JWT extractor that also enforces a specific scope.
+        pub struct $name {
+            pub claims: AgentTokenClaims,
+        }
+
+        impl FromRequestParts<Arc<AppState>> for $name {
+            type Rejection = ScopeRejection;
+
+            async fn from_request_parts(
+                parts: &mut Parts,
+                state: &Arc<AppState>,
+            ) -> Result<Self, Self::Rejection> {
+                let claims = verify_bearer(parts, state)
+                    .await
+                    .map_err(ScopeRejection::Auth)?;
+                if !claims.has_scope($scope) {
+                    return Err(ScopeRejection::Forbidden(ForbiddenScope($scope)));
+                }
+                Ok(Self { claims })
+            }
+        }
+    };
+}
+
+scoped_extractor!(RequireRead, "read");
+scoped_extractor!(RequireWrite, "write");
+scoped_extractor!(RequireAdmin, "admin");

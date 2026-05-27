@@ -10,7 +10,7 @@ use memvault_doc::TextPatch;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
 
 #[derive(Deserialize)]
@@ -112,7 +112,7 @@ pub async fn list_docs(
 
 /// POST /api/v1/docs
 pub async fn create_doc(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateDocRequest>,
 ) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
@@ -181,7 +181,7 @@ pub async fn get_doc(
 
 /// PUT /api/v1/docs/:id
 pub async fn update_doc(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateDocRequest>,
@@ -212,7 +212,7 @@ pub async fn update_doc(
 
 /// DELETE /api/v1/docs/:id
 pub async fn delete_doc(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {

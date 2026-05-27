@@ -10,7 +10,7 @@ use memvault_doc::Edge;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
 
 #[derive(Deserialize)]
@@ -54,7 +54,7 @@ pub struct DeleteLinkQuery {
 
 /// POST /api/v1/links — create an edge between any two nodes.
 pub async fn create_link(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateLinkRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
@@ -206,7 +206,7 @@ pub async fn list_nodes(
 
 /// DELETE /api/v1/nodes/:node_id — retract (soft-delete) any node.
 pub async fn retract_node(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
@@ -221,7 +221,7 @@ pub async fn retract_node(
 /// DELETE /api/v1/links/:edge_id?source=entity:<hex> — remove an edge by ID.
 /// The source parameter is required because edges are indexed by source.
 pub async fn delete_link(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(edge_id_str): Path<String>,
     Query(params): Query<DeleteLinkQuery>,

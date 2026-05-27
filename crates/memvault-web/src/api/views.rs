@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
 
 #[derive(Deserialize)]
@@ -26,7 +26,7 @@ pub struct TagUpdateRequest {
 
 /// PUT /api/v1/tags/:node_id — add tags to an item.
 pub async fn add_tags(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
     Json(req): Json<TagUpdateRequest>,
@@ -40,7 +40,7 @@ pub async fn add_tags(
 
 /// DELETE /api/v1/tags/:node_id — remove tags from an item.
 pub async fn remove_tags(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
     Json(req): Json<TagUpdateRequest>,
@@ -76,7 +76,7 @@ pub async fn list_views(
 
 /// POST /api/v1/views — create a view.
 pub async fn create_view(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateViewRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -97,7 +97,7 @@ pub async fn create_view(
 
 /// DELETE /api/v1/views/:name — delete a view.
 pub async fn delete_view(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -107,7 +107,7 @@ pub async fn delete_view(
 
 /// PUT /api/v1/views/:name — update a view's tags.
 pub async fn update_view(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(req): Json<CreateViewRequest>,

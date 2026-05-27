@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
 
 #[derive(Serialize)]
@@ -23,7 +23,7 @@ pub struct FileListItem {
 
 /// POST /api/v1/docs/:id/files — upload file (multipart)
 pub async fn upload_doc_file(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(_id): Path<String>,
     mut multipart: Multipart,
@@ -81,7 +81,7 @@ pub struct UploadQuery {
 }
 
 pub async fn upload_file(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Query(query): Query<UploadQuery>,
     mut multipart: Multipart,
@@ -169,7 +169,7 @@ pub async fn file_manifest(
 
 /// DELETE /api/v1/docs/:id/files/:name — detach file (no-op in new system)
 pub async fn detach_file(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(_state): State<Arc<AppState>>,
     Path((_id, _name)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {

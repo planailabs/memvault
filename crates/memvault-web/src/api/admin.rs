@@ -7,7 +7,7 @@ use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::RequireAdmin;
 use crate::error::ApiError;
 
 #[derive(Serialize)]
@@ -50,7 +50,7 @@ pub struct RotationInfoResponse {
 
 /// GET /api/v1/admin/status
 pub async fn status(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NodeStatusResponse>, ApiError> {
     let s = state.client.status().await?;
@@ -66,7 +66,7 @@ pub async fn status(
 
 /// GET /api/v1/admin/peers
 pub async fn peers(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let s = state.client.status().await?;
@@ -77,7 +77,7 @@ pub async fn peers(
 
 /// POST /api/v1/admin/tokens
 pub async fn issue_token(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Json(req): Json<IssueTokenRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
@@ -94,7 +94,7 @@ pub async fn issue_token(
 
 /// GET /api/v1/admin/tokens
 pub async fn list_tokens(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<TokenStatusResponse>>, ApiError> {
     let tokens = state.client.list_tokens().await?;
@@ -115,7 +115,7 @@ pub async fn list_tokens(
 
 /// DELETE /api/v1/admin/tokens/:cid
 pub async fn revoke_token(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
@@ -126,7 +126,7 @@ pub async fn revoke_token(
 
 /// GET /api/v1/admin/rotations
 pub async fn list_rotations(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<RotationInfoResponse>>, ApiError> {
     let rotations = state.client.list_rotations().await?;
