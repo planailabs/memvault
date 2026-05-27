@@ -45,6 +45,9 @@ pub enum AuthError {
 
     #[error("codec error: {0}")]
     Codec(String),
+
+    #[error("invalid token: {0}")]
+    InvalidToken(String),
 }
 
 pub type Result<T> = std::result::Result<T, AuthError>;
