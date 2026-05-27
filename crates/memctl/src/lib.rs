@@ -440,11 +440,28 @@ mod native {
         data_dir: &Path,
         event_bus: Arc<EventBus>,
     ) -> LocalClient {
-        let peer_id = store
-            .get_local_peer_id()
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| vec![0u8; 32]);
+        // Prefer the peer_id already persisted by a prior swarm spawn.
+        // Otherwise derive it from the libp2p key file (loading / creating
+        // it eagerly so the client sees a stable peer_id even when the
+        // swarm hasn't been spawned yet — e.g. dx-serve dev mode where
+        // the trust-tree UI reads peer_id before any P2P starts).
+        let peer_id = match store.get_local_peer_id().ok().flatten() {
+            Some(pid) => pid,
+            None => {
+                let key_path = data_dir.join("identity").join("libp2p.key");
+                match load_or_generate_keypair(&key_path) {
+                    Ok(kp) => {
+                        let pid = kp.public().to_peer_id().to_bytes();
+                        let _ = store.set_local_peer_id(&pid);
+                        pid
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not derive peer_id; using zeros");
+                        vec![0u8; 32]
+                    }
+                }
+            }
+        };
         let cluster_id = store
             .get_local_cluster_id()
             .ok()
