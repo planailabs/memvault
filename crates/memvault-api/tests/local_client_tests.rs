@@ -762,6 +762,7 @@ fn join_token_roundtrip_with_verify() {
         max_uses: 5,
         nonce: [42u8; 16],
         label: Some("test".into()),
+        admin_genesis: None,
         signature: [0u8; 64],
     };
 

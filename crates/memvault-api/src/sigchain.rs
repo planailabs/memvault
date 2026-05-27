@@ -17,11 +17,13 @@ use crate::error::{ApiError, Result};
 use crate::local::LocalClient;
 use memvault_auth::jwt::NodeTrust;
 use memvault_auth::{
-    AgentAttestation, AgentRevocation, EnvelopeAuthorship, NodeAttestation, NodeRevocation,
+    AdminGenesis, AgentAttestation, AgentRevocation, EnvelopeAuthorship, NodeAttestation,
+    NodeRevocation,
 };
 use memvault_store::insert::EnvelopeMeta;
 
 const KIND: &str = "sigchain";
+const LABEL_ADMIN_GENESIS: &str = "admin_genesis";
 const LABEL_NODE_ATT: &str = "node_att";
 const LABEL_AGENT_ATT: &str = "agent_att";
 const LABEL_AGENT_REV: &str = "agent_rev";
@@ -61,6 +63,46 @@ fn write_block_with_extra_tags(
         .insert_envelope(&cid_bytes, bytes, &meta)
         .map_err(|e| ApiError::Other(format!("write {label}: {e}")))?;
     Ok(cid_bytes)
+}
+
+/// Persist an `AdminGenesis` block — the cluster's root-of-trust pubkey.
+/// Published once at genesis; sync propagates it to peers so they all
+/// agree on the admin pubkey without having to be told out-of-band.
+pub fn publish_admin_genesis(client: &LocalClient, genesis: &AdminGenesis) -> Result<Vec<u8>> {
+    let bytes = serde_ipld_dagcbor::to_vec(genesis)
+        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    write_block(client, LABEL_ADMIN_GENESIS, &bytes)
+}
+
+/// Load every persisted `AdminGenesis` block scoped to the local cluster,
+/// signature-verified. Cluster-id mismatch and bad-signature entries are
+/// dropped (logged at warn). The caller typically picks the earliest via
+/// [`memvault_auth::pick_earliest_admin_genesis`].
+pub fn scan_admin_genesis(client: &LocalClient) -> Result<Vec<AdminGenesis>> {
+    let cluster_id = client.cluster_id();
+    let mut out = Vec::new();
+    for bytes in load_blocks_by_label(client, LABEL_ADMIN_GENESIS)? {
+        let g: AdminGenesis = match serde_ipld_dagcbor::from_slice(&bytes) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping corrupt admin_genesis block");
+                continue;
+            }
+        };
+        if g.cluster_id.0.as_slice() != cluster_id {
+            tracing::warn!(
+                cluster = %hex::encode(&g.cluster_id.0),
+                "skipping admin_genesis block for foreign cluster"
+            );
+            continue;
+        }
+        if let Err(e) = g.verify_self_signature() {
+            tracing::warn!(error = %e, "skipping admin_genesis with bad self-signature");
+            continue;
+        }
+        out.push(g);
+    }
+    Ok(out)
 }
 
 /// Persist a node `NodeAttestation` so it survives daemon restart and

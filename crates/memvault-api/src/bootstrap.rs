@@ -80,29 +80,82 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
     let cluster_id = memvault_core::ClusterId(cluster_arr);
     let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
 
-    // (Step 2) Self-attestation, gated on whether we hold the admin key.
-    let (admin_pubkey, node_trust_entry) = match client.admin_signing_key().cloned() {
-        Some(admin_sk) => {
-            let admin_pubkey = admin_sk.verifying_key();
-            let mut node_att = NodeAttestation {
-                cluster_id,
-                member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
-                role: Role::AgentHost,
-                not_after_ns: u64::MAX,
-                issued_via: AttestationOrigin::Direct,
-                signature: [0u8; 64],
-            };
-            let bytes = node_att
-                .signing_bytes()
-                .map_err(|e| ApiError::Other(format!("node attestation signing bytes: {e}")))?;
-            node_att.signature = {
-                use ed25519_dalek::Signer;
-                admin_sk.sign(&bytes).to_bytes()
-            };
-            sigchain::publish_node_attestation(client, &node_att)?;
-            (Some(admin_pubkey), NodeTrust::Attested(node_att))
+    // (Step 2a) Source of truth for `admin_pubkey` is the
+    // `pinned_admin_genesis` set on the client by the daemon at startup
+    // (read from `<data_dir>/identity/cluster_admin_genesis.cbor`). The
+    // pin is established TOFU-style: at genesis (we created the
+    // cluster) or at join time (the join token carries the genesis
+    // block, signed by admin, that the join command pins on first
+    // contact). We deliberately do NOT consult the sigchain for trust
+    // bootstrap — a peer accepting an AdminGenesis from sync would let
+    // any block-injecting attacker forge cluster trust.
+    let pinned_admin_genesis = client.pinned_admin_genesis().cloned();
+    let pinned_admin_pubkey = pinned_admin_genesis
+        .as_ref()
+        .and_then(|g| ed25519_dalek::VerifyingKey::from_bytes(&g.admin_pubkey).ok());
+
+    // (Step 2b) If we hold the admin signing key, the pin file must
+    // exist (written at genesis) and must match. Publish a fresh
+    // NodeAttestation; the AdminGenesis block is published once at
+    // genesis (in the `memctl genesis` command) and never re-emitted.
+    let (admin_pubkey, node_trust_entry) = if let Some(admin_sk) = client.admin_signing_key().cloned() {
+        let admin_pubkey = admin_sk.verifying_key();
+
+        // Sanity: pin must agree with the key we hold. If not, either we
+        // were re-genesis'd over a populated data dir, or someone
+        // tampered with the pin — refuse to boot rather than silently
+        // diverge.
+        if let Some(existing) = pinned_admin_pubkey.as_ref() {
+            if existing.to_bytes() != admin_pubkey.to_bytes() {
+                return Err(ApiError::Other(format!(
+                    "local admin signing key disagrees with pinned admin pubkey \
+                     (pinned: {}, local key implies: {}); refusing to bootstrap. \
+                     Either restore the matching admin.key or wipe the data_dir.",
+                    hex::encode(existing.to_bytes()),
+                    hex::encode(admin_pubkey.to_bytes()),
+                )));
+            }
         }
-        None => (None, NodeTrust::PreGenesis),
+        // If the admin's chain doesn't have an AdminGenesis block yet,
+        // publish one (informational; not used for trust bootstrap, but
+        // useful for audit tools that scan the chain). The pin file is
+        // written by `memctl genesis` — bootstrap does no file I/O.
+        if sigchain::scan_admin_genesis(client)?.is_empty() {
+            let genesis = memvault_auth::sign_admin_genesis(
+                &admin_sk,
+                cluster_id.clone(),
+                memvault_core::wall_ns(),
+            )
+            .map_err(|e| ApiError::Other(format!("sign admin_genesis: {e}")))?;
+            sigchain::publish_admin_genesis(client, &genesis)?;
+        }
+
+        let mut node_att = NodeAttestation {
+            cluster_id,
+            member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
+            role: Role::AgentHost,
+            not_after_ns: u64::MAX,
+            issued_via: AttestationOrigin::Direct,
+            signature: [0u8; 64],
+        };
+        let bytes = node_att
+            .signing_bytes()
+            .map_err(|e| ApiError::Other(format!("node attestation signing bytes: {e}")))?;
+        node_att.signature = {
+            use ed25519_dalek::Signer;
+            admin_sk.sign(&bytes).to_bytes()
+        };
+        sigchain::publish_node_attestation(client, &node_att)?;
+        (Some(admin_pubkey), NodeTrust::Attested(node_att))
+    } else if let Some(pinned_pk) = pinned_admin_pubkey {
+        // Peer node: admin pubkey pinned at join time, no local signing
+        // key. Register ourselves as PreGenesis locally — admin attests
+        // us by publishing a NodeAttestation for our pubkey via the
+        // /join/1.0 flow; scan_trusted_nodes picks it up below.
+        (Some(pinned_pk), NodeTrust::PreGenesis)
+    } else {
+        // Truly pre-genesis: no admin key locally, no pinned admin.
+        (None, NodeTrust::PreGenesis)
     };
 
     // (Step 3) Persisted attestations + local overlay.

@@ -268,6 +268,7 @@ pub fn issue_join_token(
     ttl_ns: u64,
     max_uses: u32,
     label: Option<String>,
+    admin_genesis: Option<memvault_auth::AdminGenesis>,
 ) -> Result<(JoinToken, String)> {
     let now_ns = memvault_core::time::wall_ns();
     let mut nonce = [0u8; 16];
@@ -283,6 +284,7 @@ pub fn issue_join_token(
         max_uses,
         nonce,
         label,
+        admin_genesis,
         signature: [0u8; 64], // placeholder
     };
 
@@ -411,6 +413,7 @@ mod tests {
             3600_000_000_000, // 1 hour
             1,
             Some("test-token".to_string()),
+            None,
         )
         .unwrap();
 

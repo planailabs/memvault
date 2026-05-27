@@ -65,9 +65,17 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
         .trust_state()
         .ok_or_else(|| ServerFnError::new("trust state not bootstrapped"))?;
 
+    // Prefer the pinned AdminGenesis (cluster-wide truth) over the local
+    // admin signing key (which is `None` on peer nodes). They must match
+    // when both are set — bootstrap_cluster_trust enforces that.
     let admin_pubkey = client
-        .admin_verifying_key()
-        .map(|k| hex::encode(k.to_bytes()));
+        .pinned_admin_genesis()
+        .map(|g| hex::encode(g.admin_pubkey))
+        .or_else(|| {
+            client
+                .admin_verifying_key()
+                .map(|k| hex::encode(k.to_bytes()))
+        });
     let local_node_pubkey = client.node_verifying_key().map(|k| k.to_bytes());
 
     let node_trust = state

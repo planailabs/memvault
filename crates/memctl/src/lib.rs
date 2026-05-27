@@ -629,6 +629,29 @@ mod native {
                     }
                 }
 
+                // Write the AdminGenesis pin file — this is the cluster's
+                // root of trust for peers. Self-signed; the matching
+                // signing key just got persisted above.
+                let admin_key_bytes = std::fs::read(&admin_key_path)?;
+                if admin_key_bytes.len() >= 32 {
+                    let mut seed = [0u8; 32];
+                    seed.copy_from_slice(&admin_key_bytes[..32]);
+                    let admin_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    let genesis = memvault_auth::sign_admin_genesis(
+                        &admin_sk,
+                        cluster_id.clone(),
+                        now_ns,
+                    )?;
+                    let pin_path = data_dir
+                        .join("identity")
+                        .join("cluster_admin_genesis.cbor");
+                    std::fs::write(&pin_path, serde_ipld_dagcbor::to_vec(&genesis)?)?;
+                }
+
                 // Optionally bind an existing bucket to the cluster.
                 if let Some(ref bucket_hex) = bucket {
                     let bucket_bytes = hex::decode(bucket_hex)?;
@@ -1463,13 +1486,44 @@ mod native {
                 }
             }
             Commands::ClusterJoin {
-                cluster_id: cluster_hex,
+                cluster_id: cluster_or_token,
             } => {
-                let cluster_bytes = hex::decode(&cluster_hex)?;
-                let cluster_arr: [u8; 32] = cluster_bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("cluster_id must be 32 bytes"))?;
-                let cluster_id = ClusterId(cluster_arr);
+                // Accept either a raw cluster_id hex (legacy/dev, no
+                // admin pin) or a join token (`mvjoin1:…`) carrying the
+                // AdminGenesis block to pin. Auto-detect by prefix.
+                let (cluster_id, admin_genesis): (
+                    ClusterId,
+                    Option<memvault_auth::AdminGenesis>,
+                ) = if cluster_or_token.starts_with("mvjoin1:") {
+                    let token = memvault_auth::decode_token_string(&cluster_or_token)
+                        .map_err(|e| anyhow::anyhow!("decode token: {e}"))?;
+                    let genesis = token.admin_genesis.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "join token has no AdminGenesis — \
+                             admin must reissue with the upgraded memctl"
+                        )
+                    })?;
+                    // Verify the genesis self-signature and confirm the
+                    // token's cluster_id binds the same admin.
+                    genesis
+                        .verify_self_signature()
+                        .map_err(|e| anyhow::anyhow!("admin_genesis signature: {e}"))?;
+                    if genesis.cluster_id.0 != token.cluster_id.0 {
+                        anyhow::bail!(
+                            "join token cluster_id {} does not match its admin_genesis cluster_id {}",
+                            hex::encode(token.cluster_id.0),
+                            hex::encode(genesis.cluster_id.0)
+                        );
+                    }
+                    (token.cluster_id.clone(), Some(genesis))
+                } else {
+                    let cluster_bytes = hex::decode(&cluster_or_token)?;
+                    let cluster_arr: [u8; 32] = cluster_bytes
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("cluster_id must be 32 bytes"))?;
+                    (ClusterId(cluster_arr), None)
+                };
+                let cluster_hex = hex::encode(cluster_id.0);
 
                 let store = make_store()?;
 
@@ -1487,22 +1541,28 @@ mod native {
                     println!("Rebound {rebound} existing bucket(s) to cluster.");
                 }
 
-                // Generate admin key if missing (so this node can issue tokens)
-                let admin_key_path = data_dir.join("identity").join("admin.key");
-                if !admin_key_path.exists() {
-                    std::fs::create_dir_all(admin_key_path.parent().unwrap())?;
-                    let mut seed = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
-                    std::fs::write(&admin_key_path, &seed)?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
-                            &admin_key_path,
-                            std::fs::Permissions::from_mode(0o600),
-                        );
-                    }
+                // Pin the admin from the join token if provided. Without
+                // this the joining node has no trust root.
+                if let Some(genesis) = admin_genesis {
+                    std::fs::create_dir_all(data_dir.join("identity"))?;
+                    let pin_path = data_dir
+                        .join("identity")
+                        .join("cluster_admin_genesis.cbor");
+                    std::fs::write(&pin_path, serde_ipld_dagcbor::to_vec(&genesis)?)?;
+                    println!(
+                        "  Admin pinned:  {}",
+                        hex::encode(genesis.admin_pubkey)
+                    );
+                } else {
+                    println!(
+                        "  Note: joined via raw cluster_id (no admin pin). \
+                         This node will run as pre-genesis until a token-based \
+                         re-join provides the AdminGenesis."
+                    );
                 }
+
+                // NOTE: do NOT mint a local admin.key here. Peers are
+                // not admins.
 
                 println!("Joined cluster {cluster_hex}");
                 println!("  Data dir:  {}", data_dir.display());

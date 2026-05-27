@@ -108,6 +108,13 @@ pub struct LocalClient {
     /// (tests, headless tooling); when `None`, `verify_envelope_authorship`
     /// reports `NoSidecar` for everything (fail-open).
     trust_state: std::sync::OnceLock<crate::sigchain::LiveTrustState>,
+    /// Cluster admin pubkey of record. Pinned out-of-band: written by
+    /// `memctl genesis` (for the admin) or by `memctl cluster-join`
+    /// (for peers, extracted from the join token). The daemon loads
+    /// the file `<data_dir>/identity/cluster_admin_genesis.cbor` at
+    /// startup and installs it here. `None` for legacy data dirs that
+    /// pre-date the pin file.
+    pinned_admin_genesis: std::sync::OnceLock<memvault_auth::AdminGenesis>,
     /// Optional admin signing key for token issuance and agent enrollment.
     /// `OnceLock` allows write-once initialisation through a shared `Arc`.
     admin_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
@@ -139,6 +146,7 @@ impl LocalClient {
             admin_signing_key: std::sync::OnceLock::new(),
             node_signing_key: std::sync::OnceLock::new(),
             trust_state: std::sync::OnceLock::new(),
+            pinned_admin_genesis: std::sync::OnceLock::new(),
             agent_identity: None,
             start_time: std::time::Instant::now(),
         };
@@ -192,6 +200,20 @@ impl LocalClient {
     /// (tests, headless tooling).
     pub fn trust_state(&self) -> Option<&crate::sigchain::LiveTrustState> {
         self.trust_state.get()
+    }
+
+    /// Install the cluster's pinned `AdminGenesis`. Write-once. Daemons
+    /// call this at startup after reading
+    /// `<data_dir>/identity/cluster_admin_genesis.cbor`.
+    pub fn set_pinned_admin_genesis(&self, genesis: memvault_auth::AdminGenesis) {
+        let _ = self.pinned_admin_genesis.set(genesis);
+    }
+
+    /// Borrow the pinned `AdminGenesis` — the cluster's root of trust.
+    /// `None` when no pin has been installed (truly pre-genesis, or
+    /// legacy data dir).
+    pub fn pinned_admin_genesis(&self) -> Option<&memvault_auth::AdminGenesis> {
+        self.pinned_admin_genesis.get()
     }
 
     /// Verify an envelope's authorship sidecar against the currently-trusted
@@ -2147,6 +2169,7 @@ impl MemvaultClient for LocalClient {
             ttl_secs,
             max_uses,
             label,
+            self.pinned_admin_genesis().cloned(),
             &self.store,
         )
     }

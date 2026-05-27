@@ -1,3 +1,4 @@
+pub mod admin_genesis;
 pub mod agent_attestation;
 pub mod agent_revocation;
 pub mod envelope_authorship;
@@ -15,6 +16,7 @@ pub mod token;
 pub mod trust;
 pub mod verifier;
 
+pub use admin_genesis::{AdminGenesis, pick_earliest as pick_earliest_admin_genesis, sign_admin_genesis};
 pub use agent_attestation::{AgentAttestation, sign_agent_attestation};
 pub use agent_revocation::{
     AgentRevocation, NodeRevocation, sign_agent_revocation, sign_node_revocation,
