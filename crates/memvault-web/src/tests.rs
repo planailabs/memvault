@@ -441,6 +441,8 @@ fn make_app() -> axum::Router {
         event_bus: Arc::new(EventBus::new(16)),
         admin_pubkey: Some(test_admin_pubkey()),
         node_trust: test_node_trust(),
+        revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+        revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     build_router(state)
@@ -484,6 +486,8 @@ async fn test_create_and_list_docs() {
         event_bus: Arc::new(EventBus::new(16)),
         admin_pubkey: Some(test_admin_pubkey()),
         node_trust: test_node_trust(),
+        revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+        revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
@@ -540,6 +544,8 @@ async fn test_get_doc() {
         event_bus: Arc::new(EventBus::new(16)),
         admin_pubkey: Some(test_admin_pubkey()),
         node_trust: test_node_trust(),
+        revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+        revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);

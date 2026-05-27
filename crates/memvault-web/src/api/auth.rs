@@ -85,10 +85,40 @@ async fn verify_bearer(
     let token = header
         .strip_prefix("Bearer ")
         .ok_or_else(|| AuthRejection("expected Bearer scheme".into()))?;
-    memvault_auth::jwt::verify(token, state.admin_pubkey.as_ref(), |node_pk| {
+    let claims = memvault_auth::jwt::verify(token, state.admin_pubkey.as_ref(), |node_pk| {
+        // Filter revoked nodes: act as if they're not in the trust table.
+        if state
+            .revoked_nodes
+            .read()
+            .map(|s| s.contains(node_pk))
+            .unwrap_or(false)
+        {
+            return None;
+        }
         state.node_trust.get(node_pk).cloned()
     })
-    .map_err(|e| AuthRejection(format!("token: {e}")))
+    .map_err(|e| AuthRejection(format!("token: {e}")))?;
+
+    // Revocation check — fails even if JWT signature + exp pass. The agent
+    // pubkey is the `sub` claim (hex of the 32-byte ed25519 pubkey).
+    let mut sub_bytes = [0u8; 32];
+    let decoded = hex::decode(&claims.sub).map_err(|e| AuthRejection(format!("sub hex: {e}")))?;
+    if decoded.len() != 32 {
+        return Err(AuthRejection("sub is not 32 bytes".into()));
+    }
+    sub_bytes.copy_from_slice(&decoded);
+    if state
+        .revoked_agents
+        .read()
+        .map(|s| s.contains(&sub_bytes))
+        .unwrap_or(false)
+    {
+        return Err(AuthRejection(format!(
+            "agent {} has been revoked",
+            claims.sub
+        )));
+    }
+    Ok(claims)
 }
 
 impl FromRequestParts<Arc<AppState>> for RequireAuth {

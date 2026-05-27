@@ -52,6 +52,8 @@ fn main() {
                         event_bus: Arc::new(memvault_api::EventBus::new(64)),
                         admin_pubkey: auth.admin_pubkey,
                         node_trust: auth.node_trust,
+                        revoked_agents: auth.revoked_agents,
+                        revoked_nodes: auth.revoked_nodes,
                         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                     });
                     router = axum::Router::new()

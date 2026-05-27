@@ -1,4 +1,5 @@
 pub mod agent_attestation;
+pub mod agent_revocation;
 pub mod attestation;
 pub mod enrollment;
 pub mod error;
@@ -14,6 +15,9 @@ pub mod trust;
 pub mod verifier;
 
 pub use agent_attestation::{AgentAttestation, sign_agent_attestation};
+pub use agent_revocation::{
+    AgentRevocation, NodeRevocation, sign_agent_revocation, sign_node_revocation,
+};
 pub use attestation::{AttestationOrigin, MembershipAttestation};
 pub use enrollment::AgentEnrollment;
 pub use error::{AuthError, Result};

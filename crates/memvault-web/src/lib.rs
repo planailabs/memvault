@@ -54,6 +54,16 @@ mod server_router {
         /// Trusted-node lookup table keyed by node pubkey.
         pub node_trust:
             std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
+        /// Revoked agent pubkeys. Populated from
+        /// [`memvault_auth::AgentRevocation`] blocks in the sig-chain (phase 5
+        /// sync) and on local revoke calls. JWTs from any of these agents
+        /// are rejected unconditionally.
+        pub revoked_agents: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        /// Revoked node pubkeys. Populated from
+        /// [`memvault_auth::NodeRevocation`] blocks. When a node is revoked,
+        /// the JWT verifier's lookup table filters it out — transitively
+        /// invalidating every agent that node attested.
+        pub revoked_nodes: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
         /// Operational metrics.
         pub metrics: Arc<memvault_api::metrics::Metrics>,
     }
@@ -101,6 +111,11 @@ mod server_router {
         /// `NodeTrust::Attested(_)` post-genesis, `NodeTrust::PreGenesis`
         /// before.
         pub node_trust: std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
+        /// Initial agent revocation set — empty at bootstrap; populated by
+        /// sync (phase 5) and any local `revoke_agent` calls thereafter.
+        pub revoked_agents: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        /// Initial node revocation set — empty at bootstrap.
+        pub revoked_nodes: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
     }
 
     /// Bootstrap per-agent web auth.
@@ -189,6 +204,8 @@ mod server_router {
         Ok(WebAuthBootstrap {
             admin_pubkey,
             node_trust,
+            revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+            revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         })
     }
 
