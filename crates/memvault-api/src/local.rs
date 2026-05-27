@@ -18,6 +18,43 @@ use crate::error::{ApiError, Result};
 use crate::subscription::{EventBus, MemvaultEvent};
 use crate::types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
 
+/// Generate sync + async variants of a method from a single body.
+/// The body uses helper macros that the outer macro defines differently:
+/// - `idx_read!()` → RwLock read guard
+/// - `idx_write!()` → RwLock write guard
+/// - `get_doc!(id)` → get_doc call
+/// - `get_entity!(id)` → get_entity call
+macro_rules! dual_impl {
+    (
+        $(#[$meta:meta])*
+        ($sync_name:ident, $async_name:ident)
+        fn(&$self:ident $(, $pname:ident : $pty:ty)*) -> $ret:ty
+        $body:block
+    ) => {
+        $(#[$meta])*
+        #[allow(unused_macros)]
+        pub fn $sync_name(&$self $(, $pname: $pty)*) -> $ret {
+            macro_rules! idx_read  { () => { $self.index.try_read().map_err(
+                |_| crate::error::ApiError::Other("index lock".into()))? }; }
+            macro_rules! idx_write { () => { $self.index.try_write().map_err(
+                |_| crate::error::ApiError::Other("index lock".into()))? }; }
+            macro_rules! get_doc    { ($id:expr) => { $self.get_doc_sync($id) }; }
+            macro_rules! get_entity { ($id:expr) => { $self.get_entity_sync($id) }; }
+            $body
+        }
+
+        $(#[$meta])*
+        #[allow(unused_macros)]
+        pub async fn $async_name(&$self $(, $pname: $pty)*) -> $ret {
+            macro_rules! idx_read  { () => { $self.index.read().await }; }
+            macro_rules! idx_write { () => { $self.index.write().await }; }
+            macro_rules! get_doc    { ($id:expr) => { $self.get_doc_async($id).await }; }
+            macro_rules! get_entity { ($id:expr) => { $self.get_entity_async($id).await }; }
+            $body
+        }
+    };
+}
+
 /// Extract the target node's tag label from an EdgeAdd op.
 /// Extract text from file content, catching panics from buggy extractors (e.g. pdf-extract).
 /// Result of text extraction — either the text or an error message to cache.
@@ -327,322 +364,239 @@ impl LocalClient {
         Ok(counts)
     }
 
-    /// Populate the in-memory TextIndex from the blockstore.
-    /// Sync version of populate_index for use during rebuild.
-    /// Uses try_read/try_write on the RwLock (safe at startup, no contention).
-    pub fn populate_index_sync(&self) -> Result<(usize, usize, usize)> {
-        tracing::info!("populating text index from blockstore (sync)...");
-        let mut doc_count = 0usize;
-        let mut entity_count = 0usize;
-        let mut attachment_count = 0usize;
+    // ── dual_impl! generated method pairs ────────────────────────────
 
-        let doc_labels = self.store.query_unique_labels("doc", usize::MAX)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for label in &doc_labels {
-            let id_bytes = hex::decode(label).unwrap_or_default();
-            if id_bytes.len() != 32 { continue; }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
-            let doc_id = DocId(arr);
-            if self.inferred_doc_bucket(&doc_id).is_none() { continue; }
-            if let Some(doc) = self.get_doc_sync(&doc_id)? {
-                let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
-                let creation_tags = self.extract_creation_tags("doc", label);
-                if let Ok(mut idx) = self.index.try_write() {
+    dual_impl! {
+        /// Reconstruct a document from the blockstore.
+        (get_doc_sync, get_doc_async)
+        fn(&self, id: &DocId) -> Result<Option<Document>>
+        {
+            let node_id = format!("doc:{}", hex::encode(id.0));
+            {
+                let idx = idx_read!();
+                if idx.is_retracted(&node_id) {
+                    return Ok(None);
+                }
+            }
+            let (_, label) = Self::doc_tag(id);
+            let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX)?;
+            if cids.is_empty() {
+                return Ok(None);
+            }
+            let mut ops = Vec::new();
+            for cid in &cids {
+                if let Some(data) = self.store.get_block(cid)? {
+                    if let Some(val) = memvault_store::deserialize_block(&data) {
+                        if let Some(payload) = val.get("payload") {
+                            if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
+                                ops.push(op);
+                            }
+                        }
+                    }
+                }
+            }
+            if ops.is_empty() {
+                return Ok(None);
+            }
+            let doc = memvault_doc::apply_doc_ops(&ops)?;
+            Ok(Some(doc))
+        }
+    }
+
+    dual_impl! {
+        /// Reconstruct an entity from the blockstore.
+        (get_entity_sync, get_entity_async)
+        fn(&self, id: &EntityId) -> Result<Option<Entity>>
+        {
+            let node_id = format!("entity:{}", hex::encode(id.0));
+            {
+                let idx = idx_read!();
+                if idx.is_retracted(&node_id) {
+                    return Ok(None);
+                }
+            }
+            let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+            let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;
+            if cids.is_empty() {
+                return Ok(None);
+            }
+            let mut ops = Vec::new();
+            for cid in &cids {
+                if let Some(data) = self.store.get_block(cid)? {
+                    if let Some(val) = memvault_store::deserialize_block(&data) {
+                        if let Some(payload) = val.get("payload") {
+                            if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
+                                ops.push(op);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(memvault_doc::apply_graph_ops(&ops)
+                .ok()
+                .and_then(|gs| gs.entities.into_values().next()))
+        }
+    }
+
+    dual_impl! {
+        /// Populate the in-memory TextIndex from the blockstore.
+        (populate_index_sync, populate_index)
+        fn(&self) -> Result<(usize, usize, usize)>
+        {
+            tracing::info!("populating text index from blockstore...");
+            let mut doc_count = 0usize;
+            let mut entity_count = 0usize;
+            let mut attachment_count = 0usize;
+
+            // Index documents
+            let doc_labels = self
+                .store
+                .query_unique_labels("doc", usize::MAX)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            for label in &doc_labels {
+                let id_bytes = hex::decode(label).unwrap_or_default();
+                if id_bytes.len() != 32 {
+                    continue;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&id_bytes);
+                let doc_id = DocId(arr);
+                // Skip docs without a bucket — they are unbucketed foreign data.
+                if self.inferred_doc_bucket(&doc_id).is_none() {
+                    continue;
+                }
+                if let Ok(Some(doc)) = get_doc!(&doc_id) {
+                    let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
+                    // Recover creation-time tags from the envelope metadata.
+                    let creation_tags = self.extract_creation_tags("doc", label);
+                    let mut idx = idx_write!();
                     idx.index_doc(doc_id, &doc.body, title, creation_tags);
                     doc_count += 1;
                 }
             }
-        }
 
-        let entity_labels = self.store.query_unique_labels("entity", usize::MAX)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for label in &entity_labels {
-            let id_bytes = hex::decode(label).unwrap_or_default();
-            if id_bytes.len() != 32 { continue; }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
-            let eid = EntityId(arr);
-            if self.inferred_entity_bucket(&eid).is_none() { continue; }
-            if let Some(entity) = self.get_entity_sync(&eid)? {
-                let creation_tags = self.extract_creation_tags("entity", label);
-                if let Ok(mut idx) = self.index.try_write() {
+            // Index entities
+            let entity_labels = self
+                .store
+                .query_unique_labels("entity", usize::MAX)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            for label in &entity_labels {
+                let id_bytes = hex::decode(label).unwrap_or_default();
+                if id_bytes.len() != 32 {
+                    continue;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&id_bytes);
+                let eid = EntityId(arr);
+                // Skip entities without a bucket — they are unbucketed foreign data.
+                if self.inferred_entity_bucket(&eid).is_none() {
+                    continue;
+                }
+                if let Ok(Some(entity)) = get_entity!(&eid) {
+                    let creation_tags = self.extract_creation_tags("entity", label);
+                    let mut idx = idx_write!();
                     idx.index_entity(&eid, &entity.kind, &entity.props, creation_tags);
                     entity_count += 1;
                 }
             }
-        }
 
-        let blocks = self.store.iter_blocks()
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for (_, data) in &blocks {
-            if let Some(val) = memvault_store::deserialize_block(data) {
-                if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
-                    if val.get("bucket_id").and_then(|v| v.as_array()).is_none() { continue; }
-                    let manifest_cid = val.get("manifest_cid")
-                        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
-                    let filename = val.get("filename").and_then(|v| v.as_str());
-                    let mime_type = val.get("mime_type").and_then(|v| v.as_str())
-                        .unwrap_or("application/octet-stream");
-                    if let Some(mcid) = manifest_cid {
-                        let text = self.load_cached_extraction(&mcid)
-                            .and_then(|r| match r {
-                                ExtractionResult::Ok(t) => Some(t),
-                                _ => None,
-                            });
-                        let att_tags: Vec<(String, String)> = val.get("tags")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
-                        if let Ok(mut idx) = self.index.try_write() {
+            // Index attachments
+            let blocks = self
+                .store
+                .iter_blocks()
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            for (_, data) in &blocks {
+                if let Some(val) = memvault_store::deserialize_block(data) {
+                    if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                        // Skip attachments without a bucket.
+                        if val.get("bucket_id").and_then(|v| v.as_array()).is_none() {
+                            continue;
+                        }
+                        let manifest_cid = val
+                            .get("manifest_cid")
+                            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+                        let filename = val.get("filename").and_then(|v| v.as_str());
+                        let mime_type = val
+                            .get("mime_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("application/octet-stream");
+                        if let Some(mcid) = manifest_cid {
+                            // Only use cached extraction during index rebuild.
+                            let text = self.load_cached_extraction(&mcid)
+                                .and_then(|r| match r {
+                                    ExtractionResult::Ok(t) => Some(t),
+                                    _ => None,
+                                });
+                            let att_tags: Vec<(String, String)> = val
+                                .get("tags")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                .unwrap_or_default();
+                            let mut idx = idx_write!();
                             idx.index_attachment(&mcid, filename, mime_type, text.as_deref(), att_tags);
                             attachment_count += 1;
                         }
                     }
                 }
             }
-        }
 
-        // Replay tag updates and retractions (sync)
-        for (_, data) in &blocks {
-            if let Some(val) = memvault_store::deserialize_block(data) {
-                if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
-                    if let Some(ann_type) = val.get("type").and_then(|v| v.as_str()) {
-                        if ann_type == "tag_update" {
-                            if let Some(target) = val.get("target").and_then(|v| v.as_str()) {
-                                if let Some(data_field) = val.get("data") {
-                                    let add: Vec<(String, String)> = data_field.get("add")
+            // Replay tag updates and retractions
+            for (_, data) in &blocks {
+                if let Some(val) = memvault_store::deserialize_block(data) {
+                    let kind = val.get("kind").and_then(|v| v.as_str());
+
+                    // Unified annotation format
+                    if kind == Some("annotation") {
+                        let target = val.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                        let ann_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let ann_data = val.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        if !target.is_empty() {
+                            let mut idx = idx_write!();
+                            match ann_type {
+                                "tag_update" => {
+                                    let add: Vec<(String, String)> = ann_data
+                                        .get("add")
                                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                                         .unwrap_or_default();
-                                    let remove: Vec<(String, String)> = data_field.get("remove")
+                                    let remove: Vec<(String, String)> = ann_data
+                                        .get("remove")
                                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                                         .unwrap_or_default();
-                                    if let Ok(mut idx) = self.index.try_write() {
-                                        idx.apply_tag_update(target, &add, &remove);
-                                    }
+                                    idx.apply_tag_update(target, &add, &remove);
                                 }
-                            }
-                        } else if ann_type == "retraction" {
-                            if let Some(target) = val.get("target").and_then(|v| v.as_str()) {
-                                if let Ok(mut idx) = self.index.try_write() {
+                                "retraction" => {
                                     idx.retract_node(target);
                                 }
+                                _ => {} // extraction annotations handled during attachment indexing
                             }
                         }
                     }
-                }
-            }
-        }
-
-        Ok((doc_count, entity_count, attachment_count))
-    }
-
-    /// Sync doc reconstruction from store (no async RwLock).
-    fn get_doc_sync(&self, id: &DocId) -> Result<Option<Document>> {
-        let node_id = format!("doc:{}", hex::encode(id.0));
-        if let Ok(idx) = self.index.try_read() {
-            if idx.is_retracted(&node_id) { return Ok(None); }
-        }
-        let (_, label) = Self::doc_tag(id);
-        let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX)?;
-        if cids.is_empty() { return Ok(None); }
-        let mut ops = Vec::new();
-        for cid in &cids {
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
-                            ops.push(op);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(memvault_doc::apply_doc_ops(&ops).ok())
-    }
-
-    /// Sync entity reconstruction from store (no async RwLock).
-    fn get_entity_sync(&self, id: &EntityId) -> Result<Option<memvault_doc::Entity>> {
-        let node_id = format!("entity:{}", hex::encode(id.0));
-        if let Ok(idx) = self.index.try_read() {
-            if idx.is_retracted(&node_id) { return Ok(None); }
-        }
-        let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
-        let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;
-        if cids.is_empty() { return Ok(None); }
-        let mut ops = Vec::new();
-        for cid in &cids {
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
-                            ops.push(op);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(memvault_doc::apply_graph_ops(&ops)
-            .ok()
-            .and_then(|gs| gs.entities.into_values().next()))
-    }
-
-    pub async fn populate_index(&self) -> Result<(usize, usize, usize)> {
-        tracing::info!("populating text index from blockstore...");
-        let mut doc_count = 0usize;
-        let mut entity_count = 0usize;
-        let mut attachment_count = 0usize;
-
-        // Index documents
-        let doc_labels = self
-            .store
-            .query_unique_labels("doc", usize::MAX)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for label in &doc_labels {
-            let id_bytes = hex::decode(label).unwrap_or_default();
-            if id_bytes.len() != 32 {
-                continue;
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
-            let doc_id = DocId(arr);
-            // Skip docs without a bucket — they are unbucketed foreign data.
-            if self.inferred_doc_bucket(&doc_id).is_none() {
-                continue;
-            }
-            if let Ok(Some(doc)) = self.get_doc(&doc_id).await {
-                let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
-                // Recover creation-time tags from the envelope metadata.
-                let creation_tags = self.extract_creation_tags("doc", label);
-                let mut idx = self.index.write().await;
-                idx.index_doc(doc_id, &doc.body, title, creation_tags);
-                doc_count += 1;
-            }
-        }
-
-        // Index entities
-        let entity_labels = self
-            .store
-            .query_unique_labels("entity", usize::MAX)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for label in &entity_labels {
-            let id_bytes = hex::decode(label).unwrap_or_default();
-            if id_bytes.len() != 32 {
-                continue;
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
-            let eid = EntityId(arr);
-            // Skip entities without a bucket — they are unbucketed foreign data.
-            if self.inferred_entity_bucket(&eid).is_none() {
-                continue;
-            }
-            if let Ok(Some(entity)) = self.get_entity(&eid).await {
-                let creation_tags = self.extract_creation_tags("entity", label);
-                let mut idx = self.index.write().await;
-                idx.index_entity(&eid, &entity.kind, &entity.props, creation_tags);
-                entity_count += 1;
-            }
-        }
-
-        // Index attachments
-        let blocks = self
-            .store
-            .iter_blocks()
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        for (_, data) in &blocks {
-            if let Some(val) = memvault_store::deserialize_block(data) {
-                if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
-                    // Skip attachments without a bucket.
-                    if val.get("bucket_id").and_then(|v| v.as_array()).is_none() {
-                        continue;
-                    }
-                    let manifest_cid = val
-                        .get("manifest_cid")
-                        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
-                    let filename = val.get("filename").and_then(|v| v.as_str());
-                    let mime_type = val
-                        .get("mime_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("application/octet-stream");
-                    if let Some(mcid) = manifest_cid {
-                        // Only use cached extraction during index rebuild.
-                        // Fresh extraction (which creates annotation blocks)
-                        // happens on interactive access, not here — avoids
-                        // per-node annotation divergence during rebuild.
-                        let text = self.load_cached_extraction(&mcid)
-                            .and_then(|r| match r {
-                                ExtractionResult::Ok(t) => Some(t),
-                                _ => None,
-                            });
-                        let att_tags: Vec<(String, String)> = val
-                            .get("tags")
+                    // Legacy formats (backward compat)
+                    else if kind == Some("tag_update") {
+                        let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let add: Vec<(String, String)> = val
+                            .get("add")
                             .and_then(|v| serde_json::from_value(v.clone()).ok())
                             .unwrap_or_default();
-                        let mut idx = self.index.write().await;
-                        idx.index_attachment(&mcid, filename, mime_type, text.as_deref(), att_tags);
-                        attachment_count += 1;
-                    }
-                }
-            }
-        }
-
-        // Replay tag updates and retractions
-        for (_, data) in &blocks {
-            if let Some(val) = memvault_store::deserialize_block(data) {
-                let kind = val.get("kind").and_then(|v| v.as_str());
-
-                // Unified annotation format
-                if kind == Some("annotation") {
-                    let target = val.get("target").and_then(|v| v.as_str()).unwrap_or("");
-                    let ann_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    let ann_data = val.get("data").cloned().unwrap_or(serde_json::Value::Null);
-                    if !target.is_empty() {
-                        let mut idx = self.index.write().await;
-                        match ann_type {
-                            "tag_update" => {
-                                let add: Vec<(String, String)> = ann_data
-                                    .get("add")
-                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                    .unwrap_or_default();
-                                let remove: Vec<(String, String)> = ann_data
-                                    .get("remove")
-                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                    .unwrap_or_default();
-                                idx.apply_tag_update(target, &add, &remove);
-                            }
-                            "retraction" => {
-                                idx.retract_node(target);
-                            }
-                            _ => {} // extraction annotations handled during attachment indexing
+                        let remove: Vec<(String, String)> = val
+                            .get("remove")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        if !node_id.is_empty() {
+                            let mut idx = idx_write!();
+                            idx.apply_tag_update(node_id, &add, &remove);
+                        }
+                    } else if kind == Some("node_retraction") {
+                        let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if !node_id.is_empty() {
+                            let mut idx = idx_write!();
+                            idx.retract_node(node_id);
                         }
                     }
                 }
-                // Legacy formats (backward compat)
-                else if kind == Some("tag_update") {
-                    let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let add: Vec<(String, String)> = val
-                        .get("add")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let remove: Vec<(String, String)> = val
-                        .get("remove")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    if !node_id.is_empty() {
-                        let mut idx = self.index.write().await;
-                        idx.apply_tag_update(node_id, &add, &remove);
-                    }
-                } else if kind == Some("node_retraction") {
-                    let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if !node_id.is_empty() {
-                        let mut idx = self.index.write().await;
-                        idx.retract_node(node_id);
-                    }
-                }
             }
-        }
 
-        Ok((doc_count, entity_count, attachment_count))
+            Ok((doc_count, entity_count, attachment_count))
+        }
     }
 
     /// Save the current TextIndex to a cache file.
@@ -1303,43 +1257,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn get_doc(&self, id: &DocId) -> Result<Option<Document>> {
-        // Check retraction in the index.
-        let node_id = format!("doc:{}", hex::encode(id.0));
-        {
-            let idx = self.index.read().await;
-            if idx.is_retracted(&node_id) {
-                return Ok(None);
-            }
-        }
-
-        let (_, label) = Self::doc_tag(id);
-        let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX)?;
-
-        if cids.is_empty() {
-            return Ok(None);
-        }
-
-        // Collect all ops for this doc
-        let mut ops = Vec::new();
-        for cid in &cids {
-            if let Some(data) = self.store.get_block(cid)? {
-                // The block stores the envelope JSON; extract the payload op
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
-                            ops.push(op);
-                        }
-                    }
-                }
-            }
-        }
-
-        if ops.is_empty() {
-            return Ok(None);
-        }
-
-        let doc = memvault_doc::apply_doc_ops(&ops)?;
-        Ok(Some(doc))
+        self.get_doc_async(id).await
     }
 
     async fn edit_doc(&self, id: &DocId, patch: TextPatch) -> Result<Vec<u8>> {
@@ -1691,36 +1609,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>> {
-        let node_id = format!("entity:{}", hex::encode(id.0));
-        {
-            let idx = self.index.read().await;
-            if idx.is_retracted(&node_id) {
-                return Ok(None);
-            }
-        }
-
-        let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
-        let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;
-
-        if cids.is_empty() {
-            return Ok(None);
-        }
-
-        let mut ops = Vec::new();
-        for cid in &cids {
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
-                            ops.push(op);
-                        }
-                    }
-                }
-            }
-        }
-
-        let state = memvault_doc::apply_graph_ops(&ops)?;
-        Ok(state.entities.get(id).cloned())
+        self.get_entity_async(id).await
     }
 
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>> {
