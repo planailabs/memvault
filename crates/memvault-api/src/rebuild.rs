@@ -95,82 +95,35 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             .unwrap_or(false)
     });
 
-    let det_id = deterministic_legacy_id(client);
-    let existing_legacy = client.legacy_bucket_id();
-    let legacy_bucket = if has_unbucketed || existing_legacy.is_some() {
-        if existing_legacy.as_ref() != Some(&det_id) {
-            if store.get_bucket(&det_id.0).ok().flatten().is_none() {
-                client.create_bucket_with_id(
-                    det_id.clone(),
-                    "legacy",
-                    Some("auto-created for adoption of pre-bucket data"),
-                    memvault_core::Visibility::Internal,
-                    memvault_core::classification::Classification::Internal,
-                    memvault_doc::BucketRole::Legacy,
-                )?;
-                tracing::info!(bucket = %det_id, "created deterministic legacy bucket");
+    // Use existing legacy bucket if any, otherwise create the deterministic one.
+    // No stale detection — once created, the legacy bucket is kept forever.
+    let legacy_bucket = if has_unbucketed {
+        Some(match client.legacy_bucket_id() {
+            Some(b) => b,
+            None => {
+                let det_id = deterministic_legacy_id(client);
+                if store.get_bucket(&det_id.0).ok().flatten().is_none() {
+                    client.create_bucket_with_id(
+                        det_id.clone(),
+                        "legacy",
+                        Some("auto-created for adoption of pre-bucket data"),
+                        memvault_core::Visibility::Internal,
+                        memvault_core::classification::Classification::Internal,
+                        memvault_doc::BucketRole::Legacy,
+                    )?;
+                    tracing::info!(bucket = %det_id, "created legacy bucket");
+                }
+                det_id
             }
-        }
-        Some(det_id.clone())
+        })
     } else {
-        None
+        client.legacy_bucket_id()
     };
 
-    let mut to_rewrite: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new(); // (cid, data, wall_ns)
-
-    // Find and remove old non-deterministic legacy buckets.  Any bucket
-    // with BucketRole::Legacy whose ID doesn't match the deterministic one
-    // is a leftover from a prior rebuild — delete its BucketDecl block and
-    // force rewrite of all envelopes that reference it.
-    let det_legacy_bytes: Option<Vec<u8>> = legacy_bucket.as_ref().map(|b| b.0.to_vec());
-    let mut stale_legacy_ids: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-    {
-        let buckets = store.list_buckets().unwrap_or_default();
-        for (bucket_id, decl_cid) in &buckets {
-            if let Ok(Some(block)) = store.get_block(decl_cid) {
-                if let Some(decl) = crate::local::LocalClient::parse_bucket_decl_static(&block) {
-                    if decl.role == memvault_doc::BucketRole::Legacy {
-                        if det_legacy_bytes.as_ref() != Some(bucket_id) {
-                            stale_legacy_ids.insert(bucket_id.clone());
-                            let _ = store.delete_block(decl_cid);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let mut to_rewrite: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new();
 
     for (cid, data) in &all_blocks {
-        let mut verdict = classify_block(cid, data);
-
-        // Drop ALL legacy BucketCreate blocks — the deterministic one
-        // will be re-created fresh with cluster_id as author.
-        if matches!(verdict, Verdict::Keep) {
-            if let Some(val) = memvault_store::deserialize_block(data) {
-                if let Some(bc) = val.get("payload").and_then(|p| p.get("BucketCreate")) {
-                    if bc.get("role").and_then(|v| v.as_str()) == Some("legacy") {
-                        verdict = Verdict::Drop;
-                    }
-                }
-            }
-        }
-
-        // Drop or rewrite blocks referencing a stale legacy bucket.
-        if matches!(verdict, Verdict::Keep) && !stale_legacy_ids.is_empty() {
-            if let Some(val) = memvault_store::deserialize_block(data) {
-                if let Some(bid) = val.get("bucket_id").and_then(|v| v.as_array()) {
-                    let bytes: Vec<u8> = bid.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect();
-                    if stale_legacy_ids.contains(&bytes) {
-                        // BucketCreate for a stale bucket → drop entirely.
-                        let is_bucket_create = val.get("payload")
-                            .and_then(|p| p.get("BucketCreate"))
-                            .is_some();
-                        verdict = if is_bucket_create { Verdict::Drop } else { Verdict::Rewrite };
-                    }
-                }
-            }
-        }
-
+        let verdict = classify_block(cid, data);
         match verdict {
             Verdict::Keep => {
                 report.cid_ok += 1;
