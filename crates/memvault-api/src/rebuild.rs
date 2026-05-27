@@ -19,6 +19,28 @@ use memvault_core::{BucketId, EntityId};
 
 pub use memvault_core::BLOCKSTORE_VERSION;
 
+/// Derive a deterministic legacy bucket ID.
+///
+/// - Post-genesis (has cluster_id): `hash(cluster_id + "::legacy")`
+///   — same on all nodes in the cluster.
+/// - Pre-genesis: `hash(peer_id + "::legacy")` — unique to this node,
+///   but that's fine because pre-genesis stores don't sync.
+///
+/// On the first post-genesis rebuild, the peer-derived bucket is
+/// detected as stale and rewritten to the cluster-derived one.
+pub fn deterministic_legacy_id(client: &LocalClient) -> BucketId {
+    let cluster_id = client.cluster_id();
+    let seed = if cluster_id.iter().any(|&b| b != 0) {
+        cluster_id
+    } else {
+        client.peer_id()
+    };
+    let cid = memvault_core::cid_from_bytes(&[seed, b"::legacy"].concat());
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&cid.to_bytes()[..32]);
+    BucketId(id)
+}
+
 /// Summary of what the rebuild did.
 #[derive(Debug, Default)]
 pub struct RebuildReport {
@@ -73,45 +95,24 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             })
             .unwrap_or(false)
     });
-    // Compute the deterministic legacy bucket ID from cluster_id.
-    let cluster_id = client.cluster_id();
-    let det_legacy_id = if cluster_id.iter().any(|&b| b != 0) {
-        let mut input = cluster_id.to_vec();
-        input.extend_from_slice(b"::legacy");
-        let cid = memvault_core::cid_from_bytes(&input);
-        let mut id = [0u8; 32];
-        id.copy_from_slice(&cid.to_bytes()[..32]);
-        Some(BucketId(id))
-    } else {
-        None
-    };
 
-    // If an existing legacy bucket has a different (random) ID, it's stale.
+    let det_id = deterministic_legacy_id(client);
     let existing_legacy = client.legacy_bucket_id();
     let legacy_bucket = if has_unbucketed || existing_legacy.is_some() {
-        let target = det_legacy_id.clone().unwrap_or_else(|| {
-            existing_legacy.clone().unwrap_or(BucketId([0u8; 32]))
-        });
-        // Create deterministic bucket if it doesn't exist yet.
-        if existing_legacy.as_ref() != Some(&target) {
-            if let Some(ref det) = det_legacy_id {
-                // Check if deterministic bucket already exists in store.
-                if store.get_bucket(&det.0).ok().flatten().is_none() {
-                    client
-                        .create_bucket_with_id(
-                            det.clone(),
-                            "legacy",
-                            Some("auto-created for adoption of pre-bucket data"),
-                            memvault_core::Visibility::Internal,
-                            memvault_core::classification::Classification::Internal,
-                            memvault_doc::BucketRole::Legacy,
-                        )
-                        ?;
-                    tracing::info!(bucket = %det, "created deterministic legacy bucket");
-                }
+        if existing_legacy.as_ref() != Some(&det_id) {
+            if store.get_bucket(&det_id.0).ok().flatten().is_none() {
+                client.create_bucket_with_id(
+                    det_id.clone(),
+                    "legacy",
+                    Some("auto-created for adoption of pre-bucket data"),
+                    memvault_core::Visibility::Internal,
+                    memvault_core::classification::Classification::Internal,
+                    memvault_doc::BucketRole::Legacy,
+                )?;
+                tracing::info!(bucket = %det_id, "created deterministic legacy bucket");
             }
         }
-        det_legacy_id.or(existing_legacy)
+        Some(det_id.clone())
     } else {
         None
     };
@@ -301,10 +302,6 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
 /// automatically on the first post-genesis open.
 pub fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildReport>> {
     // Pre-genesis: nothing to rebuild — no cluster for bucket derivation.
-    if !client.cluster_id().iter().any(|&b| b != 0) {
-        return Ok(None);
-    }
-
     let stored = client
         .store()
         .schema_version()

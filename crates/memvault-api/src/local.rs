@@ -174,6 +174,11 @@ impl LocalClient {
         &self.cluster_id
     }
 
+    /// Get the peer ID.
+    pub fn peer_id(&self) -> &[u8] {
+        &self.peer_id
+    }
+
     /// Create a bucket with a specific pre-determined ID.
     ///
     /// The envelope is fully deterministic: uses cluster_id as author and
