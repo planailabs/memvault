@@ -1356,9 +1356,8 @@ mod native {
                 #[cfg(feature = "daemon")]
                 {
                     let local_peer_id_vec = local_peer_id.to_bytes();
-                    let admin_pubkey =
-                        memvault_web::init_web_auth(&client, &data_dir, local_peer_id_vec)
-                            .map_err(|e| anyhow::anyhow!("web auth init: {e}"))?;
+                    let auth = memvault_web::init_web_auth(&client, &data_dir, local_peer_id_vec)
+                        .map_err(|e| anyhow::anyhow!("web auth init: {e}"))?;
 
                     let local_client = std::sync::Arc::new(client);
                     memvault_web::ui::state::set_client(std::sync::Arc::clone(&local_client));
@@ -1368,7 +1367,8 @@ mod native {
                     let app_state = std::sync::Arc::new(memvault_web::AppState {
                         client: client_arc,
                         event_bus: std::sync::Arc::clone(&event_bus_shared),
-                        admin_pubkey,
+                        admin_pubkey: auth.admin_pubkey,
+                        node_attestations: auth.node_attestations,
                         metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                     });
 
@@ -1540,14 +1540,12 @@ mod native {
                     ed25519_dalek::SigningKey::from_bytes(&secret)
                 };
 
-                let admin_vk = admin_sk.verifying_key();
-                let admin_peer_id = memvault_core::PeerId(admin_vk.as_bytes().to_vec());
-
+                // Single-key dev-mode enrollment: admin == node. Real multi-node
+                // enrollment will pass the joining node's own signing key here.
                 let identity = memvault_api::agent_identity::AgentIdentity::generate_local(
                     &identity_dir,
                     &agent_id,
                     &cluster_id,
-                    &admin_peer_id,
                     &admin_sk,
                     join_token.role,
                     join_token

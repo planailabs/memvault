@@ -97,7 +97,7 @@ fn main() {
                 .as_ref()
                 .map(|(_, c)| Arc::clone(c))
                 .expect("daemon mode requires a successfully-opened store");
-            let admin_pubkey = memvault_web::init_web_auth(&local_client, &data_dir, Vec::new())
+            let auth = memvault_web::init_web_auth(&local_client, &data_dir, Vec::new())
                 .expect("init_web_auth failed");
 
             let client_arc =
@@ -106,7 +106,8 @@ fn main() {
             let app_state = Arc::new(memvault_web::AppState {
                 client: client_arc,
                 event_bus,
-                admin_pubkey,
+                admin_pubkey: auth.admin_pubkey,
+                node_attestations: auth.node_attestations,
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
             });
 

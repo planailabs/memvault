@@ -9,9 +9,7 @@
 use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use memvault_auth::{
-    AgentEnrollment, AttestationOrigin, JoinToken, MembershipAttestation, Role, encode_token_string,
-};
+use memvault_auth::{JoinToken, Role, encode_token_string};
 use memvault_core::{AgentId, ClusterId, PeerId};
 use serde::{Deserialize, Serialize};
 
@@ -25,26 +23,29 @@ pub struct AgentMeta {
     pub enrolled_at_ns: u64,
 }
 
-/// A loaded agent identity: signing key + attestation + enrollment.
+/// A loaded agent identity: signing key + node-issued attestation.
+///
+/// In the per-agent JWT model, the attestation is signed by a *node* whose
+/// own [`MembershipAttestation`] is admin-signed and lives in the cluster's
+/// sig-chain. The agent doesn't hold the admin's pubkey — trust flows back
+/// via the node attestation lookup at verify time.
 #[derive(Debug, Clone)]
 pub struct AgentIdentity {
     pub agent_id: AgentId,
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
-    pub attestation: MembershipAttestation,
-    pub enrollment: AgentEnrollment,
+    pub attestation: memvault_auth::AgentAttestation,
     pub cluster_id: ClusterId,
 }
 
 impl AgentIdentity {
     /// Load an existing agent identity from an identity directory.
     ///
-    /// The directory must contain `private_key.pem`, `attestation.cbor`,
-    /// `enrollment.cbor`, and `agent.json`.
+    /// The directory must contain `private_key.pem`, `attestation.cbor`
+    /// (node-signed `AgentAttestation`), and `agent.json`.
     pub fn load(identity_dir: &Path) -> Result<Self> {
         let key_path = identity_dir.join("private_key.pem");
         let attestation_path = identity_dir.join("attestation.cbor");
-        let enrollment_path = identity_dir.join("enrollment.cbor");
         let meta_path = identity_dir.join("agent.json");
 
         // Load private key
@@ -53,22 +54,16 @@ impl AgentIdentity {
         let signing_key = parse_ed25519_pem(&pem_bytes)?;
         let verifying_key = signing_key.verifying_key();
 
-        // Load attestation
+        // Load agent attestation (node-signed)
         let att_bytes = std::fs::read(&attestation_path).map_err(|e| {
             ApiError::Other(format!(
                 "failed to read {}: {e}",
                 attestation_path.display()
             ))
         })?;
-        let attestation: MembershipAttestation = serde_ipld_dagcbor::from_slice(&att_bytes)
-            .map_err(|e| ApiError::Other(format!("failed to decode attestation: {e}")))?;
-
-        // Load enrollment
-        let enr_bytes = std::fs::read(&enrollment_path).map_err(|e| {
-            ApiError::Other(format!("failed to read {}: {e}", enrollment_path.display()))
-        })?;
-        let enrollment: AgentEnrollment = serde_ipld_dagcbor::from_slice(&enr_bytes)
-            .map_err(|e| ApiError::Other(format!("failed to decode enrollment: {e}")))?;
+        let attestation: memvault_auth::AgentAttestation =
+            serde_ipld_dagcbor::from_slice(&att_bytes)
+                .map_err(|e| ApiError::Other(format!("failed to decode attestation: {e}")))?;
 
         // Load metadata
         let meta_bytes = std::fs::read(&meta_path)
@@ -89,22 +84,21 @@ impl AgentIdentity {
             signing_key,
             verifying_key,
             attestation,
-            enrollment,
             cluster_id,
         })
     }
 
-    /// Generate a new agent identity via local enrollment (daemon-side).
+    /// Generate a new agent identity, signed by the given node's private key.
     ///
-    /// This creates the keypair, enrollment, and attestation without needing
-    /// a network round-trip — the caller holds the admin signing key and can
-    /// issue everything locally.
+    /// The node's own [`MembershipAttestation`](memvault_auth::MembershipAttestation)
+    /// must already be in the cluster's sig-chain; verifiers will look it up at
+    /// JWT-verify time. `cluster_id` is stored for record-keeping only — trust
+    /// flows through the node's attestation, not this field.
     pub fn generate_local(
         identity_dir: &Path,
         agent_id: &str,
         cluster_id: &ClusterId,
-        admin_peer_id: &PeerId,
-        admin_signing_key: &SigningKey,
+        node_signing_key: &SigningKey,
         role: Role,
         ttl_ns: u64,
     ) -> Result<Self> {
@@ -120,34 +114,21 @@ impl AgentIdentity {
         let now_ns = memvault_core::time::wall_ns();
         let not_after_ns = now_ns + ttl_ns;
 
-        let agent_peer_id = PeerId(verifying_key.as_bytes().to_vec());
-
-        // Create AgentEnrollment signed by admin
-        let enrollment = sign_enrollment(
-            agent_id,
-            &verifying_key,
-            cluster_id,
-            admin_peer_id,
-            admin_signing_key,
-            not_after_ns,
-        )?;
-
-        // Create MembershipAttestation signed by admin
-        let attestation = sign_attestation(
-            cluster_id,
-            &agent_peer_id,
+        // Sign the agent attestation with the node's key.
+        let attestation = memvault_auth::sign_agent_attestation(
+            node_signing_key,
+            AgentId(agent_id.to_string()),
+            verifying_key.to_bytes(),
             role,
             not_after_ns,
-            AttestationOrigin::Direct,
-            admin_signing_key,
-        )?;
+        )
+        .map_err(|e| ApiError::Other(format!("sign agent attestation: {e}")))?;
 
         // Write to disk
         write_identity_dir(
             identity_dir,
             &signing_key,
             &attestation,
-            &enrollment,
             &AgentMeta {
                 agent_id: agent_id.to_string(),
                 cluster_id: hex::encode(cluster_id.0),
@@ -160,7 +141,6 @@ impl AgentIdentity {
             signing_key,
             verifying_key,
             attestation,
-            enrollment,
             cluster_id: cluster_id.clone(),
         })
     }
@@ -169,7 +149,6 @@ impl AgentIdentity {
     pub fn exists(identity_dir: &Path) -> bool {
         identity_dir.join("private_key.pem").exists()
             && identity_dir.join("attestation.cbor").exists()
-            && identity_dir.join("enrollment.cbor").exists()
             && identity_dir.join("agent.json").exists()
     }
 
@@ -178,8 +157,7 @@ impl AgentIdentity {
         identity_dir: &Path,
         agent_id: &str,
         cluster_id: &ClusterId,
-        admin_peer_id: &PeerId,
-        admin_signing_key: &SigningKey,
+        node_signing_key: &SigningKey,
         role: Role,
         ttl_ns: u64,
     ) -> Result<Self> {
@@ -190,8 +168,7 @@ impl AgentIdentity {
                 identity_dir,
                 agent_id,
                 cluster_id,
-                admin_peer_id,
-                admin_signing_key,
+                node_signing_key,
                 role,
                 ttl_ns,
             )
@@ -210,83 +187,16 @@ impl AgentIdentity {
     /// `scope`: space-separated OAuth-style scopes ("read write" / "admin" / etc.).
     /// `ttl_secs`: lifetime in seconds; typical values 300 (short-lived) — 3600.
     pub fn issue_jwt(&self, scope: &str, ttl_secs: u64) -> Result<String> {
-        memvault_auth::jwt::issue(
-            &self.signing_key,
-            &self.attestation,
-            &self.agent_id.0,
-            scope,
-            ttl_secs,
-        )
-        .map_err(|e| ApiError::Other(format!("issue_jwt: {e}")))
+        memvault_auth::jwt::issue(&self.signing_key, &self.attestation, scope, ttl_secs)
+            .map_err(|e| ApiError::Other(format!("issue_jwt: {e}")))
     }
-}
-
-/// Sign an AgentEnrollment with the admin key.
-fn sign_enrollment(
-    agent_id: &str,
-    agent_public_key: &VerifyingKey,
-    cluster_id: &ClusterId,
-    enrolled_by: &PeerId,
-    admin_key: &SigningKey,
-    not_after_ns: u64,
-) -> Result<AgentEnrollment> {
-    let enrollment = AgentEnrollment {
-        agent_id: AgentId(agent_id.to_string()),
-        public_key: *agent_public_key.as_bytes(),
-        cluster_id: cluster_id.clone(),
-        enrolled_by: enrolled_by.clone(),
-        initial_grants: vec![],
-        default_bucket: None,
-        not_after_ns,
-        signature: [0u8; 64], // placeholder, filled below
-    };
-
-    let signing_bytes = enrollment
-        .signing_bytes()
-        .map_err(|e| ApiError::Other(format!("enrollment signing bytes: {e}")))?;
-    let sig = admin_key.sign(&signing_bytes);
-
-    Ok(AgentEnrollment {
-        signature: sig.to_bytes(),
-        ..enrollment
-    })
-}
-
-/// Sign a MembershipAttestation with the admin key.
-fn sign_attestation(
-    cluster_id: &ClusterId,
-    member: &PeerId,
-    role: Role,
-    not_after_ns: u64,
-    issued_via: AttestationOrigin,
-    admin_key: &SigningKey,
-) -> Result<MembershipAttestation> {
-    let attestation = MembershipAttestation {
-        cluster_id: cluster_id.clone(),
-        member: member.clone(),
-        role,
-        not_after_ns,
-        issued_via,
-        signature: [0u8; 64], // placeholder, filled below
-    };
-
-    let signing_bytes = attestation
-        .signing_bytes()
-        .map_err(|e| ApiError::Other(format!("attestation signing bytes: {e}")))?;
-    let sig = admin_key.sign(&signing_bytes);
-
-    Ok(MembershipAttestation {
-        signature: sig.to_bytes(),
-        ..attestation
-    })
 }
 
 /// Write all identity files to disk.
 fn write_identity_dir(
     dir: &Path,
     signing_key: &SigningKey,
-    attestation: &MembershipAttestation,
-    enrollment: &AgentEnrollment,
+    attestation: &memvault_auth::AgentAttestation,
     meta: &AgentMeta,
 ) -> Result<()> {
     // Write private key as PEM
@@ -302,17 +212,11 @@ fn write_identity_dir(
         let _ = std::fs::set_permissions(dir.join("private_key.pem"), perms);
     }
 
-    // Write attestation
+    // Write attestation (node-signed AgentAttestation)
     let att_bytes = serde_ipld_dagcbor::to_vec(attestation)
         .map_err(|e| ApiError::Other(format!("failed to encode attestation: {e}")))?;
     std::fs::write(dir.join("attestation.cbor"), &att_bytes)
         .map_err(|e| ApiError::Other(format!("failed to write attestation.cbor: {e}")))?;
-
-    // Write enrollment
-    let enr_bytes = serde_ipld_dagcbor::to_vec(enrollment)
-        .map_err(|e| ApiError::Other(format!("failed to encode enrollment: {e}")))?;
-    std::fs::write(dir.join("enrollment.cbor"), &enr_bytes)
-        .map_err(|e| ApiError::Other(format!("failed to write enrollment.cbor: {e}")))?;
 
     // Write metadata
     let meta_json = serde_json::to_string_pretty(meta)
@@ -427,13 +331,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity_dir = dir.path().join("agent-test");
 
-        // Generate
+        // Generate — node signs the agent attestation directly (no admin chain in this test).
         let identity = AgentIdentity::generate_local(
             &identity_dir,
             "test-agent",
             &cluster_id,
-            &admin_peer_id,
-            &admin_sk,
+            &admin_sk, // re-using the same key as the "node" signing key for this test
             Role::AgentHost,
             86400_000_000_000, // 1 day in ns
         )
@@ -442,11 +345,14 @@ mod tests {
         assert_eq!(identity.agent_id.0, "test-agent");
         assert_eq!(identity.cluster_id, cluster_id);
 
-        // Verify attestation signature
-        identity.attestation.verify_signature(&admin_vk).unwrap();
-
-        // Verify enrollment signature
-        identity.enrollment.verify_signature(&admin_vk).unwrap();
+        // Verify attestation signature against its embedded node pubkey.
+        identity.attestation.verify_signature().unwrap();
+        assert_eq!(
+            identity.attestation.node_pubkey,
+            admin_vk.to_bytes(),
+            "attestation's node_pubkey matches the signer"
+        );
+        let _ = admin_peer_id;
 
         // Load from disk
         let loaded = AgentIdentity::load(&identity_dir).unwrap();
@@ -460,7 +366,7 @@ mod tests {
     #[test]
     fn test_ensure_idempotent() {
         let (admin_sk, admin_vk) = make_admin_key();
-        let admin_peer_id = PeerId(admin_vk.as_bytes().to_vec());
+        let _admin_peer_id = PeerId(admin_vk.as_bytes().to_vec());
         let cluster_id = ClusterId::random();
 
         let dir = tempfile::tempdir().unwrap();
@@ -471,7 +377,6 @@ mod tests {
             &identity_dir,
             "ensure-agent",
             &cluster_id,
-            &admin_peer_id,
             &admin_sk,
             Role::AgentHost,
             86400_000_000_000,
@@ -483,7 +388,6 @@ mod tests {
             &identity_dir,
             "ensure-agent",
             &cluster_id,
-            &admin_peer_id,
             &admin_sk,
             Role::AgentHost,
             86400_000_000_000,

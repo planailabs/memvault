@@ -27,19 +27,23 @@ fn main() {
                             return Ok(router);
                         }
                     };
-                    let admin_pubkey =
-                        match memvault_web::init_web_auth(&local_client, &data_dir, Vec::new()) {
-                            Ok(pk) => pk,
-                            Err(e) => {
-                                eprintln!("memvault: API routes NOT mounted (auth init: {e})");
-                                return Ok(router);
-                            }
-                        };
+                    let auth = match memvault_web::init_web_auth(
+                        &local_client,
+                        &data_dir,
+                        Vec::new(),
+                    ) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            eprintln!("memvault: API routes NOT mounted (auth init: {e})");
+                            return Ok(router);
+                        }
+                    };
 
                     let app_state = Arc::new(memvault_web::AppState {
                         client,
                         event_bus: Arc::new(memvault_api::EventBus::new(64)),
-                        admin_pubkey,
+                        admin_pubkey: auth.admin_pubkey,
+                        node_attestations: auth.node_attestations,
                         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                     });
                     router = axum::Router::new()

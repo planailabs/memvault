@@ -2,7 +2,7 @@
 
 use memvault_api::agent_identity::AgentIdentity;
 use memvault_auth::Role;
-use memvault_core::{ClusterId, PeerId};
+use memvault_core::ClusterId;
 
 #[test]
 fn generate_and_load_identity() {
@@ -11,24 +11,25 @@ fn generate_and_load_identity() {
     let cluster_id = ClusterId::random();
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
-    let admin_sk = ed25519_dalek::SigningKey::from_bytes(&secret);
-    let admin_vk = admin_sk.verifying_key();
-    let admin_peer = PeerId(admin_vk.as_bytes().to_vec());
+    let node_sk = ed25519_dalek::SigningKey::from_bytes(&secret);
 
     let id = AgentIdentity::generate_local(
         &identity_dir,
         "smoke-agent",
         &cluster_id,
-        &admin_peer,
-        &admin_sk,
+        &node_sk,
         Role::AgentHost,
         86400_000_000_000,
     )
     .unwrap();
 
     assert_eq!(id.agent_id.0, "smoke-agent");
-    id.attestation.verify_signature(&admin_vk).unwrap();
-    id.enrollment.verify_signature(&admin_vk).unwrap();
+    // Agent attestation is node-signed; verify it against its embedded node pubkey.
+    id.attestation.verify_signature().unwrap();
+    assert_eq!(
+        id.attestation.node_pubkey,
+        node_sk.verifying_key().to_bytes()
+    );
 
     // Load from disk
     let loaded = AgentIdentity::load(&identity_dir).unwrap();
@@ -42,16 +43,13 @@ fn ensure_idempotent() {
     let cluster_id = ClusterId::random();
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
-    let admin_sk = ed25519_dalek::SigningKey::from_bytes(&secret);
-    let admin_vk = admin_sk.verifying_key();
-    let admin_peer = PeerId(admin_vk.as_bytes().to_vec());
+    let node_sk = ed25519_dalek::SigningKey::from_bytes(&secret);
 
     let id1 = AgentIdentity::ensure(
         &identity_dir,
         "agent",
         &cluster_id,
-        &admin_peer,
-        &admin_sk,
+        &node_sk,
         Role::AgentHost,
         86400_000_000_000,
     )
@@ -60,8 +58,7 @@ fn ensure_idempotent() {
         &identity_dir,
         "agent",
         &cluster_id,
-        &admin_peer,
-        &admin_sk,
+        &node_sk,
         Role::AgentHost,
         86400_000_000_000,
     )

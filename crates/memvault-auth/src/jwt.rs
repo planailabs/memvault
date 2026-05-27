@@ -1,24 +1,29 @@
 //! Agent JWT — ed25519-signed bearer token issued by an agent for itself.
 //!
-//! The token carries the agent's [`MembershipAttestation`] inline (in the `att`
-//! claim) so the server can validate the agent without any state lookup:
+//! The token carries the agent's [`AgentAttestation`] inline (in the `att`
+//! claim). The agent attestation is signed by a *node*, and the node's own
+//! [`MembershipAttestation`] (admin-signed) lives in the cluster's sig-chain.
+//! Verification flow:
 //!
 //! 1. Decode JWT header + payload.
-//! 2. Pull `att` from payload, deserialize the attestation.
-//! 3. Verify the attestation's signature against the cluster admin's pubkey.
-//! 4. Extract the agent's pubkey from the (now-trusted) attestation.member.
-//! 5. Verify the JWT signature against the agent's pubkey.
-//! 6. Check `exp` is not in the past.
+//! 2. Pull `att` from payload, deserialize the [`AgentAttestation`].
+//! 3. Verify the agent attestation's signature against its embedded `node_pubkey`.
+//! 4. Look up the node's [`MembershipAttestation`] via the caller-supplied
+//!    closure (the sig-chain table).
+//! 5. Verify that node attestation against the cluster admin's pubkey.
+//! 6. Verify the JWT signature against `att.agent_pubkey`.
+//! 7. Check `exp` is not in the past.
 //!
 //! Scopes use OAuth-style space-separated strings ("read write admin").
 //!
 //! `iss` carries the human-readable `agent_id` for display / audit only —
-//! the security-relevant identity is the attestation's `member` (peer-id).
+//! the security-relevant identity is `att.agent_pubkey`.
 
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_attestation::AgentAttestation;
 use crate::attestation::MembershipAttestation;
 use crate::error::{AuthError, Result};
 
@@ -56,8 +61,8 @@ impl AgentTokenClaims {
         self.scope.split_whitespace().any(|s| s == scope)
     }
 
-    /// Decode the embedded attestation.
-    pub fn attestation(&self) -> Result<MembershipAttestation> {
+    /// Decode the embedded agent attestation.
+    pub fn agent_attestation(&self) -> Result<AgentAttestation> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.att)
             .map_err(|e| AuthError::InvalidToken(format!("invalid att base64: {e}")))?;
@@ -77,14 +82,14 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Issue a JWT signed by `signing_key`, embedding `attestation`.
+/// Issue a JWT signed by `signing_key` (the agent's private key), embedding
+/// the agent's node-issued [`AgentAttestation`].
 ///
-/// `agent_id` is for display only; the security identity is in `attestation.member`.
+/// `attestation.agent_pubkey` MUST match `signing_key.verifying_key()`.
 /// Caller chooses scopes and `ttl_secs`.
 pub fn issue(
     signing_key: &SigningKey,
-    attestation: &MembershipAttestation,
-    agent_id: &str,
+    attestation: &AgentAttestation,
     scope: &str,
     ttl_secs: u64,
 ) -> Result<String> {
@@ -92,8 +97,8 @@ pub fn issue(
     let att_bytes = serde_ipld_dagcbor::to_vec(attestation)
         .map_err(|e| AuthError::InvalidToken(format!("encode attestation: {e}")))?;
     let claims = AgentTokenClaims {
-        iss: agent_id.to_string(),
-        sub: hex::encode(&attestation.member.0),
+        iss: attestation.agent_id.0.clone(),
+        sub: hex::encode(attestation.agent_pubkey),
         iat: now,
         exp: now + ttl_secs,
         scope: scope.to_string(),
@@ -117,9 +122,24 @@ pub fn issue(
 
 /// Verify a JWT against the cluster admin's verifying key.
 ///
-/// Performs the full chain: attestation-trust → agent-key-trust → JWT signature
-/// → expiry. Returns the verified claims on success.
-pub fn verify(token: &str, admin_pubkey: &VerifyingKey) -> Result<AgentTokenClaims> {
+/// `lookup_node` returns the trusted [`MembershipAttestation`] for the given
+/// node pubkey (from the cluster's sig-chain table) or `None` if the node is
+/// unknown/untrusted. Returning `None` rejects the token.
+///
+/// Trust chain checked:
+/// agent JWT sig → agent pubkey (from AgentAttestation)
+/// AgentAttestation → node pubkey (also in AgentAttestation, self-verified)
+/// node MembershipAttestation (from lookup) → admin pubkey
+///
+/// All three signatures must verify, and `exp` must be in the future.
+pub fn verify<F>(
+    token: &str,
+    admin_pubkey: &VerifyingKey,
+    lookup_node: F,
+) -> Result<AgentTokenClaims>
+where
+    F: FnOnce(&[u8; 32]) -> Option<MembershipAttestation>,
+{
     let b64 = b64_url();
 
     let parts: Vec<&str> = token.split('.').collect();
@@ -148,28 +168,48 @@ pub fn verify(token: &str, admin_pubkey: &VerifyingKey) -> Result<AgentTokenClai
     let claims: AgentTokenClaims = serde_json::from_slice(&payload_bytes)
         .map_err(|e| AuthError::InvalidToken(format!("claims json: {e}")))?;
 
-    // Trust chain: admin → attestation → agent pubkey → JWT signature.
-    let attestation = claims.attestation()?;
-    attestation
-        .verify_signature(admin_pubkey)
-        .map_err(|e| AuthError::InvalidToken(format!("attestation: {e}")))?;
-    // `sub` must agree with attestation.member (claim displays bind correctly).
-    let member_hex = hex::encode(&attestation.member.0);
-    if claims.sub != member_hex {
-        return Err(AuthError::InvalidToken(
-            "sub does not match attestation.member".into(),
-        ));
-    }
-    if attestation.member.0.len() != 32 {
-        return Err(AuthError::InvalidToken(
-            "attestation.member is not a 32-byte ed25519 key".into(),
-        ));
-    }
-    let mut pub_arr = [0u8; 32];
-    pub_arr.copy_from_slice(&attestation.member.0);
-    let agent_pubkey = VerifyingKey::from_bytes(&pub_arr)
-        .map_err(|e| AuthError::InvalidToken(format!("attestation pubkey: {e}")))?;
+    // Decode the agent attestation embedded in the JWT.
+    let agent_att = claims.agent_attestation()?;
 
+    // Bind: sub must match the agent pubkey claimed by the attestation.
+    if claims.sub != hex::encode(agent_att.agent_pubkey) {
+        return Err(AuthError::InvalidToken(
+            "sub does not match agent_attestation.agent_pubkey".into(),
+        ));
+    }
+    if claims.iss != agent_att.agent_id.0 {
+        return Err(AuthError::InvalidToken(
+            "iss does not match agent_attestation.agent_id".into(),
+        ));
+    }
+
+    // Look up the node's MembershipAttestation. The lookup table is the source
+    // of truth for which node_pubkeys are trusted in this cluster.
+    let node_att = lookup_node(&agent_att.node_pubkey).ok_or_else(|| {
+        AuthError::InvalidToken(format!(
+            "unknown issuing node: {}",
+            hex::encode(agent_att.node_pubkey)
+        ))
+    })?;
+    // Belt and braces: verify the node attestation against admin.
+    node_att
+        .verify_signature(admin_pubkey)
+        .map_err(|e| AuthError::InvalidToken(format!("node attestation: {e}")))?;
+    // And confirm the looked-up attestation's member matches what the agent claims.
+    if node_att.member.0 != agent_att.node_pubkey.as_slice() {
+        return Err(AuthError::InvalidToken(
+            "node_pubkey mismatch between agent attestation and looked-up node attestation".into(),
+        ));
+    }
+
+    // Verify the agent attestation against the (now-trusted) node pubkey.
+    agent_att
+        .verify_signature()
+        .map_err(|e| AuthError::InvalidToken(format!("agent attestation: {e}")))?;
+
+    // Finally: verify the JWT signature against the agent pubkey.
+    let agent_pubkey = VerifyingKey::from_bytes(&agent_att.agent_pubkey)
+        .map_err(|e| AuthError::InvalidToken(format!("agent pubkey: {e}")))?;
     let signing_input = format!("{}.{}", parts[0], parts[1]);
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
@@ -191,45 +231,53 @@ pub fn verify(token: &str, admin_pubkey: &VerifyingKey) -> Result<AgentTokenClai
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_attestation::sign_agent_attestation;
     use crate::attestation::AttestationOrigin;
     use crate::role::Role;
     use ed25519_dalek::SigningKey;
-    use memvault_core::{ClusterId, PeerId};
+    use memvault_core::{AgentId, ClusterId, PeerId};
     use rand::RngCore;
 
-    fn make_keys() -> (SigningKey, SigningKey) {
-        let mut admin_seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut admin_seed);
-        let mut agent_seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut agent_seed);
-        (
-            SigningKey::from_bytes(&admin_seed),
-            SigningKey::from_bytes(&agent_seed),
-        )
+    fn make_key() -> SigningKey {
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        SigningKey::from_bytes(&seed)
     }
 
-    fn make_attestation(admin: &SigningKey, agent: &SigningKey) -> MembershipAttestation {
-        let agent_pub = agent.verifying_key();
-        let mut att = MembershipAttestation {
+    fn node_att(admin: &SigningKey, node: &SigningKey) -> MembershipAttestation {
+        let mut a = MembershipAttestation {
             cluster_id: ClusterId([7u8; 32]),
-            member: PeerId(agent_pub.as_bytes().to_vec()),
+            member: PeerId(node.verifying_key().to_bytes().to_vec()),
             role: Role::AgentHost,
             not_after_ns: u64::MAX,
             issued_via: AttestationOrigin::Direct,
             signature: [0u8; 64],
         };
-        let signing_bytes = att.signing_bytes().unwrap();
-        let sig = admin.sign(&signing_bytes);
-        att.signature = sig.to_bytes();
-        att
+        a.signature = admin.sign(&a.signing_bytes().unwrap()).to_bytes();
+        a
+    }
+
+    fn build_token(scope: &str, ttl: u64) -> (String, VerifyingKey, MembershipAttestation) {
+        let admin = make_key();
+        let node = make_key();
+        let agent = make_key();
+        let n_att = node_att(&admin, &node);
+        let a_att = sign_agent_attestation(
+            &node,
+            AgentId("alice".into()),
+            agent.verifying_key().to_bytes(),
+            Role::AgentHost,
+            u64::MAX,
+        )
+        .unwrap();
+        let tok = issue(&agent, &a_att, scope, ttl).unwrap();
+        (tok, admin.verifying_key(), n_att)
     }
 
     #[test]
     fn roundtrip_valid_token() {
-        let (admin, agent) = make_keys();
-        let att = make_attestation(&admin, &agent);
-        let token = issue(&agent, &att, "alice", "read write", 300).unwrap();
-        let claims = verify(&token, &admin.verifying_key()).unwrap();
+        let (tok, admin_pk, n_att) = build_token("read write", 300);
+        let claims = verify(&tok, &admin_pk, |_| Some(n_att.clone())).unwrap();
         assert_eq!(claims.iss, "alice");
         assert!(claims.has_scope("read"));
         assert!(claims.has_scope("write"));
@@ -237,37 +285,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unknown_node() {
+        let (tok, admin_pk, _) = build_token("read", 300);
+        // Lookup table doesn't know this node.
+        assert!(verify(&tok, &admin_pk, |_| None).is_err());
+    }
+
+    #[test]
     fn rejects_wrong_admin_key() {
-        let (admin, agent) = make_keys();
-        let att = make_attestation(&admin, &agent);
-        let token = issue(&agent, &att, "alice", "read", 300).unwrap();
-        let (other_admin, _) = make_keys();
-        assert!(verify(&token, &other_admin.verifying_key()).is_err());
+        let (tok, _, n_att) = build_token("read", 300);
+        let other_admin = make_key();
+        assert!(verify(&tok, &other_admin.verifying_key(), |_| Some(n_att.clone())).is_err());
     }
 
     #[test]
     fn rejects_tampered_payload() {
-        let (admin, agent) = make_keys();
-        let att = make_attestation(&admin, &agent);
-        let token = issue(&agent, &att, "alice", "read", 300).unwrap();
-        let parts: Vec<&str> = token.split('.').collect();
-        // Swap in payload with elevated scope, keep original signature.
+        let (tok, admin_pk, n_att) = build_token("read", 300);
+        let parts: Vec<&str> = tok.split('.').collect();
         let new_payload = b64_url().encode(
             br#"{"iss":"alice","sub":"00","exp":99999999999,"iat":0,"scope":"admin","att":""}"#,
         );
         let tampered = format!("{}.{}.{}", parts[0], new_payload, parts[2]);
-        assert!(verify(&tampered, &admin.verifying_key()).is_err());
+        assert!(verify(&tampered, &admin_pk, |_| Some(n_att.clone())).is_err());
     }
 
     #[test]
     fn rejects_expired() {
-        let (admin, agent) = make_keys();
-        let att = make_attestation(&admin, &agent);
-        // ttl=0 so the token's exp is "now", which is treated as expired.
-        let token = issue(&agent, &att, "alice", "read", 0).unwrap();
-        // sleep 1s to push past exp
+        let (tok, admin_pk, n_att) = build_token("read", 0);
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let err = verify(&token, &admin.verifying_key()).unwrap_err();
+        let err = verify(&tok, &admin_pk, |_| Some(n_att.clone())).unwrap_err();
         assert!(format!("{err}").contains("expired"), "got: {err}");
     }
+
 }

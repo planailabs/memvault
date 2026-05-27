@@ -20,20 +20,22 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use crate::{AppState, build_router};
 
-/// Deterministic test admin + agent keys so every test sees the same JWT.
-fn test_keys() -> (SigningKey, SigningKey) {
+/// Deterministic test admin + node + agent keys.
+/// In the chain model: admin signs the node's MembershipAttestation, node
+/// signs the agent's AgentAttestation, agent signs the JWT.
+fn test_keys() -> (SigningKey, SigningKey, SigningKey) {
     (
-        SigningKey::from_bytes(&[0xAAu8; 32]),
-        SigningKey::from_bytes(&[0xBBu8; 32]),
+        SigningKey::from_bytes(&[0xAAu8; 32]), // admin
+        SigningKey::from_bytes(&[0xBBu8; 32]), // node
+        SigningKey::from_bytes(&[0xCCu8; 32]), // agent
     )
 }
 
-/// Build an attestation for the test agent, signed by the test admin.
-fn test_attestation(admin: &SigningKey, agent: &SigningKey) -> MembershipAttestation {
-    let agent_pub = agent.verifying_key();
+/// Build an admin-signed node attestation.
+fn test_node_attestation(admin: &SigningKey, node: &SigningKey) -> MembershipAttestation {
     let mut att = MembershipAttestation {
         cluster_id: ClusterId([0u8; 32]),
-        member: PeerId(agent_pub.as_bytes().to_vec()),
+        member: PeerId(node.verifying_key().as_bytes().to_vec()),
         role: Role::AgentHost,
         not_after_ns: u64::MAX,
         issued_via: AttestationOrigin::Direct,
@@ -49,11 +51,29 @@ fn test_admin_pubkey() -> VerifyingKey {
     test_keys().0.verifying_key()
 }
 
+/// node_attestations map for AppState — one entry for the test node.
+fn test_node_attestations() -> std::collections::HashMap<[u8; 32], MembershipAttestation> {
+    let (admin, node, _) = test_keys();
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        node.verifying_key().to_bytes(),
+        test_node_attestation(&admin, &node),
+    );
+    map
+}
+
 /// A valid JWT for the test agent, all scopes, 1h TTL.
 fn test_jwt() -> String {
-    let (admin, agent) = test_keys();
-    let att = test_attestation(&admin, &agent);
-    memvault_auth::jwt::issue(&agent, &att, "test-agent", "read write admin", 3600).unwrap()
+    let (_admin, node, agent) = test_keys();
+    let agent_att = memvault_auth::sign_agent_attestation(
+        &node,
+        memvault_core::AgentId("test-agent".to_string()),
+        agent.verifying_key().to_bytes(),
+        Role::AgentHost,
+        u64::MAX,
+    )
+    .unwrap();
+    memvault_auth::jwt::issue(&agent, &agent_att, "read write admin", 3600).unwrap()
 }
 
 /// Mock client that returns canned responses.
@@ -420,6 +440,7 @@ fn make_app() -> axum::Router {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
         admin_pubkey: test_admin_pubkey(),
+        node_attestations: test_node_attestations(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     build_router(state)
@@ -462,6 +483,7 @@ async fn test_create_and_list_docs() {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
         admin_pubkey: test_admin_pubkey(),
+        node_attestations: test_node_attestations(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
@@ -517,6 +539,7 @@ async fn test_get_doc() {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
         admin_pubkey: test_admin_pubkey(),
+        node_attestations: test_node_attestations(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
