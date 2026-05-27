@@ -468,13 +468,6 @@ mod native {
         create_client_with_data_dir(store, &data_dir)
     }
 
-    /// Spawn the P2P swarm on a background thread with its own tokio runtime.
-    ///
-    /// This is used by the `dioxus::serve()` path so the swarm runs alongside
-    /// the dioxus dev server. The swarm thread gets its own runtime because
-    /// `dioxus::serve()` creates its own and they can't share.
-    ///
-    /// Returns the store (for sharing with the web client) and thread handle.
     /// Spawn the swarm with an already-opened store.  Call AFTER
     /// `create_client_with_bus` (which runs the rebuild) to avoid
     /// serving blocks while CIDs are being rewritten.
