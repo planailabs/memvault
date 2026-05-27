@@ -6,6 +6,7 @@ use plan_ai_design::{Card, PageHeader, Pill};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[cfg(feature = "server")]
 use memvault_api::vfs::{VFS_CHILD_REL, VFS_DIR_KIND};
 
 use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
