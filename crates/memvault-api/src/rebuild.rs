@@ -111,7 +111,11 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                         memvault_core::classification::Classification::Internal,
                         memvault_doc::BucketRole::Legacy,
                     )?;
-                    tracing::info!(bucket = %det_id, "created legacy bucket");
+                    // Bind to cluster if one exists.
+                if client.cluster_id().iter().any(|&b| b != 0) {
+                    let _ = store.bind_bucket(&det_id.0, client.cluster_id());
+                }
+                tracing::info!(bucket = %det_id, "created legacy bucket");
                 }
                 det_id
             }
