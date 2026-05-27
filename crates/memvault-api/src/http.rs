@@ -907,7 +907,7 @@ impl MemvaultClient for HttpApiClient {
         })
     }
 
-    async fn default_bucket_id(&self) -> Result<BucketId> {
+    async fn legacy_bucket_id(&self) -> Result<BucketId> {
         let buckets = self.bucket_list().await?;
         if let Some(b) = buckets.first() {
             return Ok(b.id.clone());

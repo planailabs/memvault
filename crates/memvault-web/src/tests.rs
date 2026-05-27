@@ -366,7 +366,7 @@ impl MemvaultClient for MockClient {
         Ok(())
     }
 
-    async fn default_bucket_id(&self) -> memvault_api::Result<memvault_core::BucketId> {
+    async fn legacy_bucket_id(&self) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
     }
 

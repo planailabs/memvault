@@ -113,7 +113,8 @@ pub trait MemvaultClient: Send + Sync {
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>>;
 
     /// Resolve the legacy bucket (used only for adoption of pre-bucket data).
-    async fn default_bucket_id(&self) -> Result<BucketId>;
+    /// Errors if no `BucketRole::Legacy` bucket is configured.
+    async fn legacy_bucket_id(&self) -> Result<BucketId>;
 
     // -- History & Audit --
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>>;

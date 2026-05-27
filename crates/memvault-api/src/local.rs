@@ -866,8 +866,9 @@ impl LocalClient {
     }
 
     /// Find the legacy bucket (BucketRole::Legacy) for adoption of
-    /// pre-bucket data.
-    pub fn legacy_bucket_id(&self) -> Option<BucketId> {
+    /// pre-bucket data. Sync, internal — the `MemvaultClient::legacy_bucket_id`
+    /// trait method is the public async / `Result`-returning version.
+    pub fn find_legacy_bucket(&self) -> Option<BucketId> {
         if let Ok(buckets) = self.store.list_buckets() {
             for (_bucket_id_bytes, decl_cid) in &buckets {
                 if let Ok(Some(block)) = self.store.get_block(decl_cid) {
@@ -2509,8 +2510,8 @@ impl MemvaultClient for LocalClient {
         })
     }
 
-    async fn default_bucket_id(&self) -> Result<BucketId> {
-        self.legacy_bucket_id()
+    async fn legacy_bucket_id(&self) -> Result<BucketId> {
+        self.find_legacy_bucket()
             .ok_or_else(|| ApiError::Other("no legacy bucket configured".into()))
     }
 

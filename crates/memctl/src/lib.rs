@@ -1704,7 +1704,9 @@ mod native {
         let mut rng = rand::thread_rng();
         // Synth uses the legacy bucket if one exists; otherwise fail loudly
         // rather than silently writing to the zero bucket.
-        let bucket = client.default_bucket_id().await?;
+        let bucket = client.find_legacy_bucket().ok_or_else(|| {
+            anyhow::anyhow!("synth: no legacy bucket configured — run `memctl repair-index` first")
+        })?;
 
         // ── Vocabulary for generating plausible content ──────────────────
         let topics = [

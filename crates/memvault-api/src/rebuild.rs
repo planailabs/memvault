@@ -98,7 +98,7 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     // Use existing legacy bucket if any, otherwise create the deterministic one.
     // No stale detection — once created, the legacy bucket is kept forever.
     let legacy_bucket = if has_unbucketed {
-        Some(match client.legacy_bucket_id() {
+        Some(match client.find_legacy_bucket() {
             Some(b) => b,
             None => {
                 let det_id = deterministic_legacy_id(client);
@@ -121,7 +121,7 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             }
         })
     } else {
-        client.legacy_bucket_id()
+        client.find_legacy_bucket()
     };
 
     let mut to_rewrite: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new();
@@ -430,7 +430,7 @@ fn repair_vfs_sync(
     // 5. Link orphaned dirs to root.
     let retracted: HashSet<[u8; 32]> = root_candidates[1..].iter().copied().collect();
     let mut linked = 0usize;
-    let legacy_bucket = client.legacy_bucket_id().unwrap_or(BucketId([0u8; 32]));
+    let legacy_bucket = client.find_legacy_bucket().unwrap_or(BucketId([0u8; 32]));
 
     for (id, name) in &all_dirs {
         if reachable.contains(id) || retracted.contains(id) {
