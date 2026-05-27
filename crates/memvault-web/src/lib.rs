@@ -78,20 +78,11 @@ mod server_router {
     pub struct WebAuthBootstrap {
         /// `None` pre-genesis. `Some` once the daemon holds an admin key.
         pub admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
-        /// Trusted-node lookup. Always populated with at least the local node:
-        /// `NodeTrust::Attested(_)` post-genesis, `NodeTrust::PreGenesis`
-        /// before. Returned as an `Arc<RwLock<_>>` so the same handle can be
-        /// shared with the sigchain watcher.
-        pub node_trust: Arc<
-            std::sync::RwLock<
-                std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
-            >,
-        >,
-        /// Initial agent revocation set — empty at bootstrap; populated by
-        /// sync (phase 5) and any local `revoke_agent` calls thereafter.
-        pub revoked_agents: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
-        /// Initial node revocation set — empty at bootstrap.
-        pub revoked_nodes: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        /// Live trust state — shared handles to node_trust, revoked_*, and
+        /// trusted_agents. The same `Arc`s are wired into `AppState` and
+        /// passed to [`memvault_api::sigchain::spawn_sigchain_watcher`] so
+        /// the watcher mutates exactly what the verifier reads.
+        pub trust_state: memvault_api::sigchain::LiveTrustState,
     }
 
     /// Bootstrap per-agent web auth.
@@ -224,30 +215,23 @@ mod server_router {
         };
         let trusted_agents = Arc::new(std::sync::RwLock::new(trusted_agents_set));
 
-        // Spawn the sigchain watcher. It listens for SigchainBlock events
-        // (emitted by local writes AND by sync — sync must publish them
-        // after `insert_envelope` for received blocks) and updates the
-        // four trust handles below in place. The HTTP request path holds
-        // the same Arc handles via AppState.
-        let live = memvault_api::sigchain::LiveTrustState {
-            node_trust: Arc::clone(&node_trust),
-            revoked_agents: Arc::clone(&revoked_agents),
-            revoked_nodes: Arc::clone(&revoked_nodes),
-            trusted_agents: Arc::clone(&trusted_agents),
-        };
-        // Publish to the client so read-path enforcement
-        // (LocalClient::verify_envelope_authorship) sees the same handles.
-        client.set_trust_state(live.clone());
-        let _watcher =
-            memvault_api::sigchain::spawn_sigchain_watcher(Arc::clone(client), admin_pubkey, live);
-        // We intentionally leak the join handle — the watcher is meant to
-        // live for the daemon's lifetime; cancellation is via process exit.
-
-        Ok(WebAuthBootstrap {
-            admin_pubkey,
+        // Assemble the live trust state and publish it to the client so
+        // read-path enforcement (LocalClient::verify_envelope_authorship)
+        // sees the same handles. The caller is responsible for spawning
+        // `memvault_api::sigchain::spawn_sigchain_watcher` from inside an
+        // async context — this keeps init_web_auth itself sync and free of
+        // tokio-runtime assumptions.
+        let trust_state = memvault_api::sigchain::LiveTrustState {
             node_trust,
             revoked_agents,
             revoked_nodes,
+            trusted_agents,
+        };
+        client.set_trust_state(trust_state.clone());
+
+        Ok(WebAuthBootstrap {
+            admin_pubkey,
+            trust_state,
         })
     }
 

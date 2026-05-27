@@ -46,13 +46,21 @@ fn main() {
                         }
                     };
 
+                    // We're inside dioxus::serve's async closure, so a tokio
+                    // runtime is active — spawn the watcher onto it.
+                    let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
+                        Arc::clone(&local_client),
+                        auth.admin_pubkey,
+                        auth.trust_state.clone(),
+                    );
+
                     let app_state = Arc::new(memvault_web::AppState {
                         client,
                         event_bus: Arc::new(memvault_api::EventBus::new(64)),
                         admin_pubkey: auth.admin_pubkey,
-                        node_trust: auth.node_trust,
-                        revoked_agents: auth.revoked_agents,
-                        revoked_nodes: auth.revoked_nodes,
+                        node_trust: Arc::clone(&auth.trust_state.node_trust),
+                        revoked_agents: Arc::clone(&auth.trust_state.revoked_agents),
+                        revoked_nodes: Arc::clone(&auth.trust_state.revoked_nodes),
                         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                     });
                     router = axum::Router::new()

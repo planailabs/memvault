@@ -1367,6 +1367,14 @@ mod native {
                     let auth = memvault_web::init_web_auth(&local_client, &data_dir)
                         .map_err(|e| anyhow::anyhow!("web auth init: {e}"))?;
 
+                    // We're inside `pub async fn run` driven by the caller's
+                    // tokio runtime — spawn the watcher onto it.
+                    let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
+                        std::sync::Arc::clone(&local_client),
+                        auth.admin_pubkey,
+                        auth.trust_state.clone(),
+                    );
+
                     memvault_web::ui::state::set_client(std::sync::Arc::clone(&local_client));
                     let client_arc = local_client
                         as std::sync::Arc<dyn memvault_api::MemvaultClient>;
@@ -1375,9 +1383,9 @@ mod native {
                         client: client_arc,
                         event_bus: std::sync::Arc::clone(&event_bus_shared),
                         admin_pubkey: auth.admin_pubkey,
-                        node_trust: auth.node_trust,
-                        revoked_agents: auth.revoked_agents,
-                        revoked_nodes: auth.revoked_nodes,
+                        node_trust: std::sync::Arc::clone(&auth.trust_state.node_trust),
+                        revoked_agents: std::sync::Arc::clone(&auth.trust_state.revoked_agents),
+                        revoked_nodes: std::sync::Arc::clone(&auth.trust_state.revoked_nodes),
                         metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                     });
 

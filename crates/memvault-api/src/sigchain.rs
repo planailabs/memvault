@@ -215,48 +215,27 @@ pub struct LiveTrustState {
     pub trusted_agents: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
 }
 
-/// Spawn the sigchain watcher task. Tolerates being called from either
-/// inside or outside a tokio runtime: when no runtime is active on the
-/// current thread, a dedicated single-thread runtime is launched on a
-/// background OS thread and owns the watcher for the daemon's lifetime.
+/// Spawn the sigchain watcher into the current tokio runtime.
+///
+/// **Must be called from an async context** — i.e. from inside an `async`
+/// fn driven by the caller's runtime, or from inside a closure passed to
+/// `tokio::runtime::Runtime::block_on`. The watcher lives on the caller's
+/// runtime and is dropped/aborted when that runtime shuts down.
 ///
 /// Events arrive both from local writes (publish_*) and from RBSR sync
 /// (which calls `insert_envelope` on incoming blocks, and that must also
 /// publish `SigchainBlock` — the sync layer's responsibility).
-///
-/// Returns `Some(JoinHandle)` when spawned into an existing runtime
-/// (caller may abort), `None` when running on the dedicated thread (which
-/// lives until process exit).
 pub fn spawn_sigchain_watcher(
     client: std::sync::Arc<LocalClient>,
     admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
     state: LiveTrustState,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> tokio::task::JoinHandle<()> {
     let rx = client.event_bus().subscribe();
-    let watcher = run_watcher(client, admin_pubkey, state, rx);
-
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => Some(handle.spawn(watcher)),
-        Err(_) => {
-            // Sync context (e.g. memctl daemon-mode startup, dx serve
-            // bootstrap). Park a tiny runtime on a background thread.
-            std::thread::Builder::new()
-                .name("sigchain-watcher".into())
-                .spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("build sigchain-watcher runtime");
-                    rt.block_on(watcher);
-                })
-                .expect("spawn sigchain-watcher thread");
-            None
-        }
-    }
+    tokio::spawn(run_watcher(client, admin_pubkey, state, rx))
 }
 
-/// The watcher body, extracted so [`spawn_sigchain_watcher`] can park it
-/// onto either an existing runtime or a dedicated thread.
+/// Watcher body — separated from [`spawn_sigchain_watcher`] so callers
+/// can `tokio::spawn` it onto whatever runtime they own.
 async fn run_watcher(
     client: std::sync::Arc<LocalClient>,
     admin_pubkey: Option<ed25519_dalek::VerifyingKey>,

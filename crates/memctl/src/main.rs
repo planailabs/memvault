@@ -110,14 +110,33 @@ fn main() {
                 client: client_arc,
                 event_bus,
                 admin_pubkey: auth.admin_pubkey,
-                node_trust: auth.node_trust,
-                revoked_agents: auth.revoked_agents,
-                revoked_nodes: auth.revoked_nodes,
+                node_trust: Arc::clone(&auth.trust_state.node_trust),
+                revoked_agents: Arc::clone(&auth.trust_state.revoked_agents),
+                revoked_nodes: Arc::clone(&auth.trust_state.revoked_nodes),
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
             });
 
+            // We're in sync `fn main()` here — no tokio runtime yet. Move
+            // the watcher spawn into the dioxus::serve async closure so it
+            // lives on the runtime dioxus creates.
+            let watcher_client = Arc::clone(&local_client);
+            let watcher_admin = auth.admin_pubkey;
+            let watcher_state = auth.trust_state.clone();
+            let mut spawned = false;
+
             dioxus::serve(move || {
                 let state = Arc::clone(&app_state);
+                // First invocation of the serve callback runs inside dioxus'
+                // tokio runtime — spawn the sigchain watcher there. Guard
+                // with `spawned` so we don't double-spawn on reconnects.
+                if !spawned {
+                    let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
+                        Arc::clone(&watcher_client),
+                        watcher_admin,
+                        watcher_state.clone(),
+                    );
+                    spawned = true;
+                }
                 async move {
                     let router = axum::Router::new()
                         .serve_dioxus_application(ServeConfig::new(), memvault_web::ui::app::App)
