@@ -369,6 +369,13 @@ impl MemvaultClient for MockClient {
     async fn default_bucket_id(&self) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
     }
+
+    async fn ensure_agent_bucket(
+        &self,
+        _agent_id: &str,
+    ) -> memvault_api::Result<memvault_core::BucketId> {
+        Ok(memvault_core::BucketId([0u8; 32]))
+    }
 }
 
 fn make_app() -> axum::Router {

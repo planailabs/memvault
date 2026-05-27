@@ -148,6 +148,31 @@ pub struct ArchiveBucketRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EnsureAgentBucketRequest {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnsureAgentBucketResponse {
+    pub id: String,
+}
+
+pub async fn ensure_agent_bucket(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EnsureAgentBucketRequest>,
+) -> Result<Json<EnsureAgentBucketResponse>, StatusCode> {
+    let bucket_id = state
+        .client
+        .ensure_agent_bucket(&req.agent_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(EnsureAgentBucketResponse {
+        id: hex::encode(bucket_id.0),
+    }))
+}
+
 pub async fn archive_bucket(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,

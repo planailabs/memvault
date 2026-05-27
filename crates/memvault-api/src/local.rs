@@ -170,28 +170,22 @@ impl LocalClient {
         self.agent_identity = Some(identity);
     }
 
-    /// Create an `Agent`-role bucket for the current agent identity if one
-    /// does not already exist.  Returns the bucket ID (existing or new).
-    ///
-    /// Call after [`set_agent_identity`] and cluster genesis.  No-op when
-    /// no agent identity is set.
-    pub async fn ensure_agent_bucket(&self) -> Result<Option<memvault_core::BucketId>> {
-        let agent_id = match self.agent_id() {
-            Some(id) => id.clone(),
-            None => return Ok(None),
-        };
-
+    /// Find or create an `Agent`-role bucket for the given agent ID.
+    /// Returns the bucket ID (existing or newly created).
+    pub async fn ensure_agent_bucket_for(
+        &self,
+        agent_id: &memvault_core::AgentId,
+    ) -> Result<memvault_core::BucketId> {
         // Check if an agent bucket already exists for this agent.
         let buckets = self.bucket_list().await?;
         for b in &buckets {
             if b.role == memvault_doc::BucketRole::Agent
-                && b.owner_agent.as_ref() == Some(&agent_id)
+                && b.owner_agent.as_ref() == Some(agent_id)
             {
-                return Ok(Some(b.id.clone()));
+                return Ok(b.id.clone());
             }
         }
 
-        // Create one.
         let name = format!("agent:{}", agent_id.0);
         let bid = self
             .bucket_create(
@@ -203,7 +197,7 @@ impl LocalClient {
             )
             .await?;
         tracing::info!(agent = %agent_id.0, bucket = %bid, "created agent bucket");
-        Ok(Some(bid))
+        Ok(bid)
     }
 
     /// Get the cluster ID.
@@ -2518,5 +2512,10 @@ impl MemvaultClient for LocalClient {
     async fn default_bucket_id(&self) -> Result<BucketId> {
         self.legacy_bucket_id()
             .ok_or_else(|| ApiError::Other("no legacy bucket configured".into()))
+    }
+
+    async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId> {
+        let aid = memvault_core::AgentId(agent_id.to_string());
+        self.ensure_agent_bucket_for(&aid).await
     }
 }

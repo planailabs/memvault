@@ -914,4 +914,30 @@ impl MemvaultClient for HttpApiClient {
         }
         Ok(BucketId([0u8; 32]))
     }
+
+    async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId> {
+        let resp: serde_json::Value = self
+            .client
+            .post(self.url("/buckets/agent"))
+            .json(&serde_json::json!({ "agent_id": agent_id }))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let id_hex = resp["id"]
+            .as_str()
+            .ok_or_else(|| ApiError::Other("missing id in response".into()))?;
+        let bytes =
+            hex::decode(id_hex).map_err(|e| ApiError::Other(format!("invalid hex: {e}")))?;
+        if bytes.len() != 32 {
+            return Err(ApiError::Other("bucket id must be 32 bytes".into()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(BucketId(arr))
+    }
 }

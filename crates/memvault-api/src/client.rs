@@ -170,6 +170,10 @@ pub trait MemvaultClient: Send + Sync {
     /// Archive a bucket (soft-remove: new writes are refused, reads continue, data preserved).
     async fn bucket_archive(&self, id: &BucketId, reason: &str) -> Result<()>;
 
+    /// Find or create the agent bucket for the given agent ID.
+    /// Used by per-agent MCP servers as the default bucket for writes.
+    async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId>;
+
     // -- Sharing --
 
     /// List share proposals received by this cluster.

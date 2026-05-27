@@ -103,6 +103,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/buckets",
             get(buckets::list_buckets).post(buckets::create_bucket),
         )
+        // Register static `/buckets/agent` before the `{id}` route so it
+        // is not captured as `id = "agent"`.
+        .route("/buckets/agent", post(buckets::ensure_agent_bucket))
         .route(
             "/buckets/{id}",
             get(buckets::get_bucket).patch(buckets::rename_bucket),
