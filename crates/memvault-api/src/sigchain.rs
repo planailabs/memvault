@@ -45,6 +45,18 @@ fn write_block_with_extra_tags(
 ) -> Result<Vec<u8>> {
     let cid = memvault_core::cid_from_bytes(bytes);
     let cid_bytes = cid.to_bytes();
+
+    // Idempotence: if this exact block (same CID) is already in the
+    // store, don't re-emit the tag index entries. `insert_envelope`
+    // packs the wall_ns into BY_TAG keys, so a duplicate publish
+    // creates a NEW tag entry pointing to the SAME block — scans then
+    // return the block N times. `init_ui_agent` republishes the UI
+    // agent's attestation on every restart; without this gate, the
+    // agent would accumulate one duplicate tag entry per boot.
+    if matches!(client.store().get_block(&cid_bytes), Ok(Some(_))) {
+        return Ok(cid_bytes);
+    }
+
     let mut tags = vec![(KIND.to_string(), label.to_string())];
     tags.extend(extra_tags);
     let meta = EnvelopeMeta {
@@ -523,8 +535,18 @@ fn load_blocks_by_label(
         .store()
         .query_by_tag(KIND, label, 0, usize::MAX)
         .map_err(|e| ApiError::Other(format!("query {label}: {e}")))?;
+    // BY_TAG can contain multiple entries for the same CID — different
+    // `wall_ns` slots in the index key all map to the same block. That's
+    // the symptom of pre-fix duplicate publishes (see
+    // `write_block_with_extra_tags`). Dedupe here so scans (and the
+    // trust-tree UI) never see the same block twice, even when stale
+    // duplicate tag entries are still on disk from earlier runs.
+    let mut seen: HashSet<Vec<u8>> = HashSet::with_capacity(cids.len());
     let mut out = Vec::with_capacity(cids.len());
     for cid in cids {
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
         if let Ok(Some(bytes)) = client.store().get_block(&cid) {
             out.push(bytes);
         }
