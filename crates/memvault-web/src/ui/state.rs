@@ -90,26 +90,18 @@ mod inner {
         // rebuild from BLOCKS is the single source of truth.
         let index_cache = db_path.with_extension("text_index.json");
         {
-            let client_ref = Arc::clone(&client);
-            let cache_path = index_cache.clone();
-            let _ = std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                match rt.block_on(memvault_api::rebuild::rebuild_if_needed(&client_ref)) {
-                    Ok(Some(report)) => {
-                        // Rebuild ran — the text index was rebuilt as part of it,
-                        // so delete the stale cache to force a fresh save.
-                        let _ = std::fs::remove_file(&cache_path);
-                        tracing::info!(
-                            blocks = report.blocks_total,
-                            rewritten = report.unbucketed_rewritten,
-                            "blockstore rebuild complete"
-                        );
-                    }
-                    Ok(None) => {} // already at current version
-                    Err(e) => tracing::warn!("blockstore rebuild error: {e}"),
+            match memvault_api::rebuild::rebuild_if_needed(&client) {
+                Ok(Some(report)) => {
+                    let _ = std::fs::remove_file(&index_cache);
+                    tracing::info!(
+                        blocks = report.blocks_total,
+                        rewritten = report.unbucketed_rewritten,
+                        "blockstore rebuild complete"
+                    );
                 }
-            })
-            .join();
+                Ok(None) => {}
+                Err(e) => tracing::warn!("blockstore rebuild error: {e}"),
+            }
         }
 
         // Load or rebuild the text index in a background thread to avoid

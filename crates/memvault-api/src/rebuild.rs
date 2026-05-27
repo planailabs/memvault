@@ -42,7 +42,7 @@ pub struct RebuildReport {
 /// This is the single source of truth for what a store at
 /// `BLOCKSTORE_VERSION` should look like.  Both automatic startup
 /// rebuilds and `memctl repair-index` call this function.
-pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
+pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     let store = client.store();
     let mut report = RebuildReport::default();
 
@@ -106,7 +106,7 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                             memvault_core::classification::Classification::Internal,
                             memvault_doc::BucketRole::Legacy,
                         )
-                        .await?;
+                        ?;
                     tracing::info!(bucket = %det, "created deterministic legacy bucket");
                 }
             }
@@ -261,88 +261,8 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         }
     }
 
-    // ── Phase 4: VFS tree repair ───────────────────────────────────────
-    //
-    // Deduplicates roots, deduplicates same-name children within each
-    // directory, re-parents children from duplicate roots, then links
-    // any remaining orphaned dirs to the canonical root.
-
-    let (orphans, dupes) = repair_vfs_tree(client).await?;
-    report.vfs_orphans_linked = orphans;
-    report.vfs_dupes_removed = dupes;
-
-    // ── Phase 5: Pending VFS entries ───────────────────────────────────
-
-    let pending_cids = store
-        .query_by_tag("vfs_status", "pending_repair", 0, 10_000)
-        .unwrap_or_default();
-    for cid in &pending_cids {
-        if let Ok(Some(data)) = store.get_block(cid) {
-            if let Some(val) = memvault_store::deserialize_block(&data) {
-                let entity_tag = val
-                    .get("tags")
-                    .and_then(|v| v.as_array())
-                    .and_then(|tags| {
-                        tags.iter().find_map(|t| {
-                            let arr = t.as_array()?;
-                            let scope = arr.first()?.as_str()?;
-                            let label = arr.get(1)?.as_str()?;
-                            if scope == "entity" {
-                                Some(label.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                    });
-                let intended_path = val
-                    .get("tags")
-                    .and_then(|v| v.as_array())
-                    .and_then(|tags| {
-                        tags.iter().find_map(|t| {
-                            let arr = t.as_array()?;
-                            let scope = arr.first()?.as_str()?;
-                            let label = arr.get(1)?.as_str()?;
-                            if scope == "vfs_intended_path" {
-                                Some(label.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                    });
-                if let (Some(entity_hex), Some(path)) = (entity_tag, intended_path) {
-                    let node_ref = format!("entity:{entity_hex}");
-                    let bucket = client
-                        .legacy_bucket_id()
-                        .unwrap_or(BucketId([0u8; 32]));
-                    if crate::vfs::link_node_at_path(client, &bucket, &path, &node_ref)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = client
-                            .remove_tags(
-                                &node_ref,
-                                vec![("vfs_status".into(), "pending_repair".into())],
-                            )
-                            .await;
-                        let _ = client
-                            .add_tags(
-                                &node_ref,
-                                vec![("vfs_status".into(), "linked".into())],
-                            )
-                            .await;
-                        report.vfs_pending_migrated += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Phase 6: Rebuild full-text search index ────────────────────────
-
-    let (d, e, a) = client.populate_index().await?;
-    report.docs_indexed = d;
-    report.entities_indexed = e;
-    report.attachments_indexed = a;
+    // Phases 4-6 (VFS repair, pending VFS, text index) run async after
+    // this sync rebuild via rebuild_async_phases().
 
     // ── Stamp the version ──────────────────────────────────────────────
 
@@ -355,7 +275,8 @@ pub async fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
 
 /// Check stored version and rebuild if needed.  Returns the report if a
 /// rebuild ran, or None if the store was already at the current version.
-pub async fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildReport>> {
+/// Check stored version and rebuild if needed (sync).
+pub fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildReport>> {
     let stored = client
         .store()
         .schema_version()
@@ -371,7 +292,7 @@ pub async fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildRep
         "blockstore version mismatch — rebuilding derived state"
     );
 
-    let report = rebuild_store(client).await?;
+    let report = rebuild_store(client)?;
 
     tracing::info!(
         stored_version = stored,
@@ -383,6 +304,61 @@ pub async fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildRep
     );
 
     Ok(Some(report))
+}
+
+/// Async phases that run after the sync rebuild: VFS repair, pending VFS
+/// entries, and text index rebuild.
+pub async fn rebuild_async_phases(client: &LocalClient) -> Result<(usize, usize, usize)> {
+    use crate::client::MemvaultClient;
+
+    let (orphans, dupes) = repair_vfs_tree(client).await?;
+    if orphans > 0 || dupes > 0 {
+        tracing::info!(orphans, dupes, "VFS tree repaired");
+    }
+
+    // Pending VFS entries
+    let store = client.store();
+    let pending_cids = store
+        .query_by_tag("vfs_status", "pending_repair", 0, 10_000)
+        .unwrap_or_default();
+    for cid in &pending_cids {
+        if let Ok(Some(data)) = store.get_block(cid) {
+            if let Some(val) = memvault_store::deserialize_block(&data) {
+                let entity_tag = val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
+                    tags.iter().find_map(|t| {
+                        let arr = t.as_array()?;
+                        if arr.first()?.as_str()? == "entity" {
+                            Some(arr.get(1)?.as_str()?.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                });
+                let path = val.get("tags").and_then(|v| v.as_array()).and_then(|tags| {
+                    tags.iter().find_map(|t| {
+                        let arr = t.as_array()?;
+                        if arr.first()?.as_str()? == "vfs_intended_path" {
+                            Some(arr.get(1)?.as_str()?.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if let (Some(hex), Some(p)) = (entity_tag, path) {
+                    let node = format!("entity:{hex}");
+                    let bucket = client.legacy_bucket_id().unwrap_or(BucketId([0u8; 32]));
+                    if crate::vfs::link_node_at_path(client, &bucket, &p, &node).await.is_ok() {
+                        let _ = client.remove_tags(&node, vec![("vfs_status".into(), "pending_repair".into())]).await;
+                        let _ = client.add_tags(&node, vec![("vfs_status".into(), "linked".into())]).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // Text index
+    let (d, e, a) = client.populate_index().await?;
+    Ok((d, e, a))
 }
 
 // ── VFS tree repair ────────────────────────────────────────────────────

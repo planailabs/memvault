@@ -68,8 +68,7 @@ impl ClientArgs {
                 Arc::new(EventBus::new(64)),
                 vec![0u8; 32],
                 vec![0u8; 32],
-            )
-            .await?;
+            )?;
             Ok(Box::new(client))
         } else {
             let token = self
@@ -117,8 +116,7 @@ pub async fn connect(
             Arc::new(EventBus::new(64)),
             vec![0u8; 32],
             vec![0u8; 32],
-        )
-        .await?;
+        )?;
         Ok(Box::new(client))
     } else {
         let url = opts

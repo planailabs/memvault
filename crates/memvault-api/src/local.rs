@@ -106,7 +106,9 @@ impl LocalClient {
     /// Create a LocalClient and run a blockstore rebuild if the version
     /// is outdated.  This is the recommended entry point — use `new()`
     /// only when you need to skip the rebuild (e.g. tests).
-    pub async fn open(
+    /// Create a LocalClient and run a sync blockstore rebuild if the
+    /// version is outdated.  This is the recommended entry point.
+    pub fn open(
         store: Arc<MemvaultStore>,
         index: Arc<RwLock<TextIndex>>,
         quotas: Arc<RwLock<QuotaManager>>,
@@ -115,7 +117,7 @@ impl LocalClient {
         cluster_id: Vec<u8>,
     ) -> Result<Self> {
         let client = Self::new(store, index, quotas, event_bus, peer_id, cluster_id);
-        if let Err(e) = client.rebuild_if_needed().await {
+        if let Err(e) = client.rebuild_if_needed() {
             tracing::warn!("blockstore rebuild error on open: {e}");
         }
         Ok(client)
@@ -174,7 +176,7 @@ impl LocalClient {
 
     /// Create a bucket with a specific pre-determined ID (for deterministic
     /// legacy bucket creation across cluster nodes).
-    pub async fn create_bucket_with_id(
+    pub fn create_bucket_with_id(
         &self,
         bucket_id: BucketId,
         name: &str,
@@ -678,10 +680,11 @@ impl LocalClient {
     }
 
     /// Rebuild all derived state if the blockstore version is outdated.
-    pub async fn rebuild_if_needed(
+    /// Rebuild derived state if blockstore version is outdated (sync).
+    pub fn rebuild_if_needed(
         &self,
     ) -> Result<Option<crate::rebuild::RebuildReport>> {
-        crate::rebuild::rebuild_if_needed(self).await
+        crate::rebuild::rebuild_if_needed(self)
     }
 
     /// Access the text index (for direct queries in local backend).

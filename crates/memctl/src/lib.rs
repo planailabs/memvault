@@ -998,7 +998,7 @@ mod native {
                 // Full deterministic rebuild from BLOCKS.
                 println!("Rebuilding all derived state from blocks...");
                 let client = create_client(store.clone());
-                let report = memvault_api::rebuild::rebuild_store(&client).await?;
+                let report = memvault_api::rebuild::rebuild_store(&client)?;
 
                 println!("  Blocks:       {}", report.blocks_total);
                 println!("  Rewritten:    {}", report.unbucketed_rewritten);
@@ -1342,7 +1342,7 @@ mod native {
 
                 // Rebuild derived state if blockstore version is outdated.
                 let index_cache_path = data_dir.join("text_index.json");
-                match client.rebuild_if_needed().await {
+                match client.rebuild_if_needed() {
                     Ok(Some(report)) => {
                         let _ = std::fs::remove_file(&index_cache_path);
                         tracing::info!(
