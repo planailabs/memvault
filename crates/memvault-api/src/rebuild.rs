@@ -205,6 +205,36 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     for (cid, data) in &blocks {
         if store.reindex_block(cid, data).unwrap_or(false) {
             report.envelopes_indexed += 1;
+        } else if let Some(label) = memvault_auth::sigchain_label_for(data) {
+            // Raw CBOR sigchain blocks have no envelope `tags` field, so
+            // `reindex_block` skipped them. Re-emit the `sigchain/<label>`
+            // tag entry directly. Trust the contents: the block was
+            // already in our store (either we minted it locally or it
+            // passed sync's signature gate via `vet_sync_block`), so the
+            // shape is enough.
+            let mut tags = vec![("sigchain".to_string(), label.to_string())];
+            // EnvelopeAuthorship gets a secondary tag for O(1) lookup
+            // by envelope CID — mirror `publish_envelope_authorship`.
+            if label == "envelope_auth" {
+                if let Ok(auth) =
+                    serde_ipld_dagcbor::from_slice::<memvault_auth::EnvelopeAuthorship>(data)
+                {
+                    tags.push((
+                        "env_auth_by_cid".to_string(),
+                        hex::encode(&auth.envelope_cid),
+                    ));
+                }
+            }
+            let meta = memvault_store::EnvelopeMeta {
+                author: client.peer_id().to_vec(),
+                tags,
+                wall_ns: memvault_core::wall_ns(),
+                cluster_id: Some(client.cluster_id().to_vec()),
+                ..Default::default()
+            };
+            if store.insert_envelope(cid, data, &meta).is_ok() {
+                report.envelopes_indexed += 1;
+            }
         }
         // Bucket metadata
         if let Some(val) = memvault_store::deserialize_block(data) {

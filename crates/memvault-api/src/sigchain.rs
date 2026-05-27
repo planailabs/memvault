@@ -535,18 +535,8 @@ fn load_blocks_by_label(
         .store()
         .query_by_tag(KIND, label, 0, usize::MAX)
         .map_err(|e| ApiError::Other(format!("query {label}: {e}")))?;
-    // BY_TAG can contain multiple entries for the same CID — different
-    // `wall_ns` slots in the index key all map to the same block. That's
-    // the symptom of pre-fix duplicate publishes (see
-    // `write_block_with_extra_tags`). Dedupe here so scans (and the
-    // trust-tree UI) never see the same block twice, even when stale
-    // duplicate tag entries are still on disk from earlier runs.
-    let mut seen: HashSet<Vec<u8>> = HashSet::with_capacity(cids.len());
     let mut out = Vec::with_capacity(cids.len());
     for cid in cids {
-        if !seen.insert(cid.clone()) {
-            continue;
-        }
         if let Ok(Some(bytes)) = client.store().get_block(&cid) {
             out.push(bytes);
         }

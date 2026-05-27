@@ -1,5 +1,6 @@
 pub mod admin_genesis;
 pub mod agent_attestation;
+pub mod sigchain_shape;
 pub mod agent_revocation;
 pub mod envelope_authorship;
 pub mod node_attestation;
@@ -22,6 +23,7 @@ pub use agent_revocation::{
     AgentRevocation, NodeRevocation, sign_agent_revocation, sign_node_revocation,
 };
 pub use envelope_authorship::{EnvelopeAuthorship, sign_envelope_authorship};
+pub use sigchain_shape::{SigchainKind, sigchain_label_for, detect_sigchain_shape};
 pub use node_attestation::{AttestationOrigin, NodeAttestation};
 pub use enrollment::AgentEnrollment;
 pub use error::{AuthError, Result};

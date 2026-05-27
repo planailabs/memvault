@@ -642,3 +642,108 @@ async fn agent_attestation_syncs_with_correct_tag() {
          trust tree."
     );
 }
+
+/// Regression: `rebuild_store` must re-tag raw-CBOR sigchain blocks
+/// after `clear_secondary_indexes` so trust-state scanning works
+/// after a blockstore version bump. Without this, bumping
+/// `BLOCKSTORE_VERSION` would wipe `BY_TAG` and leave sigchain
+/// blocks untagged (since `reindex_block` treats raw CBOR as
+/// "not an envelope") — `scan_trusted_nodes` / `scan_trusted_agents`
+/// would silently return empty.
+#[tokio::test]
+async fn rebuild_retags_sigchain_blocks() {
+    use memvault_api::{
+        EventBus, LocalClient,
+        bootstrap::bootstrap_cluster_trust,
+        sigchain,
+    };
+    use memvault_core::ClusterId;
+    use memvault_query::{QuotaManager, TextIndex};
+    use std::sync::Arc;
+
+    // Build a LocalClient with admin + node keys so we can mint
+    // sigchain blocks.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemvaultStore::open(dir.path().join("blocks.redb")).unwrap());
+    let cluster_id = ClusterId::random();
+    store.set_local_cluster_id(&cluster_id.0).unwrap();
+    let mut peer_id = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut peer_id);
+    store.set_local_peer_id(&peer_id).unwrap();
+
+    let client = Arc::new({
+        let c = LocalClient::new(
+            Arc::clone(&store),
+            Arc::new(tokio::sync::RwLock::new(TextIndex::new())),
+            Arc::new(tokio::sync::RwLock::new(QuotaManager::default())),
+            Arc::new(EventBus::new(64)),
+            peer_id,
+            cluster_id.0.to_vec(),
+        );
+        let admin_sk = SigningKey::from_bytes(&random_seed());
+        c.set_admin_signing_key(admin_sk.clone());
+        let node_sk = SigningKey::from_bytes(&random_seed());
+        c.set_node_signing_key(node_sk);
+        let genesis = sign_admin_genesis(&admin_sk, cluster_id.clone(), memvault_core::wall_ns())
+            .expect("sign admin_genesis");
+        c.set_pinned_admin_genesis(genesis);
+        c
+    });
+
+    // Bootstrap publishes the admin's NodeAttestation + AdminGenesis.
+    let _trust = bootstrap_cluster_trust(&client).expect("bootstrap");
+
+    // Confirm tags exist pre-rebuild.
+    assert!(
+        !store
+            .query_by_tag("sigchain", "node_att", 0, 64)
+            .unwrap_or_default()
+            .is_empty(),
+        "node_att tag should exist before rebuild"
+    );
+
+    // Simulate the version-bump rebuild: clear secondaries, then
+    // rebuild_store should walk all blocks and re-tag sigchain shapes.
+    store.clear_secondary_indexes().expect("clear");
+    assert!(
+        store
+            .query_by_tag("sigchain", "node_att", 0, 64)
+            .unwrap_or_default()
+            .is_empty(),
+        "node_att tag must be wiped by clear_secondary_indexes"
+    );
+
+    let report = memvault_api::rebuild::rebuild_store(&client).expect("rebuild");
+    assert!(report.envelopes_indexed > 0, "rebuild indexed nothing");
+
+    // Sigchain tags must be back after rebuild.
+    let node_att_cids = store
+        .query_by_tag("sigchain", "node_att", 0, 64)
+        .unwrap_or_default();
+    assert!(
+        !node_att_cids.is_empty(),
+        "rebuild_store must re-tag NodeAttestation blocks. \
+         Pre-fix, raw CBOR sigchain blocks had no envelope `tags` \
+         field and `reindex_block` silently skipped them."
+    );
+
+    let admin_genesis_cids = store
+        .query_by_tag("sigchain", "admin_genesis", 0, 64)
+        .unwrap_or_default();
+    assert!(
+        !admin_genesis_cids.is_empty(),
+        "rebuild_store must re-tag AdminGenesis blocks"
+    );
+
+    // Verify the re-tagged blocks are still valid sigchain content
+    // (not just tagged garbage).
+    let scanned_nodes = sigchain::scan_trusted_nodes(
+        &client,
+        Some(&client.admin_signing_key().unwrap().verifying_key()),
+    )
+    .expect("scan_trusted_nodes");
+    assert!(
+        !scanned_nodes.is_empty(),
+        "scan_trusted_nodes must find the re-tagged NodeAttestation"
+    );
+}
