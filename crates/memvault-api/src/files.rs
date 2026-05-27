@@ -11,8 +11,8 @@ use crate::error::Result;
 /// Returns (manifest_cid_bytes, node_id).
 ///
 /// Audit logging is automatic via `MemvaultClient::upload_file`.
-pub async fn upload_file(
-    client: &dyn MemvaultClient,
+pub async fn upload_file<C: MemvaultClient + ?Sized>(
+    client: &C,
     data: &[u8],
     filename: Option<&str>,
     mime_type: &str,

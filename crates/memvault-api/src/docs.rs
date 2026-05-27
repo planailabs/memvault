@@ -28,8 +28,8 @@ pub struct CreateDocResult {
 /// key, the title is inserted into frontmatter automatically.
 ///
 /// Audit logging is automatic via `MemvaultClient::put_doc`.
-pub async fn create_doc(
-    client: &dyn MemvaultClient,
+pub async fn create_doc<C: MemvaultClient + ?Sized>(
+    client: &C,
     body: &str,
     title: Option<&str>,
     frontmatter: Option<BTreeMap<String, serde_json::Value>>,
