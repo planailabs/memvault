@@ -286,10 +286,18 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     report.vfs_dupes_removed = dupes;
 
     // ── Stamp the version ──────────────────────────────────────────────
+    //
+    // Only stamp if the cluster_id is set (rebuild was complete).
+    // Pre-genesis stores skip the rewrite and must re-run post-genesis.
 
-    store
-        .set_schema_version(BLOCKSTORE_VERSION)
-        .map_err(|e| ApiError::Other(format!("set blockstore version: {e}")))?;
+    let has_cluster = client.cluster_id().iter().any(|&b| b != 0);
+    if has_cluster {
+        store
+            .set_schema_version(BLOCKSTORE_VERSION)
+            .map_err(|e| ApiError::Other(format!("set blockstore version: {e}")))?;
+    } else {
+        tracing::info!("pre-genesis store — skipping version stamp (will re-run post-genesis)");
+    }
 
     Ok(report)
 }
