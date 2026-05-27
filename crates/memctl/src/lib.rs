@@ -1360,7 +1360,7 @@ mod native {
                     // (or generate one) — keeps node identity stable across
                     // restarts without depending on a libp2p host key.
                     client.set_node_signing_key(
-                        memvault_web::load_or_generate_node_key(&data_dir)
+                        memvault_api::node_key::load_or_generate(&data_dir)
                             .map_err(|e| anyhow::anyhow!("node key: {e}"))?,
                     );
                     let auth = memvault_web::init_web_auth(&client, &data_dir)

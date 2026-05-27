@@ -31,7 +31,7 @@ fn main() {
                     // key and install it on the LocalClient. The daemon main
                     // path does this with the libp2p host key; here we use a
                     // file-backed key under `<data_dir>/identity/node.key`.
-                    match memvault_web::load_or_generate_node_key(&data_dir) {
+                    match memvault_api::node_key::load_or_generate(&data_dir) {
                         Ok(k) => local_client.set_node_signing_key(k),
                         Err(e) => {
                             eprintln!("memvault: API routes NOT mounted (node key: {e})");

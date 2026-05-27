@@ -68,41 +68,6 @@ mod server_router {
         pub metrics: Arc<memvault_api::metrics::Metrics>,
     }
 
-    /// Bootstrap per-agent web auth: derive the cluster admin pubkey from the
-    /// client (which must hold the admin signing key) and register a fresh
-    /// "_ui" agent identity that the web UI uses for its session JWTs.
-    ///
-    /// Call once before constructing [`AppState`]; the returned pubkey is the
-    /// root of trust for JWT verification on every API request.
-    /// Load (or generate + persist) a per-daemon node signing key at
-    /// `<data_dir>/identity/node.key`. Used by dev / non-libp2p callers
-    /// (memctl, memvault-web standalone main). The full daemon reuses its
-    /// libp2p host key instead (design A-1).
-    pub fn load_or_generate_node_key(
-        data_dir: &std::path::Path,
-    ) -> std::io::Result<ed25519_dalek::SigningKey> {
-        let path = data_dir.join("identity").join("node.key");
-        if let Ok(bytes) = std::fs::read(&path) {
-            if bytes.len() >= 32 {
-                let mut seed = [0u8; 32];
-                seed.copy_from_slice(&bytes[..32]);
-                return Ok(ed25519_dalek::SigningKey::from_bytes(&seed));
-            }
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut seed = [0u8; 32];
-        rand::Rng::fill(&mut rand::thread_rng(), &mut seed);
-        std::fs::write(&path, &seed)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
-    }
-
     /// Bootstrap result from [`init_web_auth`].
     pub struct WebAuthBootstrap {
         /// `None` pre-genesis. `Some` once the daemon holds an admin key.

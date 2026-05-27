@@ -10,6 +10,7 @@ pub mod health;
 pub mod http;
 pub mod local;
 pub mod metrics;
+pub mod node_key;
 pub mod rebuild;
 pub mod sigchain;
 pub mod otel;
