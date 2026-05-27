@@ -74,35 +74,21 @@ mod inner {
             .flatten()
             .unwrap_or_else(|| vec![0u8; 32]);
 
-        let client = Arc::new(memvault_api::LocalClient::new(
-            store,
-            Arc::new(RwLock::new(memvault_query::TextIndex::new())),
-            Arc::new(RwLock::new(memvault_query::QuotaManager::new(
-                Default::default(),
-            ))),
-            Arc::new(memvault_api::EventBus::new(64)),
-            peer_id,
-            cluster_id,
-        ));
+        let client = Arc::new(
+            memvault_api::LocalClient::open(
+                store,
+                Arc::new(RwLock::new(memvault_query::TextIndex::new())),
+                Arc::new(RwLock::new(memvault_query::QuotaManager::new(
+                    Default::default(),
+                ))),
+                Arc::new(memvault_api::EventBus::new(64)),
+                peer_id,
+                cluster_id,
+            )
+            .unwrap_or_else(|e| panic!("memvault LocalClient::open failed: {e}")),
+        );
 
-        // Rebuild derived state if blockstore version is outdated.
-        // This replaces the old migration system — a full deterministic
-        // rebuild from BLOCKS is the single source of truth.
         let index_cache = db_path.with_extension("text_index.json");
-        {
-            match memvault_api::rebuild::rebuild_if_needed(&client) {
-                Ok(Some(report)) => {
-                    let _ = std::fs::remove_file(&index_cache);
-                    tracing::info!(
-                        blocks = report.blocks_total,
-                        rewritten = report.unbucketed_rewritten,
-                        "blockstore rebuild complete"
-                    );
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!("blockstore rebuild error: {e}"),
-            }
-        }
 
         // Load or rebuild the text index in a background thread to avoid
         // blocking the async runtime (we may be called from inside tokio).

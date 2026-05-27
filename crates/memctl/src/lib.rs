@@ -430,14 +430,18 @@ mod native {
             .ok()
             .flatten()
             .unwrap_or_else(|| vec![0u8; 32]);
-        let mut client = LocalClient::new(
+        let mut client = LocalClient::open(
             store,
             Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
             event_bus,
             peer_id,
             cluster_id,
-        );
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!("LocalClient::open failed: {e}, falling back to new()");
+            panic!("LocalClient::open failed: {e}");
+        });
         // Load admin signing key if available (enables token issuance)
         let admin_key_path = data_dir.join("identity").join("admin.key");
         if admin_key_path.exists() {
@@ -1341,21 +1345,8 @@ mod native {
                 );
 
                 // Rebuild derived state if blockstore version is outdated.
-                let index_cache_path = data_dir.join("text_index.json");
-                match client.rebuild_if_needed() {
-                    Ok(Some(report)) => {
-                        let _ = std::fs::remove_file(&index_cache_path);
-                        tracing::info!(
-                            blocks = report.blocks_total,
-                            rewritten = report.unbucketed_rewritten,
-                            "blockstore rebuild complete"
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!("blockstore rebuild error: {e}"),
-                }
-
                 // Load or rebuild the full-text search index
+                let index_cache_path = data_dir.join("text_index.json");
                 match client.load_or_rebuild_index(&index_cache_path).await {
                     Ok((d, e, a)) => {
                         tracing::info!("text index ready: {d} docs, {e} entities, {a} attachments")
