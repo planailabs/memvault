@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 use memvault_api::{EventBus, MemvaultClient, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
 use memvault_auth::Role;
-use memvault_auth::attestation::{AttestationOrigin, MembershipAttestation};
+use memvault_auth::node_attestation::{AttestationOrigin, NodeAttestation};
 use memvault_core::{ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
@@ -21,7 +21,7 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use crate::{AppState, build_router};
 
 /// Deterministic test admin + node + agent keys.
-/// In the chain model: admin signs the node's MembershipAttestation, node
+/// In the chain model: admin signs the node's NodeAttestation, node
 /// signs the agent's AgentAttestation, agent signs the JWT.
 fn test_keys() -> (SigningKey, SigningKey, SigningKey) {
     (
@@ -32,8 +32,8 @@ fn test_keys() -> (SigningKey, SigningKey, SigningKey) {
 }
 
 /// Build an admin-signed node attestation.
-fn test_node_attestation(admin: &SigningKey, node: &SigningKey) -> MembershipAttestation {
-    let mut att = MembershipAttestation {
+fn test_node_attestation(admin: &SigningKey, node: &SigningKey) -> NodeAttestation {
+    let mut att = NodeAttestation {
         cluster_id: ClusterId([0u8; 32]),
         member: PeerId(node.verifying_key().as_bytes().to_vec()),
         role: Role::AgentHost,

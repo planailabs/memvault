@@ -2,7 +2,7 @@
 //! public key is trusted by that node.
 //!
 //! Trust chain at verification time:
-//! 1. The node's [`MembershipAttestation`] is admin-signed (or carried via the
+//! 1. The node's [`NodeAttestation`] is admin-signed (or carried via the
 //!    sig-chain). The verifier looks it up by `node_pubkey`.
 //! 2. This [`AgentAttestation`] is signed by that node's private key.
 //! 3. The agent then issues JWTs signed with its own private key (carried in
@@ -12,7 +12,7 @@
 //! public key. The agent only knows which node attested it; the trust path back
 //! to the admin lives in the cluster's sig-chain, looked up at verify time.
 //!
-//! [`MembershipAttestation`]: crate::MembershipAttestation
+//! [`NodeAttestation`]: crate::NodeAttestation
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use memvault_core::AgentId;
@@ -68,7 +68,7 @@ impl AgentAttestation {
 
     /// Verify the signature against the claimed `node_pubkey`. The caller is
     /// responsible for confirming `node_pubkey` is itself a trusted node (via
-    /// a [`MembershipAttestation`](crate::MembershipAttestation) lookup).
+    /// a [`NodeAttestation`](crate::NodeAttestation) lookup).
     pub fn verify_signature(&self) -> Result<()> {
         let bytes = self.signing_bytes()?;
         let sig = Signature::from_bytes(&self.signature);

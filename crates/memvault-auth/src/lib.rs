@@ -1,6 +1,6 @@
 pub mod agent_attestation;
 pub mod agent_revocation;
-pub mod attestation;
+pub mod node_attestation;
 pub mod enrollment;
 pub mod error;
 pub mod grant;
@@ -18,7 +18,7 @@ pub use agent_attestation::{AgentAttestation, sign_agent_attestation};
 pub use agent_revocation::{
     AgentRevocation, NodeRevocation, sign_agent_revocation, sign_node_revocation,
 };
-pub use attestation::{AttestationOrigin, MembershipAttestation};
+pub use node_attestation::{AttestationOrigin, NodeAttestation};
 pub use enrollment::AgentEnrollment;
 pub use error::{AuthError, Result};
 pub use grant::{Action, Grant, GrantAudience};

@@ -3,7 +3,7 @@
 //! Every request to /api/v1/* (except `/auth/session-token`, which serves the
 //! web UI) carries `Authorization: Bearer <jwt>` where `<jwt>` is an
 //! ed25519-signed token (see `memvault_auth::jwt`) issued by an agent
-//! identity. The token embeds the agent's `MembershipAttestation` inline,
+//! identity. The token embeds the agent's `NodeAttestation` inline,
 //! so verification is stateless:
 //!
 //! 1. Verify attestation signature against the cluster admin's pubkey.

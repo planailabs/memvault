@@ -7,7 +7,7 @@
 //! its in-memory `node_trust`, `revoked_agents`, and `revoked_nodes` tables.
 //!
 //! Tag layout (kind / label):
-//! - `("sigchain", "node_att")` — values are CBOR-encoded `MembershipAttestation`
+//! - `("sigchain", "node_att")` — values are CBOR-encoded `NodeAttestation`
 //! - `("sigchain", "agent_rev")` — CBOR `AgentRevocation`
 //! - `("sigchain", "node_rev")` — CBOR `NodeRevocation`
 
@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{ApiError, Result};
 use crate::local::LocalClient;
 use memvault_auth::jwt::NodeTrust;
-use memvault_auth::{AgentRevocation, MembershipAttestation, NodeRevocation};
+use memvault_auth::{AgentRevocation, NodeAttestation, NodeRevocation};
 use memvault_store::insert::EnvelopeMeta;
 
 const KIND: &str = "sigchain";
@@ -41,11 +41,11 @@ fn write_block(client: &LocalClient, label: &str, bytes: &[u8]) -> Result<Vec<u8
     Ok(cid_bytes)
 }
 
-/// Persist a node `MembershipAttestation` so it survives daemon restart and
+/// Persist a node `NodeAttestation` so it survives daemon restart and
 /// can be picked up by other peers via RBSR sync.
 pub fn publish_node_attestation(
     client: &LocalClient,
-    attestation: &MembershipAttestation,
+    attestation: &NodeAttestation,
 ) -> Result<Vec<u8>> {
     let bytes = serde_ipld_dagcbor::to_vec(attestation)
         .map_err(|e| ApiError::Serialization(e.to_string()))?;
@@ -95,7 +95,7 @@ fn load_blocks_by_label(
 pub fn scan_trusted_nodes(client: &LocalClient) -> Result<HashMap<[u8; 32], NodeTrust>> {
     let mut out = HashMap::new();
     for bytes in load_blocks_by_label(client, LABEL_NODE_ATT)? {
-        let att: MembershipAttestation = match serde_ipld_dagcbor::from_slice(&bytes) {
+        let att: NodeAttestation = match serde_ipld_dagcbor::from_slice(&bytes) {
             Ok(a) => a,
             Err(e) => {
                 tracing::warn!(error = %e, "skipping corrupt node attestation block");

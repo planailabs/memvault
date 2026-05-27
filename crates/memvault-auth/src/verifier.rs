@@ -4,7 +4,7 @@ use cid::Cid;
 use ed25519_dalek::VerifyingKey;
 use memvault_core::PeerId;
 
-use crate::attestation::MembershipAttestation;
+use crate::node_attestation::NodeAttestation;
 use crate::error::{AuthError, Result};
 use crate::key_state::AdminKeyState;
 use crate::trust::ClusterTrust;
@@ -52,7 +52,7 @@ impl AuthVerifier {
     /// 5. For federation: accepts attestations signed by trusted cluster admin keys
     pub fn verify_attestation(
         &self,
-        attestation: &MembershipAttestation,
+        attestation: &NodeAttestation,
         connecting_peer: &PeerId,
         now_ns: u64,
         attestation_cid: &Cid,
@@ -90,7 +90,7 @@ impl AuthVerifier {
     /// Try to verify the attestation signature against local admin keys valid at now_ns.
     fn verify_with_local_keys(
         &self,
-        attestation: &MembershipAttestation,
+        attestation: &NodeAttestation,
         now_ns: u64,
     ) -> Result<()> {
         let valid_keys = self.local_key_state.valid_keys_at(now_ns);
@@ -107,7 +107,7 @@ impl AuthVerifier {
     /// Try to verify the attestation against federated cluster admin keys.
     fn verify_with_federation_keys(
         &self,
-        attestation: &MembershipAttestation,
+        attestation: &NodeAttestation,
         now_ns: u64,
     ) -> Result<()> {
         for trust in &self.federation_trusts {

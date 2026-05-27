@@ -45,7 +45,7 @@ pub struct EnvelopeMeta {
     /// Ed25519 signature over the envelope payload, produced with the agent's
     /// private key. Pairs with `agent_pubkey`. Verifiers checking
     /// authorship-of-edits cross-reference this against the agent attestation
-    /// chain (`AgentAttestation` → `MembershipAttestation` → admin).
+    /// chain (`AgentAttestation` → `NodeAttestation` → admin).
     pub agent_signature: Option<[u8; 64]>,
 }
 

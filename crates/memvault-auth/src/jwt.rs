@@ -2,13 +2,13 @@
 //!
 //! The token carries the agent's [`AgentAttestation`] inline (in the `att`
 //! claim). The agent attestation is signed by a *node*, and the node's own
-//! [`MembershipAttestation`] (admin-signed) lives in the cluster's sig-chain.
+//! [`NodeAttestation`] (admin-signed) lives in the cluster's sig-chain.
 //! Verification flow:
 //!
 //! 1. Decode JWT header + payload.
 //! 2. Pull `att` from payload, deserialize the [`AgentAttestation`].
 //! 3. Verify the agent attestation's signature against its embedded `node_pubkey`.
-//! 4. Look up the node's [`MembershipAttestation`] via the caller-supplied
+//! 4. Look up the node's [`NodeAttestation`] via the caller-supplied
 //!    closure (the sig-chain table).
 //! 5. Verify that node attestation against the cluster admin's pubkey.
 //! 6. Verify the JWT signature against `att.agent_pubkey`.
@@ -24,7 +24,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_attestation::AgentAttestation;
-use crate::attestation::MembershipAttestation;
+use crate::node_attestation::NodeAttestation;
 use crate::error::{AuthError, Result};
 
 const ALG: &str = "EdDSA";
@@ -51,7 +51,7 @@ pub struct AgentTokenClaims {
     pub iat: u64,
     /// Space-separated scopes (OAuth-style).
     pub scope: String,
-    /// Base64-encoded CBOR of the agent's [`MembershipAttestation`].
+    /// Base64-encoded CBOR of the agent's [`NodeAttestation`].
     pub att: String,
 }
 
@@ -130,7 +130,7 @@ pub fn issue(
 #[derive(Debug, Clone)]
 pub enum NodeTrust {
     /// Admin-signed attestation. Verifier confirms against `admin_pubkey`.
-    Attested(MembershipAttestation),
+    Attested(NodeAttestation),
     /// Pre-genesis trust seed. The node is trusted because it's local
     /// (or otherwise pre-configured); no admin chain check.
     PreGenesis,
@@ -148,7 +148,7 @@ pub enum NodeTrust {
 ///
 /// Trust chain checked (when `Attested`):
 /// agent JWT sig → agent pubkey → AgentAttestation sig → node pubkey →
-/// MembershipAttestation sig → admin pubkey.
+/// NodeAttestation sig → admin pubkey.
 ///
 /// Pre-genesis: agent JWT sig → agent pubkey → AgentAttestation sig → node
 /// pubkey (trusted because the lookup said so). No admin step.
@@ -275,7 +275,7 @@ where
 mod tests {
     use super::*;
     use crate::agent_attestation::sign_agent_attestation;
-    use crate::attestation::AttestationOrigin;
+    use crate::node_attestation::AttestationOrigin;
     use crate::role::Role;
     use ed25519_dalek::SigningKey;
     use memvault_core::{AgentId, ClusterId, PeerId};
@@ -287,8 +287,8 @@ mod tests {
         SigningKey::from_bytes(&seed)
     }
 
-    fn node_att(admin: &SigningKey, node: &SigningKey) -> MembershipAttestation {
-        let mut a = MembershipAttestation {
+    fn node_att(admin: &SigningKey, node: &SigningKey) -> NodeAttestation {
+        let mut a = NodeAttestation {
             cluster_id: ClusterId([7u8; 32]),
             member: PeerId(node.verifying_key().to_bytes().to_vec()),
             role: Role::AgentHost,
@@ -300,7 +300,7 @@ mod tests {
         a
     }
 
-    fn build_token(scope: &str, ttl: u64) -> (String, VerifyingKey, MembershipAttestation) {
+    fn build_token(scope: &str, ttl: u64) -> (String, VerifyingKey, NodeAttestation) {
         let admin = make_key();
         let node = make_key();
         let agent = make_key();

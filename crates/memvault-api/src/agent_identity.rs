@@ -2,7 +2,7 @@
 //!
 //! Each agent gets an identity directory containing:
 //! - `private_key.pem` — Ed25519 private key (PKCS8 PEM)
-//! - `attestation.cbor` — Signed MembershipAttestation from the cluster admin
+//! - `attestation.cbor` — Signed NodeAttestation from the cluster admin
 //! - `enrollment.cbor` — Signed AgentEnrollment record
 //! - `agent.json` — metadata (agent_id, cluster_id, enrolled_at_ns)
 
@@ -26,7 +26,7 @@ pub struct AgentMeta {
 /// A loaded agent identity: signing key + node-issued attestation.
 ///
 /// In the per-agent JWT model, the attestation is signed by a *node* whose
-/// own [`MembershipAttestation`] is admin-signed and lives in the cluster's
+/// own [`NodeAttestation`] is admin-signed and lives in the cluster's
 /// sig-chain. The agent doesn't hold the admin's pubkey — trust flows back
 /// via the node attestation lookup at verify time.
 #[derive(Debug, Clone)]
@@ -90,7 +90,7 @@ impl AgentIdentity {
 
     /// Generate a new agent identity, signed by the given node's private key.
     ///
-    /// The node's own [`MembershipAttestation`](memvault_auth::MembershipAttestation)
+    /// The node's own [`NodeAttestation`](memvault_auth::NodeAttestation)
     /// must already be in the cluster's sig-chain; verifiers will look it up at
     /// JWT-verify time. `cluster_id` is stored for record-keeping only — trust
     /// flows through the node's attestation, not this field.

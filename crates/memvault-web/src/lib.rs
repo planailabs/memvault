@@ -39,7 +39,7 @@ mod server_router {
     ///
     /// Auth uses the admin → node → agent JWT chain (see `memvault_auth::jwt`).
     /// `node_attestations` maps a node's pubkey to its admin-signed
-    /// `MembershipAttestation`; the verifier looks up the JWT's claimed issuing
+    /// `NodeAttestation`; the verifier looks up the JWT's claimed issuing
     /// node here and confirms it against `admin_pubkey`.
     ///
     /// For now this holds just the local node; phase 5 of the sig-chain sync
@@ -124,7 +124,7 @@ mod server_router {
     ///
     /// **Post-genesis** (daemon holds the admin signing key):
     /// 1. Derive admin pubkey.
-    /// 2. Self-attest the local node (admin signs `MembershipAttestation`).
+    /// 2. Self-attest the local node (admin signs `NodeAttestation`).
     ///    Insert as `NodeTrust::Attested(_)`.
     /// 3. Generate `_ui` agent signed by the node key.
     ///
@@ -142,7 +142,7 @@ mod server_router {
         node_signing_key: ed25519_dalek::SigningKey,
     ) -> Result<WebAuthBootstrap, Box<dyn std::error::Error + Send + Sync>> {
         use memvault_auth::jwt::NodeTrust;
-        use memvault_auth::{AttestationOrigin, MembershipAttestation, Role};
+        use memvault_auth::{AttestationOrigin, NodeAttestation, Role};
 
         let cluster_bytes = client.cluster_id();
         let mut cluster_arr = [0u8; 32];
@@ -157,7 +157,7 @@ mod server_router {
         let (admin_pubkey, node_trust_entry) = match client.admin_signing_key().cloned() {
             Some(admin_sk) => {
                 let admin_pubkey = admin_sk.verifying_key();
-                let mut node_att = MembershipAttestation {
+                let mut node_att = NodeAttestation {
                     cluster_id: cluster_id.clone(),
                     member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
                     role: Role::AgentHost,
