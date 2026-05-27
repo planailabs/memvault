@@ -1676,6 +1676,14 @@ mod native {
                             memvault_api::MemvaultEvent::TokenConsumed { token_cid } => {
                                 Some(token_cid.clone())
                             }
+                            // Push-on-create: announce sigchain blocks
+                            // immediately over gossip so peers don't have to
+                            // wait for the next RBSR cycle to learn about a
+                            // new attestation, revocation, or envelope
+                            // authorship sidecar.
+                            memvault_api::MemvaultEvent::SigchainBlock { cid, .. } => {
+                                Some(cid.clone())
+                            }
                             _ => None,
                         };
                         if let Some(cid) = cid {
