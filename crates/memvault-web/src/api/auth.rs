@@ -85,8 +85,8 @@ async fn verify_bearer(
     let token = header
         .strip_prefix("Bearer ")
         .ok_or_else(|| AuthRejection("expected Bearer scheme".into()))?;
-    memvault_auth::jwt::verify(token, &state.admin_pubkey, |node_pk| {
-        state.node_attestations.get(node_pk).cloned()
+    memvault_auth::jwt::verify(token, state.admin_pubkey.as_ref(), |node_pk| {
+        state.node_trust.get(node_pk).cloned()
     })
     .map_err(|e| AuthRejection(format!("token: {e}")))
 }

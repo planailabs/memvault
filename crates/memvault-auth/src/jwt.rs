@@ -120,25 +120,47 @@ pub fn issue(
     Ok(format!("{signing_input}.{sig_b64}"))
 }
 
-/// Verify a JWT against the cluster admin's verifying key.
+/// What the lookup callback returns for a given node pubkey.
 ///
-/// `lookup_node` returns the trusted [`MembershipAttestation`] for the given
-/// node pubkey (from the cluster's sig-chain table) or `None` if the node is
-/// unknown/untrusted. Returning `None` rejects the token.
+/// `PreGenesis` covers the local-node trust seed before cluster genesis:
+/// no admin key exists yet, so the node attestation can't chain to admin.
+/// In that mode `admin_pubkey` must also be `None`; the verifier skips the
+/// admin chain check but still validates the agent attestation + JWT
+/// signature.
+#[derive(Debug, Clone)]
+pub enum NodeTrust {
+    /// Admin-signed attestation. Verifier confirms against `admin_pubkey`.
+    Attested(MembershipAttestation),
+    /// Pre-genesis trust seed. The node is trusted because it's local
+    /// (or otherwise pre-configured); no admin chain check.
+    PreGenesis,
+}
+
+/// Verify a JWT.
 ///
-/// Trust chain checked:
-/// agent JWT sig → agent pubkey (from AgentAttestation)
-/// AgentAttestation → node pubkey (also in AgentAttestation, self-verified)
-/// node MembershipAttestation (from lookup) → admin pubkey
+/// `admin_pubkey`:
+/// - `Some` post-genesis — the cluster's admin verifying key. Must be present
+///   if the lookup returns [`NodeTrust::Attested`].
+/// - `None` pre-genesis — only [`NodeTrust::PreGenesis`] entries verify.
 ///
-/// All three signatures must verify, and `exp` must be in the future.
+/// `lookup_node` returns the node's trust record from the in-memory table.
+/// Returning `None` rejects the token.
+///
+/// Trust chain checked (when `Attested`):
+/// agent JWT sig → agent pubkey → AgentAttestation sig → node pubkey →
+/// MembershipAttestation sig → admin pubkey.
+///
+/// Pre-genesis: agent JWT sig → agent pubkey → AgentAttestation sig → node
+/// pubkey (trusted because the lookup said so). No admin step.
+///
+/// `exp` is always enforced.
 pub fn verify<F>(
     token: &str,
-    admin_pubkey: &VerifyingKey,
+    admin_pubkey: Option<&VerifyingKey>,
     lookup_node: F,
 ) -> Result<AgentTokenClaims>
 where
-    F: FnOnce(&[u8; 32]) -> Option<MembershipAttestation>,
+    F: FnOnce(&[u8; 32]) -> Option<NodeTrust>,
 {
     let b64 = b64_url();
 
@@ -183,23 +205,44 @@ where
         ));
     }
 
-    // Look up the node's MembershipAttestation. The lookup table is the source
-    // of truth for which node_pubkeys are trusted in this cluster.
-    let node_att = lookup_node(&agent_att.node_pubkey).ok_or_else(|| {
+    // Look up the node's trust record. The lookup table is the source of truth
+    // for which node_pubkeys are trusted in this cluster (or in pre-genesis,
+    // which nodes are trusted as local seeds).
+    let trust = lookup_node(&agent_att.node_pubkey).ok_or_else(|| {
         AuthError::InvalidToken(format!(
             "unknown issuing node: {}",
             hex::encode(agent_att.node_pubkey)
         ))
     })?;
-    // Belt and braces: verify the node attestation against admin.
-    node_att
-        .verify_signature(admin_pubkey)
-        .map_err(|e| AuthError::InvalidToken(format!("node attestation: {e}")))?;
-    // And confirm the looked-up attestation's member matches what the agent claims.
-    if node_att.member.0 != agent_att.node_pubkey.as_slice() {
-        return Err(AuthError::InvalidToken(
-            "node_pubkey mismatch between agent attestation and looked-up node attestation".into(),
-        ));
+    match trust {
+        NodeTrust::Attested(node_att) => {
+            let admin_pk = admin_pubkey.ok_or_else(|| {
+                AuthError::InvalidToken(
+                    "no admin pubkey configured but node has an admin-signed attestation".into(),
+                )
+            })?;
+            node_att
+                .verify_signature(admin_pk)
+                .map_err(|e| AuthError::InvalidToken(format!("node attestation: {e}")))?;
+            if node_att.member.0 != agent_att.node_pubkey.as_slice() {
+                return Err(AuthError::InvalidToken(
+                    "node_pubkey mismatch between agent attestation and looked-up node attestation"
+                        .into(),
+                ));
+            }
+        }
+        NodeTrust::PreGenesis => {
+            // Pre-genesis: no admin chain check. The agent attestation
+            // verification below still confirms the agent was issued by the
+            // claimed node, and the node was deemed trustworthy by the lookup.
+            if admin_pubkey.is_some() {
+                return Err(AuthError::InvalidToken(
+                    "PreGenesis trust returned but admin_pubkey is configured — \
+                     lookup table is stale; re-issue node attestation post-genesis"
+                        .into(),
+                ));
+            }
+        }
     }
 
     // Verify the agent attestation against the (now-trusted) node pubkey.
@@ -277,7 +320,10 @@ mod tests {
     #[test]
     fn roundtrip_valid_token() {
         let (tok, admin_pk, n_att) = build_token("read write", 300);
-        let claims = verify(&tok, &admin_pk, |_| Some(n_att.clone())).unwrap();
+        let claims = verify(&tok, Some(&admin_pk), |_| {
+            Some(NodeTrust::Attested(n_att.clone()))
+        })
+        .unwrap();
         assert_eq!(claims.iss, "alice");
         assert!(claims.has_scope("read"));
         assert!(claims.has_scope("write"));
@@ -285,17 +331,53 @@ mod tests {
     }
 
     #[test]
+    fn pre_genesis_token_works_without_admin() {
+        // Pre-genesis: same key acts as both "admin" and "node"; admin_pubkey is None.
+        let key = make_key();
+        let agent = make_key();
+        let a_att = sign_agent_attestation(
+            &key,
+            AgentId("alice".into()),
+            agent.verifying_key().to_bytes(),
+            Role::AgentHost,
+            u64::MAX,
+        )
+        .unwrap();
+        let tok = issue(&agent, &a_att, "read", 300).unwrap();
+        let claims = verify(&tok, None, |_| Some(NodeTrust::PreGenesis)).unwrap();
+        assert_eq!(claims.iss, "alice");
+    }
+
+    #[test]
+    fn rejects_pre_genesis_with_admin_configured() {
+        // Stale lookup: returns PreGenesis but admin_pubkey is Some.
+        let (tok, admin_pk, _) = build_token("read", 300);
+        assert!(verify(&tok, Some(&admin_pk), |_| Some(NodeTrust::PreGenesis)).is_err());
+    }
+
+    #[test]
+    fn rejects_attested_without_admin_pubkey() {
+        let (tok, _, n_att) = build_token("read", 300);
+        // No admin_pubkey but lookup returns Attested → reject.
+        assert!(verify(&tok, None, |_| Some(NodeTrust::Attested(n_att.clone()))).is_err());
+    }
+
+    #[test]
     fn rejects_unknown_node() {
         let (tok, admin_pk, _) = build_token("read", 300);
-        // Lookup table doesn't know this node.
-        assert!(verify(&tok, &admin_pk, |_| None).is_err());
+        assert!(verify(&tok, Some(&admin_pk), |_| None).is_err());
     }
 
     #[test]
     fn rejects_wrong_admin_key() {
         let (tok, _, n_att) = build_token("read", 300);
         let other_admin = make_key();
-        assert!(verify(&tok, &other_admin.verifying_key(), |_| Some(n_att.clone())).is_err());
+        assert!(
+            verify(&tok, Some(&other_admin.verifying_key()), |_| Some(
+                NodeTrust::Attested(n_att.clone())
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -306,14 +388,22 @@ mod tests {
             br#"{"iss":"alice","sub":"00","exp":99999999999,"iat":0,"scope":"admin","att":""}"#,
         );
         let tampered = format!("{}.{}.{}", parts[0], new_payload, parts[2]);
-        assert!(verify(&tampered, &admin_pk, |_| Some(n_att.clone())).is_err());
+        assert!(
+            verify(&tampered, Some(&admin_pk), |_| Some(NodeTrust::Attested(
+                n_att.clone()
+            )))
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_expired() {
         let (tok, admin_pk, n_att) = build_token("read", 0);
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let err = verify(&tok, &admin_pk, |_| Some(n_att.clone())).unwrap_err();
+        let err = verify(&tok, Some(&admin_pk), |_| {
+            Some(NodeTrust::Attested(n_att.clone()))
+        })
+        .unwrap_err();
         assert!(format!("{err}").contains("expired"), "got: {err}");
     }
 

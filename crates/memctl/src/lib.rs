@@ -1368,7 +1368,7 @@ mod native {
                         client: client_arc,
                         event_bus: std::sync::Arc::clone(&event_bus_shared),
                         admin_pubkey: auth.admin_pubkey,
-                        node_attestations: auth.node_attestations,
+                        node_trust: auth.node_trust,
                         metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                     });
 

@@ -107,7 +107,7 @@ fn main() {
                 client: client_arc,
                 event_bus,
                 admin_pubkey: auth.admin_pubkey,
-                node_attestations: auth.node_attestations,
+                node_trust: auth.node_trust,
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
             });
 

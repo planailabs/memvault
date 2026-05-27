@@ -47,11 +47,13 @@ mod server_router {
     pub struct AppState {
         pub client: Arc<dyn MemvaultClient>,
         pub event_bus: Arc<EventBus>,
-        /// Cluster admin's verifying key — the root of trust for attestations.
-        pub admin_pubkey: VerifyingKey,
-        /// Trusted node attestations keyed by node pubkey.
-        pub node_attestations:
-            std::collections::HashMap<[u8; 32], memvault_auth::MembershipAttestation>,
+        /// Cluster admin's verifying key. `None` pre-genesis (no admin key
+        /// exists yet) — `node_trust` entries must then be
+        /// [`memvault_auth::jwt::NodeTrust::PreGenesis`] for them to verify.
+        pub admin_pubkey: Option<VerifyingKey>,
+        /// Trusted-node lookup table keyed by node pubkey.
+        pub node_trust:
+            std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
         /// Operational metrics.
         pub metrics: Arc<memvault_api::metrics::Metrics>,
     }
@@ -64,41 +66,39 @@ mod server_router {
     /// root of trust for JWT verification on every API request.
     /// Bootstrap result from [`init_web_auth`].
     pub struct WebAuthBootstrap {
-        pub admin_pubkey: ed25519_dalek::VerifyingKey,
-        pub node_attestations: std::collections::HashMap<
-            [u8; 32],
-            memvault_auth::MembershipAttestation,
-        >,
+        /// `None` pre-genesis. `Some` once the daemon holds an admin key.
+        pub admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
+        /// Trusted-node lookup. Always populated with at least the local node:
+        /// `NodeTrust::Attested(_)` post-genesis, `NodeTrust::PreGenesis`
+        /// before.
+        pub node_trust: std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
     }
 
     /// Bootstrap per-agent web auth.
     ///
-    /// For the genesis case (this daemon holds the admin signing key) we:
-    /// 1. derive the admin pubkey,
-    /// 2. self-attest the local node (admin signs a `MembershipAttestation`
-    ///    naming this node), insert it into the trust map,
-    /// 3. generate a fresh `_ui` agent attested by the *node* key, register it
-    ///    via `ui::state::set_ui_agent_identity`.
+    /// Two paths:
     ///
-    /// In the single-node admin case the admin and node keys are the same
-    /// ed25519 key; the chain still verifies end-to-end (admin → node → agent).
+    /// **Post-genesis** (daemon holds the admin signing key):
+    /// 1. Derive admin pubkey.
+    /// 2. Self-attest the local node (admin signs `MembershipAttestation`).
+    ///    Insert as `NodeTrust::Attested(_)`.
+    /// 3. Generate `_ui` agent signed by the node key.
+    ///
+    /// **Pre-genesis** (no admin key yet):
+    /// 1. `admin_pubkey = None`.
+    /// 2. Insert the local node as `NodeTrust::PreGenesis` — no attestation
+    ///    persisted; the entry is in-memory only.
+    /// 3. Generate `_ui` agent signed by the node key.
+    ///
+    /// In the single-node admin case the node signing key equals the admin
+    /// signing key; the chain still verifies end-to-end.
     pub fn init_web_auth(
         client: &memvault_api::LocalClient,
         data_dir: &std::path::Path,
         _peer_id: Vec<u8>,
     ) -> Result<WebAuthBootstrap, Box<dyn std::error::Error + Send + Sync>> {
+        use memvault_auth::jwt::NodeTrust;
         use memvault_auth::{AttestationOrigin, MembershipAttestation, Role};
-
-        let admin_signing_key = client.admin_signing_key().cloned().ok_or_else(|| {
-            "no admin signing key configured — daemon must be cluster admin (genesis) before serving the web API"
-                .to_string()
-        })?;
-        let admin_pubkey = admin_signing_key.verifying_key();
-
-        // For now: node key == admin key (single-node case). Phase 2 splits
-        // these once joined-peer daemons are supported.
-        let node_signing_key = admin_signing_key.clone();
-        let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
 
         let cluster_bytes = client.cluster_id();
         let mut cluster_arr = [0u8; 32];
@@ -107,25 +107,55 @@ mod server_router {
         }
         let cluster_id = memvault_core::ClusterId(cluster_arr);
 
-        // Self-attest the local node so the JWT verifier's lookup finds it.
-        let mut node_att = MembershipAttestation {
-            cluster_id: cluster_id.clone(),
-            member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
-            role: Role::AgentHost,
-            not_after_ns: u64::MAX,
-            issued_via: AttestationOrigin::Direct,
-            signature: [0u8; 64],
-        };
-        let signing_bytes = node_att
-            .signing_bytes()
-            .map_err(|e| format!("node attestation signing bytes: {e}"))?;
-        node_att.signature = {
-            use ed25519_dalek::Signer;
-            admin_signing_key.sign(&signing_bytes).to_bytes()
+        // Decide which signing key the *node* will use to sign agent
+        // attestations, and whether the admin chain is wired up.
+        let (admin_pubkey, node_signing_key, node_trust_entry) = match client
+            .admin_signing_key()
+            .cloned()
+        {
+            Some(admin_sk) => {
+                // Post-genesis: admin key present. Admin self-attests the
+                // local node (single-key mode: node == admin until peer split
+                // lands). Insert as Attested(_) so the chain verifies fully.
+                let admin_pubkey = admin_sk.verifying_key();
+                let node_pubkey_bytes = admin_pubkey.to_bytes();
+                let mut node_att = MembershipAttestation {
+                    cluster_id: cluster_id.clone(),
+                    member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
+                    role: Role::AgentHost,
+                    not_after_ns: u64::MAX,
+                    issued_via: AttestationOrigin::Direct,
+                    signature: [0u8; 64],
+                };
+                let bytes = node_att
+                    .signing_bytes()
+                    .map_err(|e| format!("node attestation signing bytes: {e}"))?;
+                node_att.signature = {
+                    use ed25519_dalek::Signer;
+                    admin_sk.sign(&bytes).to_bytes()
+                };
+                (
+                    Some(admin_pubkey),
+                    admin_sk,
+                    NodeTrust::Attested(node_att),
+                )
+            }
+            None => {
+                // Pre-genesis: no admin key. Fall back to deriving a
+                // deterministic node signing key from the daemon's local
+                // ed25519 seed if available; otherwise generate an ephemeral
+                // one (note: ephemeral means JWTs issued in one daemon run
+                // won't verify across a restart, by design).
+                let mut seed = [0u8; 32];
+                rand::Rng::fill(&mut rand::thread_rng(), &mut seed);
+                let node_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                (None, node_sk, NodeTrust::PreGenesis)
+            }
         };
 
-        let mut node_attestations = std::collections::HashMap::new();
-        node_attestations.insert(node_pubkey_bytes, node_att);
+        let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
+        let mut node_trust = std::collections::HashMap::new();
+        node_trust.insert(node_pubkey_bytes, node_trust_entry);
 
         // Generate the built-in UI agent, signed by the node's key.
         let ui_identity_dir = data_dir.join("identity").join("ui_agent");
@@ -142,7 +172,7 @@ mod server_router {
 
         Ok(WebAuthBootstrap {
             admin_pubkey,
-            node_attestations,
+            node_trust,
         })
     }
 

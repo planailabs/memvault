@@ -51,13 +51,13 @@ fn test_admin_pubkey() -> VerifyingKey {
     test_keys().0.verifying_key()
 }
 
-/// node_attestations map for AppState — one entry for the test node.
-fn test_node_attestations() -> std::collections::HashMap<[u8; 32], MembershipAttestation> {
+/// node_trust map for AppState — one Attested entry for the test node.
+fn test_node_trust() -> std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust> {
     let (admin, node, _) = test_keys();
     let mut map = std::collections::HashMap::new();
     map.insert(
         node.verifying_key().to_bytes(),
-        test_node_attestation(&admin, &node),
+        memvault_auth::jwt::NodeTrust::Attested(test_node_attestation(&admin, &node)),
     );
     map
 }
@@ -439,8 +439,8 @@ fn make_app() -> axum::Router {
     let state = Arc::new(AppState {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
-        admin_pubkey: test_admin_pubkey(),
-        node_attestations: test_node_attestations(),
+        admin_pubkey: Some(test_admin_pubkey()),
+        node_trust: test_node_trust(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     build_router(state)
@@ -482,8 +482,8 @@ async fn test_create_and_list_docs() {
     let state = Arc::new(AppState {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
-        admin_pubkey: test_admin_pubkey(),
-        node_attestations: test_node_attestations(),
+        admin_pubkey: Some(test_admin_pubkey()),
+        node_trust: test_node_trust(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
@@ -538,8 +538,8 @@ async fn test_get_doc() {
     let state = Arc::new(AppState {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
-        admin_pubkey: test_admin_pubkey(),
-        node_attestations: test_node_attestations(),
+        admin_pubkey: Some(test_admin_pubkey()),
+        node_trust: test_node_trust(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
