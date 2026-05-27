@@ -174,8 +174,10 @@ impl LocalClient {
         &self.cluster_id
     }
 
-    /// Create a bucket with a specific pre-determined ID (for deterministic
-    /// legacy bucket creation across cluster nodes).
+    /// Create a bucket with a specific pre-determined ID.
+    ///
+    /// The envelope is fully deterministic: uses cluster_id as author and
+    /// wall_ns=0 so every node in the cluster produces the same block.
     pub fn create_bucket_with_id(
         &self,
         bucket_id: BucketId,
@@ -187,21 +189,16 @@ impl LocalClient {
     ) -> Result<()> {
         use memvault_doc::BucketDecl;
 
-        let now_ns = memvault_core::wall_ns();
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
         let decl = BucketDecl {
             bucket_id: bucket_id.clone(),
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
-            owner_agent: self.agent_identity.as_ref().map(|i| i.agent_id.clone()),
+            owner_agent: None,
             default_visibility,
             default_classification,
-            created_ns: now_ns,
-            private_to_peer: if has_cluster {
-                None
-            } else {
-                Some(memvault_core::PeerId(self.peer_id.clone()))
-            },
+            created_ns: 0,
+            private_to_peer: None,
             role,
         };
 
@@ -209,12 +206,13 @@ impl LocalClient {
             ("kind".to_string(), "bucket-decl".to_string()),
             ("bucket".to_string(), bucket_id.to_string()),
         ];
+        // Deterministic: cluster_id as author, wall_ns=0.
         let envelope = serde_json::json!({
             "version": 1,
             "payload": { "BucketCreate": decl },
-            "author": self.peer_id,
+            "author": self.cluster_id,
             "tags": tags,
-            "wall_ns": now_ns,
+            "wall_ns": 0u64,
             "bucket_id": bucket_id.0,
         });
         let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
@@ -223,9 +221,9 @@ impl LocalClient {
         let cid_bytes = cid.to_bytes();
 
         let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.effective_author(),
+            author: self.cluster_id.clone(),
             tags,
-            wall_ns: now_ns,
+            wall_ns: 0,
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),

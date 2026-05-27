@@ -143,13 +143,29 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     for (cid, data) in &all_blocks {
         let mut verdict = classify_block(cid, data);
 
-        // Force rewrite for envelopes referencing a stale legacy bucket.
+        // Drop ALL legacy BucketCreate blocks — the deterministic one
+        // will be re-created fresh with cluster_id as author.
+        if matches!(verdict, Verdict::Keep) {
+            if let Some(val) = memvault_store::deserialize_block(data) {
+                if let Some(bc) = val.get("payload").and_then(|p| p.get("BucketCreate")) {
+                    if bc.get("role").and_then(|v| v.as_str()) == Some("legacy") {
+                        verdict = Verdict::Drop;
+                    }
+                }
+            }
+        }
+
+        // Drop or rewrite blocks referencing a stale legacy bucket.
         if matches!(verdict, Verdict::Keep) && !stale_legacy_ids.is_empty() {
             if let Some(val) = memvault_store::deserialize_block(data) {
                 if let Some(bid) = val.get("bucket_id").and_then(|v| v.as_array()) {
                     let bytes: Vec<u8> = bid.iter().filter_map(|n| n.as_u64().map(|n| n as u8)).collect();
                     if stale_legacy_ids.contains(&bytes) {
-                        verdict = Verdict::Rewrite;
+                        // BucketCreate for a stale bucket → drop entirely.
+                        let is_bucket_create = val.get("payload")
+                            .and_then(|p| p.get("BucketCreate"))
+                            .is_some();
+                        verdict = if is_bucket_create { Verdict::Drop } else { Verdict::Rewrite };
                     }
                 }
             }
