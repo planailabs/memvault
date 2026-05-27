@@ -453,6 +453,21 @@ mod native {
                 }
             }
         }
+        // Load the pinned AdminGenesis so `token issue` embeds it for
+        // joining peers, and so peers themselves can verify trust.
+        let pin_path = data_dir.join("identity").join("cluster_admin_genesis.cbor");
+        if let Ok(pin_bytes) = std::fs::read(&pin_path) {
+            match serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&pin_bytes) {
+                Ok(g) => {
+                    if g.verify_self_signature().is_ok() {
+                        client.set_pinned_admin_genesis(g);
+                    } else {
+                        tracing::warn!("pinned admin_genesis has bad signature; ignoring");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "decode pinned admin_genesis"),
+            }
+        }
         client
     }
 
