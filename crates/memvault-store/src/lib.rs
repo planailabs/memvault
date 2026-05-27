@@ -20,9 +20,19 @@ pub mod tables;
 pub use error::StoreError;
 pub use insert::{EnvelopeMeta, deserialize_block, deserialize_block_as};
 
+/// Callback invoked after a block is indexed (either fresh via
+/// `insert_envelope` or re-indexed from synced data via `reindex_block`).
+/// Arguments are `(scope, label, cid)` — e.g. `("sigchain", "node_att", &cid)`.
+/// Called for **every** tag found on the block; receivers filter.
+///
+/// Set via [`MemvaultStore::set_index_notifier`]. The owner is responsible
+/// for any cross-crate event publishing — the store itself stays generic.
+pub type IndexNotifier = std::sync::Arc<dyn Fn(&str, &str, &[u8]) + Send + Sync>;
+
 /// The main memvault persistent store backed by redb.
 pub struct MemvaultStore {
     db: redb::Database,
+    pub(crate) index_notifier: std::sync::OnceLock<IndexNotifier>,
 }
 
 impl MemvaultStore {
@@ -59,7 +69,20 @@ impl MemvaultStore {
         }
         txn.commit()?;
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            index_notifier: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Register a callback to be invoked every time a block is indexed
+    /// (fresh insertion or re-index after sync). Write-once.
+    ///
+    /// Used by upper layers (e.g. the sigchain watcher) to react to new
+    /// blocks without depending on the sync code path directly. The store
+    /// itself stays generic — it knows nothing about the event bus.
+    pub fn set_index_notifier(&self, notifier: IndexNotifier) {
+        let _ = self.index_notifier.set(notifier);
     }
 
     /// Get the stored local peer ID, if any.

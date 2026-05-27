@@ -52,14 +52,16 @@ fn test_admin_pubkey() -> VerifyingKey {
 }
 
 /// node_trust map for AppState — one Attested entry for the test node.
-fn test_node_trust() -> std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust> {
+fn test_node_trust() -> std::sync::Arc<
+    std::sync::RwLock<std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>>,
+> {
     let (admin, node, _) = test_keys();
     let mut map = std::collections::HashMap::new();
     map.insert(
         node.verifying_key().to_bytes(),
         memvault_auth::jwt::NodeTrust::Attested(test_node_attestation(&admin, &node)),
     );
-    map
+    std::sync::Arc::new(std::sync::RwLock::new(map))
 }
 
 /// A valid JWT for the test agent, all scopes, 1h TTL.

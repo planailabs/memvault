@@ -173,6 +173,25 @@ impl LocalClient {
         let _ = self.admin_signing_key.set(key);
     }
 
+    /// Register the store's index notifier to bridge to the client's event
+    /// bus. Once installed, every block indexed (including blocks arriving
+    /// via RBSR sync, which go through `reindex_block`) fires a
+    /// [`MemvaultEvent::SigchainBlock`] when tagged `sigchain/<label>`.
+    ///
+    /// Call this once at daemon startup, before sync begins.
+    pub fn install_sigchain_notifier(&self) {
+        let bus = Arc::clone(&self.event_bus);
+        self.store
+            .set_index_notifier(std::sync::Arc::new(move |scope, label, cid| {
+                if scope == "sigchain" {
+                    bus.publish(MemvaultEvent::SigchainBlock {
+                        label: label.to_string(),
+                        cid: cid.to_vec(),
+                    });
+                }
+            }));
+    }
+
     /// Set the node signing key (the daemon's libp2p ed25519 key, used to
     /// sign agent attestations and revocations). Distinct from the admin
     /// key on non-genesis-admin daemons. Write-once.
@@ -293,6 +312,12 @@ impl LocalClient {
     /// Get the cluster ID.
     pub fn cluster_id(&self) -> &[u8] {
         &self.cluster_id
+    }
+
+    /// Shared event bus — used by sigchain helpers to notify watchers, and
+    /// by the watcher to subscribe.
+    pub fn event_bus(&self) -> &Arc<EventBus> {
+        &self.event_bus
     }
 
     /// Get the peer ID.

@@ -95,7 +95,11 @@ async fn verify_bearer(
         {
             return None;
         }
-        state.node_trust.get(node_pk).cloned()
+        state
+            .node_trust
+            .read()
+            .ok()
+            .and_then(|m| m.get(node_pk).cloned())
     })
     .map_err(|e| AuthRejection(format!("token: {e}")))?;
 

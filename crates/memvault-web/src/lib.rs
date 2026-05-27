@@ -51,9 +51,15 @@ mod server_router {
         /// exists yet) — `node_trust` entries must then be
         /// [`memvault_auth::jwt::NodeTrust::PreGenesis`] for them to verify.
         pub admin_pubkey: Option<VerifyingKey>,
-        /// Trusted-node lookup table keyed by node pubkey.
-        pub node_trust:
-            std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
+        /// Trusted-node lookup table keyed by node pubkey. Wrapped in an
+        /// `RwLock` so the sigchain watcher (see [`spawn_sigchain_watcher`])
+        /// can insert new entries when peers announce `NodeAttestation`s
+        /// over RBSR sync without restarting the daemon.
+        pub node_trust: Arc<
+            std::sync::RwLock<
+                std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
+            >,
+        >,
         /// Revoked agent pubkeys. Populated from
         /// [`memvault_auth::AgentRevocation`] blocks in the sig-chain (phase 5
         /// sync) and on local revoke calls. JWTs from any of these agents
@@ -74,8 +80,13 @@ mod server_router {
         pub admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
         /// Trusted-node lookup. Always populated with at least the local node:
         /// `NodeTrust::Attested(_)` post-genesis, `NodeTrust::PreGenesis`
-        /// before.
-        pub node_trust: std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
+        /// before. Returned as an `Arc<RwLock<_>>` so the same handle can be
+        /// shared with the sigchain watcher.
+        pub node_trust: Arc<
+            std::sync::RwLock<
+                std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
+            >,
+        >,
         /// Initial agent revocation set — empty at bootstrap; populated by
         /// sync (phase 5) and any local `revoke_agent` calls thereafter.
         pub revoked_agents: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
@@ -102,7 +113,7 @@ mod server_router {
     /// In the single-node admin case the node signing key equals the admin
     /// signing key; the chain still verifies end-to-end.
     pub fn init_web_auth(
-        client: &memvault_api::LocalClient,
+        client: &Arc<memvault_api::LocalClient>,
         data_dir: &std::path::Path,
     ) -> Result<WebAuthBootstrap, Box<dyn std::error::Error + Send + Sync>> {
         use memvault_auth::jwt::NodeTrust;
@@ -112,6 +123,11 @@ mod server_router {
             .node_signing_key()
             .ok_or("node signing key not set on client; call set_node_signing_key first")?
             .clone();
+
+        // Bridge the store's index notifier to the event bus so the sigchain
+        // watcher (spawned below) sees blocks arriving from both local writes
+        // and RBSR sync without the sync layer knowing about events.
+        client.install_sigchain_notifier();
 
         let cluster_bytes = client.cluster_id();
         let mut cluster_arr = [0u8; 32];
@@ -155,18 +171,20 @@ mod server_router {
         // node so the daemon's freshly-issued JWTs always verify. Persisted
         // attestations are verified against the current admin pubkey at
         // load — any that don't chain to the current admin are dropped.
-        let mut node_trust =
+        let mut node_trust_map =
             memvault_api::sigchain::scan_trusted_nodes(client, admin_pubkey.as_ref())
                 .map_err(|e| format!("scan trusted nodes: {e}"))?;
-        node_trust.insert(node_pubkey_bytes, node_trust_entry);
+        node_trust_map.insert(node_pubkey_bytes, node_trust_entry);
 
         // Hydrate revocation sets — also signature-verified.
         let (revoked_agents_set, revoked_nodes_set) = memvault_api::sigchain::scan_revocations(
             client,
             admin_pubkey.as_ref(),
-            &node_trust,
+            &node_trust_map,
         )
         .map_err(|e| format!("scan revocations: {e}"))?;
+
+        let node_trust = Arc::new(std::sync::RwLock::new(node_trust_map));
 
         // Generate the built-in UI agent, signed by the node's key.
         let ui_identity_dir = data_dir.join("identity").join("ui_agent");
@@ -187,11 +205,29 @@ mod server_router {
 
         super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
 
+        let revoked_agents = Arc::new(std::sync::RwLock::new(revoked_agents_set));
+        let revoked_nodes = Arc::new(std::sync::RwLock::new(revoked_nodes_set));
+
+        // Spawn the sigchain watcher. It listens for SigchainBlock events
+        // (emitted by local writes AND by sync — sync must publish them
+        // after `insert_envelope` for received blocks) and updates the
+        // three trust handles below in place. The HTTP request path holds
+        // the same Arc handles via AppState.
+        let live = memvault_api::sigchain::LiveTrustState {
+            node_trust: Arc::clone(&node_trust),
+            revoked_agents: Arc::clone(&revoked_agents),
+            revoked_nodes: Arc::clone(&revoked_nodes),
+        };
+        let _watcher =
+            memvault_api::sigchain::spawn_sigchain_watcher(Arc::clone(client), admin_pubkey, live);
+        // We intentionally leak the join handle — the watcher is meant to
+        // live for the daemon's lifetime; cancellation is via process exit.
+
         Ok(WebAuthBootstrap {
             admin_pubkey,
             node_trust,
-            revoked_agents: Arc::new(std::sync::RwLock::new(revoked_agents_set)),
-            revoked_nodes: Arc::new(std::sync::RwLock::new(revoked_nodes_set)),
+            revoked_agents,
+            revoked_nodes,
         })
     }
 

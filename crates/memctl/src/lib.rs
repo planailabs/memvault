@@ -1363,10 +1363,10 @@ mod native {
                         memvault_api::node_key::load_or_generate(&data_dir)
                             .map_err(|e| anyhow::anyhow!("node key: {e}"))?,
                     );
-                    let auth = memvault_web::init_web_auth(&client, &data_dir)
+                    let local_client = std::sync::Arc::new(client);
+                    let auth = memvault_web::init_web_auth(&local_client, &data_dir)
                         .map_err(|e| anyhow::anyhow!("web auth init: {e}"))?;
 
-                    let local_client = std::sync::Arc::new(client);
                     memvault_web::ui::state::set_client(std::sync::Arc::clone(&local_client));
                     let client_arc = local_client
                         as std::sync::Arc<dyn memvault_api::MemvaultClient>;

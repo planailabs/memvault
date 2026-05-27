@@ -233,6 +233,13 @@ impl MemvaultStore {
             }
         }
         txn.commit()?;
+
+        if let Some(notify) = self.index_notifier.get() {
+            for (scope, label) in &meta.tags {
+                notify(scope, label, cid_bytes);
+            }
+        }
+
         tracing::debug!("reindexed block");
         Ok(true)
     }
@@ -374,6 +381,13 @@ impl MemvaultStore {
             }
         }
         txn.commit()?;
+
+        if let Some(notify) = self.index_notifier.get() {
+            for (scope, label) in &meta.tags {
+                notify(scope, label, cid_bytes);
+            }
+        }
+
         Ok(())
     }
 }

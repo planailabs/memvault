@@ -52,6 +52,10 @@ fn write_block_with_extra_tags(
         cluster_id: Some(client.cluster_id().to_vec()),
         ..Default::default()
     };
+    // SigchainBlock event publishing happens via the store's index_notifier
+    // (installed by `LocalClient::install_sigchain_notifier`) so local writes
+    // AND blocks arriving via RBSR sync (which use `reindex_block`) both
+    // notify watchers through the same path.
     client
         .store()
         .insert_envelope(&cid_bytes, bytes, &meta)
@@ -189,6 +193,175 @@ pub fn verify_envelope_authorship(
     Ok(AuthorshipStatus::Valid {
         agent_pubkey: auth.agent_pubkey,
     })
+}
+
+/// Live trust state shared between the verifier (HTTP request path) and the
+/// sigchain watcher (background task). The watcher mutates these in place
+/// when new sigchain blocks land; verifiers take read locks per request.
+///
+/// Held by [`crate::sigchain::spawn_sigchain_watcher`] and the web layer's
+/// `AppState` simultaneously — both Arc-clone the same handles.
+#[derive(Clone)]
+pub struct LiveTrustState {
+    pub node_trust: std::sync::Arc<
+        std::sync::RwLock<HashMap<[u8; 32], NodeTrust>>,
+    >,
+    pub revoked_agents: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
+    pub revoked_nodes: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
+}
+
+/// Spawn a tokio task that subscribes to the client's event bus and, for
+/// every `SigchainBlock` event, reads the block and applies it to the
+/// in-memory trust state. Returns the join handle; drop or `abort()` to
+/// stop the watcher.
+///
+/// Events arrive both from local writes (publish_*) and from RBSR sync
+/// (which calls `insert_envelope` on incoming blocks, and that must also
+/// publish `SigchainBlock` — the sync layer's responsibility).
+pub fn spawn_sigchain_watcher(
+    client: std::sync::Arc<LocalClient>,
+    admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
+    state: LiveTrustState,
+) -> tokio::task::JoinHandle<()> {
+    let mut rx = client.event_bus().subscribe();
+    tokio::spawn(async move {
+        loop {
+            let event = match rx.recv().await {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("sigchain watcher: event bus closed, stopping");
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Dropped some events under load — rescan to recover.
+                    tracing::warn!(
+                        skipped = n,
+                        "sigchain watcher lagged; rescanning sigchain to recover"
+                    );
+                    rescan_into(&client, admin_pubkey.as_ref(), &state);
+                    continue;
+                }
+            };
+            let crate::MemvaultEvent::SigchainBlock { label, cid } = event else {
+                continue;
+            };
+            apply_sigchain_block(&client, admin_pubkey.as_ref(), &state, &label, &cid);
+        }
+    })
+}
+
+/// Re-scan the entire sigchain and replace the live trust state. Used to
+/// recover when the watcher's broadcast channel lags (events dropped).
+fn rescan_into(
+    client: &LocalClient,
+    admin_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+    state: &LiveTrustState,
+) {
+    if let Ok(nodes) = scan_trusted_nodes(client, admin_pubkey) {
+        if let Ok(mut w) = state.node_trust.write() {
+            // Preserve in-memory-only PreGenesis entries (the local node's
+            // self-trust seed before genesis). Persisted attestations
+            // overwrite anything for the same key.
+            for (k, v) in nodes {
+                w.insert(k, v);
+            }
+        }
+    }
+    let nt_snapshot = state
+        .node_trust
+        .read()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+    if let Ok((agents, nodes)) = scan_revocations(client, admin_pubkey, &nt_snapshot) {
+        if let Ok(mut w) = state.revoked_agents.write() {
+            *w = agents;
+        }
+        if let Ok(mut w) = state.revoked_nodes.write() {
+            *w = nodes;
+        }
+    }
+}
+
+/// Apply a single sigchain block to the live trust state. Verifies the
+/// block's signature before applying — invalid blocks are logged and
+/// dropped.
+fn apply_sigchain_block(
+    client: &LocalClient,
+    admin_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+    state: &LiveTrustState,
+    label: &str,
+    cid: &[u8],
+) {
+    let Ok(Some(bytes)) = client.store().get_block(cid) else {
+        tracing::warn!(label, "sigchain watcher: missing block bytes");
+        return;
+    };
+    match label {
+        LABEL_NODE_ATT => {
+            let Ok(att) = serde_ipld_dagcbor::from_slice::<NodeAttestation>(&bytes) else {
+                tracing::warn!("sigchain watcher: bad NodeAttestation bytes");
+                return;
+            };
+            // Verify against admin if we have one. Pre-genesis: nothing to
+            // verify against, so peer attestations are ignored — only the
+            // local self-trust seed (installed by init_web_auth) counts.
+            let Some(admin) = admin_pubkey else { return };
+            if att.verify_signature(admin).is_err() {
+                tracing::warn!("sigchain watcher: NodeAttestation signature invalid");
+                return;
+            }
+            if att.member.0.len() != 32 {
+                return;
+            }
+            let mut pkbytes = [0u8; 32];
+            pkbytes.copy_from_slice(&att.member.0);
+            if let Ok(mut w) = state.node_trust.write() {
+                w.insert(pkbytes, NodeTrust::Attested(att));
+            }
+        }
+        LABEL_AGENT_REV => {
+            let Ok(rev) = serde_ipld_dagcbor::from_slice::<AgentRevocation>(&bytes) else {
+                tracing::warn!("sigchain watcher: bad AgentRevocation bytes");
+                return;
+            };
+            // Must come from a currently-trusted node.
+            let known = state
+                .node_trust
+                .read()
+                .map(|m| m.contains_key(&rev.node_pubkey))
+                .unwrap_or(false);
+            if !known {
+                tracing::warn!("sigchain watcher: AgentRevocation from unknown node");
+                return;
+            }
+            if rev.verify_signature().is_err() {
+                tracing::warn!("sigchain watcher: AgentRevocation signature invalid");
+                return;
+            }
+            if let Ok(mut w) = state.revoked_agents.write() {
+                w.insert(rev.agent_pubkey);
+            }
+        }
+        LABEL_NODE_REV => {
+            let Ok(rev) = serde_ipld_dagcbor::from_slice::<NodeRevocation>(&bytes) else {
+                tracing::warn!("sigchain watcher: bad NodeRevocation bytes");
+                return;
+            };
+            let Some(admin) = admin_pubkey else { return };
+            if rev.admin_pubkey != admin.to_bytes() {
+                return;
+            }
+            if rev.verify_signature().is_err() {
+                return;
+            }
+            if let Ok(mut w) = state.revoked_nodes.write() {
+                w.insert(rev.node_pubkey);
+            }
+        }
+        // AgentAttestation / EnvelopeAuthorship are looked up on demand by
+        // the verifier — no live mutation needed.
+        _ => {}
+    }
 }
 
 /// Walk every persisted [`memvault_auth::AgentAttestation`] and return the
