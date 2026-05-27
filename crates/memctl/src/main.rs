@@ -68,7 +68,7 @@ fn main() {
                         Arc::clone(&event_bus),
                     ));
                     memvault_web::ui::state::set_client(Arc::clone(&local_client));
-                    Some(store)
+                    Some((store, local_client))
                 }
                 Err(e) => {
                     tracing::warn!("failed to open store: {e} (continuing without sync)");
@@ -77,7 +77,7 @@ fn main() {
             };
 
             // NOW spawn the swarm — rebuild is complete, safe to serve blocks.
-            if let Some(store) = &store {
+            if let Some((store, _)) = &store {
                 match memctl::spawn_swarm_with_store(
                     Arc::clone(store),
                     &data_dir,
@@ -93,7 +93,12 @@ fn main() {
             }
             // If swarm failed, let client() do its lazy init (opens its own store).
 
-            let auth_token = memvault_web::load_or_generate_token(&data_dir).unwrap_or_default();
+            let local_client = store
+                .as_ref()
+                .map(|(_, c)| Arc::clone(c))
+                .expect("daemon mode requires a successfully-opened store");
+            let admin_pubkey = memvault_web::init_web_auth(&local_client, &data_dir, Vec::new())
+                .expect("init_web_auth failed");
 
             let client_arc =
                 memvault_web::ui::state::client().expect("failed to initialize memvault client");
@@ -101,7 +106,7 @@ fn main() {
             let app_state = Arc::new(memvault_web::AppState {
                 client: client_arc,
                 event_bus,
-                auth_token,
+                admin_pubkey,
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
             });
 

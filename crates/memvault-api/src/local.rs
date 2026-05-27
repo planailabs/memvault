@@ -276,6 +276,21 @@ impl LocalClient {
     }
 
     /// Get the agent ID if set.
+    /// The admin signing key, if this daemon holds one (i.e. is the cluster
+    /// admin). Used by callers that need to derive the admin verifying key
+    /// or sign admin-only operations.
+    pub fn admin_signing_key(&self) -> Option<&ed25519_dalek::SigningKey> {
+        self.admin_signing_key.as_ref()
+    }
+
+    /// The admin's verifying key, derived from the signing key. `None` on
+    /// peer daemons that don't hold the admin key.
+    pub fn admin_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
+        self.admin_signing_key
+            .as_ref()
+            .map(|sk| sk.verifying_key())
+    }
+
     pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
         self.agent_identity.as_ref().map(|i| &i.agent_id)
     }

@@ -19,13 +19,27 @@ fn main() {
                                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                                 .join("memvault")
                         });
-                    let auth_token =
-                        memvault_web::load_or_generate_token(&data_dir).unwrap_or_default();
+                    // Local client is required to derive admin pubkey + ui agent.
+                    let local_client = match memvault_web::ui::state::local_client() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("memvault: API routes NOT mounted: {e}");
+                            return Ok(router);
+                        }
+                    };
+                    let admin_pubkey =
+                        match memvault_web::init_web_auth(&local_client, &data_dir, Vec::new()) {
+                            Ok(pk) => pk,
+                            Err(e) => {
+                                eprintln!("memvault: API routes NOT mounted (auth init: {e})");
+                                return Ok(router);
+                            }
+                        };
 
                     let app_state = Arc::new(memvault_web::AppState {
                         client,
                         event_bus: Arc::new(memvault_api::EventBus::new(64)),
-                        auth_token,
+                        admin_pubkey,
                         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                     });
                     router = axum::Router::new()

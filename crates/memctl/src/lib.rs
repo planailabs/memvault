@@ -1355,8 +1355,10 @@ mod native {
                 // handles port negotiation with dx serve automatically.
                 #[cfg(feature = "daemon")]
                 {
-                    let auth_token = memvault_web::load_or_generate_token(&data_dir)
-                        .map_err(|e| anyhow::anyhow!("failed to load/generate API token: {e}"))?;
+                    let local_peer_id_vec = local_peer_id.to_bytes();
+                    let admin_pubkey =
+                        memvault_web::init_web_auth(&client, &data_dir, local_peer_id_vec)
+                            .map_err(|e| anyhow::anyhow!("web auth init: {e}"))?;
 
                     let local_client = std::sync::Arc::new(client);
                     memvault_web::ui::state::set_client(std::sync::Arc::clone(&local_client));
@@ -1366,10 +1368,9 @@ mod native {
                     let app_state = std::sync::Arc::new(memvault_web::AppState {
                         client: client_arc,
                         event_bus: std::sync::Arc::clone(&event_bus_shared),
-                        auth_token: auth_token.clone(),
+                        admin_pubkey,
                         metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                     });
-                    println!("  API token:  {}", &auth_token[..8]);
 
                     // Start the web server. Use fullstack (SSR + UI) if assets
                     // exist, otherwise API-only to avoid a panic from Dioxus.

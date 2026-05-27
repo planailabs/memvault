@@ -202,6 +202,23 @@ impl AgentIdentity {
     pub fn peer_id(&self) -> PeerId {
         PeerId(self.verifying_key.as_bytes().to_vec())
     }
+
+    /// Issue a JWT-format bearer token signed by this agent's key.
+    /// The token embeds the attestation inline so the daemon can verify it
+    /// without a state lookup.
+    ///
+    /// `scope`: space-separated OAuth-style scopes ("read write" / "admin" / etc.).
+    /// `ttl_secs`: lifetime in seconds; typical values 300 (short-lived) — 3600.
+    pub fn issue_jwt(&self, scope: &str, ttl_secs: u64) -> Result<String> {
+        memvault_auth::jwt::issue(
+            &self.signing_key,
+            &self.attestation,
+            &self.agent_id.0,
+            scope,
+            ttl_secs,
+        )
+        .map_err(|e| ApiError::Other(format!("issue_jwt: {e}")))
+    }
 }
 
 /// Sign an AgentEnrollment with the admin key.

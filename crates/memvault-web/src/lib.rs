@@ -32,39 +32,66 @@ mod server_router {
     use std::sync::Arc;
 
     use axum::Router;
+    use ed25519_dalek::VerifyingKey;
     use memvault_api::{EventBus, MemvaultClient};
 
     /// Application state shared across all handlers.
+    ///
+    /// Auth is per-agent: every request carries an EdDSA-signed JWT (see
+    /// `memvault_auth::jwt`) embedding the issuing agent's MembershipAttestation.
+    /// The server verifies the attestation against `admin_pubkey`, then verifies
+    /// the JWT signature against the agent's public key from the attestation.
     pub struct AppState {
         pub client: Arc<dyn MemvaultClient>,
         pub event_bus: Arc<EventBus>,
-        /// Pre-shared bearer token for Phase 7 authentication.
-        pub auth_token: String,
+        /// Cluster admin's verifying key — the root of trust for attestations.
+        /// Loaded from `LocalClient::admin_signing_key().verifying_key()` on
+        /// genesis-admin daemons, or from rotation state on joined peers.
+        pub admin_pubkey: VerifyingKey,
         /// Operational metrics.
         pub metrics: Arc<memvault_api::metrics::Metrics>,
     }
 
-    /// Load the API bearer token from `data_dir/api.token`, generating a new
-    /// random token on first run. The file is created with mode 0600.
-    pub fn load_or_generate_token(data_dir: &std::path::Path) -> std::io::Result<String> {
-        let token_path = data_dir.join("api.token");
-        if let Ok(token) = std::fs::read_to_string(&token_path) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Ok(token);
-            }
+    /// Bootstrap per-agent web auth: derive the cluster admin pubkey from the
+    /// client (which must hold the admin signing key) and register a fresh
+    /// "_ui" agent identity that the web UI uses for its session JWTs.
+    ///
+    /// Call once before constructing [`AppState`]; the returned pubkey is the
+    /// root of trust for JWT verification on every API request.
+    pub fn init_web_auth(
+        client: &memvault_api::LocalClient,
+        data_dir: &std::path::Path,
+        peer_id: Vec<u8>,
+    ) -> Result<ed25519_dalek::VerifyingKey, Box<dyn std::error::Error + Send + Sync>> {
+        let admin_pubkey = client.admin_verifying_key().ok_or_else(|| {
+            "no admin signing key configured — daemon must be cluster admin (genesis) before serving the web API".to_string()
+        })?;
+        let admin_signing_key = client.admin_signing_key().cloned().unwrap();
+
+        let cluster_bytes = client.cluster_id();
+        let mut cluster_arr = [0u8; 32];
+        if cluster_bytes.len() == 32 {
+            cluster_arr.copy_from_slice(cluster_bytes);
         }
-        use rand::Rng;
-        let mut bytes = [0u8; 32];
-        rand::thread_rng().fill(&mut bytes);
-        let token = hex::encode(bytes);
-        std::fs::write(&token_path, &token)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(token)
+        let cluster_id = memvault_core::ClusterId(cluster_arr);
+        let admin_peer_id = memvault_core::PeerId(peer_id);
+
+        let ui_identity_dir = data_dir.join("identity").join("ui_agent");
+        // Rotate the UI identity on every startup — JWTs are short-lived and
+        // the WASM client refreshes via /auth/session-token.
+        let _ = std::fs::remove_dir_all(&ui_identity_dir);
+        let ui_identity = memvault_api::agent_identity::AgentIdentity::generate_local(
+            &ui_identity_dir,
+            "_ui",
+            &cluster_id,
+            &admin_peer_id,
+            &admin_signing_key,
+            memvault_auth::Role::AgentHost,
+            365 * 24 * 60 * 60 * 1_000_000_000,
+        )?;
+        super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
+
+        Ok(admin_pubkey)
     }
 
     /// Build the API-only memvault router (no web UI).

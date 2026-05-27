@@ -22,7 +22,7 @@ server = [
     "dep:memvault-api", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth", "dep:memvault-store",
     "dep:axum", "dep:tokio", "dep:tokio-stream",
     "dep:tower", "dep:tower-http", "dep:thiserror",
-    "dep:dirs", "dep:rand",
+    "dep:dirs", "dep:rand", "dep:ed25519-dalek",
 ]
 
 [dependencies]
@@ -55,6 +55,7 @@ rand = { version = "0.8", optional = true }
 memvault-doc = { path = "../memvault-doc", optional = true }
 memvault-query = { path = "../memvault-query", optional = true }
 memvault-auth = { path = "../memvault-auth", optional = true }
+ed25519-dalek = { version = "2", optional = true }
 axum = { version = "0.8", features = ["multipart"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }

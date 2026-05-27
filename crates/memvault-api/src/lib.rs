@@ -21,6 +21,7 @@ pub mod types;
 pub mod vfs;
 
 pub use client::MemvaultClient;
+pub use ed25519_dalek;
 pub use error::{ApiError, Result};
 #[cfg(feature = "http-client")]
 pub use http::HttpApiClient;

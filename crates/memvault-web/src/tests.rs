@@ -382,7 +382,7 @@ fn make_app() -> axum::Router {
     let state = Arc::new(AppState {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
-        auth_token: TEST_TOKEN.to_string(),
+        admin_pubkey: ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     build_router(state)
@@ -424,7 +424,7 @@ async fn test_create_and_list_docs() {
     let state = Arc::new(AppState {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
-        auth_token: TEST_TOKEN.to_string(),
+        admin_pubkey: ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
@@ -479,7 +479,7 @@ async fn test_get_doc() {
     let state = Arc::new(AppState {
         client: Arc::new(MockClient::new()),
         event_bus: Arc::new(EventBus::new(16)),
-        auth_token: TEST_TOKEN.to_string(),
+        admin_pubkey: ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]).verifying_key(),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
     });
     let app = build_router(state);
