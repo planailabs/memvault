@@ -422,6 +422,28 @@ fn apply_sigchain_block(
 /// pubkey set of agents currently trusted under `node_trust` and not
 /// present in `revoked_agents`. Used by the verifier to validate envelope
 /// authorship without re-scanning per call.
+/// Load every persisted [`AgentAttestation`] block, signature-verified.
+/// Unlike [`scan_trusted_agents`], this preserves the node→agent
+/// relationship and does not filter against node_trust or revocations —
+/// callers (e.g. the admin trust-tree UI) decide what to display.
+pub fn scan_agent_attestations(client: &LocalClient) -> Result<Vec<AgentAttestation>> {
+    let mut out = Vec::new();
+    for bytes in load_blocks_by_label(client, LABEL_AGENT_ATT)? {
+        let att: AgentAttestation = match serde_ipld_dagcbor::from_slice(&bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping corrupt agent attestation block");
+                continue;
+            }
+        };
+        if att.verify_signature().is_err() {
+            continue;
+        }
+        out.push(att);
+    }
+    Ok(out)
+}
+
 pub fn scan_trusted_agents(
     client: &LocalClient,
     node_trust: &HashMap<[u8; 32], NodeTrust>,

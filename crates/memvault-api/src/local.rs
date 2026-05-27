@@ -187,6 +187,13 @@ impl LocalClient {
         let _ = self.trust_state.set(state);
     }
 
+    /// Borrow the live trust state, if installed. `None` on clients that
+    /// haven't gone through [`crate::bootstrap::bootstrap_cluster_trust`]
+    /// (tests, headless tooling).
+    pub fn trust_state(&self) -> Option<&crate::sigchain::LiveTrustState> {
+        self.trust_state.get()
+    }
+
     /// Verify an envelope's authorship sidecar against the currently-trusted
     /// agent set. Read paths call this for envelopes whose authorship must
     /// be enforced; data paths can ignore it (fail-open for backwards
