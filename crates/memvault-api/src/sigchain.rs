@@ -215,44 +215,75 @@ pub struct LiveTrustState {
     pub trusted_agents: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
 }
 
-/// Spawn a tokio task that subscribes to the client's event bus and, for
-/// every `SigchainBlock` event, reads the block and applies it to the
-/// in-memory trust state. Returns the join handle; drop or `abort()` to
-/// stop the watcher.
+/// Spawn the sigchain watcher task. Tolerates being called from either
+/// inside or outside a tokio runtime: when no runtime is active on the
+/// current thread, a dedicated single-thread runtime is launched on a
+/// background OS thread and owns the watcher for the daemon's lifetime.
 ///
 /// Events arrive both from local writes (publish_*) and from RBSR sync
 /// (which calls `insert_envelope` on incoming blocks, and that must also
 /// publish `SigchainBlock` — the sync layer's responsibility).
+///
+/// Returns `Some(JoinHandle)` when spawned into an existing runtime
+/// (caller may abort), `None` when running on the dedicated thread (which
+/// lives until process exit).
 pub fn spawn_sigchain_watcher(
     client: std::sync::Arc<LocalClient>,
     admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
     state: LiveTrustState,
-) -> tokio::task::JoinHandle<()> {
-    let mut rx = client.event_bus().subscribe();
-    tokio::spawn(async move {
-        loop {
-            let event = match rx.recv().await {
-                Ok(e) => e,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    tracing::info!("sigchain watcher: event bus closed, stopping");
-                    return;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // Dropped some events under load — rescan to recover.
-                    tracing::warn!(
-                        skipped = n,
-                        "sigchain watcher lagged; rescanning sigchain to recover"
-                    );
-                    rescan_into(&client, admin_pubkey.as_ref(), &state);
-                    continue;
-                }
-            };
-            let crate::MemvaultEvent::SigchainBlock { label, cid } = event else {
-                continue;
-            };
-            apply_sigchain_block(&client, admin_pubkey.as_ref(), &state, &label, &cid);
+) -> Option<tokio::task::JoinHandle<()>> {
+    let rx = client.event_bus().subscribe();
+    let watcher = run_watcher(client, admin_pubkey, state, rx);
+
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => Some(handle.spawn(watcher)),
+        Err(_) => {
+            // Sync context (e.g. memctl daemon-mode startup, dx serve
+            // bootstrap). Park a tiny runtime on a background thread.
+            std::thread::Builder::new()
+                .name("sigchain-watcher".into())
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build sigchain-watcher runtime");
+                    rt.block_on(watcher);
+                })
+                .expect("spawn sigchain-watcher thread");
+            None
         }
-    })
+    }
+}
+
+/// The watcher body, extracted so [`spawn_sigchain_watcher`] can park it
+/// onto either an existing runtime or a dedicated thread.
+async fn run_watcher(
+    client: std::sync::Arc<LocalClient>,
+    admin_pubkey: Option<ed25519_dalek::VerifyingKey>,
+    state: LiveTrustState,
+    mut rx: tokio::sync::broadcast::Receiver<crate::MemvaultEvent>,
+) {
+    loop {
+        let event = match rx.recv().await {
+            Ok(e) => e,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                tracing::info!("sigchain watcher: event bus closed, stopping");
+                return;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    skipped = n,
+                    "sigchain watcher lagged; rescanning sigchain to recover"
+                );
+                rescan_into(&client, admin_pubkey.as_ref(), &state);
+                continue;
+            }
+        };
+        let crate::MemvaultEvent::SigchainBlock { label, cid } = event else {
+            continue;
+        };
+        apply_sigchain_block(&client, admin_pubkey.as_ref(), &state, &label, &cid);
+    }
 }
 
 /// Recompute the cached set of currently-trusted agent pubkeys from the
