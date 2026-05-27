@@ -5,8 +5,6 @@ use dioxus_i18n::t;
 use plan_ai_design::{Card, DataTable, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
-use memvault_api::vfs::{VFS_CHILD_REL, VFS_DIR_KIND};
-
 use crate::ui::app::Route;
 use crate::ui::topbar::use_topbar;
 
@@ -38,301 +36,56 @@ impl VfsRow {
 
 // ── Server functions ───────────────────────────────────────────────
 
+#[cfg(feature = "server")]
+async fn resolve_bucket(
+    client: &dyn memvault_api::MemvaultClient,
+    bucket_hex: Option<&str>,
+) -> memvault_core::BucketId {
+    if let Some(h) = bucket_hex {
+        if let Ok(b) = memvault_core::BucketId::from_hex(h) {
+            return b;
+        }
+    }
+    memvault_api::vfs::default_bucket(client).await
+}
+
 #[server]
 async fn list_vfs_entries(
     path: String,
     bucket_hex: Option<String>,
 ) -> Result<Vec<VfsRow>, ServerFnError> {
-    use memvault_core::NodeRef;
     let client = crate::ui::state::client()?;
+    let bucket = resolve_bucket(&*client, bucket_hex.as_deref()).await;
 
-    let bucket = if let Some(ref h) = bucket_hex {
-        let bytes = hex::decode(h).map_err(|e| ServerFnError::new(e.to_string()))?;
-        if bytes.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            memvault_core::BucketId(arr)
-        } else {
-            memvault_api::vfs::default_bucket(&*client).await
-        }
-    } else {
-        memvault_api::vfs::default_bucket(&*client).await
-    };
-    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-
-    let mut current = NodeRef::Entity(root_id);
-    for component in &components {
-        let child = vfs_find_named_child(&*client, &current, component)
-            .await?
-            .ok_or_else(|| ServerFnError::new(format!("path component '{component}' not found")))?;
-        current = child;
-    }
-
-    let edges = client
-        .edges_of(&current)
+    let entries = memvault_api::vfs::ls(&*client, &bucket, &path, false)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    // Collect entries, deduplicating by name (keep smallest edge ID on conflict).
-    let mut seen: std::collections::BTreeMap<String, (memvault_core::NodeRef, [u8; 32])> =
-        std::collections::BTreeMap::new();
-    for (src, edge) in &edges {
-        if src != &current || edge.relation != VFS_CHILD_REL {
-            continue;
-        }
-        let name = edge
-            .props
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?")
-            .to_string();
-        match seen.get(&name) {
-            Some((_, eid)) if *eid <= edge.id.0 => {}
-            _ => {
-                seen.insert(name, (edge.target.clone(), edge.id.0));
-            }
-        }
-    }
-    let mut entries = Vec::new();
-    for (name, (target, eid)) in &seen {
-        let node_id = target.tag_label();
-        let node_type = vfs_resolve_type(&*client, target).await;
-        entries.push(VfsRow {
-            name: name.clone(),
-            node_id,
-            node_type,
-            edge_id: hex::encode(eid),
-        });
-    }
-    entries.sort_by(|a, b| {
+    let mut rows: Vec<VfsRow> = entries
+        .into_iter()
+        .map(|e| VfsRow {
+            name: e.name,
+            node_id: e.node_id,
+            node_type: e.node_type,
+            edge_id: e.edge_id,
+        })
+        .collect();
+    // UX: directories first, then alphabetical (case-insensitive).
+    rows.sort_by(|a, b| {
         let dir_ord = (a.node_type != "dir").cmp(&(b.node_type != "dir"));
         dir_ord.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    Ok(entries)
+    Ok(rows)
 }
 
 #[server]
 async fn vfs_mkdir(path: String) -> Result<String, ServerFnError> {
-    use memvault_core::NodeRef;
     let client = crate::ui::state::client()?;
     let bucket = memvault_api::vfs::default_bucket(&*client).await;
-    let root_id = memvault_api::vfs::ensure_root(&*client, &bucket)
+    let id = memvault_api::vfs::mkdir(&*client, &bucket, &path)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if components.is_empty() {
-        return Ok(format!("entity:{}", hex::encode(root_id.0)));
-    }
-    let mut current = NodeRef::Entity(root_id);
-    for component in &components {
-        match vfs_find_named_child(&*client, &current, component).await? {
-            Some(child) => current = child,
-            None => {
-                let id = vfs_create_dir(&*client, &bucket, component).await?;
-                let child = NodeRef::Entity(id);
-                match vfs_create_edge(&*client, &current, &child, component).await {
-                    Ok(_) => current = child,
-                    Err(_) => {
-                        // Race: another writer created this entry concurrently.
-                        match vfs_find_named_child(&*client, &current, component).await? {
-                            Some(existing) => current = existing,
-                            None => {
-                                return Err(ServerFnError::new(format!(
-                                    "failed to create directory component '{component}'"
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(current.tag_label())
-}
-
-// ── Server-side helpers ────────────────────────────────────────────
-
-#[cfg(feature = "server")]
-async fn vfs_ensure_root(
-    client: &dyn memvault_api::MemvaultClient,
-) -> Result<memvault_core::EntityId, ServerFnError> {
-    use memvault_core::{EntityId, Visibility};
-    use memvault_doc::Entity;
-    use std::collections::BTreeMap;
-
-    let entities = client
-        .list_entities(500, None)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Pass 1: find roots by vfs:root tag (from text index).
-    let mut candidates: Vec<[u8; 32]> = Vec::new();
-    let mut fallback_candidates: Vec<[u8; 32]> = Vec::new();
-    for e in &entities {
-        if e.kind != VFS_DIR_KIND {
-            continue;
-        }
-        let node_id = format!("entity:{}", hex::encode(e.id.0));
-        let tags = client.get_tags(&node_id).await.unwrap_or_default();
-        if tags.iter().any(|(s, l)| s == "vfs" && l == "root") {
-            candidates.push(e.id.0);
-        }
-        // Fallback: detect root by name="/" prop (in case text index is stale).
-        if e.props.get("name").and_then(|v| v.as_str()) == Some("/") {
-            fallback_candidates.push(e.id.0);
-        }
-    }
-    if !candidates.is_empty() {
-        candidates.sort();
-        return Ok(EntityId(candidates[0]));
-    }
-    // Pass 2: fallback — root entity exists but tag wasn't in text index.
-    // Re-tag it so future lookups succeed.
-    if !fallback_candidates.is_empty() {
-        fallback_candidates.sort();
-        let id = EntityId(fallback_candidates[0]);
-        let node_id = format!("entity:{}", hex::encode(id.0));
-        let _ = client
-            .add_tags(&node_id, vec![("vfs".into(), "root".into())])
-            .await;
-        return Ok(id);
-    }
-    // Create a new root.
-    let mut props = BTreeMap::new();
-    props.insert("name".to_string(), serde_json::json!("/"));
-    let entity = Entity {
-        id: EntityId::random(),
-        kind: VFS_DIR_KIND.to_string(),
-        props,
-        edges_out: vec![],
-    };
-    let id = client
-        .add_entity(entity, Visibility::Internal, None)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let node_id = format!("entity:{}", hex::encode(id.0));
-    client
-        .add_tags(&node_id, vec![("vfs".into(), "root".into())])
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(id)
-}
-
-#[cfg(feature = "server")]
-async fn vfs_find_named_child(
-    client: &dyn memvault_api::MemvaultClient,
-    parent: &memvault_core::NodeRef,
-    name: &str,
-) -> Result<Option<memvault_core::NodeRef>, ServerFnError> {
-    let edges = client
-        .edges_of(parent)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let mut best: Option<(memvault_core::NodeRef, [u8; 32])> = None;
-    for (src, edge) in &edges {
-        if src != parent {
-            continue;
-        }
-        if edge.relation != VFS_CHILD_REL {
-            continue;
-        }
-        let edge_name = edge
-            .props
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if edge_name != name {
-            continue;
-        }
-        match &best {
-            Some((_, eid)) if *eid <= edge.id.0 => {}
-            _ => best = Some((edge.target.clone(), edge.id.0)),
-        }
-    }
-    Ok(best.map(|(node, _)| node))
-}
-
-#[cfg(feature = "server")]
-async fn vfs_resolve_type(
-    client: &dyn memvault_api::MemvaultClient,
-    node: &memvault_core::NodeRef,
-) -> String {
-    match node {
-        memvault_core::NodeRef::Entity(eid) => {
-            if let Ok(Some(e)) = client.get_entity(eid).await {
-                if e.kind == VFS_DIR_KIND {
-                    return "dir".to_string();
-                }
-            }
-            "entity".to_string()
-        }
-        memvault_core::NodeRef::Doc(_) => "doc".to_string(),
-        memvault_core::NodeRef::Attachment(_) => "file".to_string(),
-    }
-}
-
-#[cfg(feature = "server")]
-async fn vfs_create_dir(
-    client: &dyn memvault_api::MemvaultClient,
-    bucket: &memvault_core::BucketId,
-    name: &str,
-) -> Result<memvault_core::EntityId, ServerFnError> {
-    use memvault_core::{EntityId, Visibility};
-    use memvault_doc::Entity;
-    use std::collections::BTreeMap;
-
-    let mut props = BTreeMap::new();
-    props.insert("name".to_string(), serde_json::json!(name));
-    let entity = Entity {
-        id: EntityId::random(),
-        kind: VFS_DIR_KIND.to_string(),
-        props,
-        edges_out: vec![],
-    };
-    client
-        .add_entity(entity, Visibility::Internal, Some(bucket))
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
-}
-
-#[cfg(feature = "server")]
-async fn vfs_create_edge(
-    client: &dyn memvault_api::MemvaultClient,
-    parent: &memvault_core::NodeRef,
-    child: &memvault_core::NodeRef,
-    name: &str,
-) -> Result<memvault_core::EdgeId, ServerFnError> {
-    use memvault_core::{EdgeId, Visibility};
-    use memvault_doc::Edge;
-    use std::collections::BTreeMap;
-
-    // Prevent duplicate entries with the same name under the same parent.
-    if vfs_find_named_child(client, parent, name).await?.is_some() {
-        return Err(ServerFnError::new(format!(
-            "entry '{name}' already exists in directory"
-        )));
-    }
-
-    let mut props = BTreeMap::new();
-    props.insert(
-        "name".to_string(),
-        serde_json::Value::String(name.to_string()),
-    );
-    let edge = Edge {
-        id: EdgeId::random(),
-        relation: VFS_CHILD_REL.to_string(),
-        target: child.clone(),
-        weight: None,
-        props,
-        provenance: None,
-    };
-    client
-        .add_link(parent, edge, Visibility::Internal)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+    Ok(format!("entity:{}", hex::encode(id.0)))
 }
 
 // ── UI Components ──────────────────────────────────────────────────
