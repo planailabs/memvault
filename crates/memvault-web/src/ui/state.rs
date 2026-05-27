@@ -9,9 +9,11 @@ mod inner {
     static CLIENT: OnceLock<Arc<dyn MemvaultClient>> = OnceLock::new();
     static LOCAL_CLIENT: OnceLock<Arc<memvault_api::LocalClient>> = OnceLock::new();
 
-    /// Set the client explicitly (used by the daemon).
-    pub fn set_client(client: Arc<dyn MemvaultClient>) {
-        let _ = CLIENT.set(client);
+    /// Set the client explicitly (used by the daemon). Populates both the
+    /// trait-object and concrete handles so grant/ACL server functions work.
+    pub fn set_client(client: Arc<memvault_api::LocalClient>) {
+        let _ = LOCAL_CLIENT.set(Arc::clone(&client));
+        let _ = CLIENT.set(client as Arc<dyn MemvaultClient>);
     }
 
     /// Get the shared client. If not set explicitly (standalone dx serve mode),

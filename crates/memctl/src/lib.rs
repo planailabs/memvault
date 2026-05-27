@@ -1369,9 +1369,10 @@ mod native {
                     let auth_token = memvault_web::load_or_generate_token(&data_dir)
                         .map_err(|e| anyhow::anyhow!("failed to load/generate API token: {e}"))?;
 
-                    let client_arc = std::sync::Arc::new(client)
+                    let local_client = std::sync::Arc::new(client);
+                    memvault_web::ui::state::set_client(std::sync::Arc::clone(&local_client));
+                    let client_arc = local_client
                         as std::sync::Arc<dyn memvault_api::MemvaultClient>;
-                    memvault_web::ui::state::set_client(std::sync::Arc::clone(&client_arc));
 
                     let app_state = std::sync::Arc::new(memvault_web::AppState {
                         client: client_arc,

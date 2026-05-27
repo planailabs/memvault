@@ -62,14 +62,12 @@ fn main() {
             ) {
                 Ok(s) => {
                     let store = std::sync::Arc::new(s);
-                    let client: Arc<dyn memvault_api::MemvaultClient> = Arc::new(
-                        memctl::create_client_with_bus(
-                            Arc::clone(&store),
-                            &data_dir,
-                            Arc::clone(&event_bus),
-                        ),
-                    );
-                    memvault_web::ui::state::set_client(Arc::clone(&client));
+                    let local_client = Arc::new(memctl::create_client_with_bus(
+                        Arc::clone(&store),
+                        &data_dir,
+                        Arc::clone(&event_bus),
+                    ));
+                    memvault_web::ui::state::set_client(Arc::clone(&local_client));
                     Some(store)
                 }
                 Err(e) => {
