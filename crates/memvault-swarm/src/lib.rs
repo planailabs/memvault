@@ -261,7 +261,7 @@ pub async fn run_sync_loop(
                             }
                         )
                     )) => {
-                        if handle_join_response(&store, peer, response) {
+                        if handle_join_response(&store, peer, response, &join_config) {
                             // Success. Clear pending token + fire callback
                             // (caller removes the pending-token file).
                             join_config.pending_token = None;
@@ -1136,26 +1136,47 @@ fn handle_join_response(
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     response: JoinResponse,
+    join_config: &JoinConfig,
 ) -> bool {
     match response.result {
         JoinResult::Success {
             attestation_block, ..
         } => {
-            // Store the block + reindex; the index notifier fires the
-            // SigchainBlock event so the watcher promotes us from
-            // PreGenesis to Attested.
+            // Route through vet_sync_block so the NodeAttestation is
+            // signature-verified against the pinned admin pubkey AND
+            // tagged `sigchain/node_att`. Going through put_block +
+            // reindex_block here would store untagged bytes — the
+            // receiver's sigchain index would never see the entry and
+            // the watcher would never promote us out of PreGenesis.
             let cid = memvault_core::cid_from_bytes(&attestation_block);
             let cid_bytes = cid.to_bytes();
-            if let Err(e) = store.put_block(&cid_bytes, &attestation_block) {
-                tracing::warn!(%peer, %e, "failed to store join attestation");
-                return false;
+            match vet_sync_block(&attestation_block, join_config, None) {
+                SyncDisposition::AsSigchain(meta) => {
+                    if let Err(e) = store.insert_envelope(&cid_bytes, &attestation_block, &meta) {
+                        tracing::warn!(%peer, %e, "failed to insert join attestation");
+                        return false;
+                    }
+                    tracing::info!(%peer, "received node attestation via /join/1.0");
+                    true
+                }
+                SyncDisposition::Drop => {
+                    tracing::warn!(
+                        %peer,
+                        "dropped /join/1.0 response: attestation does not verify \
+                         against pinned admin pubkey"
+                    );
+                    false
+                }
+                SyncDisposition::AsIs => {
+                    // Shouldn't happen — admin minted a NodeAttestation,
+                    // it has the right shape. Defensive fallback.
+                    tracing::warn!(
+                        %peer,
+                        "join response was not a recognized NodeAttestation; ignoring"
+                    );
+                    false
+                }
             }
-            if let Err(e) = store.reindex_block(&cid_bytes, &attestation_block) {
-                tracing::warn!(%peer, %e, "failed to reindex join attestation");
-                return false;
-            }
-            tracing::info!(%peer, "received node attestation via /join/1.0");
-            true
         }
         JoinResult::Refuse { reason, .. } => {
             tracing::debug!(%peer, ?reason, "join refused");

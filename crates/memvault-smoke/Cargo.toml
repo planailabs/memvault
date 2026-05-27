@@ -13,6 +13,7 @@ memvault-query = { path = "../memvault-query" }
 memvault-attach = { path = "../memvault-attach" }
 memvault-auth = { path = "../memvault-auth" }
 memvault-net = { path = "../memvault-net" }
+memvault-swarm = { path = "../memvault-swarm" }
 memctl = { path = "../memctl", default-features = false }
 libp2p = { workspace = true }
 futures = "0.3"
