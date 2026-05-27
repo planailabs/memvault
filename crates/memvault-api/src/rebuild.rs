@@ -287,25 +287,24 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
 
     // ── Stamp the version ──────────────────────────────────────────────
     //
-    // Only stamp if the cluster_id is set (rebuild was complete).
-    // Pre-genesis stores skip the rewrite and must re-run post-genesis.
-
-    let has_cluster = client.cluster_id().iter().any(|&b| b != 0);
-    if has_cluster {
-        store
-            .set_schema_version(BLOCKSTORE_VERSION)
-            .map_err(|e| ApiError::Other(format!("set blockstore version: {e}")))?;
-    } else {
-        tracing::info!("pre-genesis store — skipping version stamp (will re-run post-genesis)");
-    }
+    store
+        .set_schema_version(BLOCKSTORE_VERSION)
+        .map_err(|e| ApiError::Other(format!("set blockstore version: {e}")))?;
 
     Ok(report)
 }
 
-/// Check stored version and rebuild if needed.  Returns the report if a
-/// rebuild ran, or None if the store was already at the current version.
 /// Check stored version and rebuild if needed (sync).
+///
+/// Skips entirely pre-genesis (no cluster_id) — the rebuild requires a
+/// cluster to derive the deterministic legacy bucket.  Will run
+/// automatically on the first post-genesis open.
 pub fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildReport>> {
+    // Pre-genesis: nothing to rebuild — no cluster for bucket derivation.
+    if !client.cluster_id().iter().any(|&b| b != 0) {
+        return Ok(None);
+    }
+
     let stored = client
         .store()
         .schema_version()
