@@ -114,29 +114,63 @@ async fn two_swarms_identify() {
 
 // ── Gossipsub tests ─────────────────────────────────────────────────
 
-#[tokio::test]
-#[ignore = "gossipsub meshing is timing-sensitive; run with --include-ignored"]
-async fn gossip_admin_announcement_propagates() {
-    let (mut swarm_a, _addr_a, _peer_a) = spawn_swarm().await;
-    let (mut swarm_b, addr_b, _peer_b) = spawn_swarm().await;
-
-    connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
-
-    // Give gossipsub time to mesh (needs heartbeat interval to pass)
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    // Drain any pending events
-    for _ in 0..20 {
+/// Drive both swarms until each side has seen the other's `Subscribed`
+/// event for `topic`. Deterministic substitute for the old "sleep 1s and
+/// hope" pattern — once both ends know the peer subscribes to the topic,
+/// `publish` will deliver immediately via gossipsub's fan-out path
+/// (it doesn't have to wait for the heartbeat-driven mesh to form).
+async fn wait_for_mesh(
+    swarm_a: &mut libp2p::Swarm<memvault_net::StandaloneMemvaultBehaviour>,
+    swarm_b: &mut libp2p::Swarm<memvault_net::StandaloneMemvaultBehaviour>,
+    peer_a: Libp2pPeerId,
+    peer_b: Libp2pPeerId,
+    topic_hash: libp2p::gossipsub::TopicHash,
+) {
+    let mut a_saw_b = false;
+    let mut b_saw_a = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while (!a_saw_b || !b_saw_a) && tokio::time::Instant::now() < deadline {
         tokio::select! {
-            _ = swarm_a.next() => {}
-            _ = swarm_b.next() => {}
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            event = swarm_a.next() => {
+                if let Some(SwarmEvent::Behaviour(
+                    memvault_net::StandaloneMemvaultBehaviourEvent::Gossipsub(
+                        libp2p::gossipsub::Event::Subscribed { peer_id, topic }
+                    )
+                )) = event {
+                    if peer_id == peer_b && topic == topic_hash {
+                        a_saw_b = true;
+                    }
+                }
+            }
+            event = swarm_b.next() => {
+                if let Some(SwarmEvent::Behaviour(
+                    memvault_net::StandaloneMemvaultBehaviourEvent::Gossipsub(
+                        libp2p::gossipsub::Event::Subscribed { peer_id, topic }
+                    )
+                )) = event {
+                    if peer_id == peer_a && topic == topic_hash {
+                        b_saw_a = true;
+                    }
+                }
+            }
         }
     }
+    assert!(a_saw_b, "swarm_a never saw swarm_b subscribe to {topic_hash}");
+    assert!(b_saw_a, "swarm_b never saw swarm_a subscribe to {topic_hash}");
+}
+
+#[tokio::test]
+async fn gossip_admin_announcement_propagates() {
+    let (mut swarm_a, _addr_a, peer_a) = spawn_swarm().await;
+    let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
+
+    connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
+    let topic = gossip::admin_topic();
+    wait_for_mesh(&mut swarm_a, &mut swarm_b, peer_a, peer_b, topic.hash()).await;
 
     // Publish an admin announcement from swarm_a
     let announcement = AdminAnnouncement::TokenConsumed(vec![1, 2, 3, 4]);
     let data = serde_ipld_dagcbor::to_vec(&announcement).unwrap();
-    let topic = gossip::admin_topic();
     swarm_a
         .behaviour_mut()
         .gossipsub
@@ -167,16 +201,13 @@ async fn gossip_admin_announcement_propagates() {
 }
 
 #[tokio::test]
-#[ignore = "gossipsub meshing is timing-sensitive; run with --include-ignored"]
 async fn gossip_bucket_created_propagates() {
-    let (mut swarm_a, _addr_a, _peer_a) = spawn_swarm().await;
-    let (mut swarm_b, addr_b, _peer_b) = spawn_swarm().await;
+    let (mut swarm_a, _addr_a, peer_a) = spawn_swarm().await;
+    let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
 
     connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    for _ in 0..10 {
-        tokio::select! { _ = swarm_a.next() => {} _ = swarm_b.next() => {} _ = tokio::time::sleep(Duration::from_millis(10)) => {} }
-    }
+    let admin = gossip::admin_topic();
+    wait_for_mesh(&mut swarm_a, &mut swarm_b, peer_a, peer_b, admin.hash()).await;
 
     let announcement = AdminAnnouncement::BucketCreated(vec![10, 20, 30]);
     let data = serde_ipld_dagcbor::to_vec(&announcement).unwrap();
@@ -656,20 +687,13 @@ async fn block_exchange_large_block() {
 // ── Head announcement gossip tests ────────────────────────────────
 
 #[tokio::test]
-#[ignore = "gossipsub meshing is timing-sensitive; run with --include-ignored"]
 async fn head_announcement_propagates() {
-    let (mut swarm_a, _addr_a, _peer_a) = spawn_swarm().await;
-    let (mut swarm_b, addr_b, _peer_b) = spawn_swarm().await;
+    let (mut swarm_a, _addr_a, peer_a) = spawn_swarm().await;
+    let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
 
     connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    for _ in 0..20 {
-        tokio::select! {
-            _ = swarm_a.next() => {}
-            _ = swarm_b.next() => {}
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
-    }
+    let heads = gossip::heads_topic();
+    wait_for_mesh(&mut swarm_a, &mut swarm_b, peer_a, peer_b, heads.hash()).await;
 
     let ann = memvault_net::HeadAnnouncement {
         cid: vec![0xCA; 32],
