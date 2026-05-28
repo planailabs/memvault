@@ -123,6 +123,7 @@ fn main() {
                 revoked_agents: Arc::clone(&trust.trust_state.revoked_agents),
                 revoked_nodes: Arc::clone(&trust.trust_state.revoked_nodes),
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
+                agent_attestation_lookup: None,
             });
 
             // Sync `fn main()` — no tokio runtime yet. Defer the watcher

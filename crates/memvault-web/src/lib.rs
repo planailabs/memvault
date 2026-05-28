@@ -72,6 +72,19 @@ mod server_router {
         pub revoked_nodes: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
         /// Operational metrics.
         pub metrics: Arc<memvault_api::metrics::Metrics>,
+        /// Optional injectable lookup for `AgentAttestation` by agent
+        /// pubkey. Production wires this to the sigchain scan via
+        /// [`memvault_api::sigchain::find_agent_attestation`]; tests
+        /// install a stub so they don't need a full `LocalClient` set up.
+        /// `None` falls back to the global `LOCAL_CLIENT` lookup.
+        #[allow(clippy::type_complexity)]
+        pub agent_attestation_lookup: Option<
+            Arc<
+                dyn Fn(&[u8; 32]) -> Option<memvault_auth::AgentAttestation>
+                    + Send
+                    + Sync,
+            >,
+        >,
     }
 
     /// Load (or generate) the built-in `_ui` agent identity used by the

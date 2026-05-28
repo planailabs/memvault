@@ -1818,6 +1818,7 @@ mod native {
                         revoked_agents: std::sync::Arc::clone(&trust.trust_state.revoked_agents),
                         revoked_nodes: std::sync::Arc::clone(&trust.trust_state.revoked_nodes),
                         metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
+                        agent_attestation_lookup: None,
                     });
 
                     // Start the web server. Use fullstack (SSR + UI) if assets

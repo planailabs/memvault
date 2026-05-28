@@ -439,17 +439,51 @@ impl MemvaultClient for MockClient {
     }
 }
 
-fn make_app() -> axum::Router {
-    let state = Arc::new(AppState {
-        client: Arc::new(MockClient::new()),
+/// Build the test agent's AgentAttestation. The JWT verifier calls our
+/// injected lookup with the agent pubkey; we just return this attestation
+/// when it matches.
+fn test_agent_attestation() -> memvault_auth::AgentAttestation {
+    let (_admin, node, agent) = test_keys();
+    memvault_auth::sign_agent_attestation(
+        &node,
+        memvault_core::AgentId("test-agent".to_string()),
+        agent.verifying_key().to_bytes(),
+        Role::AgentHost,
+        u64::MAX,
+    )
+    .expect("sign_agent_attestation")
+}
+
+/// Stub agent-attestation lookup. Returns the test agent's attestation
+/// when asked about its pubkey; anything else gets `None`. Lets tests
+/// run without a full `LocalClient` installed.
+fn test_agent_lookup()
+-> Arc<dyn Fn(&[u8; 32]) -> Option<memvault_auth::AgentAttestation> + Send + Sync> {
+    let att = test_agent_attestation();
+    Arc::new(move |agent_pk: &[u8; 32]| {
+        if *agent_pk == att.agent_pubkey {
+            Some(att.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn test_app_state(client: Arc<dyn MemvaultClient>) -> Arc<AppState> {
+    Arc::new(AppState {
+        client,
         event_bus: Arc::new(EventBus::new(16)),
         admin_pubkey: Some(test_admin_pubkey()),
         node_trust: test_node_trust(),
         revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
-    });
-    build_router(state)
+        agent_attestation_lookup: Some(test_agent_lookup()),
+    })
+}
+
+fn make_app() -> axum::Router {
+    build_router(test_app_state(Arc::new(MockClient::new())))
 }
 
 #[tokio::test]
@@ -483,33 +517,16 @@ async fn test_unauthorized_with_bad_token() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-// The 5 ignored tests below were broken in cd0bd54b ("drop JWT
-// attestation embed + HTTP agent enrollment"), which moved verify_bearer
-// from looking up agent attestations on the AppState client to
-// requiring a concrete LocalClient via `ui::state::local_client()`.
-// These tests build their AppState with a MockClient (dyn
-// MemvaultClient) and never install a LOCAL_CLIENT, so every
-// authenticated request now returns 401.
-//
-// Reviving them requires either: (a) a LocalClient-backed test
-// harness on a tempdir store, or (b) a fall-through in verify_bearer
-// when the local client isn't installed. Either is a meaningful
-// scope expansion beyond the Phase 1 migration that brought us here.
-// Ignored until that harness exists; the underlying API surfaces are
-// covered by the memvault-smoke integration tests.
+// The 5 tests below were broken in cd0bd54b ("drop JWT attestation
+// embed + HTTP agent enrollment"), which moved verify_bearer from
+// looking up agent attestations on the AppState client to requiring a
+// concrete LocalClient via `ui::state::local_client()`. They are now
+// fixed by routing the lookup through `AppState.agent_attestation_lookup`
+// when set, so tests can install a stub without a full LocalClient.
 
 #[tokio::test]
-#[ignore = "pre-existing: needs LocalClient test harness (broken in cd0bd54b)"]
 async fn test_create_and_list_docs() {
-    let state = Arc::new(AppState {
-        client: Arc::new(MockClient::new()),
-        event_bus: Arc::new(EventBus::new(16)),
-        admin_pubkey: Some(test_admin_pubkey()),
-        node_trust: test_node_trust(),
-        revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        metrics: Arc::new(memvault_api::metrics::Metrics::new()),
-    });
+    let state = test_app_state(Arc::new(MockClient::new()));
     let app = build_router(state);
 
     // Create a doc
@@ -558,17 +575,8 @@ async fn test_create_and_list_docs() {
 }
 
 #[tokio::test]
-#[ignore = "pre-existing: needs LocalClient test harness (broken in cd0bd54b)"]
 async fn test_get_doc() {
-    let state = Arc::new(AppState {
-        client: Arc::new(MockClient::new()),
-        event_bus: Arc::new(EventBus::new(16)),
-        admin_pubkey: Some(test_admin_pubkey()),
-        node_trust: test_node_trust(),
-        revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-        metrics: Arc::new(memvault_api::metrics::Metrics::new()),
-    });
+    let state = test_app_state(Arc::new(MockClient::new()));
     let app = build_router(state);
 
     // Create a doc first
@@ -612,7 +620,6 @@ async fn test_get_doc() {
 }
 
 #[tokio::test]
-#[ignore = "pre-existing: needs LocalClient test harness (broken in cd0bd54b)"]
 async fn test_search() {
     let app = make_app();
     let resp = app
@@ -633,7 +640,6 @@ async fn test_search() {
 }
 
 #[tokio::test]
-#[ignore = "pre-existing: needs LocalClient test harness (broken in cd0bd54b)"]
 async fn test_admin_status() {
     let app = make_app();
     let resp = app
@@ -656,7 +662,6 @@ async fn test_admin_status() {
 }
 
 #[tokio::test]
-#[ignore = "pre-existing: needs LocalClient test harness (broken in cd0bd54b)"]
 async fn test_download_attachment() {
     let app = make_app();
     let cid_hex = hex::encode([0xABu8; 32]);

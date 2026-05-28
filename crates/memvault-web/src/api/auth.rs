@@ -85,11 +85,18 @@ async fn verify_bearer(
     let token = header
         .strip_prefix("Bearer ")
         .ok_or_else(|| AuthRejection("expected Bearer scheme".into()))?;
-    // The web auth path always runs against the daemon's LocalClient
-    // (set via `ui::state::set_client` at bootstrap). Recover the
-    // concrete handle so we can call sigchain accessors.
-    let local_client = crate::ui::state::local_client()
-        .map_err(|e| AuthRejection(format!("local client not available: {e}")))?;
+    // The web auth path normally runs against the daemon's LocalClient
+    // (set via `ui::state::set_client` at bootstrap), but tests/headless
+    // hosts can install a per-request lookup via
+    // `AppState.agent_attestation_lookup`. Prefer the explicit hook;
+    // fall back to the global LocalClient when not set.
+    let local_client_opt = match &state.agent_attestation_lookup {
+        Some(_) => None,
+        None => Some(
+            crate::ui::state::local_client()
+                .map_err(|e| AuthRejection(format!("local client not available: {e}")))?,
+        ),
+    };
     let claims = memvault_auth::jwt::verify(
         token,
         state.admin_pubkey.as_ref(),
@@ -105,7 +112,11 @@ async fn verify_bearer(
             {
                 return None;
             }
-            memvault_api::sigchain::find_agent_attestation(&local_client, agent_pk)
+            if let Some(lookup) = &state.agent_attestation_lookup {
+                return lookup(agent_pk);
+            }
+            let local_client = local_client_opt.as_ref()?;
+            memvault_api::sigchain::find_agent_attestation(local_client, agent_pk)
                 .ok()
                 .flatten()
         },

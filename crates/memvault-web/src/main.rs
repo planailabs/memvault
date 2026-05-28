@@ -69,6 +69,7 @@ fn main() {
                         revoked_agents: Arc::clone(&trust.trust_state.revoked_agents),
                         revoked_nodes: Arc::clone(&trust.trust_state.revoked_nodes),
                         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
+                        agent_attestation_lookup: None,
                     });
                     router = axum::Router::new()
                         .nest("/api/v1", memvault_web::api::routes(app_state))
