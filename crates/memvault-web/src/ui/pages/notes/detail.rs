@@ -31,6 +31,11 @@ struct LinkedItem {
     relation: String,
     other_node: String, // tag_label format: "entity:hex", "doc:hex", etc.
     other_label: Option<String>,
+    /// `"body_markdown"`, `"frontmatter"`, or `"asserted"` (None for legacy
+    /// edges without a provenance prop).
+    provenance: Option<String>,
+    /// Unresolved alias text, if the edge's target is a pending placeholder.
+    pending_alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,12 +121,24 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
                 ("incoming".to_string(), source.tag_label())
             };
             let other_label = client.resolve_label(&other_node).await.unwrap_or(None);
+            let provenance = edge
+                .props
+                .get("provenance")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let pending_alias = edge
+                .props
+                .get("pending_alias")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             linked_items.push(LinkedItem {
                 edge_id: hex::encode(edge.id.0),
                 direction,
                 relation: edge.relation.clone(),
                 other_node,
                 other_label,
+                provenance,
+                pending_alias,
             });
         }
     }
@@ -194,6 +211,14 @@ async fn delete_note(id: String) -> Result<(), ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(())
+}
+
+fn provenance_pill_variant(prov: &str) -> PillVariant {
+    match prov {
+        "body_markdown" | "frontmatter" => PillVariant::Muted,
+        "asserted" => PillVariant::Muted,
+        _ => PillVariant::Muted,
+    }
 }
 
 #[component]
@@ -290,7 +315,14 @@ fn NoteView(data: NoteData) -> Element {
                                 div { class: "flex items-center gap-3 py-2",
                                     Pill { variant: PillVariant::Muted, "{item.direction}" }
                                     Pill { variant: PillVariant::Muted, "{item.relation}" }
-                                    if let Some(label) = &item.other_label {
+                                    if let Some(prov) = &item.provenance {
+                                        Pill { variant: provenance_pill_variant(prov), "{prov}" }
+                                    }
+                                    if let Some(alias) = &item.pending_alias {
+                                        span { class: "text-sm truncate flex-1 text-warning",
+                                            "[[{alias}]] (pending)"
+                                        }
+                                    } else if let Some(label) = &item.other_label {
                                         span { class: "text-sm truncate flex-1", "{label}" }
                                     } else {
                                         span { class: "font-mono text-sm text-fg-muted truncate flex-1",
