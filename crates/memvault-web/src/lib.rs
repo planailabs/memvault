@@ -111,66 +111,17 @@ mod server_router {
         client: &memvault_api::LocalClient,
         data_dir: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let node_signing_key = client
-            .node_signing_key()
-            .ok_or("node signing key not set on client")?
-            .clone();
-        let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
-
-        let cluster_bytes = client.cluster_id();
-        let mut cluster_arr = [0u8; 32];
-        if cluster_bytes.len() == 32 {
-            cluster_arr.copy_from_slice(cluster_bytes);
-        }
-        let cluster_id = memvault_core::ClusterId(cluster_arr);
-
+        // Delegates to the canonical LocalClient enrollment helper.
+        // Web-specific work here is limited to picking the identity_dir
+        // and installing the resulting identity in the UI state cache.
         let ui_identity_dir = data_dir.join("identity").join("ui_agent");
-
-        let now_ns = memvault_core::time::wall_ns();
-        let existing = if memvault_api::agent_identity::AgentIdentity::exists(&ui_identity_dir) {
-            match memvault_api::agent_identity::AgentIdentity::load(&ui_identity_dir) {
-                Ok(id)
-                    if id.attestation.node_pubkey == node_pubkey_bytes
-                        && id.attestation.not_after_ns > now_ns =>
-                {
-                    Some(id)
-                }
-                Ok(_) => {
-                    tracing::info!(
-                        "ui agent attestation no longer valid (node key rotated or expired); \
-                         rotating"
-                    );
-                    let _ = std::fs::remove_dir_all(&ui_identity_dir);
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ui agent identity unreadable; regenerating");
-                    let _ = std::fs::remove_dir_all(&ui_identity_dir);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let ui_identity = match existing {
-            Some(id) => id,
-            None => memvault_api::agent_identity::AgentIdentity::generate_local(
-                &ui_identity_dir,
-                "_ui",
-                &cluster_id,
-                &node_signing_key,
-                memvault_auth::Role::AgentHost,
-                365 * 24 * 60 * 60 * 1_000_000_000,
-            )?,
-        };
-
-        // Publish the attestation so peers can verify envelope authorship
-        // from this agent. Idempotent on the redb side (keyed by CID), so
-        // re-publishing a reused identity is a no-op.
-        memvault_api::sigchain::publish_agent_attestation(client, &ui_identity.attestation)
-            .map_err(|e| format!("publish ui agent attestation: {e}"))?;
-
+        let ui_identity = memvault_api::agent_identity::enroll_local_agent(
+            client,
+            "_ui",
+            &ui_identity_dir,
+            memvault_auth::Role::AgentHost,
+            365 * 24 * 60 * 60 * 1_000_000_000,
+        )?;
         super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
         Ok(())
     }

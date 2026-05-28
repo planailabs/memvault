@@ -210,6 +210,103 @@ impl AgentIdentity {
     }
 }
 
+/// Enroll (or re-use) a per-agent identity backed by the local node, then
+/// publish its attestation to the sigchain so peers can verify writes from
+/// that agent. This is the LocalClient-side analogue of
+/// `enroll_remote_agent` (which exchanges a join token over HTTP): the
+/// daemon is its own attestor and uses its in-memory node signing key to
+/// sign the `AgentAttestation` directly.
+///
+/// On every call:
+///   1. Pulls `node_signing_key` and `cluster_id` from the live
+///      `LocalClient` (no need for callers to thread them through).
+///   2. Loads an existing identity from `identity_dir` iff it was signed by
+///      the **current** node key and hasn't expired. If the key rotated
+///      or the attestation expired, the directory is removed and a fresh
+///      identity is minted — same self-healing behavior the web UI's
+///      `init_ui_agent` already implements.
+///   3. Generates a new keypair + attestation when no valid cache exists.
+///   4. Publishes the (new or reused) attestation via
+///      `sigchain::publish_agent_attestation`. Idempotent at the redb
+///      layer (keyed by attestation CID), so re-runs are safe.
+///
+/// Returns the resulting `AgentIdentity`. Caller is responsible for any
+/// process-local state binding (e.g. setting `MEMVAULT_IDENTITY_DIR` in a
+/// subprocess env, or installing the identity in a global cache).
+///
+/// **Prerequisites on the client:** a node signing key must already be
+/// installed via `LocalClient::set_node_signing_key`. Pre-genesis cluster
+/// state (all-zero cluster_id) is tolerated — the attestation gets
+/// recorded with that cluster_id and is replaced if the node later joins
+/// a real cluster and key-rotates.
+pub fn enroll_local_agent(
+    client: &crate::LocalClient,
+    agent_id: &str,
+    identity_dir: &Path,
+    role: Role,
+    ttl_ns: u64,
+) -> Result<AgentIdentity> {
+    let node_signing_key = client
+        .node_signing_key()
+        .ok_or_else(|| ApiError::Other(
+            "enroll_local_agent: node signing key not set on LocalClient; \
+             call set_node_signing_key first".into(),
+        ))?
+        .clone();
+    let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
+
+    let cluster_bytes = client.cluster_id();
+    let mut cluster_arr = [0u8; 32];
+    if cluster_bytes.len() == 32 {
+        cluster_arr.copy_from_slice(cluster_bytes);
+    }
+    let cluster_id = memvault_core::ClusterId(cluster_arr);
+
+    let now_ns = memvault_core::time::wall_ns();
+    let existing = if AgentIdentity::exists(identity_dir) {
+        match AgentIdentity::load(identity_dir) {
+            Ok(id)
+                if id.attestation.node_pubkey == node_pubkey_bytes
+                    && id.attestation.not_after_ns > now_ns =>
+            {
+                Some(id)
+            }
+            Ok(_) => {
+                tracing::info!(
+                    agent_id,
+                    "agent attestation no longer valid (node key rotated or expired); rotating"
+                );
+                let _ = std::fs::remove_dir_all(identity_dir);
+                None
+            }
+            Err(e) => {
+                tracing::warn!(agent_id, error = %e, "agent identity unreadable; regenerating");
+                let _ = std::fs::remove_dir_all(identity_dir);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let identity = match existing {
+        Some(id) => id,
+        None => AgentIdentity::generate_local(
+            identity_dir,
+            agent_id,
+            &cluster_id,
+            &node_signing_key,
+            role,
+            ttl_ns,
+        )?,
+    };
+
+    crate::sigchain::publish_agent_attestation(client, &identity.attestation)
+        .map_err(|e| ApiError::Other(format!("publish agent attestation: {e}")))?;
+
+    Ok(identity)
+}
+
 /// Write all identity files to disk.
 /// Persist all three identity files (private_key.pem, attestation.cbor,
 /// agent.json) under `dir`. Used by `generate_local` and by CLI/HTTP
