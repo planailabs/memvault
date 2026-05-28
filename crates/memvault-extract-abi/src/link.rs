@@ -41,8 +41,10 @@ pub struct ExtractedLink {
     /// Human-readable text the author wrote for this link, if any.
     #[serde(default)]
     pub display_text: Option<String>,
-    /// Byte span (start, end_exclusive) into `ExtractedText.text` — useful
-    /// for hover-preview and span-aware UIs. `(0, 0)` means span unknown.
+    /// Byte span (start, end_exclusive) in the source content — useful for
+    /// hover-preview and span-aware UIs. `(0, 0)` means span unknown.
+    /// Markdown/HTML extractors use source bytes; binary extractors that
+    /// can't map back to a source offset leave this zero.
     #[serde(default)]
     pub byte_span: (u32, u32),
     /// Source syntax of the link in the original content.
