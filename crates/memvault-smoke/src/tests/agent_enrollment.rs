@@ -119,7 +119,7 @@ async fn enroll_agent_then_write_and_verify_authorship() {
     // We need an agent-bound client to author writes. Build one off the
     // same store / handles.
     let agent_pk_bytes = agent.verifying_key.to_bytes();
-    let mut agent_client = memvault_api::LocalClient::new(
+    let agent_client = memvault_api::LocalClient::new(
         std::sync::Arc::clone(&node.store),
         std::sync::Arc::new(tokio::sync::RwLock::new(memvault_query::TextIndex::new())),
         std::sync::Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
@@ -127,6 +127,10 @@ async fn enroll_agent_then_write_and_verify_authorship() {
         node.client.peer_id().to_vec(),
         node.cluster_id.0.to_vec(),
     );
+    // Install the node signing key so writes flow through Signed<T> —
+    // without it, `build_signed_envelope` falls back to the unsigned
+    // raw-JSON envelope shape and the assertions below fail.
+    agent_client.set_node_signing_key(node_sk.clone());
     agent_client.set_agent_identity(agent);
 
     // Need a bucket — agent-attributed writes go through the bucket gate.
