@@ -517,6 +517,17 @@ mod native {
                 }
             }
         }
+        // Load the node signing key (the libp2p host key, design A-1).
+        // Needed by anything that mints sigchain blocks — including
+        // `enroll_remote_agent` on the non-daemon CLI path. Silent if
+        // libp2p.key doesn't exist yet (genesis hasn't run, or this is
+        // a fresh data_dir); callers that need it will fail later
+        // with a clear error.
+        if data_dir.join("identity").join("libp2p.key").exists() {
+            if let Ok(node_sk) = libp2p_node_signing_key(data_dir) {
+                client.set_node_signing_key(node_sk);
+            }
+        }
         // Load the pinned AdminGenesis so `token issue` embeds it for
         // joining peers, and so peers themselves can verify trust.
         let pin_path = data_dir.join("identity").join("cluster_admin_genesis.cbor");
@@ -535,6 +546,15 @@ mod native {
         // Bind agent identity if `MEMVAULT_AGENT_ID` is set (the global
         // `--agent-id` flag exports it). Writes through this client get
         // signed for that agent (EnvelopeAuthorship sidecar).
+        //
+        // "Not enrolled" is silent: it's the expected state right
+        // before `memctl agent-enroll` runs (the CLI may have
+        // exported MEMVAULT_AGENT_ID from the shell), and it's also
+        // expected if the user typo'd the agent id — the failure mode
+        // shows up at the first write/JWT attempt and is clearer
+        // there than as a warn here. Failed-to-load (file exists but
+        // unreadable) IS still warned, since that's an unexpected
+        // error.
         if let Ok(agent_id) = std::env::var("MEMVAULT_AGENT_ID") {
             if !agent_id.is_empty() {
                 let identity_dir = data_dir.join("agents").join(&agent_id);
@@ -547,11 +567,6 @@ mod native {
                             identity_dir.display()
                         ),
                     }
-                } else {
-                    tracing::warn!(
-                        "agent '{agent_id}' not enrolled at {}; running as node",
-                        identity_dir.display()
-                    );
                 }
             }
         }
