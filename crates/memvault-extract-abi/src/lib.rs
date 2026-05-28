@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+mod link;
+
+pub use link::{ExtractedLink, LinkSyntax, LinkTargetKind, ParsedUri, UriError, parse_uri, render_uri};
+
 // ─── Input envelope ────────────────────────────────────────────────────────────
 
 /// Header portion of the binary input envelope (CBOR-encoded).
@@ -50,6 +54,11 @@ pub struct ExtractedText {
     /// Extraction warnings (e.g. "possible scanned PDF")
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Links discovered in the source, addressed via `memvault://` URIs.
+    /// Plugins that only extract text leave this empty. Spans (when set)
+    /// index into `text`.
+    #[serde(default)]
+    pub links: Vec<ExtractedLink>,
 }
 
 // ─── Plugin capabilities ───────────────────────────────────────────────────────
@@ -194,6 +203,7 @@ mod tests {
             text: "Hello world".to_string(),
             page_breaks: vec![5],
             warnings: vec![],
+            links: vec![],
         });
 
         let encoded = encode_response(&response);

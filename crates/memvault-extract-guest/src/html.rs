@@ -41,6 +41,7 @@ pub fn extract(content: &[u8], hints: &ExtractionHints) -> Result<ExtractedText,
         text,
         page_breaks,
         warnings: Vec::new(),
+        links: Vec::new(),
     })
 }
 
