@@ -92,40 +92,22 @@ impl MemvaultStore {
         cid_bytes: &[u8],
         envelope_bytes: &[u8],
     ) -> Result<bool, StoreError> {
-        let val: serde_json::Value = match deserialize_block(envelope_bytes) {
-            Some(v) => v,
-            None => return Ok(false), // not an envelope, skip
+        let Some(view) = crate::EnvelopeView::parse(envelope_bytes) else {
+            return Ok(false); // not an envelope
         };
+        let val = view.raw().clone();
 
-        // Extract envelope metadata
-        let author: Vec<u8> = val
-            .get("author")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let mut tags: Vec<(String, String)> = val
-            .get("tags")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        // `kind` may live either at the top level (legacy raw-JSON
-        // envelopes) or one level down inside `payload` (post-Signed<T>
-        // migration). Try the body first, fall back to payload.
-        let kind_str = val
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .or_else(|| val.get("payload").and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
-        let target_str = val
-            .get("target")
-            .and_then(|v| v.as_str())
-            .or_else(|| val.get("payload").and_then(|p| p.get("target")).and_then(|v| v.as_str()));
-        let manifest_cid_val = val
-            .get("manifest_cid")
-            .or_else(|| val.get("payload").and_then(|p| p.get("manifest_cid")));
+        // Extract envelope metadata via the canonical view — handles
+        // both legacy raw-JSON envelopes and Signed<T> payload-nested
+        // kind fields uniformly.
+        let author: Vec<u8> = view.author();
+        let mut tags: Vec<(String, String)> = view.get_as("tags").unwrap_or_default();
 
         // Legacy annotation blocks stored tags only in EnvelopeMeta, not in
         // the body. Recover _ann tag from the annotation target field.
         if tags.is_empty() {
-            if kind_str == Some("annotation") {
-                if let Some(target) = target_str {
+            if view.str_field("kind") == Some("annotation") {
+                if let Some(target) = view.str_field("target") {
                     tags.push(("_ann".to_string(), target.to_string()));
                 }
             }
@@ -133,28 +115,16 @@ impl MemvaultStore {
         // For attachment envelopes, add a manifest→envelope reverse lookup tag
         // so get_file_manifest can find the envelope when the manifest block
         // is missing (legacy files).
-        if kind_str == Some("attachment") {
-            if let Some(mcid) = manifest_cid_val
-                .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
-            {
+        if view.str_field("kind") == Some("attachment") {
+            if let Some(mcid) = view.get_as::<Vec<u8>>("manifest_cid") {
                 tags.push(("_manifest".to_string(), hex::encode(&mcid)));
             }
         }
-        let wall_ns: u64 = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-        let causal: Vec<Vec<u8>> = val
-            .get("causal")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let provenance: Vec<Vec<u8>> = val
-            .get("provenance")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let cluster_id: Option<Vec<u8>> = val
-            .get("cluster_id")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let bucket_id: Option<Vec<u8>> = val
-            .get("bucket_id")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let wall_ns: u64 = view.field("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+        let causal: Vec<Vec<u8>> = view.get_as("causal").unwrap_or_default();
+        let provenance: Vec<Vec<u8>> = view.get_as("provenance").unwrap_or_default();
+        let cluster_id: Option<Vec<u8>> = view.get_as("cluster_id");
+        let bucket_id: Option<Vec<u8>> = view.get_as("bucket_id");
 
         if wall_ns == 0 && author.is_empty() && tags.is_empty() {
             return Ok(false); // not an envelope

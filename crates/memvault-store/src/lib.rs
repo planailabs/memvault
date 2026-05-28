@@ -8,6 +8,7 @@ pub mod audit_index;
 pub mod blockstore;
 pub mod consumed_tokens;
 pub mod encryption;
+pub mod envelope_view;
 pub mod error;
 pub mod heads;
 pub mod insert;
@@ -17,6 +18,7 @@ pub mod retracted;
 pub mod rotation_state;
 pub mod tables;
 
+pub use envelope_view::EnvelopeView;
 pub use error::StoreError;
 pub use insert::{EnvelopeMeta, deserialize_block, deserialize_block_as};
 

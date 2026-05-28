@@ -107,16 +107,21 @@ pub fn query_audit(
 }
 
 pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
-    let author = val
-        .get("author")
-        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
+    let view = memvault_store::EnvelopeView::from_value(val.clone());
+
+    let author: Vec<u8> = view
+        .as_ref()
+        .map(|v| v.author())
         .unwrap_or_default();
 
-    let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+    let wall_ns = view
+        .as_ref()
+        .and_then(|v| v.field("wall_ns").and_then(|x| x.as_u64()))
+        .unwrap_or(0);
 
-    let tags: Vec<(String, String)> = val
-        .get("tags")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    let tags: Vec<(String, String)> = view
+        .as_ref()
+        .and_then(|v| v.get_as("tags"))
         .unwrap_or_default();
 
     let op_kind = if let Some(p) = val.get("payload") {
@@ -148,18 +153,9 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
             OpKind::Other("unknown".into())
         }
     } else {
-        // Some envelope kinds (annotation, attachment) carry their
-        // `kind` either at the top level (legacy) or inside `payload`
-        // (post-Signed<T> migration). Look in both places.
-        let payload = val.get("payload");
-        let kind = val
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .or_else(|| payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
-        let ann_type = val
-            .get("type")
-            .and_then(|v| v.as_str())
-            .or_else(|| payload.and_then(|p| p.get("type")).and_then(|v| v.as_str()));
+        // EnvelopeView handles the legacy-vs-Signed<T> shape unification.
+        let kind = view.as_ref().and_then(|v| v.str_field("kind"));
+        let ann_type = view.as_ref().and_then(|v| v.str_field("type"));
         let kind_tag = tags
             .iter()
             .find(|(s, _)| s == "kind")
@@ -220,18 +216,13 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         None
     });
 
-    // For attachment envelopes, extract the manifest_cid. Pre-Signed<T>
-    // it was top-level; post-migration it lives inside `payload`.
-    let attachment_cid = val
-        .get("manifest_cid")
-        .or_else(|| val.get("payload").and_then(|p| p.get("manifest_cid")))
-        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+    let attachment_cid: Option<Vec<u8>> =
+        view.as_ref().and_then(|v| v.get_as("manifest_cid"));
 
     // Agent attribution lives in `agent_attestation` on Signed<T> v3+
     // envelopes. Absent on legacy raw-JSON envelopes (None).
-    let agent_attestation = val
-        .get("agent_attestation")
-        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+    let agent_attestation: Option<Vec<u8>> =
+        view.as_ref().and_then(|v| v.agent_attestation_cid());
 
     AuditRecord {
         cid: cid.to_vec(),

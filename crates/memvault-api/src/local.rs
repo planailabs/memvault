@@ -834,31 +834,16 @@ impl LocalClient {
                 .iter_blocks()
                 .map_err(|e| ApiError::Serialization(e.to_string()))?;
             for (_, data) in &blocks {
-                if let Some(val) = memvault_store::deserialize_block(data) {
-                    // `kind` may live at top level (legacy) or inside
-                    // `payload` (post-Signed<T> attachment envelopes).
-                    let payload = val.get("payload");
-                    let kind = val
-                        .get("kind")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
-                    if kind == Some("attachment") {
+                if let Some(view) = memvault_store::EnvelopeView::parse(data) {
+                    if view.str_field("kind") == Some("attachment") {
                         // Skip attachments without a bucket.
-                        if val.get("bucket_id").and_then(|v| v.as_array()).is_none() {
+                        if view.field("bucket_id").and_then(|v| v.as_array()).is_none() {
                             continue;
                         }
-                        let manifest_cid = val
-                            .get("manifest_cid")
-                            .or_else(|| payload.and_then(|p| p.get("manifest_cid")))
-                            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
-                        let filename = val
-                            .get("filename")
-                            .or_else(|| payload.and_then(|p| p.get("filename")))
-                            .and_then(|v| v.as_str());
-                        let mime_type = val
-                            .get("mime_type")
-                            .or_else(|| payload.and_then(|p| p.get("mime_type")))
-                            .and_then(|v| v.as_str())
+                        let manifest_cid: Option<Vec<u8>> = view.get_as("manifest_cid");
+                        let filename = view.str_field("filename");
+                        let mime_type = view
+                            .str_field("mime_type")
                             .unwrap_or("application/octet-stream");
                         if let Some(mcid) = manifest_cid {
                             // Only use cached extraction during index rebuild.
@@ -867,10 +852,8 @@ impl LocalClient {
                                     ExtractionResult::Ok(t) => Some(t),
                                     _ => None,
                                 });
-                            let att_tags: Vec<(String, String)> = val
-                                .get("tags")
-                                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                .unwrap_or_default();
+                            let att_tags: Vec<(String, String)> =
+                                view.get_as("tags").unwrap_or_default();
                             let mut idx = idx_write!();
                             idx.index_attachment(&mcid, filename, mime_type, text.as_deref(), att_tags);
                             attachment_count += 1;
@@ -881,28 +864,16 @@ impl LocalClient {
 
             // Replay tag updates and retractions
             for (_, data) in &blocks {
-                if let Some(val) = memvault_store::deserialize_block(data) {
-                    let payload = val.get("payload");
-                    let kind = val
-                        .get("kind")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
+                if let Some(view) = memvault_store::EnvelopeView::parse(data) {
+                    let val = view.raw();
+                    let kind = view.str_field("kind");
 
                     // Unified annotation format
                     if kind == Some("annotation") {
-                        let target = val
-                            .get("target")
-                            .or_else(|| payload.and_then(|p| p.get("target")))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let ann_type = val
-                            .get("type")
-                            .or_else(|| payload.and_then(|p| p.get("type")))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let ann_data = val
-                            .get("data")
-                            .or_else(|| payload.and_then(|p| p.get("data")))
+                        let target = view.str_field("target").unwrap_or("");
+                        let ann_type = view.str_field("type").unwrap_or("");
+                        let ann_data = view
+                            .field("data")
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
                         if !target.is_empty() {

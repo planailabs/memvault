@@ -563,20 +563,14 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
 
     // Old-format extraction annotation: references extracted_text by CID
     // instead of inline.  Drop — text will be re-extracted inline on access.
-    let ann_payload = val.get("payload");
-    let kind_here = val
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .or_else(|| ann_payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
-    if kind_here == Some("annotation") {
-        let data_here = val
-            .get("data")
-            .or_else(|| ann_payload.and_then(|p| p.get("data")));
-        if let Some(data) = data_here {
-            if data.get("extracted_text").is_some()
-                && data.get("extracted_text_inline").is_none()
-            {
-                return Verdict::Drop;
+    if let Some(view) = memvault_store::EnvelopeView::from_value(val.clone()) {
+        if view.str_field("kind") == Some("annotation") {
+            if let Some(data) = view.field("data") {
+                if data.get("extracted_text").is_some()
+                    && data.get("extracted_text_inline").is_none()
+                {
+                    return Verdict::Drop;
+                }
             }
         }
     }
