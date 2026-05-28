@@ -47,6 +47,14 @@ pub struct EnrollAgentResponse {
     pub role: String,
     /// Attestation expiry in unix nanos.
     pub expires_ns: u64,
+    /// Full attestation as DAG-CBOR, hex-encoded. Remote callers (the
+    /// `memctl agent-enroll-remote` flow) use this to populate their
+    /// local identity dir without a second round-trip; existing
+    /// callers can ignore the field. Empty if the caller went through
+    /// the daemon's local enrollment path that already has the
+    /// attestation bytes in hand.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attestation_cbor_hex: String,
 }
 
 /// POST /api/v1/auth/enroll-agent
@@ -77,9 +85,13 @@ pub async fn enroll_agent(
     )
     .map_err(|e| ApiError::bad_request(format!("enroll: {e}")))?;
 
+    let attestation_cbor = serde_ipld_dagcbor::to_vec(&result.attestation)
+        .map_err(|e| ApiError::internal(format!("encode attestation: {e}")))?;
+
     Ok(Json(EnrollAgentResponse {
         attestation_cid: hex::encode(&result.attestation_cid),
         role: format!("{:?}", result.attestation.role),
         expires_ns: result.attestation.not_after_ns,
+        attestation_cbor_hex: hex::encode(&attestation_cbor),
     }))
 }
