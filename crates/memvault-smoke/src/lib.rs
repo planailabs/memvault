@@ -7,6 +7,7 @@ pub mod harness;
 
 #[cfg(test)]
 mod tests {
+    pub mod agent_enrollment;
     pub mod basic;
     pub mod block_sync_divergence;
     pub mod bucket_sync;
@@ -16,10 +17,14 @@ mod tests {
     pub mod files;
     pub mod graph;
     pub mod identity;
+    pub mod join_protocol;
     pub mod lifecycle;
+    pub mod links;
+    pub mod list_visibility;
     pub mod migrations;
     pub mod p2p;
     pub mod sharing;
+    pub mod signed_envelope_indexing;
     pub mod tokens;
     pub mod views;
 }

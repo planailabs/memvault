@@ -18,7 +18,7 @@ pub enum AttestationOrigin {
 
 /// Proves that a peer is a member of a cluster with a given role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MembershipAttestation {
+pub struct NodeAttestation {
     pub cluster_id: ClusterId,
     pub member: PeerId,
     pub role: Role,
@@ -38,7 +38,7 @@ struct AttestationSigningPayload<'a> {
     issued_via: &'a AttestationOrigin,
 }
 
-impl MembershipAttestation {
+impl NodeAttestation {
     /// Compute the bytes that are signed.
     pub fn signing_bytes(&self) -> Result<Vec<u8>> {
         let payload = AttestationSigningPayload {

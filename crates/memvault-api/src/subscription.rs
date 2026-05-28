@@ -12,6 +12,15 @@ pub enum MemvaultEvent {
     BucketCreated { bucket_id: BucketId, cid: Vec<u8> },
     Retracted { cid: Vec<u8> },
     TokenConsumed { token_cid: Vec<u8> },
+    /// A new sigchain block was persisted (locally created or received from
+    /// a peer via RBSR sync). Watchers update their in-memory trust tables
+    /// without restarting the daemon.
+    SigchainBlock {
+        /// Label as written in the `sigchain/<label>` tag (e.g. `node_att`,
+        /// `agent_att`, `agent_rev`, `node_rev`, `envelope_auth`).
+        label: String,
+        cid: Vec<u8>,
+    },
 }
 
 /// Event broadcaster using tokio broadcast channel.

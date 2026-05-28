@@ -31,6 +31,9 @@ fn make_client() -> (tempfile::TempDir, Arc<LocalClient>) {
         peer_id.to_vec(),
         cluster_id.to_vec(),
     ));
+    // LocalClient now refuses writes without a node signing key; install
+    // a deterministic one so this test harness can issue write ops.
+    client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]));
     (dir, client)
 }
 
@@ -388,6 +391,7 @@ async fn bucket_bind_to_cluster() {
         b"peer-1".to_vec(),
         vec![0u8; 32],
     ));
+    client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]));
     let bucket_id = client
         .bucket_create(
             "bindable",
@@ -426,6 +430,7 @@ async fn bucket_attach_flips_private() {
         b"peer-1".to_vec(),
         vec![0u8; 32],
     ));
+    client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]));
     let bucket_id = client
         .bucket_create(
             "private-bucket",
@@ -613,6 +618,7 @@ async fn bucket_bind_exclusive_to_one_cluster() {
         b"peer-1".to_vec(),
         vec![0u8; 32],
     ));
+    client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]));
     let bucket_id = client
         .bucket_create(
             "exclusive",
@@ -660,6 +666,7 @@ async fn bucket_bind_idempotent_same_cluster() {
         b"peer-1".to_vec(),
         vec![0u8; 32],
     ));
+    client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]));
     let bucket_id = client
         .bucket_create(
             "idem",
@@ -762,6 +769,7 @@ fn join_token_roundtrip_with_verify() {
         max_uses: 5,
         nonce: [42u8; 16],
         label: Some("test".into()),
+        admin_genesis: None,
         signature: [0u8; 64],
     };
 
@@ -817,6 +825,9 @@ fn envelope_v1_no_bucket_roundtrip() {
         1000,
         None,
         None, // no bucket = v1
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 
@@ -848,6 +859,9 @@ fn envelope_v2_with_bucket_roundtrip() {
         1000,
         None,
         Some(bucket.clone()),
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 
@@ -878,6 +892,9 @@ fn envelope_v2_tampered_bucket_fails_verify() {
         1000,
         None,
         Some(BucketId::random()),
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 

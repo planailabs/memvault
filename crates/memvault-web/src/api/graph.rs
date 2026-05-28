@@ -10,7 +10,7 @@ use memvault_doc::Entity;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
 
 #[derive(Deserialize)]
@@ -58,7 +58,7 @@ pub struct UpdateEntityRequest {
 
 /// POST /api/v1/entities
 pub async fn create_entity(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateEntityRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
@@ -140,7 +140,7 @@ pub async fn get_entity(
 
 /// DELETE /api/v1/entities/:id
 pub async fn delete_entity(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {

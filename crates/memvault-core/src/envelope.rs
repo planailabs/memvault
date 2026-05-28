@@ -25,8 +25,31 @@ pub struct Signed<T> {
     /// Present in version 2+ envelopes; absent (deserialized as None) in v1.
     #[serde(default)]
     pub bucket_id: Option<BucketId>,
-    #[serde(with = "serde_bytes")]
+    /// CID of the `NodeAttestation` covering `author`. Audit pointer to
+    /// the attestation that admitted the signing node into the cluster.
+    /// Not required for signature verification — `author` is the pubkey
+    /// ed25519 uses directly. v3+; absent (None) in v1/v2.
+    #[serde(default)]
+    pub node_attestation: Option<Vec<u8>>,
+    /// CID of the `AgentAttestation` when this envelope was authored on
+    /// behalf of an agent. The verifier resolves it via
+    /// `trusted_attestations` to get the agent's pubkey, then validates
+    /// `agent_signature` against that pubkey. `None` for pure node
+    /// writes. v3+.
+    #[serde(default)]
+    pub agent_attestation: Option<Vec<u8>>,
+    /// Ed25519 signature by the **node** over the version-appropriate
+    /// signing payload. `#[serde(default)]` so legacy raw-JSON envelopes
+    /// (no signature field) deserialize cleanly — readers detect
+    /// "no signature" via `signature.is_empty()` and skip verification.
+    #[serde(default, with = "serde_bytes")]
     pub signature: Vec<u8>,
+    /// Optional ed25519 co-signature by the **agent** over the same
+    /// signing payload. Populated iff the agent's SK was available at
+    /// write time. Verified against the pubkey resolved from
+    /// `agent_attestation`. Empty when only the node signed.
+    #[serde(default, with = "serde_bytes")]
+    pub agent_signature: Vec<u8>,
 }
 
 /// V1 signing payload (no bucket_id) — for backwards-compatible signature verification.
@@ -60,14 +83,49 @@ struct SigningPayloadV2<'a, T: Serialize> {
     bucket_id: &'a Option<BucketId>,
 }
 
+/// V3 signing payload — used when node_attestation or agent_attestation
+/// is set. Both attestation CIDs are committed by the node's signature so
+/// they can't be swapped after the fact. The agent's co-signature (when
+/// present) signs over the same bytes, binding the agent to the exact
+/// node-attributed view of the envelope.
+#[derive(Serialize)]
+struct SigningPayloadV3<'a, T: Serialize> {
+    version: u8,
+    payload: &'a T,
+    author: &'a PeerId,
+    causal: &'a [Cid],
+    provenance: &'a [Cid],
+    tags: &'a [Tag],
+    visibility: &'a Visibility,
+    lamport: u64,
+    wall_ns: u64,
+    capability: &'a Option<Cid>,
+    bucket_id: &'a Option<BucketId>,
+    node_attestation: &'a Option<Vec<u8>>,
+    agent_attestation: &'a Option<Vec<u8>>,
+}
+
 impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
     /// Create and sign a new envelope.
     ///
-    /// When `bucket_id` is `Some`, the envelope uses version 2 (bucket-aware signing payload).
-    /// When `None`, version 1 is used (byte-identical to pre-bucket envelopes).
+    /// `node_signing_key` always signs. When `agent_signing_key` is
+    /// `Some`, the agent additionally co-signs the same payload bytes,
+    /// producing `agent_signature`.
+    ///
+    /// Version selection (highest applicable):
+    /// - v3: any of `node_attestation` or `agent_attestation` is `Some`
+    ///       (attestation-aware write — new format).
+    /// - v2: `bucket_id` is `Some` (bucket-aware, no attestations).
+    /// - v1: legacy byte-identical to pre-bucket envelopes.
+    ///
+    /// `author` must match `node_signing_key.verifying_key()` so
+    /// `verify()` accepts. Likewise the pubkey resolved from
+    /// `agent_attestation` must match `agent_signing_key` for
+    /// `verify_agent()` to accept.
+    #[allow(clippy::too_many_arguments)]
     pub fn sign(
         payload: T,
-        signing_key: &SigningKey,
+        node_signing_key: &SigningKey,
         author: PeerId,
         causal: Vec<Cid>,
         provenance: Vec<Cid>,
@@ -77,11 +135,20 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
         wall_ns: u64,
         capability: Option<Cid>,
         bucket_id: Option<BucketId>,
+        node_attestation: Option<Vec<u8>>,
+        agent_attestation: Option<Vec<u8>>,
+        agent_signing_key: Option<&SigningKey>,
     ) -> Result<Self> {
-        let version = if bucket_id.is_some() { 2 } else { 1 };
+        let version: u8 = if node_attestation.is_some() || agent_attestation.is_some() {
+            3
+        } else if bucket_id.is_some() {
+            2
+        } else {
+            1
+        };
 
-        let bytes = if version == 1 {
-            codec::encode(&SigningPayloadV1 {
+        let bytes = match version {
+            1 => codec::encode(&SigningPayloadV1 {
                 version: 1,
                 payload: &payload,
                 author: &author,
@@ -92,9 +159,8 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
                 lamport,
                 wall_ns,
                 capability: &capability,
-            })?
-        } else {
-            codec::encode(&SigningPayloadV2 {
+            })?,
+            2 => codec::encode(&SigningPayloadV2 {
                 version: 2,
                 payload: &payload,
                 author: &author,
@@ -106,10 +172,29 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
                 wall_ns,
                 capability: &capability,
                 bucket_id: &bucket_id,
-            })?
+            })?,
+            _ => codec::encode(&SigningPayloadV3 {
+                version: 3,
+                payload: &payload,
+                author: &author,
+                causal: &causal,
+                provenance: &provenance,
+                tags: &tags,
+                visibility: &visibility,
+                lamport,
+                wall_ns,
+                capability: &capability,
+                bucket_id: &bucket_id,
+                node_attestation: &node_attestation,
+                agent_attestation: &agent_attestation,
+            })?,
         };
 
-        let sig = signing_key.sign(&bytes);
+        let sig = node_signing_key.sign(&bytes);
+        let agent_signature = match agent_signing_key {
+            Some(sk) => sk.sign(&bytes).to_bytes().to_vec(),
+            None => Vec::new(),
+        };
 
         Ok(Self {
             version,
@@ -123,16 +208,41 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
             wall_ns,
             capability,
             bucket_id,
+            node_attestation,
+            agent_attestation,
             signature: sig.to_bytes().to_vec(),
+            agent_signature,
         })
     }
 
-    /// Verify the signature against the provided verifying key.
+    /// Verify the agent's co-signature against the given pubkey. Returns
+    /// `Ok(())` only if `agent_signature` is present and validates.
+    /// `Err(SignatureInvalid)` when the agent_signature is empty (no
+    /// co-signature was attached) or the bytes don't verify.
     ///
-    /// V1 envelopes use the v1 signing payload (no bucket_id).
-    /// V2 envelopes use the v2 signing payload (includes bucket_id).
-    pub fn verify(&self, verifying_key: &VerifyingKey) -> Result<()> {
-        let bytes = match self.version {
+    /// Callers resolve the pubkey via `agent_attestation` →
+    /// `trusted_attestations[cid]` → `agent_pubkey`.
+    pub fn verify_agent(&self, agent_verifying_key: &VerifyingKey) -> Result<()> {
+        if self.agent_signature.is_empty() {
+            return Err(Error::SignatureInvalid);
+        }
+        let bytes = self.signing_payload_bytes()?;
+        let sig_bytes: [u8; 64] = self
+            .agent_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::SignatureInvalid)?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        agent_verifying_key
+            .verify(&bytes, &sig)
+            .map_err(|_| Error::SignatureInvalid)
+    }
+
+    /// Encode the version-appropriate signing payload bytes — the same
+    /// bytes both the node's `signature` and the agent's `agent_signature`
+    /// cover. Returns the v1/v2/v3 payload matching `self.version`.
+    fn signing_payload_bytes(&self) -> Result<Vec<u8>> {
+        match self.version {
             1 => codec::encode(&SigningPayloadV1 {
                 version: self.version,
                 payload: &self.payload,
@@ -144,7 +254,7 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
                 lamport: self.lamport,
                 wall_ns: self.wall_ns,
                 capability: &self.capability,
-            })?,
+            }),
             2 => codec::encode(&SigningPayloadV2 {
                 version: self.version,
                 payload: &self.payload,
@@ -157,16 +267,44 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
                 wall_ns: self.wall_ns,
                 capability: &self.capability,
                 bucket_id: &self.bucket_id,
-            })?,
-            _ => {
-                tracing::warn!(
-                    version = self.version,
-                    "unknown envelope version, skipping signature verification"
-                );
-                return Ok(());
-            }
-        };
+            }),
+            _ => codec::encode(&SigningPayloadV3 {
+                version: self.version,
+                payload: &self.payload,
+                author: &self.author,
+                causal: &self.causal,
+                provenance: &self.provenance,
+                tags: &self.tags,
+                visibility: &self.visibility,
+                lamport: self.lamport,
+                wall_ns: self.wall_ns,
+                capability: &self.capability,
+                bucket_id: &self.bucket_id,
+                node_attestation: &self.node_attestation,
+                agent_attestation: &self.agent_attestation,
+            }),
+        }
+    }
 
+    /// Verify the **node**'s signature against the provided verifying key.
+    /// Use [`Self::verify_agent`] separately for the agent co-signature.
+    ///
+    /// V1 — v1 signing payload (no bucket_id).
+    /// V2 — v2 signing payload (includes bucket_id).
+    /// V3 — v3 signing payload (also includes node_attestation +
+    ///      agent_attestation).
+    ///
+    /// Unknown versions are skipped (logged) — preserves forward
+    /// compatibility for unknown future shapes.
+    pub fn verify(&self, verifying_key: &VerifyingKey) -> Result<()> {
+        if self.version > 3 {
+            tracing::warn!(
+                version = self.version,
+                "unknown envelope version, skipping signature verification"
+            );
+            return Ok(());
+        }
+        let bytes = self.signing_payload_bytes()?;
         let sig_bytes: [u8; 64] = self
             .signature
             .as_slice()
@@ -209,6 +347,9 @@ mod tests {
             crate::time::wall_ns(),
             None,
             None, // no bucket (v1)
+            None, // no node_attestation
+            None, // no agent_attestation
+            None, // no agent co-signer
         )
         .unwrap();
 
@@ -234,6 +375,9 @@ mod tests {
             0,
             None,
             None, // no bucket (v1)
+            None, // no node_attestation
+            None, // no agent_attestation
+            None, // no agent co-signer
         )
         .unwrap();
 
@@ -260,6 +404,9 @@ mod tests {
             1000,
             None,
             None, // no bucket (v1)
+            None, // no node_attestation
+            None, // no agent_attestation
+            None, // no agent co-signer
         )
         .unwrap();
 
@@ -288,6 +435,9 @@ mod tests {
             crate::time::wall_ns(),
             None,
             Some(bucket.clone()),
+            None, // no node_attestation
+            None, // no agent_attestation
+            None, // no agent co-signer
         )
         .unwrap();
 
@@ -317,6 +467,9 @@ mod tests {
             1000,
             None,
             None,
+            None, // no node_attestation
+            None, // no agent_attestation
+            None, // no agent co-signer
         )
         .unwrap();
 
@@ -332,6 +485,9 @@ mod tests {
             1000,
             None,
             Some(BucketId::random()),
+            None, // no node_attestation
+            None, // no agent_attestation
+            None, // no agent co-signer
         )
         .unwrap();
 

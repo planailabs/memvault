@@ -56,10 +56,43 @@ fn parent_script(iframe_id: &str) -> String {
   const iframe = document.getElementById("{iframe_id}");
   if (!iframe) return;
 
-  // Handle resize messages from iframe.
+  // Allowed in-app paths a sandboxed iframe is permitted to ask the
+  // parent to navigate to. Same-origin only, relative paths only,
+  // and the leading segment must be one of these. Anything else is
+  // silently dropped — a hostile or malformed body must not be able to
+  // drive the parent off-route.
+  function isAllowedNav(href) {{
+    if (typeof href !== "string" || href.length > 2048) return false;
+    if (!href.startsWith("/")) return false;        // no absolute URLs
+    if (href.startsWith("//")) return false;        // no protocol-relative
+    // Parse against the current origin and verify it stays same-origin.
+    var url;
+    try {{ url = new URL(href, window.location.origin); }} catch (_) {{ return false; }}
+    if (url.origin !== window.location.origin) return false;
+    var p = url.pathname;
+    // Explicit allowlist; tightens as new in-app routes appear.
+    var hexId = /^[0-9a-f]+$/i;
+    if (p.startsWith("/notes/")) return hexId.test(p.slice(7));
+    if (p.startsWith("/graph/")) return hexId.test(p.slice(7));
+    if (p.startsWith("/files/")) return hexId.test(p.slice(7));
+    if (p === "/search") return true;
+    return false;
+  }}
+
+  // Handle resize + navigation messages from this iframe (id match
+  // gates messages from other sandboxed iframes on the same page).
   window.addEventListener("message", function(e) {{
-    if (e.data && e.data.type === "sandboxResize" && e.data.id === "{iframe_id}") {{
+    if (!e.data || e.data.id !== "{iframe_id}") return;
+    if (e.data.type === "sandboxResize") {{
       iframe.style.height = e.data.height + "px";
+    }} else if (e.data.type === "sandboxNav") {{
+      if (isAllowedNav(e.data.href)) {{
+        // Plain assignment lets the SPA router pick up the new path
+        // and avoids granting the iframe `allow-top-navigation`.
+        window.location.assign(e.data.href);
+      }} else {{
+        console.warn("blocked sandboxed nav:", e.data.href);
+      }}
     }}
   }});
 
@@ -103,9 +136,15 @@ fn parent_script(iframe_id: &str) -> String {
     )
 }
 
-/// Build the full HTML document for srcdoc.
+/// Build the full HTML document for srcdoc. Dioxus's `srcdoc: "{var}"`
+/// interpolation does its own HTML-attribute escaping (`&` → `&amp;`,
+/// `"` → `&quot;`), so we pass raw HTML and let it handle the encoding.
+/// Manually pre-escaping here causes double-encoding — `<a href="/x">`
+/// goes out as `<a href=&amp;quot;/x&amp;quot;>`, the browser decodes
+/// once to `&quot;`, and HTML parses it as an unquoted attribute that
+/// includes literal quote characters as part of the URL.
 fn build_srcdoc(html: &str, iframe_id: &str) -> String {
-    let escaped_html = html.replace('&', "&amp;").replace('"', "&quot;");
+    let escaped_html = html;
 
     format!(
         r#"<!DOCTYPE html>
@@ -178,6 +217,33 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
   }});
   // Initial post.
   postHeight();
+
+  // Intercept link clicks inside the sandbox and ask the parent to
+  // navigate. The iframe is `sandbox=allow-scripts` (no
+  // `allow-top-navigation`), so anchor clicks otherwise do nothing
+  // useful — without this they either silently fail or get blocked by
+  // the browser. By forwarding the href as a postMessage we keep the
+  // parent in charge of routing AND let the parent validate the
+  // target before it commits.
+  document.addEventListener("click", function(e) {{
+    var el = e.target;
+    while (el && el.nodeName !== "A") el = el.parentElement;
+    if (!el) return;
+    var href = el.getAttribute("href");
+    if (!href) return;
+    // Defensive: refuse javascript:/data:/vbscript: schemes outright.
+    var lower = href.trim().toLowerCase();
+    if (lower.startsWith("javascript:") || lower.startsWith("data:") || lower.startsWith("vbscript:")) {{
+      e.preventDefault();
+      return;
+    }}
+    // Forward in-app relative links; external (http/https) ones are
+    // left to default behavior (likely no-op under the sandbox).
+    if (href.startsWith("/") && !href.startsWith("//")) {{
+      e.preventDefault();
+      parent.postMessage({{ type: "sandboxNav", id: id, href: href }}, "*");
+    }}
+  }}, true);
 
   // Listen for theme sync from parent.
   window.addEventListener("message", function(e) {{

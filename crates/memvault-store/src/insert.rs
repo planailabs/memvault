@@ -2,14 +2,28 @@
 
 use redb::ReadableTable;
 
-/// Deserialize block bytes as a JSON Value.  Detects format by first
+/// Deserialize block bytes as a JSON Value. Detects format by first
 /// byte: `{` (0x7B) → JSON, otherwise → DAG-CBOR.
+///
+/// Signed<T> envelopes contain byte-string fields (signature,
+/// agent_signature, the typed PeerId/Cid arrays) that DAG-CBOR encodes
+/// as CBOR major-type-2 byte strings — those don't roundtrip cleanly
+/// through `serde_json::Value`, which has no byte-string variant. When
+/// the direct CBOR-to-Value decode fails, we fall back to decoding as
+/// `Signed<serde_json::Value>` (the typed struct handles byte fields
+/// correctly) and re-serialize via `serde_json::to_value` so callers
+/// see a Value with all byte fields normalised to arrays of numbers.
 pub fn deserialize_block(data: &[u8]) -> Option<serde_json::Value> {
     if data.first() == Some(&b'{') {
-        serde_json::from_slice(data).ok()
-    } else {
-        serde_ipld_dagcbor::from_slice(data).ok()
+        return serde_json::from_slice(data).ok();
     }
+    if let Ok(v) = serde_ipld_dagcbor::from_slice::<serde_json::Value>(data) {
+        return Some(v);
+    }
+    // Fall back: Signed<T> with byte-string fields.
+    let signed: memvault_core::Signed<serde_json::Value> =
+        serde_ipld_dagcbor::from_slice(data).ok()?;
+    serde_json::to_value(signed).ok()
 }
 
 /// Deserialize block bytes into a typed struct.  Same detection as
@@ -28,7 +42,7 @@ use crate::keys;
 use crate::tables::*;
 
 /// Metadata extracted from an envelope for indexing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EnvelopeMeta {
     pub author: Vec<u8>,
     pub tags: Vec<(String, String)>,
@@ -92,25 +106,46 @@ impl MemvaultStore {
         cid_bytes: &[u8],
         envelope_bytes: &[u8],
     ) -> Result<bool, StoreError> {
-        let val: serde_json::Value = match deserialize_block(envelope_bytes) {
-            Some(v) => v,
-            None => return Ok(false), // not an envelope, skip
+        let Some(view) = crate::EnvelopeView::parse(envelope_bytes) else {
+            return Ok(false); // not an envelope
         };
+        let val = view.raw().clone();
 
-        // Extract envelope metadata
-        let author: Vec<u8> = val
-            .get("author")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        // Extract envelope metadata via the canonical view — handles
+        // both legacy raw-JSON envelopes and Signed<T> payload-nested
+        // kind fields uniformly.
+        let author: Vec<u8> = view.author();
+        // Signed<T> envelopes serialize `tags` as a list of Tag structs
+        // (`[{"scope":"x","label":"y"}, …]`); the legacy raw-JSON
+        // fallback used the tuple shape (`[["x","y"], …]`). Try the
+        // struct shape first and fall back to the tuple shape so the
+        // secondary tag index gets populated for both. Without this,
+        // every reindexed Signed<T> envelope would be invisible to
+        // tag-scoped lookups (list_entities, list_docs, audit
+        // edge_source/edge_target).
+        let mut tags: Vec<(String, String)> = view
+            .field("tags")
+            .and_then(|raw| {
+                if let Ok(structured) =
+                    serde_json::from_value::<Vec<memvault_core::Tag>>(raw.clone())
+                {
+                    Some(
+                        structured
+                            .into_iter()
+                            .map(|t| (t.scope, t.label))
+                            .collect(),
+                    )
+                } else {
+                    serde_json::from_value::<Vec<(String, String)>>(raw.clone()).ok()
+                }
+            })
             .unwrap_or_default();
-        let mut tags: Vec<(String, String)> = val
-            .get("tags")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+
         // Legacy annotation blocks stored tags only in EnvelopeMeta, not in
         // the body. Recover _ann tag from the annotation target field.
         if tags.is_empty() {
-            if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
-                if let Some(target) = val.get("target").and_then(|v| v.as_str()) {
+            if view.str_field("kind") == Some("annotation") {
+                if let Some(target) = view.str_field("target") {
                     tags.push(("_ann".to_string(), target.to_string()));
                 }
             }
@@ -118,29 +153,16 @@ impl MemvaultStore {
         // For attachment envelopes, add a manifest→envelope reverse lookup tag
         // so get_file_manifest can find the envelope when the manifest block
         // is missing (legacy files).
-        if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
-            if let Some(mcid) = val
-                .get("manifest_cid")
-                .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
-            {
+        if view.str_field("kind") == Some("attachment") {
+            if let Some(mcid) = view.get_as::<Vec<u8>>("manifest_cid") {
                 tags.push(("_manifest".to_string(), hex::encode(&mcid)));
             }
         }
-        let wall_ns: u64 = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-        let causal: Vec<Vec<u8>> = val
-            .get("causal")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let provenance: Vec<Vec<u8>> = val
-            .get("provenance")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let cluster_id: Option<Vec<u8>> = val
-            .get("cluster_id")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let bucket_id: Option<Vec<u8>> = val
-            .get("bucket_id")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let wall_ns: u64 = view.field("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+        let causal: Vec<Vec<u8>> = view.get_as("causal").unwrap_or_default();
+        let provenance: Vec<Vec<u8>> = view.get_as("provenance").unwrap_or_default();
+        let cluster_id: Option<Vec<u8>> = view.get_as("cluster_id");
+        let bucket_id: Option<Vec<u8>> = view.get_as("bucket_id");
 
         if wall_ns == 0 && author.is_empty() && tags.is_empty() {
             return Ok(false); // not an envelope
@@ -154,6 +176,7 @@ impl MemvaultStore {
             provenance,
             cluster_id,
             bucket_id,
+                    ..Default::default()
         };
 
         // Write index entries (without re-inserting the block itself)
@@ -232,6 +255,13 @@ impl MemvaultStore {
             }
         }
         txn.commit()?;
+
+        if let Some(notify) = self.index_notifier.get() {
+            for (scope, label) in &meta.tags {
+                notify(scope, label, cid_bytes);
+            }
+        }
+
         tracing::debug!("reindexed block");
         Ok(true)
     }
@@ -373,6 +403,13 @@ impl MemvaultStore {
             }
         }
         txn.commit()?;
+
+        if let Some(notify) = self.index_notifier.get() {
+            for (scope, label) in &meta.tags {
+                notify(scope, label, cid_bytes);
+            }
+        }
+
         Ok(())
     }
 }

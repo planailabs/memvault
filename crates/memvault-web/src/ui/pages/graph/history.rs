@@ -16,6 +16,9 @@ struct HistoryEntry {
     op_kind: String,
     wall_ns: u64,
     author: String,
+    /// Resolved agent identifier when the underlying envelope carries
+    /// an `agent_attestation` cid (post-Signed<T> agent-bound writes).
+    agent_id: Option<String>,
 }
 
 #[server]
@@ -34,6 +37,13 @@ async fn get_entity_history(id: String) -> Result<Vec<HistoryEntry>, ServerFnErr
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
+    // Resolve agent_attestation cids → human-readable agent_ids once
+    // per request (same pattern as audit and notes history).
+    let agent_id_index = match crate::ui::state::local_client() {
+        Ok(local) => crate::api::agents::build_agent_id_index(&local),
+        Err(_) => std::collections::HashMap::new(),
+    };
+
     Ok(records
         .into_iter()
         .map(|r| HistoryEntry {
@@ -41,6 +51,10 @@ async fn get_entity_history(id: String) -> Result<Vec<HistoryEntry>, ServerFnErr
             op_kind: format!("{:?}", r.op_kind),
             wall_ns: r.wall_ns,
             author: hex::encode(&r.author),
+            agent_id: r
+                .agent_attestation
+                .as_ref()
+                .and_then(|cid| agent_id_index.get(cid).cloned()),
         })
         .collect())
 }
@@ -66,7 +80,14 @@ pub fn EntityHistory(id: String) -> Element {
                                     OpKindBadge { kind: entry.op_kind.clone() }
                                     div { class: "flex-1 min-w-0",
                                         span { class: "text-sm text-fg-muted", {t!("entity-history-by")} " " }
-                                        CidDisplay { cid: entry.author.clone(), len: Some(8) }
+                                        if let Some(agent_id) = &entry.agent_id {
+                                            span { class: "font-medium text-sm", "{agent_id}" }
+                                            span { class: "text-[10px] opacity-60 ml-1",
+                                                CidDisplay { cid: entry.author.clone(), len: Some(8) }
+                                            }
+                                        } else {
+                                            CidDisplay { cid: entry.author.clone(), len: Some(8) }
+                                        }
                                     }
                                     TimeAgo { wall_ns: entry.wall_ns }
                                     CidDisplay { cid: entry.cid.clone() }

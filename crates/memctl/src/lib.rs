@@ -33,6 +33,33 @@ mod native {
         #[arg(long, env = "MEMVAULT_DATA_DIR")]
         pub data_dir: Option<PathBuf>,
 
+        /// Operate as the given enrolled agent. When set, the
+        /// LocalClient binds the agent's identity (loaded from
+        /// `<data-dir>/agents/<agent-id>/`) before running the
+        /// command. Writes produced under this flag get an
+        /// `EnvelopeAuthorship` sidecar signed by the agent, and
+        /// future read-path enforcement (`verify_envelope_authorship`)
+        /// will name this agent as the author.
+        ///
+        /// Has effect on commands that go through `create_client*`
+        /// (`put`, `get`, `list`, `search`, etc.). Administrative
+        /// commands that read raw files (`genesis`, `cluster-join`,
+        /// `token-issue`, `agent-enroll`) ignore it.
+        #[arg(long, global = true, env = "MEMVAULT_AGENT_ID")]
+        pub agent_id: Option<String>,
+
+        /// Target a specific bucket for the command. Hex-encoded
+        /// 32-byte BucketId. When unset, bucket-aware commands fall
+        /// back to the bound agent's own bucket (when `--agent-id`
+        /// is also set) — auto-created via
+        /// `LocalClient::ensure_agent_bucket_for`. If neither is
+        /// set, the command hard-fails: we deliberately do NOT
+        /// auto-pick "the first existing bucket", and we don't allow
+        /// writes to land in the void either. Buckets are
+        /// tenant-scoped; the operator should always know which one.
+        #[arg(long, global = true, env = "MEMVAULT_BUCKET_ID")]
+        pub bucket_id: Option<String>,
+
         #[command(flatten)]
         pub client: memvault_api::ClientArgs,
 
@@ -100,6 +127,32 @@ mod native {
         History {
             /// Hex-encoded DocId
             doc_id: String,
+        },
+        /// List outlinks for a document (cached, from the latest extracted-text
+        /// annotation under doc:<head-cid>).
+        DocLinks {
+            /// Hex-encoded DocId
+            doc_id: String,
+        },
+        /// List backlinks pointing at a node (any kind).
+        DocBacklinks {
+            /// Target tag label, e.g. `doc:abcd…`, `entity:1234…`, `file:c0ffee…`.
+            node: String,
+        },
+        /// List body-extracted edges whose target is a pending (unresolved)
+        /// alias placeholder. These are the dangling links.
+        DocDangling {
+            /// Optional bucket filter (hex bucket-id).
+            #[arg(long)]
+            bucket: Option<String>,
+        },
+        /// Force a re-parse of a document's body — drops the cached
+        /// extraction annotation and re-runs the extractor, which in turn
+        /// re-reconciles graph edges.
+        DocReindexLinks {
+            /// Hex-encoded DocId. If omitted, reindex every doc.
+            #[arg(long)]
+            doc_id: Option<String>,
         },
         /// Retract a memory
         Retract {
@@ -340,14 +393,34 @@ mod native {
             #[arg(long, env = "MEMVAULT_API_PORT", default_value = "8401")]
             api_port: u16,
         },
-        /// Join this node to an existing cluster
+        /// Join this node to an existing cluster using a join token
         ///
-        /// Sets the cluster_id and creates a default bucket. This is a NODE-level
-        /// operation — it makes this memvault instance part of the P2P cluster.
-        /// For enrolling an AGENT (like openclaw), use `agent-enroll` instead.
+        /// The token (issued by the cluster admin via `token-issue`) carries
+        /// the cluster_id and the cluster's `AdminGenesis` block. The join
+        /// pins the admin pubkey from the token — this is the only path
+        /// that establishes the chain of trust required to verify
+        /// admin-signed sigchain blocks. Raw-cluster_id joining was
+        /// removed: it could not pin admin and left the joining node
+        /// permanently in pre-genesis mode.
+        ///
+        /// For enrolling an AGENT (like openclaw), use `agent-enroll`.
         ClusterJoin {
-            /// Cluster ID to join (hex)
-            cluster_id: String,
+            /// Join token (`mvjoin1:…`) issued by the cluster admin.
+            token: String,
+        },
+        /// Attest a peer node into the cluster (admin-only)
+        ///
+        /// Publishes a `NodeAttestation` for the given peer pubkey,
+        /// signed by this node's admin key. After the block syncs to
+        /// the peer, that peer's bootstrap stops registering itself
+        /// as pre-genesis. Manual interim step until /join/1.0
+        /// round-trip lands.
+        NodeAttest {
+            /// Hex-encoded peer ed25519 pubkey (32 bytes / 64 hex chars).
+            peer_pubkey: String,
+            /// Role to grant the peer (default: agent-host).
+            #[arg(long, default_value = "agent-host")]
+            role: String,
         },
         /// Enroll an agent (e.g. openclaw, hermes) for API access
         ///
@@ -411,7 +484,10 @@ mod native {
         open_store_at(&db_path)
     }
 
-    fn create_client_with_data_dir(store: Arc<MemvaultStore>, data_dir: &Path) -> LocalClient {
+    fn create_client_with_data_dir(
+        store: Arc<MemvaultStore>,
+        data_dir: &Path,
+    ) -> Result<LocalClient> {
         create_client_with_bus(store, data_dir, Arc::new(EventBus::new(64)))
     }
 
@@ -419,18 +495,35 @@ mod native {
         store: Arc<MemvaultStore>,
         data_dir: &Path,
         event_bus: Arc<EventBus>,
-    ) -> LocalClient {
-        let peer_id = store
-            .get_local_peer_id()
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| vec![0u8; 32]);
+    ) -> Result<LocalClient> {
+        // Prefer the peer_id already persisted by a prior swarm spawn.
+        // Otherwise derive it from the libp2p key file (loading / creating
+        // it eagerly so the client sees a stable peer_id even when the
+        // swarm hasn't been spawned yet — e.g. dx-serve dev mode where
+        // the trust-tree UI reads peer_id before any P2P starts).
+        //
+        // Hard-fail if neither source is available: a zero peer_id would
+        // silently break attestation chains and is never what we want.
+        let peer_id = match store.get_local_peer_id().ok().flatten() {
+            Some(pid) => pid,
+            None => {
+                let key_path = data_dir.join("identity").join("libp2p.key");
+                let kp = load_or_generate_keypair(&key_path).map_err(|e| {
+                    anyhow::anyhow!("could not derive peer_id from {key_path:?}: {e}")
+                })?;
+                let pid = kp.public().to_peer_id().to_bytes();
+                store
+                    .set_local_peer_id(&pid)
+                    .map_err(|e| anyhow::anyhow!("persist peer_id: {e}"))?;
+                pid
+            }
+        };
         let cluster_id = store
             .get_local_cluster_id()
             .ok()
             .flatten()
             .unwrap_or_else(|| vec![0u8; 32]);
-        let mut client = LocalClient::open(
+        let client = LocalClient::open(
             store,
             Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
@@ -438,10 +531,7 @@ mod native {
             peer_id,
             cluster_id,
         )
-        .unwrap_or_else(|e| {
-            tracing::warn!("LocalClient::open failed: {e}, falling back to new()");
-            panic!("LocalClient::open failed: {e}");
-        });
+        .map_err(|e| anyhow::anyhow!("LocalClient::open: {e}"))?;
         // Load admin signing key if available (enables token issuance)
         let admin_key_path = data_dir.join("identity").join("admin.key");
         if admin_key_path.exists() {
@@ -453,10 +543,63 @@ mod native {
                 }
             }
         }
-        client
+        // Load the node signing key (the libp2p host key, design A-1).
+        // Needed by anything that mints sigchain blocks — including
+        // `enroll_remote_agent` on the non-daemon CLI path. Silent if
+        // libp2p.key doesn't exist yet (genesis hasn't run, or this is
+        // a fresh data_dir); callers that need it will fail later
+        // with a clear error.
+        if data_dir.join("identity").join("libp2p.key").exists() {
+            if let Ok(node_sk) = libp2p_node_signing_key(data_dir) {
+                client.set_node_signing_key(node_sk);
+            }
+        }
+        // Load the pinned AdminGenesis so `token issue` embeds it for
+        // joining peers, and so peers themselves can verify trust.
+        let pin_path = data_dir.join("identity").join("cluster_admin_genesis.cbor");
+        if let Ok(pin_bytes) = std::fs::read(&pin_path) {
+            match serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&pin_bytes) {
+                Ok(g) => {
+                    if g.verify_self_signature().is_ok() {
+                        client.set_pinned_admin_genesis(g);
+                    } else {
+                        tracing::warn!("pinned admin_genesis has bad signature; ignoring");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "decode pinned admin_genesis"),
+            }
+        }
+        // Bind agent identity if `MEMVAULT_AGENT_ID` is set (the global
+        // `--agent-id` flag exports it). Writes through this client get
+        // signed for that agent (EnvelopeAuthorship sidecar).
+        //
+        // "Not enrolled" is silent: it's the expected state right
+        // before `memctl agent-enroll` runs (the CLI may have
+        // exported MEMVAULT_AGENT_ID from the shell), and it's also
+        // expected if the user typo'd the agent id — the failure mode
+        // shows up at the first write/JWT attempt and is clearer
+        // there than as a warn here. Failed-to-load (file exists but
+        // unreadable) IS still warned, since that's an unexpected
+        // error.
+        if let Ok(agent_id) = std::env::var("MEMVAULT_AGENT_ID") {
+            if !agent_id.is_empty() {
+                let identity_dir = data_dir.join("agents").join(&agent_id);
+                if memvault_api::agent_identity::AgentIdentity::exists(&identity_dir) {
+                    match memvault_api::agent_identity::AgentIdentity::load(&identity_dir) {
+                        Ok(id) => client.set_agent_identity(id),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "could not load agent identity at {}; running as node",
+                            identity_dir.display()
+                        ),
+                    }
+                }
+            }
+        }
+        Ok(client)
     }
 
-    fn create_client(store: Arc<MemvaultStore>) -> LocalClient {
+    fn create_client(store: Arc<MemvaultStore>) -> Result<LocalClient> {
         // Resolve data_dir from env or default (for admin key loading)
         let data_dir = std::env::var("MEMVAULT_DATA_DIR")
             .map(PathBuf::from)
@@ -466,6 +609,77 @@ mod native {
                     .join("memvault")
             });
         create_client_with_data_dir(store, &data_dir)
+    }
+
+    /// Assemble the `JoinConfig` for the swarm:
+    /// - Reads the pending join token from
+    ///   `<data_dir>/identity/pending_join_token.txt` if present (the
+    ///   joining peer's redemption credential, written by `cluster-join`).
+    /// - Reads the admin signing key from `admin.key` if present (admin
+    ///   node serves incoming joins).
+    /// - Extracts the local ed25519 pubkey from the libp2p keypair so
+    ///   the request carries proof-of-key.
+    /// - Wires `on_join_success` to remove the pending-token file.
+    fn build_join_config(
+        data_dir: &Path,
+        cluster_id: &[u8],
+        keypair: &libp2p::identity::Keypair,
+    ) -> Result<memvault_swarm::JoinConfig> {
+        let pending_token_path = data_dir.join("identity").join("pending_join_token.txt");
+        let pending_token = std::fs::read_to_string(&pending_token_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.starts_with("mvjoin1:"));
+
+        let admin_signing_key = std::fs::read(data_dir.join("identity").join("admin.key"))
+            .ok()
+            .filter(|b| b.len() >= 32)
+            .map(|b| {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&b[..32]);
+                ed25519_dalek::SigningKey::from_bytes(&seed)
+            });
+
+        // Pinned admin verifying key — sync uses it to reject foreign
+        // NodeAttestations BEFORE storing them.
+        let pinned_admin_pubkey = std::fs::read(
+            data_dir.join("identity").join("cluster_admin_genesis.cbor"),
+        )
+        .ok()
+        .and_then(|b| serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok())
+        .filter(|g| g.verify_self_signature().is_ok())
+        .map(|g| g.admin_pubkey);
+
+        // Hard-fail: the swarm-side node pubkey MUST match the libp2p
+        // identity it's serving with. A zero pubkey would silently break
+        // both incoming joins (PeerIdMismatch refusals) and outgoing
+        // joins (admin can't verify our key).
+        let node_pubkey: [u8; 32] = keypair
+            .public()
+            .try_into_ed25519()
+            .map_err(|e| anyhow::anyhow!("libp2p keypair is not ed25519: {e}"))?
+            .to_bytes();
+
+        let mut cluster_arr = [0u8; 32];
+        if cluster_id.len() == 32 {
+            cluster_arr.copy_from_slice(cluster_id);
+        }
+
+        let pending_token_path_for_cb = pending_token_path.clone();
+        let on_join_success: std::sync::Arc<dyn Fn() + Send + Sync> =
+            std::sync::Arc::new(move || {
+                let _ = std::fs::remove_file(&pending_token_path_for_cb);
+                tracing::info!("/join/1.0 success; cleared pending token file");
+            });
+
+        Ok(memvault_swarm::JoinConfig {
+            pending_token,
+            node_pubkey,
+            admin_signing_key,
+            pinned_admin_pubkey,
+            cluster_id: cluster_arr,
+            on_join_success: Some(on_join_success),
+        })
     }
 
     /// Spawn the swarm with an already-opened store.  Call AFTER
@@ -496,9 +710,11 @@ mod native {
             .unwrap_or_else(|| vec![0u8; 32]);
 
         let sync_config = memvault_swarm::SyncConfig {
-            cluster_id,
+            cluster_id: cluster_id.clone(),
             ..Default::default()
         };
+
+        let join_config = build_join_config(&data_dir, &cluster_id, &keypair)?;
 
         let handle = std::thread::Builder::new()
             .name("memvault-swarm".into())
@@ -522,7 +738,14 @@ mod native {
                             }
                         };
                     tracing::info!("P2P swarm started on background thread");
-                    memvault_swarm::run_sync_loop(&mut swarm, store, head_rx, sync_config).await;
+                    memvault_swarm::run_sync_loop(
+                        &mut swarm,
+                        store,
+                        head_rx,
+                        sync_config,
+                        join_config,
+                    )
+                    .await;
                 });
             })?;
 
@@ -533,7 +756,60 @@ mod native {
     ///
     /// Stores the 32-byte Ed25519 secret seed (not the 64-byte expanded keypair)
     /// so that `Keypair::ed25519_from_bytes` can reload it.
-    fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
+    /// Extract the 32-byte ed25519 seed from `<data_dir>/identity/libp2p.key`
+    /// and return it as an `ed25519_dalek::SigningKey` — the daemon's
+    /// cluster-node signing key. Same bytes as the libp2p host key, so
+    /// the pubkey `bootstrap_cluster_trust` keys trust state by is the
+    /// same pubkey the JoinRequest carries.
+    pub fn libp2p_node_signing_key(data_dir: &Path) -> Result<ed25519_dalek::SigningKey> {
+        let key_path = data_dir.join("identity").join("libp2p.key");
+        let mut key_bytes = std::fs::read(&key_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", key_path.display()))?;
+        // `load_or_generate_keypair` accepts both 32-byte seed-only files
+        // and 64-byte seed+public files — mirror that here.
+        if key_bytes.len() == 64 {
+            key_bytes.truncate(32);
+        }
+        let seed: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("libp2p.key must contain a 32-byte seed"))?;
+        Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+    }
+
+    /// Resolve the target bucket for a bucket-aware command. Hard-fails
+    /// when no bucket can be determined — writes don't get to "go
+    /// nowhere", even pre-genesis. (`LocalClient::require_bucket` does
+    /// have a pre-genesis carve-out for legacy adoption, but at the
+    /// memctl level we expect the operator to specify or bind one.)
+    ///
+    /// Order (we deliberately do NOT auto-pick "first existing bucket"):
+    ///   1. `MEMVAULT_BUCKET_ID` env var, set by the global `--bucket-id`
+    ///      flag — explicit user choice always wins.
+    ///   2. The bound agent's own bucket when an agent is loaded on
+    ///      the client (auto-created via `ensure_agent_bucket_for`).
+    pub async fn resolve_target_bucket(
+        client: &LocalClient,
+    ) -> Result<memvault_core::BucketId> {
+        if let Ok(hex_str) = std::env::var("MEMVAULT_BUCKET_ID") {
+            if !hex_str.is_empty() {
+                let bytes = hex::decode(hex_str.trim())
+                    .map_err(|e| anyhow::anyhow!("--bucket-id is not valid hex: {e}"))?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("--bucket-id must decode to 32 bytes"))?;
+                return Ok(memvault_core::BucketId(arr));
+            }
+        }
+        if let Some(aid) = client.agent_id().cloned() {
+            return Ok(client.ensure_agent_bucket_for(&aid).await?);
+        }
+        anyhow::bail!(
+            "no bucket selected: pass --bucket-id <hex> or --agent-id <id> \
+             (or set MEMVAULT_BUCKET_ID / MEMVAULT_AGENT_ID)"
+        );
+    }
+
+    pub fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
         if key_path.exists() {
             let mut key_bytes = std::fs::read(key_path)?;
             // ed25519_from_bytes expects the 32-byte seed. If we accidentally
@@ -571,10 +847,56 @@ mod native {
         EntityId::from_hex(hex_str).map_err(Into::into)
     }
 
+    fn parse_doc_id(hex_str: &str) -> Result<DocId> {
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("invalid hex for doc_id: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "doc_id must be 32 bytes (64 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(DocId(arr))
+    }
+
+    fn parse_bucket_id(hex_str: &str) -> Result<memvault_core::BucketId> {
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("invalid hex for bucket_id: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "bucket_id must be 32 bytes (64 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(memvault_core::BucketId(arr))
+    }
+
     /// Run the memctl CLI with the given parsed arguments.
     pub async fn run(cli: Cli) -> Result<()> {
         let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
         let client_args = cli.client;
+
+        // Bridge the global `--agent-id` and `--bucket-id` flags to
+        // helpers that live a few layers down and are also called from
+        // non-CLI contexts. Setting the env vars here means every
+        // `create_client*` and bucket-resolving call below this point
+        // picks up the values without each match arm threading them.
+        if let Some(ref id) = cli.agent_id {
+            // SAFETY: single-threaded at this point — run() is called once
+            // from main before any tokio task spawning that reads env.
+            unsafe {
+                std::env::set_var("MEMVAULT_AGENT_ID", id);
+            }
+        }
+        if let Some(ref b) = cli.bucket_id {
+            unsafe {
+                std::env::set_var("MEMVAULT_BUCKET_ID", b);
+            }
+        }
 
         // For commands that need direct store access (RepairIndex, FixClusterId, etc.),
         // use the db path from client_args or fall back to data_dir.
@@ -629,6 +951,29 @@ mod native {
                     }
                 }
 
+                // Write the AdminGenesis pin file — this is the cluster's
+                // root of trust for peers. Self-signed; the matching
+                // signing key just got persisted above.
+                let admin_key_bytes = std::fs::read(&admin_key_path)?;
+                if admin_key_bytes.len() >= 32 {
+                    let mut seed = [0u8; 32];
+                    seed.copy_from_slice(&admin_key_bytes[..32]);
+                    let admin_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    let genesis = memvault_auth::sign_admin_genesis(
+                        &admin_sk,
+                        cluster_id.clone(),
+                        now_ns,
+                    )?;
+                    let pin_path = data_dir
+                        .join("identity")
+                        .join("cluster_admin_genesis.cbor");
+                    std::fs::write(&pin_path, serde_ipld_dagcbor::to_vec(&genesis)?)?;
+                }
+
                 // Optionally bind an existing bucket to the cluster.
                 if let Some(ref bucket_hex) = bucket {
                     let bucket_bytes = hex::decode(bucket_hex)?;
@@ -672,9 +1017,10 @@ mod native {
                     }
                 };
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tags = memvault_api::docs::parse_tags(&tag);
                 let vis = memvault_api::docs::parse_visibility(Some(&visibility));
+                let bucket = resolve_target_bucket(&client).await?;
                 let result = memvault_api::docs::create_doc(
                     &client,
                     &text,
@@ -683,7 +1029,7 @@ mod native {
                     tags,
                     vis,
                     None,
-                    None,
+                    Some(&bucket),
                 )
                 .await?;
                 println!("{}", result.node_id);
@@ -700,7 +1046,7 @@ mod native {
             }
             Commands::Search { query, limit } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let hits = client.search(&query, limit).await?;
                 for hit in hits {
                     println!("{} (score: {:.2})", hex::encode(hit.doc_id.0), hit.score);
@@ -710,7 +1056,7 @@ mod native {
             }
             Commands::List { limit, scope } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tag_filter = scope.map(|s| (s, "*".to_string()));
                 let docs = client.list_docs(tag_filter, limit, None).await?;
                 for doc in docs {
@@ -720,7 +1066,7 @@ mod native {
             }
             Commands::Status => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let status = client.status().await?;
                 println!("Memvault Node Status");
                 println!("  Blocks:   {}", status.block_count);
@@ -731,7 +1077,7 @@ mod native {
             Commands::Retract { cid, reason } => {
                 let cid_bytes = hex::decode(&cid)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tombstone = client.retract(&cid_bytes, &reason).await?;
                 println!("Retracted. Tombstone: {}", hex::encode(&tombstone));
             }
@@ -748,13 +1094,13 @@ mod native {
                     _ => Role::AgentHost,
                 };
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let token_str = client.issue_token(role, ttl, max_uses, label).await?;
                 println!("{token_str}");
             }
             Commands::TokenList => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let tokens = client.list_tokens().await?;
                 for t in tokens {
                     let label = t.label.unwrap_or_else(|| "-".into());
@@ -773,13 +1119,13 @@ mod native {
             Commands::TokenRevoke { cid, reason } => {
                 let cid_bytes = hex::decode(&cid)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 client.revoke_token(&cid_bytes, &reason).await?;
                 println!("Token revoked.");
             }
             Commands::Rotations => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let rotations = client.list_rotations().await?;
                 for r in rotations {
                     let status = if r.aborted { "ABORTED" } else { "active" };
@@ -808,16 +1154,94 @@ mod native {
                 id[..len].copy_from_slice(&doc_id_bytes[..len]);
                 let did = DocId(id);
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let records = client.history_of(&did).await?;
                 println!("History for doc {doc_id}: {} ops", records.len());
                 for r in records {
                     println!("  {} kind={:?}", hex::encode(&r.cid), r.op_kind);
                 }
             }
+            Commands::DocLinks { doc_id } => {
+                let did = parse_doc_id(&doc_id)?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let links = client.doc_outlinks(&did);
+                println!("Outlinks for doc {doc_id}: {} links", links.len());
+                for l in links {
+                    let display = l.display_text.as_deref().unwrap_or("");
+                    println!(
+                        "  {} [{}]{}{}",
+                        l.uri,
+                        format!("{:?}", l.syntax),
+                        if display.is_empty() { String::new() } else { format!(" — {display}") },
+                        if l.byte_span != (0, 0) {
+                            format!(" @[{}..{}]", l.byte_span.0, l.byte_span.1)
+                        } else {
+                            String::new()
+                        },
+                    );
+                }
+            }
+            Commands::DocBacklinks { node } => {
+                let Some(node_ref) = memvault_core::NodeRef::from_tag_label(&node) else {
+                    return Err(anyhow::anyhow!(
+                        "node must be `doc:<hex>`, `entity:<hex>`, or `file:<hex>`"
+                    ));
+                };
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let edges = client.doc_backlinks(&node_ref)?;
+                println!("Backlinks to {node}: {} edges", edges.len());
+                for (source, edge) in edges {
+                    let prov = memvault_doc::link::LinkProvenance::of(&edge)
+                        .map(|p| p.as_str())
+                        .unwrap_or("asserted");
+                    println!(
+                        "  {} —[{}/{}]→ {}",
+                        source,
+                        edge.relation,
+                        prov,
+                        edge.target,
+                    );
+                }
+            }
+            Commands::DocDangling { bucket } => {
+                let bucket_id = match bucket {
+                    Some(s) => Some(parse_bucket_id(&s)?),
+                    None => None,
+                };
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let dangling = client.dangling_link_edges(bucket_id.as_ref())?;
+                println!("Dangling links: {} entries", dangling.len());
+                for (source, alias) in dangling {
+                    println!("  {source} → [[{alias}]]");
+                }
+            }
+            Commands::DocReindexLinks { doc_id } => {
+                let store = make_store()?;
+                let client = create_client(store)?;
+                match doc_id {
+                    Some(id_hex) => {
+                        let did = parse_doc_id(&id_hex)?;
+                        match client.reindex_doc_links(&did).await? {
+                            Some(cid) => println!(
+                                "Reindexed doc {} (head {})",
+                                id_hex,
+                                hex::encode(&cid)
+                            ),
+                            None => println!("No body to reindex for {id_hex}"),
+                        }
+                    }
+                    None => {
+                        let count = client.reindex_all_doc_links().await?;
+                        println!("Reindexed {count} doc(s).");
+                    }
+                }
+            }
             Commands::GraphAdd { kind, prop } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let props: BTreeMap<String, serde_json::Value> = prop
                     .iter()
                     .filter_map(|p| {
@@ -845,7 +1269,7 @@ mod native {
                 let source_id = parse_entity_id(&source)?;
                 let target_id = parse_entity_id(&target)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let source_ref = memvault_core::NodeRef::Entity(source_id);
                 let edge = Edge {
                     id: memvault_core::EdgeId::random(),
@@ -867,7 +1291,7 @@ mod native {
             } => {
                 let entity_id = parse_entity_id(&from)?;
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 let from_ref = memvault_core::NodeRef::Entity(entity_id);
                 let hits = client
                     .traverse_from(&from_ref, relation.as_deref(), max_depth)
@@ -988,7 +1412,7 @@ mod native {
 
                 // Full deterministic rebuild from BLOCKS.
                 println!("Rebuilding all derived state from blocks...");
-                let client = create_client(store.clone());
+                let client = create_client(store.clone())?;
                 let report = memvault_api::rebuild::rebuild_store(&client)?;
 
                 println!("  Blocks:       {}", report.blocks_total);
@@ -1322,7 +1746,7 @@ mod native {
                     store.clone(),
                     &data_dir,
                     std::sync::Arc::clone(&event_bus_shared),
-                );
+                )?;
 
                 // Rebuild derived state if blockstore version is outdated.
                 // Load or rebuild the full-text search index
@@ -1355,10 +1779,33 @@ mod native {
                 // handles port negotiation with dx serve automatically.
                 #[cfg(feature = "daemon")]
                 {
-                    let auth_token = memvault_web::load_or_generate_token(&data_dir)
-                        .map_err(|e| anyhow::anyhow!("failed to load/generate API token: {e}"))?;
-
+                    let _ = local_peer_id;
+                    // Design A-1: node signing key == libp2p host key.
+                    // Pulling the seed from the same `libp2p.key` file the
+                    // swarm uses guarantees that the pubkey
+                    // `bootstrap_cluster_trust` keys trust state by matches
+                    // the pubkey the JoinRequest carries — otherwise admin
+                    // mints a NodeAttestation for libp2p_pk but bootstrap
+                    // looks for node_pk and the local node stays PreGenesis
+                    // (regression test:
+                    // `tests::join_protocol::node_key_and_libp2p_key_must_be_the_same`).
+                    let node_sk = libp2p_node_signing_key(&data_dir)
+                        .map_err(|e| anyhow::anyhow!("node signing key: {e}"))?;
+                    client.set_node_signing_key(node_sk);
                     let local_client = std::sync::Arc::new(client);
+                    let trust = memvault_api::bootstrap::bootstrap_cluster_trust(&local_client)
+                        .map_err(|e| anyhow::anyhow!("cluster trust bootstrap: {e}"))?;
+
+                    // Inside `pub async fn run` driven by the caller's
+                    // tokio runtime — spawn the watcher onto it.
+                    let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
+                        std::sync::Arc::clone(&local_client),
+                        trust.admin_pubkey,
+                        trust.trust_state.clone(),
+                    );
+                    memvault_web::init_ui_agent(&local_client, &data_dir)
+                        .map_err(|e| anyhow::anyhow!("init ui agent: {e}"))?;
+
                     memvault_web::ui::state::set_client(std::sync::Arc::clone(&local_client));
                     let client_arc = local_client
                         as std::sync::Arc<dyn memvault_api::MemvaultClient>;
@@ -1366,10 +1813,13 @@ mod native {
                     let app_state = std::sync::Arc::new(memvault_web::AppState {
                         client: client_arc,
                         event_bus: std::sync::Arc::clone(&event_bus_shared),
-                        auth_token: auth_token.clone(),
+                        admin_pubkey: trust.admin_pubkey,
+                        node_trust: std::sync::Arc::clone(&trust.trust_state.node_trust),
+                        revoked_agents: std::sync::Arc::clone(&trust.trust_state.revoked_agents),
+                        revoked_nodes: std::sync::Arc::clone(&trust.trust_state.revoked_nodes),
                         metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
+                        agent_attestation_lookup: None,
                     });
-                    println!("  API token:  {}", &auth_token[..8]);
 
                     // Start the web server. Use fullstack (SSR + UI) if assets
                     // exist, otherwise API-only to avoid a panic from Dioxus.
@@ -1403,6 +1853,10 @@ mod native {
                         }
                     });
 
+                    // Build join_config BEFORE the keypair is moved into the swarm.
+                    let join_config =
+                        build_join_config(&data_dir, &cluster_id_bytes, &keypair)?;
+
                     // Build standalone swarm
                     let mut swarm =
                         memvault_net::standalone_swarm(keypair, listen_addr, bootstrap_addrs)
@@ -1419,12 +1873,21 @@ mod native {
                     };
 
                     println!("Daemon running. Press Ctrl+C to stop.");
-                    memvault_swarm::run_sync_loop(&mut swarm, store, head_rx, sync_config).await;
+                    memvault_swarm::run_sync_loop(
+                        &mut swarm,
+                        store,
+                        head_rx,
+                        sync_config,
+                        join_config,
+                    )
+                    .await;
                 }
 
                 // Without the daemon feature, run P2P only (no web UI)
                 #[cfg(not(feature = "daemon"))]
                 {
+                    let join_config =
+                        build_join_config(&data_dir, &cluster_id_bytes, &keypair)?;
                     let mut swarm =
                         memvault_net::standalone_swarm(keypair, listen_addr, bootstrap_addrs)
                             .await
@@ -1439,63 +1902,99 @@ mod native {
                     };
 
                     println!("Daemon running (P2P only, no web UI). Press Ctrl+C to stop.");
-                    memvault_swarm::run_sync_loop(&mut swarm, store, head_rx, sync_config).await;
+                    memvault_swarm::run_sync_loop(
+                        &mut swarm,
+                        store,
+                        head_rx,
+                        sync_config,
+                        join_config,
+                    )
+                    .await;
                 }
             }
-            Commands::ClusterJoin {
-                cluster_id: cluster_hex,
-            } => {
-                let cluster_bytes = hex::decode(&cluster_hex)?;
-                let cluster_arr: [u8; 32] = cluster_bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("cluster_id must be 32 bytes"))?;
-                let cluster_id = ClusterId(cluster_arr);
+            Commands::ClusterJoin { token } => {
+                // Token-only join. Decode + verify the embedded
+                // AdminGenesis, then pin it; without the pin the joining
+                // node has no trust root.
+                let parsed = memvault_auth::decode_token_string(&token)
+                    .map_err(|e| anyhow::anyhow!("decode token: {e}"))?;
+                let genesis = parsed.admin_genesis.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "join token has no AdminGenesis — admin must \
+                         reissue with the current memctl"
+                    )
+                })?;
+                genesis
+                    .verify_self_signature()
+                    .map_err(|e| anyhow::anyhow!("admin_genesis signature: {e}"))?;
+                if genesis.cluster_id.0 != parsed.cluster_id.0 {
+                    anyhow::bail!(
+                        "join token cluster_id {} does not match its admin_genesis cluster_id {}",
+                        hex::encode(parsed.cluster_id.0),
+                        hex::encode(genesis.cluster_id.0)
+                    );
+                }
+                let cluster_id = parsed.cluster_id.clone();
+                let cluster_hex = hex::encode(cluster_id.0);
 
                 let store = make_store()?;
-
-                // Set cluster_id in the store
                 store.set_local_cluster_id(&cluster_id.0)?;
 
-                // Write cluster_id file (for compat)
                 let id_path = data_dir.join("cluster_id");
                 std::fs::create_dir_all(&data_dir)?;
                 std::fs::write(&id_path, cluster_hex.as_bytes())?;
 
-                // Bind any unbound buckets to this cluster
                 let rebound = store.bind_unbound_buckets(&cluster_id.0)?;
                 if rebound > 0 {
                     println!("Rebound {rebound} existing bucket(s) to cluster.");
                 }
 
-                // Generate admin key if missing (so this node can issue tokens)
-                let admin_key_path = data_dir.join("identity").join("admin.key");
-                if !admin_key_path.exists() {
-                    std::fs::create_dir_all(admin_key_path.parent().unwrap())?;
-                    let mut seed = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
-                    std::fs::write(&admin_key_path, &seed)?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
-                            &admin_key_path,
-                            std::fs::Permissions::from_mode(0o600),
-                        );
-                    }
-                }
+                std::fs::create_dir_all(data_dir.join("identity"))?;
+                let pin_path = data_dir.join("identity").join("cluster_admin_genesis.cbor");
+                std::fs::write(&pin_path, serde_ipld_dagcbor::to_vec(&genesis)?)?;
+                println!("  Admin pinned:  {}", hex::encode(genesis.admin_pubkey));
+
+                // Stash the token so the swarm can redeem it via /join/1.0
+                // on next daemon start. Removed after a successful Success.
+                let token_path = data_dir.join("identity").join("pending_join_token.txt");
+                std::fs::write(&token_path, &token)?;
+                println!("  Token stashed: {}", token_path.display());
+
+                // NOTE: do NOT mint a local admin.key. Peers are not admins.
 
                 println!("Joined cluster {cluster_hex}");
                 println!("  Data dir:  {}", data_dir.display());
+            }
+            Commands::NodeAttest { peer_pubkey, role } => {
+                let pk_bytes = hex::decode(&peer_pubkey)
+                    .map_err(|e| anyhow::anyhow!("decode peer_pubkey hex: {e}"))?;
+                let pk_arr: [u8; 32] = pk_bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("peer_pubkey must be 32 bytes"))?;
+                let role_enum = match role.as_str() {
+                    "admin" => memvault_auth::Role::Admin,
+                    "agent-host" | "agenthost" | "host" => memvault_auth::Role::AgentHost,
+                    "auditor" => memvault_auth::Role::Auditor,
+                    "service" => memvault_auth::Role::Service,
+                    other => anyhow::bail!("unknown role: {other}"),
+                };
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let cid = client
+                    .attest_node(pk_arr, role_enum)
+                    .map_err(|e| anyhow::anyhow!("attest_node: {e}"))?;
+                println!("Attested peer {peer_pubkey}");
+                println!("  Attestation CID: {}", hex::encode(&cid));
+                println!("  Role:            {role}");
+                println!("  The peer's pre-genesis status will clear once this block syncs over.");
             }
             Commands::AgentEnroll {
                 token,
                 agent_id,
                 identity_dir,
             } => {
-                // Decode the join token to extract cluster info
-                let join_token = memvault_auth::decode_token_string(&token)
-                    .map_err(|e| anyhow::anyhow!("failed to decode token: {e}"))?;
-
+                // Identity dir layout: `<data-dir>/agents/<agent-id>/`
+                // unless explicitly overridden.
                 let identity_dir =
                     identity_dir.unwrap_or_else(|| data_dir.join("agents").join(&agent_id));
 
@@ -1508,61 +2007,54 @@ mod native {
                     return Ok(());
                 }
 
-                // For CLI enrollment, we need an admin key to sign the enrollment.
-                // In the local case, we generate a temporary admin identity.
-                // In production, this would go through the /join/1.0 protocol.
-                let _store = make_store()?;
+                // Generate the agent's keypair locally — the private key
+                // never leaves this host.
+                let mut agent_seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut agent_seed);
+                let agent_sk = ed25519_dalek::SigningKey::from_bytes(&agent_seed);
+                let agent_pubkey = agent_sk.verifying_key().to_bytes();
 
-                // Read cluster_id from the data dir
-                let cluster_id_path = data_dir.join("cluster_id");
-                let cluster_id_hex = std::fs::read_to_string(&cluster_id_path).map_err(|e| {
-                    anyhow::anyhow!("failed to read cluster_id: {e} (run genesis first)")
-                })?;
-                let cluster_id_bytes = hex::decode(cluster_id_hex.trim())?;
-                let cluster_id_arr: [u8; 32] = cluster_id_bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("cluster_id must be 32 bytes"))?;
-                let cluster_id = ClusterId(cluster_id_arr);
-
-                // Load or generate admin key from identity dir
-                let admin_key_path = data_dir.join("identity").join("admin_key.pem");
-                let admin_sk = if admin_key_path.exists() {
-                    let id = memvault_api::agent_identity::AgentIdentity::load(
-                        &data_dir.join("identity"),
-                    )
-                    .map_err(|e| anyhow::anyhow!("failed to load admin identity: {e}"))?;
-                    id.signing_key
-                } else {
-                    // Generate a temporary admin key for local enrollment
-                    let mut secret = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
-                    ed25519_dalek::SigningKey::from_bytes(&secret)
-                };
-
-                let admin_vk = admin_sk.verifying_key();
-                let admin_peer_id = memvault_core::PeerId(admin_vk.as_bytes().to_vec());
-
-                let identity = memvault_api::agent_identity::AgentIdentity::generate_local(
-                    &identity_dir,
+                // Delegate to the same helper the HTTP endpoint uses:
+                // verifies the token signature against the admin pubkey
+                // held on this client, enforces max_uses, mints the
+                // node-signed AgentAttestation, publishes to sigchain,
+                // and records token consumption. The previous CLI path
+                // bypassed all of these (and would even mint a fresh
+                // admin key if none was on disk — a security hole this
+                // closes).
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let result = memvault_api::agent_identity::enroll_remote_agent(
+                    &client,
+                    &token,
                     &agent_id,
-                    &cluster_id,
-                    &admin_peer_id,
-                    &admin_sk,
-                    join_token.role,
-                    join_token
-                        .not_after_ns
-                        .saturating_sub(memvault_core::time::wall_ns()),
+                    agent_pubkey,
                 )
                 .map_err(|e| anyhow::anyhow!("enrollment failed: {e}"))?;
 
+                // Persist the identity dir via the canonical writer.
+                // The attestation is already on the chain (verifiers
+                // look it up by agent_pubkey) — caching it locally is
+                // for back-compat with `AgentIdentity::load` callers
+                // that read attestation.cbor directly.
+                std::fs::create_dir_all(&identity_dir)?;
+                let meta = memvault_api::agent_identity::AgentMeta {
+                    agent_id: agent_id.clone(),
+                    attestation_cid_hex: hex::encode(&result.attestation_cid),
+                };
+                memvault_api::agent_identity::write_identity_dir(
+                    &identity_dir,
+                    &agent_sk,
+                    &meta,
+                )
+                .map_err(|e| anyhow::anyhow!("write identity dir: {e}"))?;
+
                 println!("Agent enrolled successfully.");
                 println!("  Agent ID:     {agent_id}");
-                println!("  Cluster:      {}", hex::encode(cluster_id.0));
+                println!("  Cluster:      {}", hex::encode(client.cluster_id()));
                 println!("  Identity dir: {}", identity_dir.display());
-                println!(
-                    "  Public key:   {}",
-                    hex::encode(identity.verifying_key.as_bytes())
-                );
+                println!("  Public key:   {}", hex::encode(agent_pubkey));
+                println!("  Attestation:  {}", hex::encode(&result.attestation_cid));
             }
             Commands::AgentList => {
                 let agents_dir = dirs::data_local_dir()
@@ -1586,10 +2078,10 @@ mod native {
                         match memvault_api::agent_identity::AgentIdentity::load(&agent_dir) {
                             Ok(id) => {
                                 println!(
-                                    "{} cluster={} pubkey={}",
+                                    "{} pubkey={} attestation_cid={}",
                                     id.agent_id.0,
-                                    hex::encode(id.cluster_id.0),
                                     hex::encode(id.verifying_key.as_bytes()),
+                                    hex::encode(&id.attestation_cid),
                                 );
                                 found = true;
                             }
@@ -1619,14 +2111,20 @@ mod native {
                     .map_err(|e| anyhow::anyhow!("failed to load agent: {e}"))?;
 
                 println!("Agent: {}", id.agent_id.0);
-                println!("  Cluster:      {}", hex::encode(id.cluster_id.0));
                 println!(
-                    "  Public key:   {}",
+                    "  Public key:      {}",
                     hex::encode(id.verifying_key.as_bytes())
                 );
-                println!("  Role:         {:?}", id.attestation.role);
-                println!("  Expires:      {} ns", id.attestation.not_after_ns);
-                println!("  Identity dir: {}", agent_dir.display());
+                println!(
+                    "  Attestation CID: {}",
+                    hex::encode(&id.attestation_cid)
+                );
+                println!("  Identity dir:    {}", agent_dir.display());
+                println!(
+                    "  (role/expiry now live on-chain in the AgentAttestation \
+                     — fetch via `memctl audit --kind agent-attestation` \
+                     or the web trust-tree)"
+                );
             }
             Commands::Seed {
                 docs,
@@ -1635,7 +2133,7 @@ mod native {
                 links,
             } => {
                 let store = make_store()?;
-                let client = create_client(store);
+                let client = create_client(store)?;
                 run_seed(&client, docs, entities, files, links).await?;
             }
         }
@@ -1667,6 +2165,14 @@ mod native {
                             memvault_api::MemvaultEvent::Retracted { cid } => Some(cid.clone()),
                             memvault_api::MemvaultEvent::TokenConsumed { token_cid } => {
                                 Some(token_cid.clone())
+                            }
+                            // Push-on-create: announce sigchain blocks
+                            // immediately over gossip so peers don't have to
+                            // wait for the next RBSR cycle to learn about a
+                            // new attestation, revocation, or envelope
+                            // authorship sidecar.
+                            memvault_api::MemvaultEvent::SigchainBlock { cid, .. } => {
+                                Some(cid.clone())
                             }
                             _ => None,
                         };
@@ -1702,11 +2208,33 @@ mod native {
         use rand::Rng;
 
         let mut rng = rand::thread_rng();
-        // Synth uses the legacy bucket if one exists; otherwise fail loudly
-        // rather than silently writing to the zero bucket.
-        let bucket = client.find_legacy_bucket().ok_or_else(|| {
-            anyhow::anyhow!("synth: no legacy bucket configured — run `memctl repair-index` first")
-        })?;
+        // Pick a bucket to write into, in order of preference:
+        //   1. The legacy bucket if one exists (adopted pre-bucket data).
+        //   2. An existing bucket named "seed" — keeps repeat `memctl
+        //      seed` runs idempotent.
+        //   3. Create a fresh bucket named "seed".
+        // Falling back through 2 → 3 means seeding works on a clean
+        // node that has never seen any pre-bucket data.
+        let bucket = if let Some(b) = client.find_legacy_bucket() {
+            b
+        } else {
+            use memvault_api::MemvaultClient;
+            let existing = client.bucket_list().await?;
+            if let Some(b) = existing.iter().find(|b| b.name == "seed") {
+                b.id.clone()
+            } else {
+                println!("No legacy bucket found; creating bucket \"seed\" for synthetic data.");
+                client
+                    .bucket_create(
+                        "seed",
+                        Some("Synthetic data generated by `memctl seed`"),
+                        memvault_core::Visibility::Internal,
+                        memvault_core::classification::Classification::Internal,
+                        memvault_doc::BucketRole::Standard,
+                    )
+                    .await?
+            }
+        };
 
         // ── Vocabulary for generating plausible content ──────────────────
         let topics = [
@@ -1776,6 +2304,7 @@ mod native {
         let file_exts = [
             ("txt", "text/plain"),
             ("md", "text/markdown"),
+            ("html", "text/html"),
             ("json", "application/json"),
             ("csv", "text/csv"),
             ("log", "text/plain"),
@@ -1797,69 +2326,19 @@ mod native {
         }
         println!("  VFS directories created: {}", vfs_dirs.len());
 
-        // Track all created node refs for linking later.
+        // Track all created node refs for linking later. Created in order
+        // so docs/files can embed memvault:// references to already-existing
+        // entities and earlier docs — this exercises the link reconciler
+        // end-to-end alongside operator-asserted edges below.
         let mut all_nodes: Vec<NodeRef> = Vec::new();
+        let mut entity_ids: Vec<EntityId> = Vec::new();
+        let mut doc_ids: Vec<DocId> = Vec::new();
+        // Aliases we expose so wikilinks like `[[Alice]]` resolve via the
+        // alias index (entity.props["name"] is what AliasIndex picks up).
+        let mut entity_aliases: Vec<String> = Vec::new();
+        let allowlisted_relations = ["mentions", "cites", "embeds", "replies-to"];
 
-        // ── Documents ───────────────────────────────────────────────────
-        for i in 0..n_docs {
-            let topic = topics[rng.gen_range(0..topics.len())];
-            let adj = adjectives[rng.gen_range(0..adjectives.len())];
-            let title = format!("{} {} notes #{}", adj, topic, i + 1);
-            let paragraphs: usize = rng.gen_range(2..6);
-            let mut body = String::new();
-            for _ in 0..paragraphs {
-                let sentences: usize = rng.gen_range(2..5);
-                for _ in 0..sentences {
-                    let t1 = topics[rng.gen_range(0..topics.len())];
-                    let t2 = topics[rng.gen_range(0..topics.len())];
-                    let a = adjectives[rng.gen_range(0..adjectives.len())];
-                    body.push_str(&format!(
-                        "The {} approach to {} integrates well with {}. ",
-                        a, t1, t2
-                    ));
-                }
-                body.push('\n');
-            }
-            let mut fm = BTreeMap::new();
-            fm.insert(
-                "title".to_string(),
-                serde_json::Value::String(title.clone()),
-            );
-            let doc = memvault_doc::Document::new(DocId::random(), body, fm);
-            let mut tags = vec![("topic".to_string(), topic.to_string())];
-            if rng.gen_bool(0.3) {
-                tags.push((
-                    "priority".to_string(),
-                    ["low", "medium", "high"][rng.gen_range(0..3)].to_string(),
-                ));
-            }
-            let cid = client
-                .put_doc(doc.clone(), tags, Visibility::Internal, None)
-                .await?;
-            all_nodes.push(NodeRef::Doc(doc.id.clone()));
-
-            // Place some docs in VFS
-            if rng.gen_bool(0.5) {
-                let dir = vfs_dirs[rng.gen_range(0..vfs_dirs.len())];
-                let slug: String = title
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || *c == ' ')
-                    .collect::<String>()
-                    .replace(' ', "-")
-                    .to_lowercase();
-                let path = format!("{}/{}.md", dir, &slug[..slug.len().min(40)]);
-                let node_id = format!("doc:{}", hex::encode(doc.id.0));
-                let _ =
-                    memvault_api::vfs::link_node_at_path(client, &bucket, &path, &node_id).await;
-            }
-
-            if (i + 1) % 10 == 0 || i + 1 == n_docs {
-                println!("  Documents: {}/{}", i + 1, n_docs);
-            }
-            let _ = cid;
-        }
-
-        // ── Entities ────────────────────────────────────────────────────
+        // ── Entities (first, so docs/files can link to them) ────────────
         for i in 0..n_entities {
             let kind = entity_kinds[rng.gen_range(0..entity_kinds.len())];
             let name = match kind {
@@ -1874,7 +2353,7 @@ mod native {
                 _ => format!("{}-{}", kind, rng.gen_range(1..100u32)),
             };
             let mut props = BTreeMap::new();
-            props.insert("name".to_string(), serde_json::json!(name));
+            props.insert("name".to_string(), serde_json::json!(name.clone()));
             if rng.gen_bool(0.4) {
                 props.insert(
                     "description".to_string(),
@@ -1900,22 +2379,156 @@ mod native {
                 edges_out: vec![],
             };
             let eid = client
-                .add_entity(entity.clone(), Visibility::Internal, None)
+                .add_entity(entity.clone(), Visibility::Internal, Some(&bucket))
                 .await?;
-            all_nodes.push(NodeRef::Entity(eid));
-
+            all_nodes.push(NodeRef::Entity(eid.clone()));
+            entity_ids.push(eid);
+            entity_aliases.push(name);
             if (i + 1) % 10 == 0 || i + 1 == n_entities {
                 println!("  Entities:  {}/{}", i + 1, n_entities);
             }
         }
 
-        // ── Files ───────────────────────────────────────────────────────
+        // ── Documents — some bodies embed [[wikilinks]] / markdown links /
+        //    `[[Alias]]` references to entities so the link reconciler
+        //    populates body-provenance graph edges. ─────────────────────
+        for i in 0..n_docs {
+            let topic = topics[rng.gen_range(0..topics.len())];
+            let adj = adjectives[rng.gen_range(0..adjectives.len())];
+            let title = format!("{} {} notes #{}", adj, topic, i + 1);
+            let paragraphs: usize = rng.gen_range(2..6);
+            let mut body = String::new();
+            for _ in 0..paragraphs {
+                let sentences: usize = rng.gen_range(2..5);
+                for _ in 0..sentences {
+                    let t1 = topics[rng.gen_range(0..topics.len())];
+                    let t2 = topics[rng.gen_range(0..topics.len())];
+                    let a = adjectives[rng.gen_range(0..adjectives.len())];
+                    body.push_str(&format!(
+                        "The {} approach to {} integrates well with {}. ",
+                        a, t1, t2
+                    ));
+                }
+                body.push('\n');
+            }
+
+            // Sprinkle memvault links so the reconciler has work to do.
+            // 60% of docs reference 1–3 prior nodes via mixed syntaxes.
+            if rng.gen_bool(0.6) {
+                let n_refs: usize = rng.gen_range(1..4);
+                body.push_str("\n## References\n");
+                for _ in 0..n_refs {
+                    let roll = rng.gen_range(0..4);
+                    match roll {
+                        // [[doc:hex]] wikilink
+                        0 if !doc_ids.is_empty() => {
+                            let tgt = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                            body.push_str(&format!(
+                                "- See [[doc:{}]] for related notes.\n",
+                                hex::encode(tgt.0)
+                            ));
+                        }
+                        // [[entity:hex|alias]] wikilink, demoted/kept rel
+                        1 if !entity_ids.is_empty() => {
+                            let idx = rng.gen_range(0..entity_ids.len());
+                            let tgt = &entity_ids[idx];
+                            let alias = &entity_aliases[idx];
+                            body.push_str(&format!(
+                                "- Owned by [[entity:{}|{}]].\n",
+                                hex::encode(tgt.0),
+                                alias
+                            ));
+                        }
+                        // [Alice](memvault://entity/hex?rel=cites) markdown link
+                        2 if !entity_ids.is_empty() => {
+                            let idx = rng.gen_range(0..entity_ids.len());
+                            let tgt = &entity_ids[idx];
+                            let alias = &entity_aliases[idx];
+                            let rel = allowlisted_relations
+                                [rng.gen_range(0..allowlisted_relations.len())];
+                            body.push_str(&format!(
+                                "- Per [{}](memvault://entity/{}?rel={}).\n",
+                                alias,
+                                hex::encode(tgt.0),
+                                rel,
+                            ));
+                        }
+                        // bare-alias [[Alice]] (relies on alias index)
+                        _ if !entity_aliases.is_empty() => {
+                            let alias =
+                                &entity_aliases[rng.gen_range(0..entity_aliases.len())];
+                            body.push_str(&format!("- Coordinated with [[{alias}]].\n"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut fm = BTreeMap::new();
+            fm.insert(
+                "title".to_string(),
+                serde_json::Value::String(title.clone()),
+            );
+            // 25% of docs declare frontmatter `links:` referencing earlier docs.
+            if rng.gen_bool(0.25) && !doc_ids.is_empty() {
+                let take: usize = rng.gen_range(1..3.min(doc_ids.len() + 1));
+                let links: Vec<serde_json::Value> = (0..take)
+                    .map(|_| {
+                        let t = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                        serde_json::Value::String(format!(
+                            "memvault://doc/{}",
+                            hex::encode(t.0)
+                        ))
+                    })
+                    .collect();
+                fm.insert("links".to_string(), serde_json::Value::Array(links));
+            }
+            let doc = memvault_doc::Document::new(DocId::random(), body, fm);
+            let mut tags = vec![("topic".to_string(), topic.to_string())];
+            if rng.gen_bool(0.3) {
+                tags.push((
+                    "priority".to_string(),
+                    ["low", "medium", "high"][rng.gen_range(0..3)].to_string(),
+                ));
+            }
+            let cid = client
+                .put_doc(doc.clone(), tags, Visibility::Internal, Some(&bucket))
+                .await?;
+            all_nodes.push(NodeRef::Doc(doc.id.clone()));
+            doc_ids.push(doc.id.clone());
+
+            // Place some docs in VFS
+            if rng.gen_bool(0.5) {
+                let dir = vfs_dirs[rng.gen_range(0..vfs_dirs.len())];
+                let slug: String = title
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == ' ')
+                    .collect::<String>()
+                    .replace(' ', "-")
+                    .to_lowercase();
+                let path = format!("{}/{}.md", dir, &slug[..slug.len().min(40)]);
+                let node_id = format!("doc:{}", hex::encode(doc.id.0));
+                let _ =
+                    memvault_api::vfs::link_node_at_path(client, &bucket, &path, &node_id).await;
+            }
+
+            if (i + 1) % 10 == 0 || i + 1 == n_docs {
+                println!("  Documents: {}/{}", i + 1, n_docs);
+            }
+            let _ = cid;
+        }
+
+        // ── Files — markdown/html variants embed memvault:// references
+        //    so the extractor pipeline produces body-provenance edges
+        //    out of the attachment too. ───────────────────────────────────
         for i in 0..n_files {
             let (ext, mime) = file_exts[rng.gen_range(0..file_exts.len())];
             let topic = topics[rng.gen_range(0..topics.len())];
             let filename = format!("{}-report-{}.{}", topic, rng.gen_range(1..999u32), ext);
 
-            // Generate plausible file content
+            // Generate plausible file content. Markdown and HTML variants
+            // embed memvault:// references so the extractor pipeline
+            // emits body-provenance edges out of the attachment node too.
             let content = match ext {
                 "json" => serde_json::to_vec_pretty(&serde_json::json!({
                     "report": topic,
@@ -1940,6 +2553,62 @@ mod native {
                     }
                     csv.into_bytes()
                 }
+                "md" => {
+                    let mut md = format!("# {} report\n\n", topic);
+                    for _ in 0..rng.gen_range(2..5) {
+                        let a = adjectives[rng.gen_range(0..adjectives.len())];
+                        md.push_str(&format!("- {} {} analysis.\n", a, topic));
+                    }
+                    md.push_str("\n## Related\n");
+                    if !doc_ids.is_empty() {
+                        let t = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                        md.push_str(&format!(
+                            "- [[doc:{}]]\n",
+                            hex::encode(t.0)
+                        ));
+                    }
+                    if !entity_ids.is_empty() {
+                        let idx = rng.gen_range(0..entity_ids.len());
+                        let e = &entity_ids[idx];
+                        let alias = &entity_aliases[idx];
+                        md.push_str(&format!(
+                            "- See [{}](memvault://entity/{}?rel=cites).\n",
+                            alias,
+                            hex::encode(e.0),
+                        ));
+                    }
+                    md.into_bytes()
+                }
+                "html" => {
+                    let mut html = format!(
+                        "<!doctype html><html><body><h1>{} report</h1>",
+                        topic
+                    );
+                    for _ in 0..rng.gen_range(2..5) {
+                        let a = adjectives[rng.gen_range(0..adjectives.len())];
+                        html.push_str(&format!("<p>{} {} analysis.</p>", a, topic));
+                    }
+                    html.push_str("<h2>Related</h2><ul>");
+                    if !doc_ids.is_empty() {
+                        let t = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                        html.push_str(&format!(
+                            "<li><a href=\"memvault://doc/{}\">related doc</a></li>",
+                            hex::encode(t.0)
+                        ));
+                    }
+                    if !entity_ids.is_empty() {
+                        let idx = rng.gen_range(0..entity_ids.len());
+                        let e = &entity_ids[idx];
+                        let alias = &entity_aliases[idx];
+                        html.push_str(&format!(
+                            "<li><a href=\"memvault://entity/{}?rel=cites\">{}</a></li>",
+                            hex::encode(e.0),
+                            alias
+                        ));
+                    }
+                    html.push_str("</ul></body></html>");
+                    html.into_bytes()
+                }
                 _ => {
                     let mut text = String::new();
                     for _ in 0..rng.gen_range(3..10) {
@@ -1952,7 +2621,14 @@ mod native {
             };
 
             let cid = client
-                .upload_file(&content, Some(&filename), mime, vec![], "internal", None)
+                .upload_file(
+                    &content,
+                    Some(&filename),
+                    mime,
+                    vec![],
+                    "internal",
+                    Some(&bucket),
+                )
                 .await?;
             all_nodes.push(NodeRef::Attachment(cid.clone()));
 

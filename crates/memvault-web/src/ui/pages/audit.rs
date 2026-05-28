@@ -17,7 +17,14 @@ use crate::ui::topbar::use_topbar;
 struct AuditRow {
     cid: String,
     op_kind: String,
+    /// Envelope-level signer. For post-Signed<T> writes this is the
+    /// node pubkey; for legacy raw-JSON envelopes it's whoever the
+    /// `effective_author()` was at write time.
     author: String,
+    /// Resolved agent identifier when the write carries an
+    /// `agent_attestation` cid (post-Signed<T> agent-bound writes).
+    /// Empty for pure node writes and legacy unattributed envelopes.
+    agent_id: Option<String>,
     wall_ns: u64,
     /// Human-readable description built from op_kind + tags + resolved labels.
     description: String,
@@ -38,9 +45,14 @@ impl AuditRow {
         self.op_kind.to_lowercase().contains(query)
             || self.description.to_lowercase().contains(query)
             || self.author.contains(query)
+            || self
+                .agent_id
+                .as_deref()
+                .is_some_and(|id| id.to_lowercase().contains(query))
             || self.cid.contains(query)
     }
 }
+
 
 #[server]
 async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
@@ -55,6 +67,13 @@ async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
+    // Build the cid → agent_id lookup once per request so every row
+    // resolves via an O(1) map hit instead of re-reading attestations.
+    let agent_id_index = match crate::ui::state::local_client() {
+        Ok(local) => crate::api::agents::build_agent_id_index(&local),
+        Err(_) => std::collections::HashMap::new(),
+    };
+
     let mut rows = Vec::new();
     for r in records {
         let op_kind = format!("{:?}", r.op_kind);
@@ -63,10 +82,16 @@ async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
         let (description, link_target) =
             build_description(&client, &op_kind, &r.tags, r.doc_id.as_ref()).await;
 
+        let agent_id = r
+            .agent_attestation
+            .as_ref()
+            .and_then(|cid| agent_id_index.get(cid).cloned());
+
         rows.push(AuditRow {
             cid: hex::encode(&r.cid),
             op_kind,
             author: hex::encode(&r.author),
+            agent_id,
             wall_ns: r.wall_ns,
             description,
             link_target,
@@ -566,7 +591,18 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
                                 }
                             }
                         }
-                        Td { CidDisplay { cid: row.author.clone(), len: Some(8) } }
+                        Td {
+                            if let Some(agent_id) = &row.agent_id {
+                                div { class: "flex flex-col gap-0.5",
+                                    span { class: "font-medium", "{agent_id}" }
+                                    span { class: "text-[10px] opacity-60",
+                                        CidDisplay { cid: row.author.clone(), len: Some(8) }
+                                    }
+                                }
+                            } else {
+                                CidDisplay { cid: row.author.clone(), len: Some(8) }
+                            }
+                        }
                         TdMuted { TimeAgo { wall_ns: row.wall_ns } }
                     }
                 }

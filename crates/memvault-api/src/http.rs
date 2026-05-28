@@ -1,43 +1,115 @@
 //! HTTP client implementing MemvaultClient — talks to the daemon's REST API.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use reqwest::header::{AUTHORIZATION, HeaderValue};
 
 use memvault_auth::Role;
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 
+use crate::agent_identity::AgentIdentity;
 use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
 use crate::types::{
     BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View,
 };
 
+/// JWT TTL for auto-issued tokens. 1h is plenty for typical CLI/MCP sessions
+/// and bounds the blast radius if a token is stolen.
+const TOKEN_TTL_SECS: u64 = 3600;
+/// Renew this many seconds before expiry — gives in-flight requests headroom.
+const TOKEN_RENEW_SLACK_SECS: u64 = 60;
+
+/// Wrapper around `reqwest::Client` that injects a freshly-issued JWT bearer
+/// header on every outgoing request. Holds an [`AgentIdentity`] (cheap-to-clone
+/// `Arc`) and issues a JWT signed with the agent's private key whenever the
+/// cached one is within [`TOKEN_RENEW_SLACK_SECS`] of expiry.
+///
+/// Existing call sites can keep using `client.get(url)` / `client.post(url)`
+/// etc. — they now return a [`reqwest::RequestBuilder`] with the bearer set.
+struct AuthClient {
+    inner: reqwest::Client,
+    identity: Option<Arc<AgentIdentity>>,
+    cached: Mutex<Option<(String, u64)>>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+impl AuthClient {
+    fn new(identity: Option<Arc<AgentIdentity>>) -> std::result::Result<Self, anyhow::Error> {
+        Ok(Self {
+            inner: reqwest::Client::builder().build()?,
+            identity,
+            cached: Mutex::new(None),
+        })
+    }
+
+    /// Get a valid bearer token, regenerating if cached one is near expiry.
+    /// `None` if no identity is configured (unauthenticated client).
+    fn bearer(&self) -> Option<String> {
+        let id = self.identity.as_ref()?;
+        let now = now_secs();
+        let mut cache = self.cached.lock().ok()?;
+        if let Some((tok, exp)) = cache.as_ref() {
+            if *exp > now + TOKEN_RENEW_SLACK_SECS {
+                return Some(tok.clone());
+            }
+        }
+        let tok = id.issue_jwt("read write admin", TOKEN_TTL_SECS).ok()?;
+        *cache = Some((tok.clone(), now + TOKEN_TTL_SECS));
+        Some(tok)
+    }
+
+    fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.bearer() {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    }
+
+    pub fn get(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.with_auth(self.inner.get(url))
+    }
+    pub fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.with_auth(self.inner.post(url))
+    }
+    pub fn put(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.with_auth(self.inner.put(url))
+    }
+    pub fn delete(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.with_auth(self.inner.delete(url))
+    }
+    pub fn patch(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.with_auth(self.inner.patch(url))
+    }
+}
+
 /// HTTP client that implements MemvaultClient by talking to the daemon's REST API.
 pub struct HttpApiClient {
-    client: reqwest::Client,
+    client: AuthClient,
     base_url: String,
 }
 
 impl HttpApiClient {
-    pub fn new(base_url: &str, token: &str) -> std::result::Result<Self, anyhow::Error> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if !token.is_empty() {
-            let auth_value = format!("Bearer {token}");
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&auth_value)
-                    .map_err(|e| anyhow::anyhow!("invalid token: {e}"))?,
-            );
-        }
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()?;
+    /// Construct an HTTP client that authenticates with JWTs issued from the
+    /// given agent identity. Pass `None` for an unauthenticated client (will
+    /// only succeed against endpoints that don't require auth).
+    ///
+    /// JWTs are auto-renewed before expiry — long-lived sessions stay valid.
+    pub fn new(
+        base_url: &str,
+        identity: Option<Arc<AgentIdentity>>,
+    ) -> std::result::Result<Self, anyhow::Error> {
         Ok(Self {
-            client,
+            client: AuthClient::new(identity)?,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
     }

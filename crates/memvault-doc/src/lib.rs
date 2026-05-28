@@ -11,6 +11,7 @@ pub mod gc;
 pub mod graph;
 pub mod head;
 pub mod history;
+pub mod link;
 pub mod log;
 pub mod op;
 pub mod snapshot;
@@ -25,6 +26,10 @@ pub use gc::collectible_ops;
 pub use graph::{Edge, Entity};
 pub use head::DocumentHead;
 pub use history::{doc_at_op, doc_diff};
+pub use link::{
+    ALLOWED_BODY_RELATIONS, LinkProvenance, ResolvedLink, demote_relation, pending_node_for_alias,
+    reconcile,
+};
 pub use log::{OpEntry, OpLog};
 pub use op::{Op, TextOp, TextPatch};
 pub use snapshot::Snapshot;

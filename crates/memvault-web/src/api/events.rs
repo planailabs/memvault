@@ -51,5 +51,8 @@ fn event_to_sse(event: MemvaultEvent) -> Event {
         MemvaultEvent::BucketCreated { bucket_id, cid } => Event::default()
             .event("bucket_created")
             .data(serde_json::json!({"bucket_id": bucket_id.to_string(), "cid": hex::encode(&cid)}).to_string()),
+        MemvaultEvent::SigchainBlock { label, cid } => Event::default()
+            .event("sigchain_block")
+            .data(serde_json::json!({"label": label, "cid": hex::encode(&cid)}).to_string()),
     }
 }

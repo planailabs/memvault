@@ -37,7 +37,17 @@ pub enum OpKind {
 pub struct AuditRecord {
     pub cid: Vec<u8>,
     pub op_kind: OpKind,
+    /// Envelope-level author. For Signed<T> envelopes this is the node
+    /// pubkey that signed; for legacy raw-JSON envelopes it's whoever the
+    /// `effective_author()` was at write time (agent pubkey when an
+    /// agent identity was bound, otherwise the node peer_id).
     pub author: Vec<u8>,
+    /// CID of the `AgentAttestation` covering the agent that authored
+    /// this write, when present. Set on Signed<T> envelopes whenever an
+    /// agent identity was bound. UIs should prefer this for "who did
+    /// this" attribution.
+    #[serde(default)]
+    pub agent_attestation: Option<Vec<u8>>,
     pub wall_ns: u64,
     pub doc_id: Option<DocId>,
     pub entity_id: Option<Vec<u8>>,
@@ -76,7 +86,11 @@ pub fn query_audit(
     let mut records = Vec::new();
     for cid in cids {
         if let Some(data) = store.get_block(&cid)? {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+            // Use deserialize_block — handles both raw-JSON envelopes
+            // (legacy) and DAG-CBOR Signed<T> envelopes (post-Phase 1).
+            // The previous direct `serde_json::from_slice` only matched
+            // JSON-stored bytes, silently dropping every CBOR envelope.
+            if let Some(val) = memvault_store::deserialize_block(&data) {
                 let record = parse_audit_record(&cid, &val);
                 if let Some(ref filter_doc) = query.doc_id {
                     if record.doc_id.as_ref() != Some(filter_doc) {
@@ -97,49 +111,87 @@ pub fn query_audit(
 }
 
 pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
-    let author = val
-        .get("author")
-        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
+    let view = memvault_store::EnvelopeView::from_value(val.clone());
+
+    let author: Vec<u8> = view
+        .as_ref()
+        .map(|v| v.author())
         .unwrap_or_default();
 
-    let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+    let wall_ns = view
+        .as_ref()
+        .and_then(|v| v.field("wall_ns").and_then(|x| x.as_u64()))
+        .unwrap_or(0);
 
-    let tags: Vec<(String, String)> = val
-        .get("tags")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    // Signed<T> envelopes serialize `tags` as a list of `Tag` structs
+    // (`[{"scope":"x","label":"y"}, …]`); the unsigned fallback path
+    // uses nested arrays (`[["x","y"], …]`). Try the struct shape first,
+    // fall back to the tuple shape so both round-trip into the
+    // canonical `Vec<(String, String)>` representation.
+    let tags: Vec<(String, String)> = view
+        .as_ref()
+        .and_then(|v| v.field("tags"))
+        .and_then(|raw| {
+            if let Ok(structured) =
+                serde_json::from_value::<Vec<memvault_core::Tag>>(raw.clone())
+            {
+                Some(
+                    structured
+                        .into_iter()
+                        .map(|t| (t.scope, t.label))
+                        .collect(),
+                )
+            } else {
+                serde_json::from_value::<Vec<(String, String)>>(raw.clone()).ok()
+            }
+        })
         .unwrap_or_default();
 
-    let op_kind = if let Some(p) = val.get("payload") {
+    // First try the Op-variant tags inside `payload` (the Signed<T>
+    // shape that put_doc / add_entity / add_link etc. produce). If none
+    // matches, FALL THROUGH to the kind/type/tag check below — the
+    // previous version hard-returned Other("unknown") here, which made
+    // every attachment envelope and every annotation (extraction,
+    // tag_update, retraction) come back as Other("unknown") because
+    // their payload object lacks any Op variant key.
+    let payload_op_kind = val.get("payload").and_then(|p| {
         if p.get("DocCreate").is_some() {
-            OpKind::DocCreate
+            Some(OpKind::DocCreate)
         } else if p.get("DocEdit").is_some() {
-            OpKind::DocEdit
+            Some(OpKind::DocEdit)
         } else if p.get("AttachFile").is_some() {
-            OpKind::AttachFile
+            Some(OpKind::AttachFile)
         } else if p.get("DetachFile").is_some() {
-            OpKind::DetachFile
+            Some(OpKind::DetachFile)
         } else if p.get("EntityCreate").is_some() {
-            OpKind::EntityCreate
+            Some(OpKind::EntityCreate)
         } else if p.get("EdgeAdd").is_some() {
-            OpKind::EdgeAdd
+            Some(OpKind::EdgeAdd)
         } else if p.get("EdgeRemove").is_some() {
-            OpKind::EdgeRemove
+            Some(OpKind::EdgeRemove)
         } else if p.get("BucketCreate").is_some() {
-            OpKind::BucketCreate
+            Some(OpKind::BucketCreate)
         } else if p.get("BucketRename").is_some() {
-            OpKind::BucketRename
+            Some(OpKind::BucketRename)
         } else if p.get("BucketAttach").is_some() {
-            OpKind::BucketAttach
+            Some(OpKind::BucketAttach)
         } else if p.get("BucketArchive").is_some() {
-            OpKind::BucketArchive
+            Some(OpKind::BucketArchive)
         } else if p.get("BucketBind").is_some() {
-            OpKind::BucketBind
+            Some(OpKind::BucketBind)
         } else {
-            OpKind::Other("unknown".into())
+            None
         }
+    });
+
+    let op_kind = if let Some(k) = payload_op_kind {
+        k
     } else {
-        let kind = val.get("kind").and_then(|v| v.as_str());
-        let ann_type = val.get("type").and_then(|v| v.as_str());
+        // EnvelopeView handles the legacy-vs-Signed<T> shape unification,
+        // so the same match works whether `kind`/`type` live at the top
+        // level (legacy raw JSON) or inside `payload` (Signed<T>).
+        let kind = view.as_ref().and_then(|v| v.str_field("kind"));
+        let ann_type = view.as_ref().and_then(|v| v.str_field("type"));
         let kind_tag = tags
             .iter()
             .find(|(s, _)| s == "kind")
@@ -200,15 +252,19 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         None
     });
 
-    // For attachment envelopes, extract the manifest_cid.
-    let attachment_cid = val
-        .get("manifest_cid")
-        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+    let attachment_cid: Option<Vec<u8>> =
+        view.as_ref().and_then(|v| v.get_as("manifest_cid"));
+
+    // Agent attribution lives in `agent_attestation` on Signed<T> v3+
+    // envelopes. Absent on legacy raw-JSON envelopes (None).
+    let agent_attestation: Option<Vec<u8>> =
+        view.as_ref().and_then(|v| v.agent_attestation_cid());
 
     AuditRecord {
         cid: cid.to_vec(),
         op_kind,
         author,
+        agent_attestation,
         wall_ns,
         doc_id,
         entity_id,

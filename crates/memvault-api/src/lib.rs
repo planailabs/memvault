@@ -1,6 +1,7 @@
 //! `memvault-api` — Agent-facing API, RPC layer, and client trait for memvault.
 
 pub mod agent_identity;
+pub mod bootstrap;
 pub mod client;
 pub mod docs;
 pub mod error;
@@ -8,9 +9,12 @@ pub mod files;
 pub mod health;
 #[cfg(feature = "http-client")]
 pub mod http;
+pub mod link_reconcile;
 pub mod local;
 pub mod metrics;
+pub mod node_key;
 pub mod rebuild;
+pub mod sigchain;
 pub mod otel;
 pub mod quotas;
 pub mod rotation;
@@ -21,6 +25,7 @@ pub mod types;
 pub mod vfs;
 
 pub use client::MemvaultClient;
+pub use ed25519_dalek;
 pub use error::{ApiError, Result};
 #[cfg(feature = "http-client")]
 pub use http::HttpApiClient;
@@ -41,15 +46,29 @@ pub struct ClientArgs {
     #[arg(long, env = "MEMVAULT_URL", default_value = "http://127.0.0.1:8401")]
     pub url: String,
 
-    /// Bearer token file (HTTP mode).
-    #[arg(long, env = "MEMVAULT_TOKEN_FILE")]
-    pub token_file: Option<std::path::PathBuf>,
+    /// Agent identity directory (HTTP mode). The directory must contain
+    /// `private_key.pem`, `attestation.cbor`, `enrollment.cbor`, and
+    /// `agent.json` (as produced by `AgentIdentity::generate_local`).
+    /// Defaults to `<data_local_dir>/memvault/identity/ui_agent` for
+    /// localhost daemon access.
+    #[arg(long, env = "MEMVAULT_IDENTITY_DIR")]
+    pub identity_dir: Option<std::path::PathBuf>,
+}
+
+#[cfg(feature = "http-client")]
+fn default_identity_dir() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("memvault")
+        .join("identity")
+        .join("ui_agent")
 }
 
 #[cfg(feature = "http-client")]
 impl ClientArgs {
     /// Connect to memvault using these CLI args.
-    /// Returns a local client if `--db` is set, otherwise an HTTP client.
+    /// Returns a local client if `--db` is set, otherwise an HTTP client
+    /// authenticated with a JWT issued from the loaded agent identity.
     pub async fn connect(&self) -> std::result::Result<Box<dyn MemvaultClient>, anyhow::Error> {
         if let Some(db_path) = &self.db {
             use memvault_query::{QuotaManager, TextIndex};
@@ -71,13 +90,18 @@ impl ClientArgs {
             )?;
             Ok(Box::new(client))
         } else {
-            let token = self
-                .token_file
-                .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let client = HttpApiClient::new(&self.url, &token)?;
+            // Load the agent identity and hand it to HttpApiClient. Every
+            // outgoing request gets a freshly-issued JWT signed with the
+            // agent's private key, auto-renewed near expiry.
+            let identity_dir = self.identity_dir.clone().unwrap_or_else(default_identity_dir);
+            let identity =
+                crate::agent_identity::AgentIdentity::load(&identity_dir).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to load agent identity from {}: {e} — pass --identity-dir or set MEMVAULT_IDENTITY_DIR",
+                        identity_dir.display()
+                    )
+                })?;
+            let client = HttpApiClient::new(&self.url, Some(std::sync::Arc::new(identity)))?;
             Ok(Box::new(client))
         }
     }
@@ -122,8 +146,11 @@ pub async fn connect(
         let url = opts
             .url
             .unwrap_or_else(|| "http://127.0.0.1:8401".to_string());
-        let token = opts.token.unwrap_or_default();
-        let client = HttpApiClient::new(&url, &token)?;
+        // ConnectOptions::token is preserved for callers that already issued
+        // their own JWT externally — but the canonical path now wires through
+        // an AgentIdentity via ClientArgs. Unauthenticated client is the
+        // fallback here.
+        let client = HttpApiClient::new(&url, None)?;
         Ok(Box::new(client))
     }
 }

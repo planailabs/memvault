@@ -385,6 +385,7 @@ async fn private_bucket_attach_after_genesis() {
         peer_id.to_vec(),
         vec![0u8; 32], // no cluster yet
     );
+    pre_client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]));
 
     // Create a bucket — should be private (no cluster).
     let bucket_id = pre_client
@@ -433,7 +434,7 @@ async fn private_bucket_attach_after_genesis() {
 
     // Re-create client with the cluster_id (as happens on daemon restart after genesis).
     // The constructor auto-binds unbound buckets.
-    let mut post_client = LocalClient::new(
+    let post_client = LocalClient::new(
         Arc::clone(&store),
         Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
@@ -444,6 +445,7 @@ async fn private_bucket_attach_after_genesis() {
     let mut seed = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
     post_client.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&seed));
+    post_client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]));
 
     // The bucket should now be bound (auto-bind on open) but still private.
     let info = post_client.bucket_get(&bucket_id).await.unwrap().unwrap();
@@ -517,6 +519,7 @@ async fn attach_also_binds_unbound_bucket() {
         peer_id.to_vec(),
         vec![0u8; 32],
     );
+    pre_client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]));
     let bucket_id = pre_client
         .bucket_create(
             "will-attach",
@@ -549,6 +552,7 @@ async fn attach_also_binds_unbound_bucket() {
         peer_id.to_vec(),
         cluster_id.0.to_vec(),
     );
+    post_client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]));
 
     // At this point the bucket is auto-bound but still private.
     let info = post_client.bucket_get(&bucket_id).await.unwrap().unwrap();

@@ -99,6 +99,12 @@ fn AdminView(status: NodeStatusData, tokens: Vec<TokenRow>) -> Element {
         div { class: "space-y-6",
             PageHeader { {t!("admin-title")} }
 
+            // Quick links
+            div { class: "flex flex-wrap gap-2",
+                a { href: "/admin/tokens", class: "btn btn-secondary", "Tokens" }
+                a { href: "/admin/trust", class: "btn btn-secondary", "Trust tree" }
+            }
+
             // Stats
             div { class: "grid grid-cols-2 lg:grid-cols-4 gap-3",
                 StatBlock { label: t!("admin-stat-documents"), value: format!("{}", status.doc_count) }

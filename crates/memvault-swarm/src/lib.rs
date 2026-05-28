@@ -20,8 +20,9 @@ use libp2p::swarm::SwarmEvent;
 use tokio::sync::mpsc;
 
 use memvault_net::{
-    BlockEntry, BlockRequest, BlockResponse, HeadAnnouncement, RangeFingerprint,
-    StandaloneMemvaultBehaviour, StandaloneMemvaultBehaviourEvent,
+    BlockEntry, BlockRequest, BlockResponse, HeadAnnouncement, JoinRefuseReason, JoinRequest,
+    JoinResponse, JoinResult, RangeFingerprint, StandaloneMemvaultBehaviour,
+    StandaloneMemvaultBehaviourEvent,
 };
 use memvault_store::MemvaultStore;
 
@@ -53,6 +54,36 @@ pub struct OutboundHead {
     pub bucket_id: Option<Vec<u8>>,
 }
 
+/// Configuration for the `/ai-memvault/join/1.0` protocol — both the
+/// client-side (we have a pending token, looking for admin to accept it)
+/// and server-side (we are admin, accept tokens and mint `NodeAttestation`).
+#[derive(Clone, Default)]
+pub struct JoinConfig {
+    /// Encoded `mvjoin1:…` token. If present, the sync loop sends a
+    /// `JoinRequest` to each peer on first connect until one returns
+    /// `Success`. Cleared by [`on_join_success`].
+    pub pending_token: Option<String>,
+    /// This node's ed25519 verifying key (sent as `peer_id` in the request).
+    /// Used by admin to verify the requester controls the key it claims.
+    pub node_pubkey: [u8; 32],
+    /// Admin signing key, set only on the admin node. When present, this
+    /// node serves incoming `JoinRequest`s by minting a `NodeAttestation`.
+    pub admin_signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Cluster admin VERIFYING key, from the local pin file
+    /// (`cluster_admin_genesis.cbor`). Used by the sync receiver to
+    /// signature-verify incoming `NodeAttestation` blocks BEFORE they
+    /// land in the store — sync is otherwise a wide-open block ingress
+    /// path and an unsigned-or-foreign-admin attestation would corrupt
+    /// trust on the receiver.
+    pub pinned_admin_pubkey: Option<[u8; 32]>,
+    /// Cluster ID — bound into NodeAttestations we mint as admin.
+    pub cluster_id: [u8; 32],
+    /// Called once after a successful join. Callers typically use this to
+    /// delete the pending-token file on disk so we don't try to redeem it
+    /// again on the next restart.
+    pub on_join_success: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
 /// Run the swarm event loop with full block sync.
 ///
 /// This function blocks until ctrl+c is received.
@@ -61,12 +92,19 @@ pub async fn run_sync_loop(
     store: Arc<MemvaultStore>,
     mut head_rx: mpsc::UnboundedReceiver<OutboundHead>,
     config: SyncConfig,
+    mut join_config: JoinConfig,
 ) {
     let mut synced_peers: HashSet<libp2p::PeerId> = HashSet::new();
     // Track peer → cluster_id for visibility enforcement.
     let mut peer_clusters: HashMap<libp2p::PeerId, Vec<u8>> = HashMap::new();
     // Periodic resync timer to heal partial sync.
     let mut resync_timer = tokio::time::interval(RESYNC_INTERVAL);
+    // Retry timer for /join/1.0 — re-broadcast the JoinRequest while
+    // we still hold a pending token. Covers transient request-response
+    // failures (admin briefly offline, codec retries, etc.) without
+    // requiring a peer reconnect.
+    let mut join_retry_timer = tokio::time::interval(Duration::from_secs(15));
+    join_retry_timer.tick().await; // skip immediate fire
     resync_timer.tick().await; // consume the immediate first tick
 
     loop {
@@ -82,6 +120,12 @@ pub async fn run_sync_loop(
                         tracing::info!(%peer_id, "peer connected");
                         if synced_peers.insert(peer_id) {
                             request_remote_heads(swarm, &store, &config, peer_id);
+                        }
+                        // If we have a pending join token, redeem it with
+                        // this peer. Only admin will reply Success — other
+                        // peers respond NotAdminPeer and we keep waiting.
+                        if let Some(token) = &join_config.pending_token {
+                            send_join_request(swarm, peer_id, token, join_config.node_pubkey);
                         }
                     }
 
@@ -152,7 +196,7 @@ pub async fn run_sync_loop(
                             }
                         )
                     )) => {
-                        serve_block_request(swarm, &store, peer, channel, request, &config.cluster_id, &peer_clusters);
+                        serve_block_request(swarm, &store, peer, channel, request, &config.cluster_id, &peer_clusters, &join_config);
                     }
 
                     // ── Block exchange: process responses ──
@@ -167,7 +211,7 @@ pub async fn run_sync_loop(
                             }
                         )
                     )) => {
-                        handle_block_response(swarm, &store, peer, response);
+                        handle_block_response(swarm, &store, peer, response, &join_config);
                     }
 
                     // ── Block exchange: errors ──
@@ -188,6 +232,43 @@ pub async fn run_sync_loop(
                         )
                     )) => {
                         tracing::warn!(%peer, %error, "block exchange inbound failure");
+                    }
+
+                    // ── /join/1.0 server: incoming JoinRequest ──
+                    Some(SwarmEvent::Behaviour(
+                        StandaloneMemvaultBehaviourEvent::Join(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message: libp2p::request_response::Message::Request {
+                                    channel, request, ..
+                                },
+                                ..
+                            }
+                        )
+                    )) => {
+                        serve_join_request(swarm, &store, peer, channel, request, &join_config);
+                    }
+
+                    // ── /join/1.0 client: response to our JoinRequest ──
+                    Some(SwarmEvent::Behaviour(
+                        StandaloneMemvaultBehaviourEvent::Join(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message: libp2p::request_response::Message::Response {
+                                    response, ..
+                                },
+                                ..
+                            }
+                        )
+                    )) => {
+                        if handle_join_response(&store, peer, response, &join_config) {
+                            // Success. Clear pending token + fire callback
+                            // (caller removes the pending-token file).
+                            join_config.pending_token = None;
+                            if let Some(cb) = join_config.on_join_success.take() {
+                                cb();
+                            }
+                        }
                     }
 
                     Some(SwarmEvent::Behaviour(_)) => {}
@@ -234,6 +315,25 @@ pub async fn run_sync_loop(
                                     store_version: memvault_core::BLOCKSTORE_VERSION,
                                 },
                             );
+                        }
+                    }
+                }
+            }
+
+            // ── /join/1.0 retry while a token is pending ──
+            // Rebroadcasts the JoinRequest to every connected peer until
+            // one returns Success and clears the pending token. Covers
+            // transient drops without waiting for peer reconnect.
+            _ = join_retry_timer.tick() => {
+                if let Some(token) = join_config.pending_token.clone() {
+                    let peers: Vec<_> = synced_peers.iter().copied().collect();
+                    if !peers.is_empty() {
+                        tracing::debug!(
+                            peers = peers.len(),
+                            "retrying /join/1.0 (still pending)"
+                        );
+                        for peer_id in peers {
+                            send_join_request(swarm, peer_id, &token, join_config.node_pubkey);
                         }
                     }
                 }
@@ -380,7 +480,27 @@ fn serve_block_request(
     request: BlockRequest,
     cluster_id: &[u8],
     peer_clusters: &std::collections::HashMap<libp2p::PeerId, Vec<u8>>,
+    join_config: &JoinConfig,
 ) {
+    // Refuse to serve blocks to peers that aren't an attested cluster
+    // node. We pull the trusted-node PeerId set from sigchain blocks
+    // each call — cheap relative to network IO, and avoids holding a
+    // shared trust handle in the swarm. Pre-genesis daemons (no pinned
+    // admin) skip the check.
+    if join_config.pinned_admin_pubkey.is_some()
+        && !peer_is_trusted_node(store, &peer, join_config)
+    {
+        tracing::warn!(
+            %peer,
+            "refusing to serve blocks: peer is not an attested cluster node"
+        );
+        let _ = swarm
+            .behaviour_mut()
+            .block_exchange
+            .send_response(channel, BlockResponse { blocks: vec![] });
+        return;
+    }
+
     // Reject requests from peers with a different blockstore version.
     let local_version = memvault_core::BLOCKSTORE_VERSION;
     if request.store_version != local_version {
@@ -546,11 +666,221 @@ fn check_block_access(
 /// content_root / chunk CIDs), those dependent CIDs are queued for
 /// fetch. Without this, file data chunks are invisible to RBSR (they
 /// have no BY_TIME entry) and silently diverge between nodes.
+/// Decide how a synced block should be persisted. Sigchain blocks are
+/// detected by their CBOR shape and signature-verified before storage;
+/// invalid attestations / revocations are dropped at sync ingress so
+/// they never pollute trust state. Non-sigchain blocks pass through.
+enum SyncDisposition {
+    /// Drop the block — signature invalid, cluster mismatch, or unknown
+    /// admin. Better to fail closed than to store a forgery.
+    Drop,
+    /// Store as opaque block (existing put_block + reindex_block path).
+    AsIs,
+    /// Store as a sigchain block with the given envelope tags. Tags are
+    /// what `reindex_block` would assign if it could parse the CBOR
+    /// shape — we set them explicitly here so the receiver's sigchain
+    /// index + watcher see the block.
+    AsSigchain(memvault_store::EnvelopeMeta),
+}
+
+/// Does this libp2p peer correspond to a node currently attested by
+/// the cluster admin?
+///
+/// Walks the local NodeAttestation blocks (`sigchain/node_att` tag),
+/// verifies each against the pinned admin pubkey, derives the libp2p
+/// PeerId from the attested ed25519 pubkey, and compares. Returns true
+/// on first match. Cheap when the cluster is small; cache later if it
+/// matters.
+fn peer_is_trusted_node(
+    store: &MemvaultStore,
+    peer: &libp2p::PeerId,
+    join_config: &JoinConfig,
+) -> bool {
+    let Some(admin_pk) = join_config.pinned_admin_pubkey else {
+        return false;
+    };
+    let Ok(admin_vk) = ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) else {
+        return false;
+    };
+
+    let cids = match store.query_by_tag("sigchain", "node_att", 0, 1024) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    for cid in cids {
+        let Ok(Some(bytes)) = store.get_block(&cid) else {
+            continue;
+        };
+        let Ok(att) =
+            serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
+        else {
+            continue;
+        };
+        if att.cluster_id.0 != join_config.cluster_id {
+            continue;
+        }
+        if att.verify_signature(&admin_vk).is_err() {
+            continue;
+        }
+        if att.member.0.len() != 32 {
+            continue;
+        }
+        let mut pkbytes = [0u8; 32];
+        pkbytes.copy_from_slice(&att.member.0);
+        let Ok(ed_pk) = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pkbytes) else {
+            continue;
+        };
+        let candidate: libp2p::PeerId =
+            libp2p::identity::PublicKey::from(ed_pk).to_peer_id();
+        if &candidate == peer {
+            return true;
+        }
+    }
+    false
+}
+
+/// Outcome of validating a candidate sigchain block from a sync ingress.
+/// Used internally by [`vet_sync_block`] to compress the per-type
+/// validation arms into a single dispatcher.
+enum SyncSigchainVerdict {
+    /// Bytes don't look like any known sigchain type — caller treats
+    /// the block as a regular envelope and lets the receiver's
+    /// existing indexer handle it.
+    NotSigchain,
+    /// Bytes parsed as a known sigchain type but the signature didn't
+    /// verify (or admin/cluster mismatch). Reason string is logged at
+    /// the call site for debugging.
+    Drop {
+        reason: &'static str,
+    },
+    /// Sigchain block validated successfully. Caller wraps `label`
+    /// + `signer_pubkey` into the canonical `AsSigchain` meta.
+    Accept {
+        label: &'static str,
+        signer_pubkey: Vec<u8>,
+    },
+}
+
+/// Single dispatcher for all sigchain block types arriving via sync.
+/// Each arm: parse → verify signature → return label + signer pubkey,
+/// or Drop with a reason. Centralises the per-type validation that
+/// used to live as four near-duplicate arms inside `vet_sync_block`.
+fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSigchainVerdict {
+    let cluster_id = join_config.cluster_id;
+
+    // NodeAttestation: admin-signed; verify against the pinned admin.
+    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(bytes) {
+        if att.cluster_id.0 == cluster_id && !att.member.0.is_empty() {
+            let Some(admin_pk) = join_config.pinned_admin_pubkey else {
+                return SyncSigchainVerdict::Drop {
+                    reason: "node_att: no pinned admin pubkey",
+                };
+            };
+            let Ok(admin_vk) = ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) else {
+                return SyncSigchainVerdict::Drop {
+                    reason: "node_att: pinned admin pubkey is not a valid ed25519 key",
+                };
+            };
+            if att.verify_signature(&admin_vk).is_err() {
+                return SyncSigchainVerdict::Drop {
+                    reason: "node_att: signature does not verify against pinned admin",
+                };
+            }
+            return SyncSigchainVerdict::Accept {
+                label: "node_att",
+                signer_pubkey: att.member.0.clone(),
+            };
+        }
+    }
+
+    // AgentAttestation: node-signed; chain-up-to-admin check happens
+    // later in `scan_trusted_agents`.
+    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(bytes) {
+        if att.verify_signature().is_err() {
+            return SyncSigchainVerdict::Drop {
+                reason: "agent_att: bad node signature",
+            };
+        }
+        return SyncSigchainVerdict::Accept {
+            label: "agent_att",
+            signer_pubkey: att.node_pubkey.to_vec(),
+        };
+    }
+
+    // AgentRevocation: node-signed; trust-of-node check is deferred.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentRevocation>(bytes) {
+        if rev.verify_signature().is_err() {
+            return SyncSigchainVerdict::Drop {
+                reason: "agent_rev: bad node signature",
+            };
+        }
+        return SyncSigchainVerdict::Accept {
+            label: "agent_rev",
+            signer_pubkey: rev.node_pubkey.to_vec(),
+        };
+    }
+
+    // NodeRevocation: admin-signed; require pinned admin match.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeRevocation>(bytes) {
+        let Some(pin) = join_config.pinned_admin_pubkey else {
+            return SyncSigchainVerdict::Drop {
+                reason: "node_rev: no pinned admin pubkey",
+            };
+        };
+        if rev.admin_pubkey != pin || rev.verify_signature().is_err() {
+            return SyncSigchainVerdict::Drop {
+                reason: "node_rev: bad signature or admin mismatch",
+            };
+        }
+        return SyncSigchainVerdict::Accept {
+            label: "node_rev",
+            signer_pubkey: rev.admin_pubkey.to_vec(),
+        };
+    }
+
+    SyncSigchainVerdict::NotSigchain
+}
+
+fn vet_sync_block(
+    bytes: &[u8],
+    join_config: &JoinConfig,
+    author_peer_pubkey: Option<[u8; 32]>,
+) -> SyncDisposition {
+    match validate_sigchain_for_sync(bytes, join_config) {
+        SyncSigchainVerdict::NotSigchain => SyncDisposition::AsIs,
+        SyncSigchainVerdict::Drop { reason } => {
+            tracing::warn!(reason, "dropped sync'd sigchain block");
+            SyncDisposition::Drop
+        }
+        SyncSigchainVerdict::Accept {
+            label,
+            signer_pubkey,
+        } => {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let author = author_peer_pubkey
+                .map(|p| p.to_vec())
+                .unwrap_or(signer_pubkey);
+            SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
+                author,
+                tags: vec![("sigchain".to_string(), label.to_string())],
+                wall_ns: now_ns,
+                cluster_id: Some(join_config.cluster_id.to_vec()),
+                ..Default::default()
+            })
+        }
+    }
+}
+
 fn handle_block_response(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     response: BlockResponse,
+    join_config: &JoinConfig,
 ) {
     let mut stored = 0usize;
     let mut missing_cids: Vec<Vec<u8>> = Vec::new();
@@ -569,13 +899,29 @@ fn handle_block_response(
             if store.get_block(&entry.cid).ok().flatten().is_some() {
                 continue; // already have it
             }
-            if let Err(e) = store.put_block(&entry.cid, &entry.data) {
-                tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
-                continue;
+            // Gate sigchain block ingress: a synced NodeAttestation must
+            // verify against the pinned admin pubkey before being stored.
+            // Other shapes pass through to the existing path.
+            match vet_sync_block(&entry.data, join_config, None) {
+                SyncDisposition::Drop => continue,
+                SyncDisposition::AsSigchain(meta) => {
+                    if let Err(e) = store.insert_envelope(&entry.cid, &entry.data, &meta) {
+                        tracing::warn!(
+                            cid = %hex::encode(&entry.cid), %e,
+                            "failed to insert synced sigchain block"
+                        );
+                        continue;
+                    }
+                }
+                SyncDisposition::AsIs => {
+                    if let Err(e) = store.put_block(&entry.cid, &entry.data) {
+                        tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
+                        continue;
+                    }
+                    let _ = store.reindex_block(&entry.cid, &entry.data);
+                    let _ = store.reindex_bucket_decl(&entry.cid, &entry.data);
+                }
             }
-            let _ = store.reindex_block(&entry.cid, &entry.data);
-            // Also try bucket-specific reindexing (BUCKETS table).
-            let _ = store.reindex_bucket_decl(&entry.cid, &entry.data);
             stored += 1;
             tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
 
@@ -626,28 +972,23 @@ fn handle_block_response(
 /// Without this, file data chunks (stored via `put_block`, no BY_TIME
 /// entry) are invisible to RBSR and silently diverge between nodes.
 fn extract_dependent_cids(block_data: &[u8]) -> Vec<Vec<u8>> {
-    // Try JSON first (envelopes, manifests).
-    if let Some(val) = memvault_store::deserialize_block(block_data) {
+    // Try the canonical envelope view first — handles both legacy
+    // raw-JSON envelopes and Signed<T> payload-nested attachments.
+    if let Some(view) = memvault_store::EnvelopeView::parse(block_data) {
         let mut deps = Vec::new();
 
-        // Attachment envelope → manifest_cid
-        if let Some(mcid) = val
-            .get("manifest_cid")
-            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
-        {
+        // Attachment envelope → manifest_cid (top-level or in payload).
+        if let Some(mcid) = view.get_as::<Vec<u8>>("manifest_cid") {
             deps.push(mcid);
         }
 
-        // AttachmentManifest → content_root (UnixFS DAG root CID)
-        if let Some(root) = val
-            .get("content_root")
-            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
-        {
+        // AttachmentManifest → content_root (UnixFS DAG root CID).
+        if let Some(root) = view.get_as::<Vec<u8>>("content_root") {
             deps.push(root);
         }
 
-        // Causal / provenance links (envelope references to prior blocks)
-        if let Some(arr) = val.get("causal").and_then(|v| v.as_array()) {
+        // Causal links — always at the envelope level, not nested.
+        if let Some(arr) = view.field("causal").and_then(|v| v.as_array()) {
             for v in arr {
                 if let Ok(cid) = serde_json::from_value::<Vec<u8>>(v.clone()) {
                     deps.push(cid);
@@ -694,4 +1035,358 @@ fn collect_incomplete_cids(store: &MemvaultStore) -> Vec<Vec<u8>> {
     }
 
     missing
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// /ai-memvault/join/1.0 — node-attestation handshake.
+//
+// Server: any node that holds the cluster admin signing key accepts incoming
+// JoinRequests. The request carries a join-token issued by admin and the
+// requester's ed25519 pubkey. We verify the token's admin-signature with
+// the local admin key, verify the requester's libp2p PeerId matches the
+// claimed pubkey, then mint a NodeAttestation for the requester and return
+// it. The mint is persisted via insert_envelope so the store's index
+// notifier fires the usual sigchain pipeline (gossip, watcher updates).
+//
+// Client: any node carrying a pending token sends a JoinRequest to every
+// peer that connects. Only the admin will return Success; others return
+// NotAdminPeer (or other refuse codes). On Success we put_block the
+// returned attestation locally; reindex_block fires the notifier so our
+// own trust state picks it up live and we cease to be PreGenesis.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn send_join_request(
+    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    peer_id: libp2p::PeerId,
+    token: &str,
+    node_pubkey: [u8; 32],
+) {
+    let req = JoinRequest {
+        version: 1,
+        token_block: token.as_bytes().to_vec(),
+        peer_id: node_pubkey.to_vec(),
+        requested_ttl: None,
+        agent_id: None,
+        public_key: None,
+    };
+    let _ = swarm.behaviour_mut().join.send_request(&peer_id, req);
+    tracing::debug!(%peer_id, "sent /join/1.0 request");
+}
+
+fn serve_join_request(
+    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    store: &MemvaultStore,
+    peer: libp2p::PeerId,
+    channel: libp2p::request_response::ResponseChannel<JoinResponse>,
+    request: JoinRequest,
+    join_config: &JoinConfig,
+) {
+    let response = build_join_response(store, peer, &request, join_config);
+    let _ = swarm.behaviour_mut().join.send_response(channel, response);
+}
+
+fn build_join_response(
+    store: &MemvaultStore,
+    peer: libp2p::PeerId,
+    request: &JoinRequest,
+    join_config: &JoinConfig,
+) -> JoinResponse {
+    if request.version != 1 {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+    let Some(admin_sk) = &join_config.admin_signing_key else {
+        return refuse(JoinRefuseReason::NotAdminPeer);
+    };
+
+    // Decode the token. token_block is the raw mvjoin1: string bytes.
+    let token_str = match std::str::from_utf8(&request.token_block) {
+        Ok(s) => s,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    let token = match memvault_auth::decode_token_string(token_str) {
+        Ok(t) => t,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+
+    // Verify the token signature against our admin pubkey.
+    let admin_vk = admin_sk.verifying_key();
+    if token.verify_signature(&admin_vk).is_err() {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+
+    // Time bounds.
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    if let Err(e) = token.verify_time_bounds(now_ns) {
+        return match e {
+            memvault_auth::AuthError::GrantExpired => refuse(JoinRefuseReason::TokenExpired),
+            memvault_auth::AuthError::GrantNotYetValid => {
+                refuse(JoinRefuseReason::TokenNotYetValid)
+            }
+            _ => refuse(JoinRefuseReason::TokenInvalidSignature),
+        };
+    }
+
+    // Cluster_id must match ours.
+    if token.cluster_id.0 != join_config.cluster_id {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+
+    // Verify the libp2p peer's PeerId derives from the claimed pubkey.
+    // This proves the requester controls the key they're asking us to attest.
+    let claimed: [u8; 32] = match request.peer_id.as_slice().try_into() {
+        Ok(arr) => arr,
+        Err(_) => return refuse(JoinRefuseReason::PeerIdMismatch),
+    };
+    if !peer_id_matches_pubkey(peer, &claimed) {
+        return refuse(JoinRefuseReason::PeerIdMismatch);
+    }
+
+    // The token's CID — keys the CONSUMED_TOKENS / REVOCATIONS tables.
+    let token_cbor = match serde_ipld_dagcbor::to_vec(&token) {
+        Ok(b) => b,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    let token_cid = memvault_core::cid_from_bytes(&token_cbor).to_bytes();
+
+    if store.is_revoked(&token_cid).unwrap_or(false) {
+        return refuse(JoinRefuseReason::TokenRevoked);
+    }
+
+    // Build the would-be NodeAttestation. Ed25519 signing is
+    // deterministic given the same admin key + same payload, so the
+    // serialised attestation bytes (and hence the CID) are stable
+    // across multiple JoinRequests from the same peer with the same
+    // role / cluster. We use that determinism for idempotence: if the
+    // block already exists in our store, this is a retry — return the
+    // existing block without consuming another use of the token.
+    use ed25519_dalek::Signer;
+    let mut node_att = memvault_auth::NodeAttestation {
+        cluster_id: memvault_core::ClusterId(join_config.cluster_id),
+        member: memvault_core::PeerId(claimed.to_vec()),
+        role: token.role,
+        not_after_ns: u64::MAX,
+        issued_via: memvault_auth::AttestationOrigin::Direct,
+        signature: [0u8; 64],
+    };
+    let signing_bytes = match node_att.signing_bytes() {
+        Ok(b) => b,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    node_att.signature = admin_sk.sign(&signing_bytes).to_bytes();
+
+    let att_bytes = match serde_ipld_dagcbor::to_vec(&node_att) {
+        Ok(b) => b,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    let cid = memvault_core::cid_from_bytes(&att_bytes);
+    let cid_bytes = cid.to_bytes();
+
+    // Hard idempotence: BLOCKS-table existence check. Reliable
+    // regardless of BY_TAG state, race timing, or comparison gotchas.
+    // The previous tag-scan check (`already_attested`) was correct in
+    // theory but lost a race in practice when two JoinRequests from
+    // the same peer arrived ~20ms apart (libp2p retransmit, double
+    // ConnectionEstablished, etc.) — both saw "no attestation yet" if
+    // the redb commit hadn't propagated to the read txn in time.
+    let already_minted =
+        matches!(store.get_block(&cid_bytes), Ok(Some(_)));
+
+    if !already_minted {
+        // Honour max_uses BEFORE minting so we don't over-issue.
+        let used = store.get_token_consumption_count(&token_cid).unwrap_or(0);
+        if used >= token.max_uses {
+            return refuse(JoinRefuseReason::TokenAlreadyConsumed);
+        }
+    }
+
+    let meta = memvault_store::EnvelopeMeta {
+        author: claimed.to_vec(),
+        tags: vec![("sigchain".to_string(), "node_att".to_string())],
+        wall_ns: now_ns,
+        cluster_id: Some(join_config.cluster_id.to_vec()),
+        ..Default::default()
+    };
+    // insert_envelope is idempotent on the BLOCKS-table key (same CID
+    // overwrites with identical bytes) but adds a fresh BY_TAG entry
+    // every call. Skip the insert entirely on a hit to keep tag
+    // index clean.
+    if !already_minted {
+        if store.insert_envelope(&cid_bytes, &att_bytes, &meta).is_err() {
+            return refuse(JoinRefuseReason::TokenInvalidSignature);
+        }
+    }
+
+    // Record token consumption on first mint only.
+    if !already_minted {
+        if let Err(e) = store.record_token_consumption(&token_cid, &claimed, now_ns) {
+            tracing::warn!(%peer, %e, "failed to record token consumption");
+        }
+    }
+
+    tracing::info!(%peer, "minted NodeAttestation via /join/1.0");
+
+    // Bootstrap bundle: hand the joining peer the sigchain blocks it
+    // needs to verify cluster trust before its first block-exchange
+    // round (the trust gate in `serve_block_request` would otherwise
+    // refuse — peer isn't attested yet from admin's POV until the
+    // attestation we just minted reaches admin's trust state via the
+    // sigchain notifier, and from peer's POV admin isn't attested
+    // until admin's own NodeAttestation arrives). Bundling avoids the
+    // chicken-and-egg without opening up unauthenticated block
+    // exchange. Each block is shape-and-signature-verified at the
+    // peer via `vet_sync_block`, so a malicious admin can't inject
+    // arbitrary blocks here.
+    let bootstrap_blocks = gather_bootstrap_blocks(store);
+
+    JoinResponse {
+        version: 1,
+        result: JoinResult::Success {
+            attestation_block: att_bytes,
+            enrollment_block: None,
+            bootstrap_blocks,
+        },
+    }
+}
+
+/// Collect the sigchain blocks a joining peer needs to verify cluster
+/// trust before its first block-exchange round: every NodeAttestation
+/// we hold (so peer learns who else is attested) and every
+/// AdminGenesis block (the cluster's pin material, in case the peer
+/// wants to cross-check). Size is bounded by cluster size + 1.
+fn gather_bootstrap_blocks(store: &MemvaultStore) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for (kind, label) in &[
+        ("sigchain", "node_att"),
+        ("sigchain", "admin_genesis"),
+    ] {
+        if let Ok(cids) = store.query_by_tag(kind, label, 0, 1024) {
+            // Tag entries may repeat the same CID (pre-fix duplicate
+            // publishes); dedupe before reading.
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+            for cid in cids {
+                if !seen.insert(cid.clone()) {
+                    continue;
+                }
+                if let Ok(Some(bytes)) = store.get_block(&cid) {
+                    out.push(bytes);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn refuse(reason: JoinRefuseReason) -> JoinResponse {
+    JoinResponse {
+        version: 1,
+        result: JoinResult::Refuse {
+            reason,
+            try_peers: vec![],
+        },
+    }
+}
+
+fn peer_id_matches_pubkey(peer: libp2p::PeerId, pubkey: &[u8; 32]) -> bool {
+    let ed_pk = match libp2p::identity::ed25519::PublicKey::try_from_bytes(pubkey) {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+    let pk: libp2p::identity::PublicKey = ed_pk.into();
+    pk.to_peer_id() == peer
+}
+
+/// Returns `true` if the response was a successful node attestation that
+/// we persisted; `false` for refuse, decode failures, or any other case.
+fn handle_join_response(
+    store: &MemvaultStore,
+    peer: libp2p::PeerId,
+    response: JoinResponse,
+    join_config: &JoinConfig,
+) -> bool {
+    match response.result {
+        JoinResult::Success {
+            attestation_block,
+            bootstrap_blocks,
+            ..
+        } => {
+            // Bootstrap bundle first: each block (admin's
+            // NodeAttestation, AdminGenesis, etc.) goes through
+            // vet_sync_block for signature verification and proper
+            // tagging. After this, admin's identity is in our
+            // sigchain index — the block-exchange gate on the peer
+            // side won't refuse admin's serve_block_request once we
+            // ask. And from admin's POV, the attestation it just
+            // minted for us is already in admin's local sigchain, so
+            // admin's peer_is_trusted_node(us) returns true.
+            for boot in &bootstrap_blocks {
+                let boot_cid = memvault_core::cid_from_bytes(boot).to_bytes();
+                match vet_sync_block(boot, join_config, None) {
+                    SyncDisposition::AsSigchain(meta) => {
+                        if let Err(e) = store.insert_envelope(&boot_cid, boot, &meta) {
+                            tracing::warn!(%peer, %e, "failed to insert bootstrap block");
+                        }
+                    }
+                    SyncDisposition::Drop => {
+                        tracing::warn!(
+                            %peer,
+                            "dropped bootstrap block: signature does not verify"
+                        );
+                    }
+                    SyncDisposition::AsIs => {
+                        tracing::debug!(
+                            %peer,
+                            "ignoring non-sigchain bootstrap block"
+                        );
+                    }
+                }
+            }
+
+            // Now the main attestation_block (peer's own
+            // NodeAttestation). Same shape: vet + tag.
+            //
+            // Route through vet_sync_block so the NodeAttestation is
+            // signature-verified against the pinned admin pubkey AND
+            // tagged `sigchain/node_att`. Going through put_block +
+            // reindex_block here would store untagged bytes — the
+            // receiver's sigchain index would never see the entry and
+            // the watcher would never promote us out of PreGenesis.
+            let cid = memvault_core::cid_from_bytes(&attestation_block);
+            let cid_bytes = cid.to_bytes();
+            match vet_sync_block(&attestation_block, join_config, None) {
+                SyncDisposition::AsSigchain(meta) => {
+                    if let Err(e) = store.insert_envelope(&cid_bytes, &attestation_block, &meta) {
+                        tracing::warn!(%peer, %e, "failed to insert join attestation");
+                        return false;
+                    }
+                    tracing::info!(%peer, "received node attestation via /join/1.0");
+                    true
+                }
+                SyncDisposition::Drop => {
+                    tracing::warn!(
+                        %peer,
+                        "dropped /join/1.0 response: attestation does not verify \
+                         against pinned admin pubkey"
+                    );
+                    false
+                }
+                SyncDisposition::AsIs => {
+                    // Shouldn't happen — admin minted a NodeAttestation,
+                    // it has the right shape. Defensive fallback.
+                    tracing::warn!(
+                        %peer,
+                        "join response was not a recognized NodeAttestation; ignoring"
+                    );
+                    false
+                }
+            }
+        }
+        JoinResult::Refuse { reason, .. } => {
+            tracing::debug!(%peer, ?reason, "join refused");
+            false
+        }
+    }
 }

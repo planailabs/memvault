@@ -15,6 +15,7 @@ memvault-store = { path = "../memvault-store" }
 memvault-doc = { path = "../memvault-doc" }
 memvault-attach = { path = "../memvault-attach" }
 memvault-extract = { path = "../memvault-extract" }
+memvault-extract-abi = { path = "../memvault-extract-abi" }
 memvault-query = { path = "../memvault-query" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

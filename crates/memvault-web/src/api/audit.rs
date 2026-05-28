@@ -25,6 +25,11 @@ pub struct AuditRecordResponse {
     pub cid: String,
     pub op_kind: String,
     pub author: String,
+    /// Hex-encoded `agent_attestation` CID when the envelope was
+    /// written through the Signed<T> path with an agent identity
+    /// bound. `None` for legacy / pure-node writes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_attestation: Option<String>,
     pub wall_ns: u64,
     pub doc_id: Option<String>,
     pub tags: Vec<(String, String)>,
@@ -74,6 +79,7 @@ pub async fn query_audit(
             cid: hex::encode(&r.cid),
             op_kind: format!("{:?}", r.op_kind),
             author: hex::encode(&r.author),
+            agent_attestation: r.agent_attestation.as_ref().map(hex::encode),
             wall_ns: r.wall_ns,
             doc_id: r.doc_id.map(|d| hex::encode(d.0)),
             tags: r.tags,

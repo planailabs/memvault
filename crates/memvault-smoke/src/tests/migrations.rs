@@ -54,6 +54,7 @@ fn old_envelope_without_bucket_indexes_correctly() {
         provenance: vec![],
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: None, // old format
+            ..Default::default()
     };
     store
         .insert_envelope(b"old-cid-001", b"old data", &meta)
@@ -115,13 +116,19 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
             vec![9u8; 32],
             cluster_id.0.to_vec(),
         );
+        client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]));
+        // Use BucketRole::Legacy so `rebuild_store::find_legacy_bucket`
+        // picks it up and routes the unbucketed entity into it.
+        // Standard-role buckets are intentionally ignored by the
+        // legacy-adoption path; the rebuild auto-creates its own
+        // deterministic Legacy bucket if none exists.
         let default_bucket = client
             .bucket_create(
                 "default",
                 None,
                 Visibility::Internal,
                 classification::Classification::Internal,
-                BucketRole::Standard,
+                BucketRole::Legacy,
             )
             .await
             .unwrap();
@@ -153,6 +160,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
             provenance: vec![],
             cluster_id: Some(cluster_id.0.to_vec()),
             bucket_id: None,
+                    ..Default::default()
         };
         store
             .insert_envelope(&cid.to_bytes(), &envelope_bytes, &meta)
@@ -177,12 +185,31 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
         default_bucket
     };
 
+    // RepairIndex's rebuild path now refuses to commit unsigned
+    // legacy-rewrite blocks; it needs a node signing key to re-sign
+    // them as Signed<T>. memctl's create_client() reads its data_dir
+    // from MEMVAULT_DATA_DIR (not from the CLI struct), then loads the
+    // node key from `<data_dir>/identity/libp2p.key` (raw 32-byte
+    // ed25519 seed). Seed a deterministic one for the test and point
+    // the env var at it.
+    let id_dir = dir.path().join("identity");
+    std::fs::create_dir_all(&id_dir).unwrap();
+    std::fs::write(id_dir.join("libp2p.key"), [9u8; 32]).unwrap();
+    // SAFETY: smoke tests run single-threaded enough that env mutation
+    // is not racing other code; mirrors the pattern memctl::run uses
+    // for MEMVAULT_AGENT_ID.
+    unsafe {
+        std::env::set_var("MEMVAULT_DATA_DIR", dir.path());
+    }
+
     let cli = memctl::Cli {
         data_dir: Some(dir.path().to_path_buf()),
+        agent_id: None,
+        bucket_id: None,
         client: memctl::memvault_api::ClientArgs {
             db: Some(db_path.clone()),
             url: "http://127.0.0.1:8401".to_string(),
-            token_file: None,
+            identity_dir: None,
         },
         command: memctl::Commands::RepairIndex,
     };
@@ -226,6 +253,9 @@ fn v1_envelope_no_bucket_signs_and_verifies() {
         1000,
         None,
         None, // v1: no bucket
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 
@@ -254,6 +284,9 @@ fn v1_envelope_serialization_compatible_with_v2_deserialize() {
         1000,
         None,
         None,
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 
@@ -491,6 +524,7 @@ fn reindex_mixed_v1_v2_envelopes() {
         provenance: vec![],
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: None,
+            ..Default::default()
     };
     store
         .insert_envelope(b"cid-v1", b"v1-data", &meta_v1)
@@ -506,6 +540,7 @@ fn reindex_mixed_v1_v2_envelopes() {
         provenance: vec![],
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: Some(bucket.to_vec()),
+            ..Default::default()
     };
     store
         .insert_envelope(b"cid-v2", b"v2-data", &meta_v2)
@@ -593,6 +628,7 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
             vec![0u8; 32], // zero peer_id
             vec![0u8; 32], // zero cluster_id = no cluster
         );
+        client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]));
         // Create buckets — these will be private/unbound since no cluster
         let b1 = client
             .bucket_create(

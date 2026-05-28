@@ -5,6 +5,7 @@ use memvault_core::{ClusterId, PeerId};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+use crate::admin_genesis::AdminGenesis;
 use crate::error::{AuthError, Result};
 use crate::role::Role;
 
@@ -23,6 +24,13 @@ pub struct JoinToken {
     pub max_uses: u32,
     pub nonce: [u8; 16],
     pub label: Option<String>,
+    /// The cluster's `AdminGenesis` block. Lets the joining peer pin
+    /// the cluster admin pubkey out-of-band (via this token, which is
+    /// itself admin-signed). Required for join to bootstrap trust
+    /// without consulting sync. `None` only on legacy tokens issued
+    /// before this field existed.
+    #[serde(default)]
+    pub admin_genesis: Option<AdminGenesis>,
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
@@ -38,6 +46,7 @@ struct TokenSigningPayload<'a> {
     max_uses: u32,
     nonce: &'a [u8; 16],
     label: &'a Option<String>,
+    admin_genesis: &'a Option<AdminGenesis>,
 }
 
 impl JoinToken {
@@ -53,6 +62,7 @@ impl JoinToken {
             max_uses: self.max_uses,
             nonce: &self.nonce,
             label: &self.label,
+            admin_genesis: &self.admin_genesis,
         };
         serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
     }

@@ -151,6 +151,22 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         std::collections::HashMap::new();
 
     if let Some(ref bucket) = legacy_bucket {
+        // Re-sign rewritten envelopes with the local node key so they
+        // match the production envelope shape. The unsigned-fallback
+        // path was removed in build_signed_envelope; leaving rewrites
+        // unsigned would re-introduce a divergent shape and reproduce
+        // exactly the bug class that motivated the removal. If no node
+        // key is installed, bail out of the rebuild entirely rather
+        // than silently committing unsigned blocks — the operator can
+        // re-run after wiring up the key.
+        let node_signing_key = client.node_signing_key().ok_or_else(|| {
+            ApiError::Other(format!(
+                "rebuild has {} unbucketed envelope(s) to rewrite but no node signing key is \
+                 configured; call set_node_signing_key before running repair-index so \
+                 migrated envelopes can be re-signed",
+                to_rewrite.len()
+            ))
+        })?;
         for (old_cid, data, _) in &to_rewrite {
             let mut val = match memvault_store::deserialize_block(data) {
                 Some(v) => v,
@@ -174,9 +190,27 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                 }
             }
 
-            let new_bytes = match serde_ipld_dagcbor::to_vec(&val) {
-                Ok(b) => b,
-                Err(_) => continue,
+            // Re-sign as a Signed<T> envelope. The legacy author
+            // attribution is replaced by the local node's pubkey — the
+            // original signature was already invalidated by the
+            // bucket_id mutation, so there's nothing meaningful to
+            // preserve. If we can't even shape the payload into a
+            // Signed<T> for this specific block, skip it rather than
+            // commit an unsigned variant.
+            let new_bytes = match resign_legacy_envelope(
+                &val,
+                bucket,
+                node_signing_key,
+                client.peer_id(),
+            ) {
+                Some(b) => b,
+                None => {
+                    tracing::warn!(
+                        old_cid = %hex::encode(old_cid),
+                        "skipping legacy envelope: could not coerce to Signed<T> shape"
+                    );
+                    continue;
+                }
             };
             let new_cid_bytes = memvault_core::cid_from_bytes(&new_bytes).to_bytes();
 
@@ -205,6 +239,24 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     for (cid, data) in &blocks {
         if store.reindex_block(cid, data).unwrap_or(false) {
             report.envelopes_indexed += 1;
+        } else if let Some(label) = memvault_auth::sigchain_label_for(data) {
+            // Raw CBOR sigchain blocks have no envelope `tags` field, so
+            // `reindex_block` skipped them. Re-emit the `sigchain/<label>`
+            // tag entry directly. Trust the contents: the block was
+            // already in our store (either we minted it locally or it
+            // passed sync's signature gate via `vet_sync_block`), so the
+            // shape is enough.
+            let tags = vec![("sigchain".to_string(), label.to_string())];
+            let meta = memvault_store::EnvelopeMeta {
+                author: client.peer_id().to_vec(),
+                tags,
+                wall_ns: memvault_core::wall_ns(),
+                cluster_id: Some(client.cluster_id().to_vec()),
+                ..Default::default()
+            };
+            if store.insert_envelope(cid, data, &meta).is_ok() {
+                report.envelopes_indexed += 1;
+            }
         }
         // Bucket metadata
         if let Some(val) = memvault_store::deserialize_block(data) {
@@ -491,6 +543,7 @@ fn repair_vfs_sync(
                 provenance: vec![],
                 cluster_id: Some(client.cluster_id().to_vec()),
                 bucket_id: Some(legacy_bucket.0.to_vec()),
+                            ..Default::default()
             };
             let _ = store.insert_envelope(&cid.to_bytes(), &bytes, &meta);
             linked += 1;
@@ -544,12 +597,14 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
 
     // Old-format extraction annotation: references extracted_text by CID
     // instead of inline.  Drop — text will be re-extracted inline on access.
-    if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
-        if let Some(data) = val.get("data") {
-            if data.get("extracted_text").is_some()
-                && data.get("extracted_text_inline").is_none()
-            {
-                return Verdict::Drop;
+    if let Some(view) = memvault_store::EnvelopeView::from_value(val.clone()) {
+        if view.str_field("kind") == Some("annotation") {
+            if let Some(data) = view.field("data") {
+                if data.get("extracted_text").is_some()
+                    && data.get("extracted_text_inline").is_none()
+                {
+                    return Verdict::Drop;
+                }
             }
         }
     }
@@ -584,4 +639,62 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
             _ => Verdict::Drop,
         }
     }
+}
+
+/// Re-sign a legacy / mutated envelope as a `Signed<T>` block using the
+/// node's signing key. The legacy author attribution is replaced by the
+/// local peer_id (the original signature was already invalidated by
+/// adding `bucket_id`); the payload, tags, visibility, and timestamp
+/// from the source envelope are preserved verbatim. Returns the encoded
+/// envelope bytes on success, `None` if the source can't be coerced
+/// into the canonical shape (in which case the caller falls back to a
+/// raw CBOR re-encode and the block remains unsigned).
+fn resign_legacy_envelope(
+    val: &serde_json::Value,
+    bucket: &memvault_core::BucketId,
+    node_signing_key: &ed25519_dalek::SigningKey,
+    peer_id: &[u8],
+) -> Option<Vec<u8>> {
+    let payload = val.get("payload")?.clone();
+    let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+    let visibility: memvault_core::Visibility = val
+        .get("visibility")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(memvault_core::Visibility::Internal);
+
+    // tags may be either the Signed<T> struct shape or the legacy tuple
+    // shape — coerce to Vec<Tag> so the re-signed envelope speaks the
+    // canonical wire format.
+    let tags_value = val.get("tags").cloned().unwrap_or(serde_json::json!([]));
+    let tags: Vec<memvault_core::Tag> = serde_json::from_value::<Vec<memvault_core::Tag>>(
+        tags_value.clone(),
+    )
+    .or_else(|_| {
+        serde_json::from_value::<Vec<(String, String)>>(tags_value).map(|v| {
+            v.into_iter()
+                .map(|(s, l)| memvault_core::Tag::new(s, l))
+                .collect()
+        })
+    })
+    .ok()?;
+
+    let envelope = memvault_core::Signed::sign(
+        payload,
+        node_signing_key,
+        memvault_core::PeerId(peer_id.to_vec()),
+        vec![], // causal — drop legacy refs (already remapped above)
+        vec![], // provenance
+        tags,
+        visibility,
+        0, // lamport — not tracked in legacy envelopes
+        wall_ns,
+        None, // capability
+        Some(bucket.clone()),
+        None, // node_attestation — wire up via trust_state when present
+        None, // agent_attestation — legacy envelopes pre-date agent attribution
+        None, // agent_signing_key
+    )
+    .ok()?;
+
+    serde_ipld_dagcbor::to_vec(&envelope).ok()
 }

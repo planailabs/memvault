@@ -109,24 +109,27 @@ mod inner {
 #[cfg(feature = "server")]
 pub use inner::*;
 
-/// Server-side storage for the API auth token, used to generate session tokens
-/// for the web UI to call the REST API directly.
+/// Server-side storage for the built-in "web UI" agent identity.
+/// Used to issue session JWTs for the WASM client via `/auth/session-token`.
 #[cfg(feature = "server")]
-mod token_store {
-    use std::sync::OnceLock;
+mod ui_identity_store {
+    use std::sync::{Arc, OnceLock};
 
-    static API_TOKEN: OnceLock<String> = OnceLock::new();
+    use memvault_api::agent_identity::AgentIdentity;
 
-    /// Set the API auth token (called during server startup).
-    pub fn set_api_token(token: String) {
-        let _ = API_TOKEN.set(token);
+    static UI_AGENT: OnceLock<Arc<AgentIdentity>> = OnceLock::new();
+
+    /// Set the daemon's built-in web-ui agent identity. Called once at daemon
+    /// startup. Subsequent calls are no-ops.
+    pub fn set_ui_agent_identity(id: Arc<AgentIdentity>) {
+        let _ = UI_AGENT.set(id);
     }
 
-    /// Get the API auth token for session-token generation.
-    pub fn api_token() -> Option<&'static str> {
-        API_TOKEN.get().map(|s| s.as_str())
+    /// Get the web-ui agent identity, if one has been registered.
+    pub fn ui_agent_identity() -> Option<Arc<AgentIdentity>> {
+        UI_AGENT.get().cloned()
     }
 }
 
 #[cfg(feature = "server")]
-pub use token_store::*;
+pub use ui_identity_store::*;

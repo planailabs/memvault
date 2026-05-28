@@ -26,6 +26,7 @@ Rules for any AI agent (Claude Code, Copilot, etc.) working on the memvault crat
 
 ## Testing
 
+- **Tests before fixes.** For any bug that has a reproducible failure mode, write a failing test in `memvault-smoke` BEFORE the fix lands. The diff should include: (1) the failing test, (2) the fix, (3) the test now passing. This pattern catches "the fix landed in path A but the same bug lives in path B" — which has bitten us repeatedly (e.g. node-key vs libp2p-key divergence existed in two daemon paths; the join-response storing untagged blocks mirrored the sync-receiver bug). A repro test makes the bug's shape explicit and forces you to find every place that shape exists.
 - **Add tests to `memvault-smoke`**, not inline in the crate being modified. The smoke crate has a `TestNode` harness that creates isolated stores with random cluster IDs.
 - **Run `cargo test -p memvault-smoke`** before submitting. All 118+ tests must pass.
 - **Gossipsub tests are `#[ignore]`** due to timing sensitivity. Run with `--include-ignored` to verify P2P gossip propagation.

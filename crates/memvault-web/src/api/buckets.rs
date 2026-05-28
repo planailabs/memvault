@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::auth::RequireAuth;
+use crate::api::auth::{RequireAdmin, RequireAuth, RequireWrite};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBucketRequest {
@@ -76,7 +76,7 @@ pub async fn get_bucket(
 }
 
 pub async fn create_bucket(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateBucketRequest>,
 ) -> Result<Json<CreateBucketResponse>, StatusCode> {
@@ -103,7 +103,7 @@ pub struct RenameBucketRequest {
 }
 
 pub async fn rename_bucket(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<RenameBucketRequest>,
@@ -124,7 +124,7 @@ pub async fn rename_bucket(
 }
 
 pub async fn attach_bucket(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
@@ -159,7 +159,7 @@ pub struct EnsureAgentBucketResponse {
 }
 
 pub async fn ensure_agent_bucket(
-    _auth: RequireAuth,
+    _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<EnsureAgentBucketRequest>,
 ) -> Result<Json<EnsureAgentBucketResponse>, StatusCode> {
@@ -174,7 +174,7 @@ pub async fn ensure_agent_bucket(
 }
 
 pub async fn archive_bucket(
-    _auth: RequireAuth,
+    _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<ArchiveBucketRequest>,

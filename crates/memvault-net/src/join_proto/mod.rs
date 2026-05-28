@@ -35,6 +35,18 @@ pub enum JoinResult {
         /// AgentEnrollment block (CBOR), present when the request included agent_id + public_key.
         #[serde(default)]
         enrollment_block: Option<Vec<u8>>,
+        /// Bootstrap bundle: raw CBOR bytes for sigchain blocks the
+        /// joining peer needs to be able to verify cluster trust
+        /// before its first block-exchange request. Typically contains
+        /// admin's own `NodeAttestation` and the cluster's
+        /// `AdminGenesis` block — both of which the peer's block
+        /// exchange would otherwise be refused service of (the trust
+        /// gate in `serve_block_request` requires the peer to already
+        /// be attested). Each entry is dispatched through the same
+        /// shape-detection + signature-verification path as a synced
+        /// block, so a malicious admin can't inject arbitrary blocks.
+        #[serde(default)]
+        bootstrap_blocks: Vec<Vec<u8>>,
     },
     Refuse {
         reason: JoinRefuseReason,

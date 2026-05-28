@@ -81,10 +81,14 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
             None => continue,
         };
         let cid_hex = hex::encode(&manifest_cid);
-        // Read manifest block (always exists after repair-index).
+        // Read manifest block (always exists after repair-index). The
+        // block is DAG-CBOR, not JSON — use the canonical helper so
+        // filename/mime_type/content_size come through instead of
+        // collapsing to defaults ("unnamed" / octet-stream / 0).
         let (filename, mime_type, size) = match client.get_file_manifest(&manifest_cid).await {
             Ok(Some(bytes)) => {
-                let m: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                let m: serde_json::Value =
+                    memvault_store::deserialize_block(&bytes).unwrap_or_default();
                 (
                     m.get("filename")
                         .and_then(|v| v.as_str())

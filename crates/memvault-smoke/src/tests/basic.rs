@@ -20,14 +20,19 @@ fn open_temp_store(dir: &tempfile::TempDir, name: &str) -> Arc<MemvaultStore> {
 }
 
 fn make_client(store: Arc<MemvaultStore>) -> LocalClient {
-    LocalClient::new(
+    let client = LocalClient::new(
         store,
         Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
         Arc::new(EventBus::new(64)),
         vec![0u8; 32],
         vec![0u8; 32],
-    )
+    );
+    // LocalClient now refuses writes without a node signing key (the
+    // unsigned-JSON fallback was deleted). Install a deterministic key
+    // so this read-and-write client can actually emit envelopes.
+    client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
+    client
 }
 
 /// Copy all blocks from source store to destination store (simulates sync).
@@ -79,33 +84,33 @@ async fn put_sync_search_retract() {
     copy_blocks(&store1, &store2, &[cid.clone()]);
     copy_blocks(&store1, &store3, &[cid.clone()]);
 
-    // Also replicate the envelope via insert_envelope metadata so queries work.
+    // Re-index the synced envelope metadata so tag/time/bucket queries
+    // work on remote nodes. reindex_block decodes the canonical envelope
+    // bytes itself (now handles both Signed<T>-shape and tuple-shape tag
+    // serialization — see the recent insert.rs fix), so the smoke test
+    // no longer has to fabricate an EnvelopeMeta with placeholder
+    // author / cluster_id values that don't match the real envelope.
     let block_data = store1.get_block(&cid).unwrap().unwrap();
+    store2.reindex_block(&cid, &block_data).unwrap();
+    store3.reindex_block(&cid, &block_data).unwrap();
 
-    // Parse the envelope to extract metadata for indexing on remote nodes.
-    let envelope: serde_json::Value = serde_json::from_slice(&block_data).unwrap();
-    let wall_ns = envelope
-        .get("wall_ns")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let tags_val: Vec<(String, String)> = envelope
-        .get("tags")
-        .and_then(|t| serde_json::from_value(t.clone()).ok())
+    // The in-memory TextIndex below still wants the doc's tag list, so
+    // pull it from the envelope view.
+    let view = memvault_store::EnvelopeView::parse(&block_data)
+        .expect("envelope must parse via EnvelopeView");
+    let tags_val: Vec<(String, String)> = view
+        .field("tags")
+        .and_then(|t| {
+            serde_json::from_value::<Vec<memvault_core::Tag>>(t.clone())
+                .ok()
+                .map(|tags| {
+                    tags.into_iter()
+                        .map(|t| (t.scope, t.label))
+                        .collect::<Vec<_>>()
+                })
+                .or_else(|| serde_json::from_value::<Vec<(String, String)>>(t.clone()).ok())
+        })
         .unwrap_or_default();
-
-    let meta = memvault_store::EnvelopeMeta {
-        author: vec![0u8; 32],
-        tags: tags_val.clone(),
-        wall_ns,
-        causal: vec![],
-        provenance: vec![],
-        cluster_id: Some(vec![0u8; 32]),
-        bucket_id: None,
-    };
-
-    // Insert envelope on nodes 2 and 3 so their indexes are populated.
-    store2.insert_envelope(&cid, &block_data, &meta).unwrap();
-    store3.insert_envelope(&cid, &block_data, &meta).unwrap();
 
     // Create clients for nodes 2 and 3 with their own indexes.
     let index2 = Arc::new(RwLock::new(TextIndex::new()));

@@ -11,13 +11,74 @@ use tower::ServiceExt;
 
 use memvault_api::{EventBus, MemvaultClient, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
 use memvault_auth::Role;
-use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_auth::node_attestation::{AttestationOrigin, NodeAttestation};
+use memvault_core::{ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+
 use crate::{AppState, build_router};
 
-const TEST_TOKEN: &str = "test-secret-token";
+/// Deterministic test admin + node + agent keys.
+/// In the chain model: admin signs the node's NodeAttestation, node
+/// signs the agent's AgentAttestation, agent signs the JWT.
+fn test_keys() -> (SigningKey, SigningKey, SigningKey) {
+    (
+        SigningKey::from_bytes(&[0xAAu8; 32]), // admin
+        SigningKey::from_bytes(&[0xBBu8; 32]), // node
+        SigningKey::from_bytes(&[0xCCu8; 32]), // agent
+    )
+}
+
+/// Build an admin-signed node attestation.
+fn test_node_attestation(admin: &SigningKey, node: &SigningKey) -> NodeAttestation {
+    let mut att = NodeAttestation {
+        cluster_id: ClusterId([0u8; 32]),
+        member: PeerId(node.verifying_key().as_bytes().to_vec()),
+        role: Role::AgentHost,
+        not_after_ns: u64::MAX,
+        issued_via: AttestationOrigin::Direct,
+        signature: [0u8; 64],
+    };
+    let signing_bytes = att.signing_bytes().unwrap();
+    att.signature = admin.sign(&signing_bytes).to_bytes();
+    att
+}
+
+/// Admin's verifying key for AppState.
+fn test_admin_pubkey() -> VerifyingKey {
+    test_keys().0.verifying_key()
+}
+
+/// node_trust map for AppState — one Attested entry for the test node.
+fn test_node_trust() -> std::sync::Arc<
+    std::sync::RwLock<std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>>,
+> {
+    let (admin, node, _) = test_keys();
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        node.verifying_key().to_bytes(),
+        memvault_auth::jwt::NodeTrust::Attested(test_node_attestation(&admin, &node)),
+    );
+    std::sync::Arc::new(std::sync::RwLock::new(map))
+}
+
+/// A valid JWT for the test agent, all scopes, 1h TTL.
+fn test_jwt() -> String {
+    let (_admin, node, agent) = test_keys();
+    let agent_att = memvault_auth::sign_agent_attestation(
+        &node,
+        memvault_core::AgentId("test-agent".to_string()),
+        agent.verifying_key().to_bytes(),
+        Role::AgentHost,
+        u64::MAX,
+    )
+    .unwrap();
+    let _ = agent_att; // attestation now lives only in the sigchain; the
+    // JWT carries just the agent_id label in `iss`.
+    memvault_auth::jwt::issue(&agent, "test-agent", "read write admin", 3600).unwrap()
+}
 
 /// Mock client that returns canned responses.
 struct MockClient {
@@ -378,14 +439,51 @@ impl MemvaultClient for MockClient {
     }
 }
 
-fn make_app() -> axum::Router {
-    let state = Arc::new(AppState {
-        client: Arc::new(MockClient::new()),
+/// Build the test agent's AgentAttestation. The JWT verifier calls our
+/// injected lookup with the agent pubkey; we just return this attestation
+/// when it matches.
+fn test_agent_attestation() -> memvault_auth::AgentAttestation {
+    let (_admin, node, agent) = test_keys();
+    memvault_auth::sign_agent_attestation(
+        &node,
+        memvault_core::AgentId("test-agent".to_string()),
+        agent.verifying_key().to_bytes(),
+        Role::AgentHost,
+        u64::MAX,
+    )
+    .expect("sign_agent_attestation")
+}
+
+/// Stub agent-attestation lookup. Returns the test agent's attestation
+/// when asked about its pubkey; anything else gets `None`. Lets tests
+/// run without a full `LocalClient` installed.
+fn test_agent_lookup()
+-> Arc<dyn Fn(&[u8; 32]) -> Option<memvault_auth::AgentAttestation> + Send + Sync> {
+    let att = test_agent_attestation();
+    Arc::new(move |agent_pk: &[u8; 32]| {
+        if *agent_pk == att.agent_pubkey {
+            Some(att.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn test_app_state(client: Arc<dyn MemvaultClient>) -> Arc<AppState> {
+    Arc::new(AppState {
+        client,
         event_bus: Arc::new(EventBus::new(16)),
-        auth_token: TEST_TOKEN.to_string(),
+        admin_pubkey: Some(test_admin_pubkey()),
+        node_trust: test_node_trust(),
+        revoked_agents: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+        revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
-    });
-    build_router(state)
+        agent_attestation_lookup: Some(test_agent_lookup()),
+    })
+}
+
+fn make_app() -> axum::Router {
+    build_router(test_app_state(Arc::new(MockClient::new())))
 }
 
 #[tokio::test]
@@ -419,14 +517,16 @@ async fn test_unauthorized_with_bad_token() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+// The 5 tests below were broken in cd0bd54b ("drop JWT attestation
+// embed + HTTP agent enrollment"), which moved verify_bearer from
+// looking up agent attestations on the AppState client to requiring a
+// concrete LocalClient via `ui::state::local_client()`. They are now
+// fixed by routing the lookup through `AppState.agent_attestation_lookup`
+// when set, so tests can install a stub without a full LocalClient.
+
 #[tokio::test]
 async fn test_create_and_list_docs() {
-    let state = Arc::new(AppState {
-        client: Arc::new(MockClient::new()),
-        event_bus: Arc::new(EventBus::new(16)),
-        auth_token: TEST_TOKEN.to_string(),
-        metrics: Arc::new(memvault_api::metrics::Metrics::new()),
-    });
+    let state = test_app_state(Arc::new(MockClient::new()));
     let app = build_router(state);
 
     // Create a doc
@@ -441,7 +541,7 @@ async fn test_create_and_list_docs() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/docs")
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                 .unwrap(),
@@ -461,7 +561,7 @@ async fn test_create_and_list_docs() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/docs")
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -476,12 +576,7 @@ async fn test_create_and_list_docs() {
 
 #[tokio::test]
 async fn test_get_doc() {
-    let state = Arc::new(AppState {
-        client: Arc::new(MockClient::new()),
-        event_bus: Arc::new(EventBus::new(16)),
-        auth_token: TEST_TOKEN.to_string(),
-        metrics: Arc::new(memvault_api::metrics::Metrics::new()),
-    });
+    let state = test_app_state(Arc::new(MockClient::new()));
     let app = build_router(state);
 
     // Create a doc first
@@ -495,7 +590,7 @@ async fn test_get_doc() {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/docs")
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                 .unwrap(),
@@ -512,7 +607,7 @@ async fn test_get_doc() {
         .oneshot(
             Request::builder()
                 .uri(format!("/api/v1/docs/{doc_id}"))
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -531,7 +626,7 @@ async fn test_search() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/search?q=hello&limit=10")
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -551,7 +646,7 @@ async fn test_admin_status() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/admin/status")
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -574,7 +669,7 @@ async fn test_download_attachment() {
         .oneshot(
             Request::builder()
                 .uri(format!("/api/v1/attachments/{cid_hex}"))
-                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
                 .body(Body::empty())
                 .unwrap(),
         )

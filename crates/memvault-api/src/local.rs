@@ -57,11 +57,140 @@ macro_rules! dual_impl {
 
 /// Extract the target node's tag label from an EdgeAdd op.
 /// Extract text from file content, catching panics from buggy extractors (e.g. pdf-extract).
-/// Result of text extraction — either the text or an error message to cache.
+/// Result of text extraction — either the text (with any discovered links)
+/// or an error message to cache.
 enum ExtractionResult {
-    Ok(String),
+    Ok {
+        text: String,
+        links: Vec<memvault_extract_abi::ExtractedLink>,
+    },
     Failed(String),
     Unsupported,
+}
+
+/// Describes the entity an extraction request is about — either an attachment
+/// (immutable manifest) or a document (mutable head snapshot). Both flow
+/// through the same extractor registry; only the annotation target differs.
+pub enum ExtractionSource<'a> {
+    Attachment {
+        manifest_cid: &'a [u8],
+        mime: &'a str,
+        data: &'a [u8],
+    },
+    /// Document head — wired up by the head-change reconciler in Phase 5+.
+    #[allow(dead_code)]
+    Document {
+        doc_id: memvault_core::DocId,
+        head_cid: &'a [u8],
+        mime: &'a str,
+        body: &'a [u8],
+    },
+}
+
+impl<'a> ExtractionSource<'a> {
+    /// Annotation target string, e.g. `"file:<hex>"` or `"doc:<hex>"`.
+    fn annotation_target(&self) -> String {
+        match self {
+            Self::Attachment { manifest_cid, .. } => {
+                format!("file:{}", hex::encode(manifest_cid))
+            }
+            Self::Document { head_cid, .. } => format!("doc:{}", hex::encode(head_cid)),
+        }
+    }
+
+    /// Bytes-for-lookup — the source CID (manifest CID or doc head CID).
+    fn cache_key(&self) -> &'a [u8] {
+        match self {
+            Self::Attachment { manifest_cid, .. } => manifest_cid,
+            Self::Document { head_cid, .. } => head_cid,
+        }
+    }
+
+    fn mime(&self) -> &'a str {
+        match self {
+            Self::Attachment { mime, .. } | Self::Document { mime, .. } => mime,
+        }
+    }
+
+    fn data(&self) -> &'a [u8] {
+        match self {
+            Self::Attachment { data, .. } => data,
+            Self::Document { body, .. } => body,
+        }
+    }
+
+    /// For attachments the canonical target uses the `"file:"` prefix; the
+    /// store carries a `"attachment:"` prefixed legacy variant we also want
+    /// to scan when reading.
+    fn legacy_target(&self) -> Option<String> {
+        match self {
+            Self::Attachment { manifest_cid, .. } => {
+                Some(format!("attachment:{}", hex::encode(manifest_cid)))
+            }
+            Self::Document { .. } => None,
+        }
+    }
+}
+
+/// Pick the MIME for a document body. Markdown is the default; opt-in to
+/// HTML via `frontmatter.mime` (full MIME like `text/html`) or
+/// `frontmatter.format` (shorthand `"html"` / `"markdown"`).
+fn doc_mime_from_frontmatter(
+    frontmatter: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> &'static str {
+    let raw = frontmatter
+        .get("mime")
+        .and_then(|v| v.as_str())
+        .or_else(|| frontmatter.get("format").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    match raw {
+        "html" | "text/html" | "application/xhtml+xml" => "text/html",
+        _ => "text/markdown",
+    }
+}
+
+/// Parse the `links` field of a cached extraction annotation. Returns an
+/// empty Vec for legacy entries (which lack the field) or anything that
+/// isn't shaped right.
+fn parse_cached_links(val: Option<&serde_json::Value>) -> Vec<memvault_extract_abi::ExtractedLink> {
+    use memvault_extract_abi::{ExtractedLink, LinkSyntax};
+    let Some(arr) = val.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(uri) = item.get("uri").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let display_text = item
+            .get("display_text")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let span_arr = item.get("byte_span").and_then(|v| v.as_array());
+        let byte_span = match span_arr {
+            Some(a) if a.len() == 2 => {
+                let s = a[0].as_u64().unwrap_or(0) as u32;
+                let e = a[1].as_u64().unwrap_or(0) as u32;
+                (s, e)
+            }
+            _ => (0, 0),
+        };
+        let syntax = match item.get("syntax").and_then(|v| v.as_str()).unwrap_or("") {
+            "Wikilink" => LinkSyntax::Wikilink,
+            "MarkdownLink" => LinkSyntax::MarkdownLink,
+            "HtmlAnchor" => LinkSyntax::HtmlAnchor,
+            "FrontmatterRef" => LinkSyntax::FrontmatterRef,
+            "EmbeddedHyperlink" => LinkSyntax::EmbeddedHyperlink,
+            _ => LinkSyntax::MarkdownLink,
+        };
+        out.push(ExtractedLink {
+            uri: uri.to_string(),
+            display_text,
+            byte_span,
+            syntax,
+        });
+    }
+    out
 }
 
 fn safe_extract_text(data: &[u8], mime_type: &str) -> ExtractionResult {
@@ -75,7 +204,10 @@ fn safe_extract_text(data: &[u8], mime_type: &str) -> ExtractionResult {
         let registry = memvault_extract::ExtractionRegistry::with_defaults();
         registry.extract(&data, &mime, &memvault_extract::ExtractionHints::default())
     }) {
-        Ok(Ok(extracted)) => ExtractionResult::Ok(extracted.text),
+        Ok(Ok(extracted)) => ExtractionResult::Ok {
+            text: extracted.text,
+            links: extracted.links,
+        },
         Ok(Err(e)) => {
             tracing::warn!("text extraction failed for {mime_type}: {e}");
             ExtractionResult::Failed(format!("{e}"))
@@ -94,6 +226,22 @@ fn op_edge_target_label(op: &Op) -> Option<String> {
     }
 }
 
+/// Identity bundle for a new write — returned by
+/// [`LocalClient::signer_for_writes`]. The node always signs; the agent
+/// additionally co-signs iff `agent_signing_key` is `Some` (i.e. an
+/// `AgentIdentity` is bound).
+///
+/// `author` is the node's pubkey-derived peer_id, matching
+/// `node_signing_key.verifying_key()` so `Signed::verify(author)` accepts.
+/// `agent_attestation` and `agent_signing_key` are `Some` together — they
+/// always travel as a pair.
+pub(crate) struct WriteSigner<'a> {
+    pub node_signing_key: &'a ed25519_dalek::SigningKey,
+    pub author: memvault_core::PeerId,
+    pub agent_signing_key: Option<&'a ed25519_dalek::SigningKey>,
+    pub agent_attestation: Option<Vec<u8>>,
+}
+
 /// LocalClient implements MemvaultClient by calling directly into the store.
 pub struct LocalClient {
     store: Arc<MemvaultStore>,
@@ -102,10 +250,29 @@ pub struct LocalClient {
     event_bus: Arc<EventBus>,
     peer_id: Vec<u8>,
     cluster_id: Vec<u8>,
+    /// Live trust state — `node_trust` + revocation sets + cached trusted
+    /// agents — shared with the web layer's `AppState` and updated in place
+    /// by the sigchain watcher. `None` on clients without an auth layer
+    /// (tests, headless tooling); when `None`, `verify_envelope_authorship`
+    /// reports `NoSidecar` for everything (fail-open).
+    trust_state: std::sync::OnceLock<crate::sigchain::LiveTrustState>,
+    /// Cluster admin pubkey of record. Pinned out-of-band: written by
+    /// `memctl genesis` (for the admin) or by `memctl cluster-join`
+    /// (for peers, extracted from the join token). The daemon loads
+    /// the file `<data_dir>/identity/cluster_admin_genesis.cbor` at
+    /// startup and installs it here. `None` for legacy data dirs that
+    /// pre-date the pin file.
+    pinned_admin_genesis: std::sync::OnceLock<memvault_auth::AdminGenesis>,
     /// Optional admin signing key for token issuance and agent enrollment.
-    admin_signing_key: Option<ed25519_dalek::SigningKey>,
-    /// Optional agent identity for agent-scoped operations.
-    agent_identity: Option<crate::agent_identity::AgentIdentity>,
+    /// `OnceLock` allows write-once initialisation through a shared `Arc`.
+    admin_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
+    /// Optional node signing key — the daemon's libp2p ed25519 private key,
+    /// used to sign agent attestations and agent revocations. Distinct from
+    /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
+    node_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
+    /// Optional agent identity for agent-scoped operations. Write-once
+    /// via `OnceLock` so it can be installed through a shared `Arc`.
+    agent_identity: std::sync::OnceLock<crate::agent_identity::AgentIdentity>,
     start_time: std::time::Instant,
 }
 
@@ -125,8 +292,11 @@ impl LocalClient {
             event_bus,
             peer_id,
             cluster_id,
-            admin_signing_key: None,
-            agent_identity: None,
+            admin_signing_key: std::sync::OnceLock::new(),
+            node_signing_key: std::sync::OnceLock::new(),
+            trust_state: std::sync::OnceLock::new(),
+            pinned_admin_genesis: std::sync::OnceLock::new(),
+            agent_identity: std::sync::OnceLock::new(),
             start_time: std::time::Instant::now(),
         };
 
@@ -160,14 +330,183 @@ impl LocalClient {
         Ok(client)
     }
 
-    /// Set the admin signing key (enables real token issuance).
-    pub fn set_admin_signing_key(&mut self, key: ed25519_dalek::SigningKey) {
-        self.admin_signing_key = Some(key);
+    /// Set the admin signing key (enables real token issuance). Write-once;
+    /// subsequent calls are silently ignored so a daemon that re-enters
+    /// initialisation cannot accidentally swap admin identity.
+    pub fn set_admin_signing_key(&self, key: ed25519_dalek::SigningKey) {
+        let _ = self.admin_signing_key.set(key);
+    }
+
+    /// Publish the live trust state on this client. Write-once.
+    /// Subsequent reads via [`Self::verify_envelope_authorship`] consult it
+    /// instead of returning `NoSidecar` by default.
+    pub fn set_trust_state(&self, state: crate::sigchain::LiveTrustState) {
+        let _ = self.trust_state.set(state);
+    }
+
+    /// Borrow the live trust state, if installed. `None` on clients that
+    /// haven't gone through [`crate::bootstrap::bootstrap_cluster_trust`]
+    /// (tests, headless tooling).
+    pub fn trust_state(&self) -> Option<&crate::sigchain::LiveTrustState> {
+        self.trust_state.get()
+    }
+
+    /// Install the cluster's pinned `AdminGenesis`. Write-once. Daemons
+    /// call this at startup after reading
+    /// `<data_dir>/identity/cluster_admin_genesis.cbor`.
+    pub fn set_pinned_admin_genesis(&self, genesis: memvault_auth::AdminGenesis) {
+        let _ = self.pinned_admin_genesis.set(genesis);
+    }
+
+    /// Borrow the pinned `AdminGenesis` — the cluster's root of trust.
+    /// `None` when no pin has been installed (truly pre-genesis, or
+    /// legacy data dir).
+    pub fn pinned_admin_genesis(&self) -> Option<&memvault_auth::AdminGenesis> {
+        self.pinned_admin_genesis.get()
+    }
+
+    /// Verify an envelope's authorship sidecar against the currently-trusted
+    /// agent set. Read paths call this for envelopes whose authorship must
+    /// be enforced; data paths can ignore it (fail-open for backwards
+    /// compatibility).
+    ///
+    /// Returns [`memvault_api::sigchain::AuthorshipStatus::NoSidecar`] when
+    /// no trust state is installed (tests, headless tooling).
+    pub fn verify_envelope_authorship(
+        &self,
+        envelope_cid: &[u8],
+    ) -> Result<crate::sigchain::AuthorshipStatus> {
+        let Some(state) = self.trust_state.get() else {
+            return Ok(crate::sigchain::AuthorshipStatus::NoSidecar);
+        };
+        let trusted_atts = state
+            .trusted_attestations
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let trusted_nodes = state
+            .node_trust
+            .read()
+            .map(|m| m.keys().copied().collect::<std::collections::HashSet<_>>())
+            .unwrap_or_default();
+        crate::sigchain::verify_envelope_authorship(
+            self,
+            envelope_cid,
+            &trusted_atts,
+            &trusted_nodes,
+        )
+    }
+
+    /// Register the store's index notifier to bridge to the client's event
+    /// bus. Once installed, every block indexed (including blocks arriving
+    /// via RBSR sync, which go through `reindex_block`) fires a
+    /// [`MemvaultEvent::SigchainBlock`] when tagged `sigchain/<label>`.
+    ///
+    /// Call this once at daemon startup, before sync begins.
+    pub fn install_sigchain_notifier(&self) {
+        let bus = Arc::clone(&self.event_bus);
+        self.store
+            .set_index_notifier(std::sync::Arc::new(move |scope, label, cid| {
+                if scope == "sigchain" {
+                    bus.publish(MemvaultEvent::SigchainBlock {
+                        label: label.to_string(),
+                        cid: cid.to_vec(),
+                    });
+                }
+            }));
+    }
+
+    /// Set the node signing key (the daemon's libp2p ed25519 key, used to
+    /// sign agent attestations and revocations). Distinct from the admin
+    /// key on non-genesis-admin daemons. Write-once.
+    pub fn set_node_signing_key(&self, key: ed25519_dalek::SigningKey) {
+        let _ = self.node_signing_key.set(key);
+    }
+
+    /// Get the node signing key, if configured.
+    pub fn node_signing_key(&self) -> Option<&ed25519_dalek::SigningKey> {
+        self.node_signing_key.get()
+    }
+
+    /// Get the node verifying key, derived from the node signing key.
+    pub fn node_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
+        self.node_signing_key.get().map(|k| k.verifying_key())
     }
 
     /// Set the agent identity (enables agent-scoped operations).
-    pub fn set_agent_identity(&mut self, identity: crate::agent_identity::AgentIdentity) {
-        self.agent_identity = Some(identity);
+    /// Write-once; subsequent calls are silently ignored.
+    pub fn set_agent_identity(&self, identity: crate::agent_identity::AgentIdentity) {
+        let _ = self.agent_identity.set(identity);
+    }
+
+    /// Issue a `NodeAttestation` for a peer's pubkey, signed by this
+    /// node's admin signing key. Used to admit a peer node into the
+    /// cluster after they've completed `cluster-join`. Returns the
+    /// attestation block's CID.
+    ///
+    /// Errors if no admin signing key is set on this client.
+    pub fn attest_node(
+        &self,
+        peer_pubkey: [u8; 32],
+        role: memvault_auth::Role,
+    ) -> Result<Vec<u8>> {
+        use ed25519_dalek::Signer;
+        let admin_sk = self
+            .admin_signing_key
+            .get()
+            .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
+        let cluster_id_arr: [u8; 32] = self
+            .cluster_id
+            .clone()
+            .try_into()
+            .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))?;
+        let mut node_att = memvault_auth::NodeAttestation {
+            cluster_id: memvault_core::ClusterId(cluster_id_arr),
+            member: memvault_core::PeerId(peer_pubkey.to_vec()),
+            role,
+            not_after_ns: u64::MAX,
+            issued_via: memvault_auth::AttestationOrigin::Direct,
+            signature: [0u8; 64],
+        };
+        let bytes = node_att
+            .signing_bytes()
+            .map_err(|e| ApiError::Other(format!("node attestation signing bytes: {e}")))?;
+        node_att.signature = admin_sk.sign(&bytes).to_bytes();
+        crate::sigchain::publish_node_attestation(self, &node_att)
+    }
+
+    /// Revoke an agent that this node previously attested. Signs the
+    /// revocation with the node signing key and persists it as a sigchain
+    /// block (picked up by peers via RBSR sync).
+    pub fn revoke_agent(
+        &self,
+        agent_pubkey: [u8; 32],
+        reason: impl Into<String>,
+    ) -> Result<Vec<u8>> {
+        let node_sk = self
+            .node_signing_key
+            .get()
+            .ok_or_else(|| ApiError::Other("no node signing key configured".into()))?;
+        let rev = memvault_auth::sign_agent_revocation(node_sk, agent_pubkey, reason)
+            .map_err(|e| ApiError::Other(format!("sign agent revocation: {e}")))?;
+        crate::sigchain::publish_agent_revocation(self, &rev)
+    }
+
+    /// Revoke a node. Requires the admin signing key. Persists as a sigchain
+    /// block; on next scan, downstream verifiers transitively reject every
+    /// JWT chained through that node.
+    pub fn revoke_node(
+        &self,
+        node_pubkey: [u8; 32],
+        reason: impl Into<String>,
+    ) -> Result<Vec<u8>> {
+        let admin_sk = self
+            .admin_signing_key
+            .get()
+            .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
+        let rev = memvault_auth::sign_node_revocation(admin_sk, node_pubkey, reason)
+            .map_err(|e| ApiError::Other(format!("sign node revocation: {e}")))?;
+        crate::sigchain::publish_node_revocation(self, &rev)
     }
 
     /// Find or create an `Agent`-role bucket for the given agent ID.
@@ -205,6 +544,12 @@ impl LocalClient {
         &self.cluster_id
     }
 
+    /// Shared event bus — used by sigchain helpers to notify watchers, and
+    /// by the watcher to subscribe.
+    pub fn event_bus(&self) -> &Arc<EventBus> {
+        &self.event_bus
+    }
+
     /// Get the peer ID.
     pub fn peer_id(&self) -> &[u8] {
         &self.peer_id
@@ -214,6 +559,15 @@ impl LocalClient {
     ///
     /// The envelope is fully deterministic: uses cluster_id as author and
     /// wall_ns=0 so every node in the cluster produces the same block.
+    ///
+    /// **Sole remaining unsigned-envelope producer.** Called only from
+    /// `rebuild_store` when no legacy bucket exists yet, so we need to
+    /// mint one before any node signing key is necessarily available
+    /// (and the cluster as a whole — not any single node — is the
+    /// nominal author). Every other write path goes through
+    /// `build_signed_envelope`, which now refuses to fall back to an
+    /// unsigned envelope. See `resign_legacy_envelope` in rebuild.rs
+    /// for how legacy data adopted into this bucket is re-signed.
     pub fn create_bucket_with_id(
         &self,
         bucket_id: BucketId,
@@ -264,6 +618,7 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -276,19 +631,135 @@ impl LocalClient {
     }
 
     /// Get the agent ID if set.
+    /// The admin signing key, if this daemon holds one (i.e. is the cluster
+    /// admin). Used by callers that need to derive the admin verifying key
+    /// or sign admin-only operations.
+    pub fn admin_signing_key(&self) -> Option<&ed25519_dalek::SigningKey> {
+        self.admin_signing_key.get()
+    }
+
+    /// The admin's verifying key, derived from the signing key. `None` on
+    /// peer daemons that don't hold the admin key.
+    pub fn admin_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
+        self.admin_signing_key.get().map(|sk| sk.verifying_key())
+    }
+
     pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
-        self.agent_identity.as_ref().map(|i| &i.agent_id)
+        self.agent_identity.get().map(|i| &i.agent_id)
+    }
+
+    /// CID of the bound agent's attestation block, if an agent identity is
+    /// bound. Used by envelope builders to embed an inline attribution
+    /// reference so reads can resolve the agent without a sidecar.
+    pub fn agent_attestation_cid(&self) -> Option<&[u8]> {
+        self.agent_identity
+            .get()
+            .map(|i| i.attestation_cid.as_slice())
     }
 
     /// The effective author identity for write operations.
     /// Uses the agent's peer ID (derived from its public key) if an agent
     /// identity is set, otherwise falls back to the raw peer_id.
     fn effective_author(&self) -> Vec<u8> {
-        if let Some(ref identity) = self.agent_identity {
+        if let Some(identity) = self.agent_identity.get() {
             identity.verifying_key.as_bytes().to_vec()
         } else {
             self.peer_id.clone()
         }
+    }
+
+    /// Identity to sign a new write with. The node always signs; the
+    /// agent additionally co-signs when an agent identity is bound.
+    /// Returns `None` only when no node SK is configured (pre-genesis
+    /// bootstrap), in which case the caller must use an unsigned write
+    /// path.
+    ///
+    /// `author` is always the node's pubkey-derived peer_id — matches
+    /// `node_signing_key.verifying_key()`. `agent_attestation` and
+    /// `agent_signing_key` are `Some` together iff an agent identity is
+    /// bound; the verifier resolves the cid to the same pubkey the
+    /// co-signature verifies against.
+    pub(crate) fn signer_for_writes(&self) -> Option<WriteSigner<'_>> {
+        let node_signing_key = self.node_signing_key.get()?;
+        let agent = self.agent_identity.get();
+        Some(WriteSigner {
+            node_signing_key,
+            author: memvault_core::PeerId(self.peer_id.clone()),
+            agent_signing_key: agent.map(|a| &a.signing_key),
+            agent_attestation: agent.map(|a| a.attestation_cid.clone()),
+        })
+    }
+
+    /// Build a `Signed<Value>` envelope for an agent-attributable write
+    /// and return its `(cid_bytes, envelope_bytes)`. The node always
+    /// signs; when an agent identity is bound, the agent additionally
+    /// co-signs the same payload bytes.
+    ///
+    /// `payload` is the kind-specific JSON content (e.g. the op for ops,
+    /// the annotation body for annotations, …). The helper wraps it in
+    /// the canonical envelope shape — author, tags, visibility, wall_ns,
+    /// bucket_id, attestation cids — and signs.
+    ///
+    /// `tags` is the existing `(scope, label)` shape used at call sites;
+    /// it's converted to `Vec<Tag>` here so callers don't repeat the
+    /// boilerplate.
+    fn build_signed_envelope(
+        &self,
+        payload: serde_json::Value,
+        tags: &[(String, String)],
+        visibility: Visibility,
+        wall_ns: u64,
+        bucket_id: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let tags_typed: Vec<memvault_core::tags::Tag> = tags
+            .iter()
+            .map(|(s, l)| memvault_core::tags::Tag::new(s.clone(), l.clone()))
+            .collect();
+        let bucket_id_typed: Option<BucketId> = bucket_id.and_then(|b| {
+            let arr: [u8; 32] = b.try_into().ok()?;
+            Some(BucketId(arr))
+        });
+
+        // When a signer is available, produce a fully-signed Signed<T>
+        // envelope (node always signs, agent co-signs when bound).
+        if let Some(signer) = self.signer_for_writes() {
+            let envelope = memvault_core::Signed::sign(
+                payload,
+                signer.node_signing_key,
+                signer.author,
+                vec![], // causal — not tracked in the JSON envelope era
+                vec![], // provenance — likewise
+                tags_typed,
+                visibility,
+                0, // lamport — not tracked yet
+                wall_ns,
+                None, // capability
+                bucket_id_typed,
+                None, // node_attestation — wire up once trust_state has the cid
+                signer.agent_attestation,
+                signer.agent_signing_key,
+            )
+            .map_err(|e| ApiError::Other(format!("sign envelope: {e}")))?;
+
+            let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            let cid_bytes = memvault_core::cid_from_bytes(&envelope_bytes).to_bytes();
+            return Ok((cid_bytes, envelope_bytes));
+        }
+
+        // No node signing key configured. Previously we silently fell
+        // back to an unsigned JSON envelope with a different `tags`
+        // serialization, which let smoke tests pass while production
+        // (signed) envelopes carried a different shape — that's how the
+        // EdgeAdd "? → ?" audit bug went undetected for so long. The
+        // node key is now load-bearing: refuse the write outright so
+        // misconfigured callers get a clear error instead of a divergent
+        // envelope shape.
+        Err(ApiError::Other(
+            "node_signing_key not configured on LocalClient; call \
+             set_node_signing_key before issuing writes"
+                .into(),
+        ))
     }
 
     /// Build a BucketInfo from a bucket_id and its decl CID.
@@ -500,31 +971,26 @@ impl LocalClient {
                 .iter_blocks()
                 .map_err(|e| ApiError::Serialization(e.to_string()))?;
             for (_, data) in &blocks {
-                if let Some(val) = memvault_store::deserialize_block(data) {
-                    if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                if let Some(view) = memvault_store::EnvelopeView::parse(data) {
+                    if view.str_field("kind") == Some("attachment") {
                         // Skip attachments without a bucket.
-                        if val.get("bucket_id").and_then(|v| v.as_array()).is_none() {
+                        if view.field("bucket_id").and_then(|v| v.as_array()).is_none() {
                             continue;
                         }
-                        let manifest_cid = val
-                            .get("manifest_cid")
-                            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
-                        let filename = val.get("filename").and_then(|v| v.as_str());
-                        let mime_type = val
-                            .get("mime_type")
-                            .and_then(|v| v.as_str())
+                        let manifest_cid: Option<Vec<u8>> = view.get_as("manifest_cid");
+                        let filename = view.str_field("filename");
+                        let mime_type = view
+                            .str_field("mime_type")
                             .unwrap_or("application/octet-stream");
                         if let Some(mcid) = manifest_cid {
                             // Only use cached extraction during index rebuild.
                             let text = self.load_cached_extraction(&mcid)
                                 .and_then(|r| match r {
-                                    ExtractionResult::Ok(t) => Some(t),
+                                    ExtractionResult::Ok { text, .. } => Some(text),
                                     _ => None,
                                 });
-                            let att_tags: Vec<(String, String)> = val
-                                .get("tags")
-                                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                .unwrap_or_default();
+                            let att_tags: Vec<(String, String)> =
+                                view.get_as("tags").unwrap_or_default();
                             let mut idx = idx_write!();
                             idx.index_attachment(&mcid, filename, mime_type, text.as_deref(), att_tags);
                             attachment_count += 1;
@@ -535,14 +1001,18 @@ impl LocalClient {
 
             // Replay tag updates and retractions
             for (_, data) in &blocks {
-                if let Some(val) = memvault_store::deserialize_block(data) {
-                    let kind = val.get("kind").and_then(|v| v.as_str());
+                if let Some(view) = memvault_store::EnvelopeView::parse(data) {
+                    let val = view.raw();
+                    let kind = view.str_field("kind");
 
                     // Unified annotation format
                     if kind == Some("annotation") {
-                        let target = val.get("target").and_then(|v| v.as_str()).unwrap_or("");
-                        let ann_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let ann_data = val.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        let target = view.str_field("target").unwrap_or("");
+                        let ann_type = view.str_field("type").unwrap_or("");
+                        let ann_data = view
+                            .field("data")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
                         if !target.is_empty() {
                             let mut idx = idx_write!();
                             match ann_type {
@@ -619,19 +1089,20 @@ impl LocalClient {
         }
 
         let wall_ns = memvault_core::wall_ns();
-        let block = serde_json::json!({
+        let payload = serde_json::json!({
             "kind": "annotation",
             "target": target,
             "type": ann_type,
             "data": data,
-            "wall_ns": wall_ns,
-            "tags": tags,
             "cluster_id": self.cluster_id.clone(),
-            "bucket_id": bucket_id.clone(),
         });
-        let block_bytes = serde_ipld_dagcbor::to_vec(&block)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&block_bytes);
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            wall_ns,
+            bucket_id.as_deref(),
+        )?;
         let meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: vec![("_ann".to_string(), target.to_string())],
@@ -640,9 +1111,9 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
+                    ..Default::default()
         };
-        self.store
-            .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+        self.store.insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
         Ok(())
     }
 
@@ -659,18 +1130,18 @@ impl LocalClient {
         )
     }
 
-    /// Extract text from data, cache the result (success or failure) in the blockstore,
-    /// and return the extracted text if successful.
-    fn extract_and_cache(
+    /// Extract text + links from a source (attachment or document), cache
+    /// the result in the blockstore as an `"extraction"` annotation, and
+    /// return the extracted text if successful.
+    pub(crate) fn extract_source_and_cache(
         &self,
-        manifest_cid: &[u8],
-        data: &[u8],
-        mime_type: &str,
+        source: ExtractionSource<'_>,
     ) -> Option<String> {
-        tracing::debug!(mime_type, "extracting text");
+        let mime_type = source.mime();
+        tracing::debug!(mime_type, target = %source.annotation_target(), "extracting text");
         // Check cache first.
-        match self.load_cached_extraction(manifest_cid) {
-            Some(ExtractionResult::Ok(text)) => {
+        match self.load_cached_extraction_for(&source) {
+            Some(ExtractionResult::Ok { text, .. }) => {
                 tracing::debug!(mime_type, "extraction cache hit");
                 return Some(text);
             }
@@ -682,59 +1153,246 @@ impl LocalClient {
         }
 
         // Extract fresh.
-        let result = safe_extract_text(data, mime_type);
+        let result = safe_extract_text(source.data(), mime_type);
 
         // Cache the result.
         match &result {
-            ExtractionResult::Ok(text) => {
-                // Embed extracted text directly in the annotation (syncs
-                // via gossip, bucket-scoped).  No separate raw block.
-                self.store_extraction_annotation(manifest_cid, Some(&text), None);
+            ExtractionResult::Ok { text, links } => {
+                self.store_extraction_annotation(&source, Some(text), Some(links), None);
                 tracing::debug!(
                     mime_type,
                     text_len = text.len(),
+                    link_count = links.len(),
                     "extraction succeeded, cached in annotation"
                 );
             }
             ExtractionResult::Failed(err) => {
                 tracing::debug!(mime_type, error = %err, "extraction failed, cached failure");
-                self.store_extraction_annotation(manifest_cid, None, Some(err));
+                self.store_extraction_annotation(&source, None, None, Some(err));
             }
             ExtractionResult::Unsupported => {}
         }
 
         match result {
-            ExtractionResult::Ok(text) => Some(text),
+            ExtractionResult::Ok { text, .. } => Some(text),
             _ => None,
         }
     }
 
-    fn store_extraction_annotation(
+    /// Backwards-compatible wrapper used by the attachment write path.
+    fn extract_and_cache(
         &self,
         manifest_cid: &[u8],
+        data: &[u8],
+        mime_type: &str,
+    ) -> Option<String> {
+        self.extract_source_and_cache(ExtractionSource::Attachment {
+            manifest_cid,
+            mime: mime_type,
+            data,
+        })
+    }
+
+    /// Extract text + links from a document body and cache the result as an
+    /// `"extraction"` annotation keyed by the head op CID. MIME defaults to
+    /// `text/markdown`; opt into `text/html` via `frontmatter.mime` or
+    /// `frontmatter.format`.
+    pub(crate) fn extract_doc_and_cache(
+        &self,
+        doc_id: &DocId,
+        head_cid: &[u8],
+        body: &str,
+        frontmatter: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Option<String> {
+        let mime = doc_mime_from_frontmatter(frontmatter);
+        let source = ExtractionSource::Document {
+            doc_id: doc_id.clone(),
+            head_cid,
+            mime,
+            body: body.as_bytes(),
+        };
+        let text = self.extract_source_and_cache(source);
+
+        // Reconcile cached links into graph edges. Failures here are
+        // non-fatal — the body itself is already saved.
+        if let Err(e) = self.reconcile_doc_link_edges(doc_id, head_cid, mime, body) {
+            tracing::warn!(
+                doc_id = %hex::encode(doc_id.0),
+                error = %e,
+                "doc-link reconciliation failed"
+            );
+        }
+
+        text
+    }
+
+    /// Read the cached links for the doc's head, reconcile against the
+    /// existing body-provenance edges, and commit the diff as graph ops.
+    fn reconcile_doc_link_edges(
+        &self,
+        doc_id: &DocId,
+        head_cid: &[u8],
+        mime: &str,
+        body: &str,
+    ) -> Result<()> {
+        let alias_index = crate::link_reconcile::AliasIndex::build(&self.store);
+
+        let source = ExtractionSource::Document {
+            doc_id: doc_id.clone(),
+            head_cid,
+            mime,
+            body: body.as_bytes(),
+        };
+        let current_links = self.load_cached_links_for_source(&source);
+
+        // Reload existing body-provenance edges out of this doc using the
+        // sync read path (inline mirror of edges_of).
+        let doc_node = NodeRef::Doc(doc_id.clone());
+        let existing = self.edges_of_sync(&doc_node)?;
+        let body_edges = crate::link_reconcile::filter_body_provenance(existing);
+
+        // We treat existing body edges as the "prev" baseline; the diff
+        // gives us removes for vanished targets and adds for new ones.
+        let input = crate::link_reconcile::ReconcileInput {
+            doc_id,
+            current_links: &current_links,
+            previous_links: &[],
+            existing_body_edges: &body_edges,
+            alias_index: &alias_index,
+        };
+        let mut ops = crate::link_reconcile::compute_reconcile_ops(&input);
+
+        // Also remove body-provenance edges whose target is absent in the
+        // current resolved set — the pure-add diff above wouldn't catch
+        // these. Build a key set from current resolved links.
+        let resolved_keys: std::collections::HashSet<(NodeRef, String)> = current_links
+            .iter()
+            .filter_map(|l| crate::link_reconcile::resolve_extracted_link(l, &alias_index))
+            .map(|r| (r.target, r.relation))
+            .collect();
+        for edge in &body_edges {
+            if !resolved_keys.contains(&(edge.target.clone(), edge.relation.clone())) {
+                ops.push(Op::EdgeRemove {
+                    source: doc_node.clone(),
+                    edge_id: edge.id.clone(),
+                });
+            }
+        }
+
+        if ops.is_empty() {
+            return Ok(());
+        }
+        crate::link_reconcile::apply_reconcile_ops(self, &ops)
+    }
+
+    /// Synchronous equivalent of `MemvaultClient::edges_of` — used by the
+    /// link reconciler which runs inside a sync write path. Mirrors the
+    /// implementation in the async method.
+    fn edges_of_sync(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
+        let label = node.tag_label();
+        let mut results = Vec::new();
+        let mut removed_ids: std::collections::HashSet<EdgeId> =
+            std::collections::HashSet::new();
+
+        let source_cids = self
+            .store
+            .query_by_tag("edge_source", &label, 0, usize::MAX)?;
+        let target_cids = self
+            .store
+            .query_by_tag("edge_target", &label, 0, usize::MAX)?;
+
+        let mut all_cids = source_cids;
+        all_cids.extend(target_cids);
+
+        for cid in &all_cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        match serde_json::from_value::<Op>(payload.clone()) {
+                            Ok(Op::EdgeAdd { source, edge }) => {
+                                results.push((source, edge));
+                            }
+                            Ok(Op::EdgeRemove { edge_id, .. }) => {
+                                removed_ids.insert(edge_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        results.retain(|(_, edge)| !removed_ids.contains(&edge.id));
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|(_, edge)| seen.insert(edge.id.clone()));
+        Ok(results)
+    }
+
+    fn store_extraction_annotation(
+        &self,
+        source: &ExtractionSource<'_>,
         text: Option<&str>,
+        links: Option<&[memvault_extract_abi::ExtractedLink]>,
         error: Option<&str>,
     ) {
-        let target = format!("file:{}", hex::encode(manifest_cid));
+        let target = source.annotation_target();
+        let links_json = links.map(|ls| {
+            ls.iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "uri": l.uri,
+                        "display_text": l.display_text,
+                        "byte_span": [l.byte_span.0, l.byte_span.1],
+                        "syntax": format!("{:?}", l.syntax),
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
         let _ = self.store_annotation(
             &target,
             "extraction",
             serde_json::json!({
                 "extracted_text_inline": text,
                 "extraction_error": error,
+                "links": links_json,
                 "extractor": "memvault-extract",
                 "extracted_at_ns": memvault_core::wall_ns(),
             }),
         );
     }
 
+    /// Load cached extraction result for a generic source. Returns
+    /// `Some(ExtractionResult::Ok { text, links })` on cached success,
+    /// `Some(ExtractionResult::Failed(err))` on cached failure, `None` if
+    /// no cache exists. The result's `links` field is populated from the
+    /// `links` annotation field (empty for legacy entries).
+    fn load_cached_extraction_for(
+        &self,
+        source: &ExtractionSource<'_>,
+    ) -> Option<ExtractionResult> {
+        let target = source.annotation_target();
+        let legacy_target = source.legacy_target();
+        self.load_cached_extraction_by_targets(&target, legacy_target.as_deref(), source.cache_key())
+    }
+
     /// Load cached extraction result.
-    /// Returns `Some(ExtractionResult::Ok(text))` on cached success,
-    /// `Some(ExtractionResult::Failed(err))` on cached failure,
+    /// Returns `Some(ExtractionResult::Ok { text, links })` on cached
+    /// success, `Some(ExtractionResult::Failed(err))` on cached failure,
     /// `None` if no cache exists.
     fn load_cached_extraction(&self, manifest_cid: &[u8]) -> Option<ExtractionResult> {
         let target = format!("file:{}", hex::encode(manifest_cid));
         let legacy_target = format!("attachment:{}", hex::encode(manifest_cid));
+        self.load_cached_extraction_by_targets(&target, Some(&legacy_target), manifest_cid)
+    }
+
+    fn load_cached_extraction_by_targets(
+        &self,
+        target: &str,
+        legacy_target_attachment: Option<&str>,
+        manifest_cid: &[u8],
+    ) -> Option<ExtractionResult> {
+        // Kept for diff continuity — original implementation below.
+        let legacy_target = legacy_target_attachment.map(|s| s.to_string()).unwrap_or_default();
 
         // Try new unified annotation format first, then legacy manifest_update.
         let mut ann_cids = self.store.query_by_tag("_ann", &target, 0, 10).ok()?;
@@ -750,10 +1408,21 @@ impl LocalClient {
 
         for cid in ann_cids.iter().chain(legacy_cids.iter()) {
             let block_data = self.store.get_block(cid).ok()??;
-            let val: serde_json::Value = memvault_store::deserialize_block(&block_data)?;
+            // EnvelopeView normalises top-level vs Signed<T>-nested
+            // field access, so the `data` field is reached regardless of
+            // whether the annotation came from the legacy raw-JSON or
+            // the new Signed<T> envelope path.
+            let view = memvault_store::EnvelopeView::parse(&block_data)?;
+            let val: serde_json::Value = view.raw().clone();
 
-            // Unified annotation format
-            let data_field = val.get("data").unwrap_or(&val);
+            // Unified annotation format — pull `data` via the view first;
+            // fall back to the legacy top-level layout if the field is
+            // absent.
+            let data_field_owned = view
+                .field("data")
+                .cloned()
+                .unwrap_or_else(|| val.clone());
+            let data_field = &data_field_owned;
 
             if let Some(err) = data_field.get("extraction_error").and_then(|v| v.as_str()) {
                 if !err.is_empty() {
@@ -761,12 +1430,17 @@ impl LocalClient {
                 }
             }
 
+            let links = parse_cached_links(data_field.get("links"));
+
             // New inline format: text embedded directly in annotation.
             if let Some(text) = data_field
                 .get("extracted_text_inline")
                 .and_then(|v| v.as_str())
             {
-                return Some(ExtractionResult::Ok(text.to_string()));
+                return Some(ExtractionResult::Ok {
+                    text: text.to_string(),
+                    links,
+                });
             }
 
             // Legacy format: text stored as separate block via CID ref.
@@ -777,10 +1451,22 @@ impl LocalClient {
                 let et_bytes = self.store.get_block(&et_cid).ok()??;
                 let et: serde_json::Value = memvault_store::deserialize_block(&et_bytes)?;
                 let text = et.get("text").and_then(|v| v.as_str())?.to_string();
-                return Some(ExtractionResult::Ok(text));
+                return Some(ExtractionResult::Ok { text, links });
             }
         }
         None
+    }
+
+    /// Public read accessor — returns the cached extracted links for a
+    /// source, or empty if nothing cached. Used by the link reconciler.
+    pub fn load_cached_links_for_source(
+        &self,
+        source: &ExtractionSource<'_>,
+    ) -> Vec<memvault_extract_abi::ExtractedLink> {
+        match self.load_cached_extraction_for(source) {
+            Some(ExtractionResult::Ok { links, .. }) => links,
+            _ => Vec::new(),
+        }
     }
 
     /// Access the underlying store.
@@ -921,6 +1607,15 @@ impl LocalClient {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
+    /// Top-level `agent_attestation` CID from an envelope, if present.
+    /// Returns `None` for legacy envelopes (pre-Signed<T> v3) and for
+    /// system writes that weren't agent-attributed.
+    fn agent_attestation_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
+        let val: serde_json::Value = memvault_store::deserialize_block(data)?;
+        val.get("agent_attestation")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
     fn author_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
         let val: serde_json::Value = memvault_store::deserialize_block(data)?;
         val.get("author")
@@ -954,13 +1649,28 @@ impl LocalClient {
         self.latest_bucket_from_cids(&cids)
     }
 
-    /// Returns true if at least one block in `cids` was authored by the local peer.
+    /// Returns true if at least one block in `cids` was authored by
+    /// the local node or, when an agent identity is bound, by that
+    /// agent. Handles both legacy raw-JSON envelopes (author == agent
+    /// pubkey or peer_id at write time) and post-migration Signed<T>
+    /// envelopes (author == node peer_id; agent identity carried in
+    /// `agent_attestation`).
     fn has_local_author(&self, cids: &[Vec<u8>]) -> bool {
-        let local = self.effective_author();
+        let local_effective = self.effective_author();
+        let local_peer_id = &self.peer_id;
+        let local_agent_att = self.agent_attestation_cid().map(|c| c.to_vec());
         for cid in cids {
             if let Ok(Some(data)) = self.store.get_block(cid) {
+                // Signed<T> v3: agent attribution lives in `agent_attestation`.
+                if let Some(att) = Self::agent_attestation_from_envelope_bytes(&data) {
+                    if local_agent_att.as_ref() == Some(&att) {
+                        return true;
+                    }
+                }
                 if let Some(author) = Self::author_from_envelope_bytes(&data) {
-                    if author == local {
+                    // Match legacy (author == effective_author at write
+                    // time) and Signed<T> node-only writes (author == peer_id).
+                    if author == local_effective || &author == local_peer_id {
                         return true;
                     }
                 }
@@ -1017,6 +1727,150 @@ impl LocalClient {
         None
     }
 
+    /// Public wrapper around [`Self::inferred_node_bucket`] for the
+    /// link reconciler module.
+    pub fn inferred_node_bucket_pub(&self, node: &NodeRef) -> Option<Vec<u8>> {
+        self.inferred_node_bucket(node)
+    }
+
+    /// Find the most recent op CID for a document (its "head").
+    pub fn latest_doc_head_cid(&self, doc_id: &DocId) -> Option<Vec<u8>> {
+        let label: String = doc_id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX).ok()?;
+        // query_by_tag returns insertion order; the most recent is last.
+        cids.into_iter().last()
+    }
+
+    /// Cached out-links for a document (read from the latest extraction
+    /// annotation). Returns an empty vec if nothing is cached.
+    pub fn doc_outlinks(&self, doc_id: &DocId) -> Vec<memvault_extract_abi::ExtractedLink> {
+        let Some(head_cid) = self.latest_doc_head_cid(doc_id) else {
+            return Vec::new();
+        };
+        let source = ExtractionSource::Document {
+            doc_id: doc_id.clone(),
+            head_cid: &head_cid,
+            mime: "text/markdown",
+            body: &[],
+        };
+        self.load_cached_links_for_source(&source)
+    }
+
+    /// In-links pointing at `node` — graph edges whose target is `node`
+    /// and whose provenance is body/frontmatter (operator-asserted edges
+    /// are returned too).
+    pub fn doc_backlinks(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
+        let all = self.edges_of_sync(node)?;
+        Ok(all
+            .into_iter()
+            .filter(|(_, edge)| edge.target == *node)
+            .collect())
+    }
+
+    /// Body-provenance edges whose target is an alias placeholder. Each
+    /// entry is `(source_node, alias_string)`. `bucket` filters by inferred
+    /// source bucket when provided.
+    pub fn dangling_link_edges(
+        &self,
+        bucket_filter: Option<&BucketId>,
+    ) -> Result<Vec<(NodeRef, String)>> {
+        // Scan all body-provenance edges across docs by walking the
+        // `edge_source` tag space — we know every doc-sourced edge gets
+        // tagged with `edge_source: doc:<hex>`.
+        let labels = self
+            .store
+            .query_unique_labels("edge_source", usize::MAX)
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for label in labels {
+            // Only docs are interesting as link sources here.
+            let Some(node) = NodeRef::from_tag_label(&label) else {
+                continue;
+            };
+            if !matches!(node, NodeRef::Doc(_)) {
+                continue;
+            }
+            if let Some(bf) = bucket_filter {
+                let Some(inferred) = self.inferred_node_bucket(&node) else {
+                    continue;
+                };
+                if inferred != bf.0.to_vec() {
+                    continue;
+                }
+            }
+            let edges = self.edges_of_sync(&node)?;
+            for (src, edge) in edges {
+                if src != node {
+                    continue;
+                }
+                if memvault_doc::link::LinkProvenance::of(&edge)
+                    != Some(memvault_doc::link::LinkProvenance::BodyMarkdown)
+                {
+                    continue;
+                }
+                if let Some(alias) = edge
+                    .props
+                    .get("pending_alias")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push((node.clone(), alias.to_string()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Re-parse and re-reconcile a single document's body. Returns the
+    /// op CID of the head that was re-extracted, or `Ok(None)` if there's
+    /// no body to extract.
+    pub async fn reindex_doc_links(&self, doc_id: &DocId) -> Result<Option<Vec<u8>>> {
+        let head_cid = match self.latest_doc_head_cid(doc_id) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        let Some(doc) = self.get_doc_async(doc_id).await? else {
+            return Ok(None);
+        };
+        let _ = self.extract_doc_and_cache(doc_id, &head_cid, &doc.body, &doc.frontmatter);
+        Ok(Some(head_cid))
+    }
+
+    /// Re-parse and re-reconcile every document's body. Returns the
+    /// number of docs visited.
+    pub async fn reindex_all_doc_links(&self) -> Result<usize> {
+        let labels = self
+            .store
+            .query_unique_labels("doc", usize::MAX)
+            .unwrap_or_default();
+        let mut count = 0usize;
+        for label in labels {
+            let Ok(bytes) = hex::decode(&label) else {
+                continue;
+            };
+            if bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            let doc_id = DocId(arr);
+            if self.reindex_doc_links(&doc_id).await?.is_some() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Public wrapper around [`Self::store_op`] for the link reconciler.
+    pub fn store_op_pub(
+        &self,
+        op: &Op,
+        tags: &[(String, String)],
+        vis: &Visibility,
+        bucket: Option<&BucketId>,
+    ) -> Result<Vec<u8>> {
+        self.store_op(op, tags, vis, bucket)
+    }
+
     fn store_op(
         &self,
         op: &Op,
@@ -1027,6 +1881,20 @@ impl LocalClient {
         let wall_ns = memvault_core::wall_ns();
         let bucket_id = self.require_bucket(bucket)?;
 
+        // The op IS the payload — preserves `payload.<OpKind>` access for
+        // existing readers (`list_docs` extracting `DocCreate`, etc.).
+        // `cluster_id` is conveyed via `meta` for indexing rather than
+        // a top-level envelope field.
+        let payload = serde_json::to_value(op)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            tags,
+            vis.clone(),
+            wall_ns,
+            bucket_id.as_deref(),
+        )?;
+
         let meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: tags.to_vec(),
@@ -1036,23 +1904,6 @@ impl LocalClient {
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
         };
-
-        // CID is computed from the full envelope bytes so any peer
-        // receiving the block can verify: CID == hash(block_bytes).
-        let envelope = serde_json::json!({
-            "version": 2,
-            "payload": op,
-            "author": self.peer_id,
-            "tags": tags,
-            "visibility": vis,
-            "wall_ns": wall_ns,
-            "cluster_id": meta.cluster_id,
-            "bucket_id": meta.bucket_id,
-        });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&envelope_bytes);
-        let cid_bytes = cid.to_bytes();
 
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -1096,7 +1947,7 @@ impl LocalClient {
         actions: Vec<memvault_auth::Action>,
         ttl_secs: u64,
     ) -> Result<Vec<u8>> {
-        let admin_key = self.admin_signing_key.as_ref().ok_or_else(|| {
+        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
             ApiError::Other("no admin signing key — cannot issue grants".into())
         })?;
 
@@ -1151,6 +2002,7 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
+                    ..Default::default()
         };
         self.store.insert_envelope(&cid_bytes, &grant_json, &meta)?;
 
@@ -1232,6 +2084,11 @@ impl MemvaultClient for LocalClient {
         let cid_bytes = self.store_op(&op, &all_tags, &vis, bucket)?;
         tracing::info!(doc_id = %hex::encode(doc.id.0), "doc created");
 
+        // Run the body through the extractor pipeline so links land in the
+        // annotation cache. Failures and unsupported MIMEs are silently
+        // ignored — the body is still saved.
+        let _ = self.extract_doc_and_cache(&doc.id, &cid_bytes, &doc.body, &doc.frontmatter);
+
         // Index for search
         let title = doc
             .frontmatter
@@ -1244,7 +2101,7 @@ impl MemvaultClient for LocalClient {
         }
 
         self.event_bus.publish(MemvaultEvent::DocCreated {
-            doc_id: doc.id,
+            doc_id: doc.id.clone(),
             cid: cid_bytes.clone(),
         });
 
@@ -1268,6 +2125,12 @@ impl MemvaultClient for LocalClient {
             .map(BucketId);
         let cid_bytes =
             self.store_op(&op, &tags, &Visibility::Internal, inferred_bucket.as_ref())?;
+
+        // After the edit lands, re-extract the doc body so cached links
+        // track the new head.
+        if let Ok(Some(doc)) = self.get_doc_async(id).await {
+            let _ = self.extract_doc_and_cache(id, &cid_bytes, &doc.body, &doc.frontmatter);
+        }
 
         self.event_bus.publish(MemvaultEvent::DocUpdated {
             doc_id: id.clone(),
@@ -1416,25 +2279,30 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
+                    ..Default::default()
         };
-        let envelope = serde_json::json!({
-            "version": 1,
+        let payload = serde_json::json!({
             "kind": "attachment",
             "manifest_cid": manifest_cid_bytes,
             "filename": filename,
             "mime_type": mime_type,
             "size": data.len(),
-            "visibility": visibility,
-            "tags": tags,
-            "wall_ns": meta.wall_ns,
             "cluster_id": meta.cluster_id,
-            "bucket_id": meta.bucket_id,
         });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let env_cid = cid_from_bytes(&envelope_bytes);
+        let visibility_typed = match visibility {
+            "public" => Visibility::Public,
+            "federated" => Visibility::Federated,
+            _ => Visibility::Internal,
+        };
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            visibility_typed,
+            meta.wall_ns,
+            meta.bucket_id.as_deref(),
+        )?;
         self.store
-            .insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
         tracing::info!(filename = ?filename, mime_type, size = data.len(), "file attached");
 
         // Extract text and cache the result (success or failure) in the blockstore.
@@ -1951,7 +2819,7 @@ impl MemvaultClient for LocalClient {
         max_uses: u32,
         label: Option<String>,
     ) -> Result<String> {
-        let admin_key = self.admin_signing_key.as_ref().ok_or_else(|| {
+        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
             ApiError::Other("no admin signing key configured — cannot issue tokens".into())
         })?;
         let peer_id = memvault_core::PeerId(self.peer_id.clone());
@@ -1970,6 +2838,7 @@ impl MemvaultClient for LocalClient {
             ttl_secs,
             max_uses,
             label,
+            self.pinned_admin_genesis().cloned(),
             &self.store,
         )
     }
@@ -2035,6 +2904,14 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn create_view(&self, view: crate::types::View) -> Result<()> {
+        // Views are typed side blocks (like attachment manifests,
+        // bucket grants, and BucketTrust): the stored block IS the
+        // View struct, not a Signed<T> envelope wrapping it. They
+        // intentionally bypass build_signed_envelope because their
+        // integrity model is "by-CID lookup of a self-describing
+        // payload" rather than "audit log of authored events". Don't
+        // route this through Signed<T> without coordinated reader
+        // changes in list_views / get_view / delete_view.
         let view_bytes =
             serde_ipld_dagcbor::to_vec(&view).map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&view_bytes);
@@ -2048,6 +2925,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: None,
+                    ..Default::default()
         };
         self.store.insert_envelope(&cid_bytes, &view_bytes, &meta)?;
         tracing::info!(name = %view.name, tag_count = view.tags.len(), "view created");
@@ -2099,7 +2977,7 @@ impl MemvaultClient for LocalClient {
             bucket_id: bucket_id.clone(),
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
-            owner_agent: self.agent_identity.as_ref().map(|i| i.agent_id.clone()),
+            owner_agent: self.agent_identity.get().map(|i| i.agent_id.clone()),
             default_visibility,
             default_classification,
             created_ns: now_ns,
@@ -2117,18 +2995,18 @@ impl MemvaultClient for LocalClient {
             ("kind".to_string(), "bucket-decl".to_string()),
             ("bucket".to_string(), bucket_id.to_string()),
         ];
-        let envelope = serde_json::json!({
-            "version": 1,
-            "payload": { "BucketCreate": decl },
-            "author": self.peer_id,
-            "tags": tags,
-            "wall_ns": now_ns,
-            "bucket_id": bucket_id.0,
+        // Payload shape preserves `payload.BucketCreate` so `parse_bucket_decl`
+        // continues to find the decl after the Signed<T> migration.
+        let payload = serde_json::json!({
+            "BucketCreate": decl,
         });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&envelope_bytes);
-        let cid_bytes = cid.to_bytes();
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            now_ns,
+            Some(&bucket_id.0),
+        )?;
 
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
@@ -2138,6 +3016,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -2187,30 +3066,39 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {
-        // Store a rename operation as a block
-        let rename = serde_json::json!({
-            "op": "BucketRename",
-            "bucket_id": id.0,
-            "new_name": new_name,
-            "wall_ns": memvault_core::wall_ns(),
+        let wall_ns = memvault_core::wall_ns();
+        let tags = vec![
+            ("kind".to_string(), "bucket-rename".to_string()),
+            ("bucket".to_string(), id.to_string()),
+        ];
+        // `payload.BucketRename` shape matches audit parsing
+        // (`memvault_query::audit::parse_audit_record`).
+        let payload = serde_json::json!({
+            "BucketRename": {
+                "bucket_id": id.0,
+                "new_name": new_name,
+                "wall_ns": wall_ns,
+            }
         });
-        let block_bytes =
-            serde_ipld_dagcbor::to_vec(&rename).map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&block_bytes);
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            wall_ns,
+            Some(&id.0),
+        )?;
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
-            tags: vec![
-                ("kind".to_string(), "bucket-rename".to_string()),
-                ("bucket".to_string(), id.to_string()),
-            ],
-            wall_ns: memvault_core::wall_ns(),
+            tags,
+            wall_ns,
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
-            .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
         // Update the name in the bucket decl by storing a new decl with the updated name
         if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
@@ -2234,6 +3122,7 @@ impl MemvaultClient for LocalClient {
                             provenance: vec![],
                             cluster_id: Some(self.cluster_id.clone()),
                             bucket_id: Some(id.0.to_vec()),
+                                                    ..Default::default()
                         },
                     )?;
                     self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
@@ -2289,6 +3178,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
             .insert_envelope(&new_cid.to_bytes(), &new_bytes, &meta)?;
@@ -2305,29 +3195,38 @@ impl MemvaultClient for LocalClient {
 
     async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
         let now_ns = memvault_core::wall_ns();
-        let archive_block = serde_json::json!({
-            "op": "BucketArchive",
-            "bucket_id": id.0,
-            "reason": reason,
-            "archived_at_ns": now_ns,
+        let tags = vec![
+            ("kind".to_string(), "bucket-archive".to_string()),
+            ("bucket".to_string(), id.to_string()),
+        ];
+        // `payload.BucketArchive` shape matches audit parsing
+        // (`memvault_query::audit::parse_audit_record`).
+        let payload = serde_json::json!({
+            "BucketArchive": {
+                "bucket_id": id.0,
+                "reason": reason,
+                "archived_at_ns": now_ns,
+            }
         });
-        let block_bytes = serde_ipld_dagcbor::to_vec(&archive_block)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&block_bytes);
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            now_ns,
+            Some(&id.0),
+        )?;
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
-            tags: vec![
-                ("kind".to_string(), "bucket-archive".to_string()),
-                ("bucket".to_string(), id.to_string()),
-            ],
+            tags,
             wall_ns: now_ns,
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
+                    ..Default::default()
         };
         self.store
-            .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
         // Mark the bucket decl as archived by storing an updated decl
         if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
@@ -2356,6 +3255,7 @@ impl MemvaultClient for LocalClient {
                             provenance: vec![],
                             cluster_id: Some(self.cluster_id.clone()),
                             bucket_id: Some(id.0.to_vec()),
+                                                    ..Default::default()
                         },
                     )?;
                     self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
@@ -2394,7 +3294,7 @@ impl MemvaultClient for LocalClient {
 
         // If approved and we have an admin signing key, issue a BucketTrust
         if approve {
-            if let Some(ref admin_key) = self.admin_signing_key {
+            if let Some(admin_key) = self.admin_signing_key.get() {
                 // Load the proposal to get bucket/cluster info
                 if let Some(proposal_block) = self.store.get_block(proposal_cid)? {
                     if let Ok(proposal) =
@@ -2457,6 +3357,7 @@ impl MemvaultClient for LocalClient {
                                         provenance: vec![],
                                         cluster_id: Some(self.cluster_id.clone()),
                                         bucket_id: Some(bucket_bytes),
+                                                                            ..Default::default()
                                     };
                                     let _ = self.store.insert_envelope(
                                         &trust_cid.to_bytes(),

@@ -7,6 +7,7 @@ use unic_langid::langid;
 use super::layout::Layout;
 use super::pages::admin::dashboard::AdminDashboard;
 use super::pages::admin::tokens::TokenManagement;
+use super::pages::admin::trust::TrustTreePage;
 use super::pages::audit::AuditLog;
 use super::pages::buckets::detail::BucketDetail;
 use super::pages::buckets::list::BucketList;
@@ -59,6 +60,8 @@ pub enum Route {
     AdminDashboard {},
     #[route("/admin/tokens")]
     TokenManagement {},
+    #[route("/admin/trust")]
+    TrustTreePage {},
 }
 
 use plan_ai_design::theme_toggle::{THEME_INIT_SCRIPT, WASM_LOADING_INNER, WASM_LOADING_STYLE};

@@ -32,39 +32,98 @@ mod server_router {
     use std::sync::Arc;
 
     use axum::Router;
+    use ed25519_dalek::VerifyingKey;
     use memvault_api::{EventBus, MemvaultClient};
 
     /// Application state shared across all handlers.
+    ///
+    /// Auth uses the admin → node → agent JWT chain (see `memvault_auth::jwt`).
+    /// `node_attestations` maps a node's pubkey to its admin-signed
+    /// `NodeAttestation`; the verifier looks up the JWT's claimed issuing
+    /// node here and confirms it against `admin_pubkey`.
+    ///
+    /// For now this holds just the local node; phase 5 of the sig-chain sync
+    /// will populate it with attestations from other peers as they're received.
     pub struct AppState {
         pub client: Arc<dyn MemvaultClient>,
         pub event_bus: Arc<EventBus>,
-        /// Pre-shared bearer token for Phase 7 authentication.
-        pub auth_token: String,
+        /// Cluster admin's verifying key. `None` pre-genesis (no admin key
+        /// exists yet) — `node_trust` entries must then be
+        /// [`memvault_auth::jwt::NodeTrust::PreGenesis`] for them to verify.
+        pub admin_pubkey: Option<VerifyingKey>,
+        /// Trusted-node lookup table keyed by node pubkey. Wrapped in an
+        /// `RwLock` so the sigchain watcher (see [`spawn_sigchain_watcher`])
+        /// can insert new entries when peers announce `NodeAttestation`s
+        /// over RBSR sync without restarting the daemon.
+        pub node_trust: Arc<
+            std::sync::RwLock<
+                std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
+            >,
+        >,
+        /// Revoked agent pubkeys. Populated from
+        /// [`memvault_auth::AgentRevocation`] blocks in the sig-chain (phase 5
+        /// sync) and on local revoke calls. JWTs from any of these agents
+        /// are rejected unconditionally.
+        pub revoked_agents: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        /// Revoked node pubkeys. Populated from
+        /// [`memvault_auth::NodeRevocation`] blocks. When a node is revoked,
+        /// the JWT verifier's lookup table filters it out — transitively
+        /// invalidating every agent that node attested.
+        pub revoked_nodes: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
         /// Operational metrics.
         pub metrics: Arc<memvault_api::metrics::Metrics>,
+        /// Optional injectable lookup for `AgentAttestation` by agent
+        /// pubkey. Production wires this to the sigchain scan via
+        /// [`memvault_api::sigchain::find_agent_attestation`]; tests
+        /// install a stub so they don't need a full `LocalClient` set up.
+        /// `None` falls back to the global `LOCAL_CLIENT` lookup.
+        #[allow(clippy::type_complexity)]
+        pub agent_attestation_lookup: Option<
+            Arc<
+                dyn Fn(&[u8; 32]) -> Option<memvault_auth::AgentAttestation>
+                    + Send
+                    + Sync,
+            >,
+        >,
     }
 
-    /// Load the API bearer token from `data_dir/api.token`, generating a new
-    /// random token on first run. The file is created with mode 0600.
-    pub fn load_or_generate_token(data_dir: &std::path::Path) -> std::io::Result<String> {
-        let token_path = data_dir.join("api.token");
-        if let Ok(token) = std::fs::read_to_string(&token_path) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Ok(token);
-            }
-        }
-        use rand::Rng;
-        let mut bytes = [0u8; 32];
-        rand::thread_rng().fill(&mut bytes);
-        let token = hex::encode(bytes);
-        std::fs::write(&token_path, &token)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(token)
+    /// Load (or generate) the built-in `_ui` agent identity used by the
+    /// web UI to issue per-session JWTs, and publish its attestation to
+    /// the sigchain.
+    ///
+    /// The identity is persisted under `<data_dir>/identity/ui_agent/`
+    /// across restarts: the keypair, the node-signed `AgentAttestation`,
+    /// and metadata. On startup we reuse the saved identity iff:
+    ///   1. The attestation's `node_pubkey` matches the daemon's current
+    ///      node signing key (no key rotation), AND
+    ///   2. The attestation hasn't expired.
+    /// Otherwise we rotate. This keeps the agent stable across restarts
+    /// (so existing JWTs and envelope-authorship blocks remain valid)
+    /// without leaving an orphaned identity behind after a node-key
+    /// rotation.
+    ///
+    /// **Prerequisite**: cluster trust must already be bootstrapped on the
+    /// client via [`memvault_api::bootstrap::bootstrap_cluster_trust`].
+    ///
+    /// Called only by web-serving callers (full daemon, memvault-web
+    /// standalone, memctl daemon-mode). Headless / CLI consumers skip it.
+    pub fn init_ui_agent(
+        client: &memvault_api::LocalClient,
+        data_dir: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Delegates to the canonical LocalClient enrollment helper.
+        // Web-specific work here is limited to picking the identity_dir
+        // and installing the resulting identity in the UI state cache.
+        let ui_identity_dir = data_dir.join("identity").join("ui_agent");
+        let ui_identity = memvault_api::agent_identity::enroll_local_agent(
+            client,
+            "_ui",
+            &ui_identity_dir,
+            memvault_auth::Role::AgentHost,
+            365 * 24 * 60 * 60 * 1_000_000_000,
+        )?;
+        super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
+        Ok(())
     }
 
     /// Build the API-only memvault router (no web UI).

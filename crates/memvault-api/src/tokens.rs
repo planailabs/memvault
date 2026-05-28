@@ -19,6 +19,7 @@ pub fn issue_token(
     ttl_secs: u64,
     max_uses: u32,
     label: Option<String>,
+    admin_genesis: Option<memvault_auth::AdminGenesis>,
     store: &MemvaultStore,
 ) -> Result<String> {
     let now_ns = memvault_core::time::wall_ns();
@@ -36,6 +37,7 @@ pub fn issue_token(
         max_uses,
         nonce,
         label: label.clone(),
+        admin_genesis,
         signature: [0u8; 64],
     };
 
@@ -67,6 +69,7 @@ pub fn issue_token(
         provenance: vec![],
         cluster_id: Some(cluster_id.0.to_vec()),
         bucket_id: None,
+            ..Default::default()
     };
     store.insert_envelope(&cid_bytes, &token_cbor, &meta)?;
 
