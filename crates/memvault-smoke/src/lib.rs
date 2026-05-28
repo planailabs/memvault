@@ -22,6 +22,7 @@ mod tests {
     pub mod migrations;
     pub mod p2p;
     pub mod sharing;
+    pub mod signed_envelope_indexing;
     pub mod tokens;
     pub mod views;
 }

@@ -86,7 +86,11 @@ pub fn query_audit(
     let mut records = Vec::new();
     for cid in cids {
         if let Some(data) = store.get_block(&cid)? {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&data) {
+            // Use deserialize_block — handles both raw-JSON envelopes
+            // (legacy) and DAG-CBOR Signed<T> envelopes (post-Phase 1).
+            // The previous direct `serde_json::from_slice` only matched
+            // JSON-stored bytes, silently dropping every CBOR envelope.
+            if let Some(val) = memvault_store::deserialize_block(&data) {
                 let record = parse_audit_record(&cid, &val);
                 if let Some(ref filter_doc) = query.doc_id {
                     if record.doc_id.as_ref() != Some(filter_doc) {
