@@ -123,9 +123,28 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         .and_then(|v| v.field("wall_ns").and_then(|x| x.as_u64()))
         .unwrap_or(0);
 
+    // Signed<T> envelopes serialize `tags` as a list of `Tag` structs
+    // (`[{"scope":"x","label":"y"}, …]`); the unsigned fallback path
+    // uses nested arrays (`[["x","y"], …]`). Try the struct shape first,
+    // fall back to the tuple shape so both round-trip into the
+    // canonical `Vec<(String, String)>` representation.
     let tags: Vec<(String, String)> = view
         .as_ref()
-        .and_then(|v| v.get_as("tags"))
+        .and_then(|v| v.field("tags"))
+        .and_then(|raw| {
+            if let Ok(structured) =
+                serde_json::from_value::<Vec<memvault_core::Tag>>(raw.clone())
+            {
+                Some(
+                    structured
+                        .into_iter()
+                        .map(|t| (t.scope, t.label))
+                        .collect(),
+                )
+            } else {
+                serde_json::from_value::<Vec<(String, String)>>(raw.clone()).ok()
+            }
+        })
         .unwrap_or_default();
 
     // First try the Op-variant tags inside `payload` (the Signed<T>

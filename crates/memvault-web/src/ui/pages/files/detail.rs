@@ -69,7 +69,9 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
         .get_file_manifest(&cid_bytes)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        // Manifests are stored as DAG-CBOR; the canonical helper falls
+        // through to JSON for legacy blocks.
+        .and_then(|bytes| memvault_store::deserialize_block(&bytes))
         .unwrap_or_default();
 
     let extracted_text = client.read_extracted_text(&cid_bytes).await.unwrap_or(None);

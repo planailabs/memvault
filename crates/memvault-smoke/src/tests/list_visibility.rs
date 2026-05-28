@@ -86,6 +86,127 @@ async fn audit_lists_attachfile_op_for_uploaded_file() {
 }
 
 #[tokio::test]
+async fn file_manifest_round_trips_metadata() {
+    // The files page reads file rows by fetching the manifest block and
+    // pulling filename / mime_type / content_size out. Manifests are
+    // CBOR-encoded today, so a JSON-only parser would silently return
+    // defaults — "unnamed" / "application/octet-stream" / 0. Make sure
+    // the round-trip preserves the real values through the canonical
+    // deserialize helper.
+    let node = TestNode::new();
+    let cid = node
+        .client
+        .upload_file(
+            b"hello world",
+            Some("hello.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            None,
+        )
+        .await
+        .unwrap();
+
+    let bytes = node
+        .client
+        .get_file_manifest(&cid)
+        .await
+        .unwrap()
+        .expect("manifest block should exist after upload");
+    let manifest: serde_json::Value = memvault_store::deserialize_block(&bytes)
+        .expect("manifest must decode via the canonical helper");
+    assert_eq!(
+        manifest.get("filename").and_then(|v| v.as_str()),
+        Some("hello.txt"),
+        "filename missing from decoded manifest: {manifest}"
+    );
+    assert_eq!(
+        manifest.get("mime_type").and_then(|v| v.as_str()),
+        Some("text/plain"),
+        "mime_type missing from decoded manifest: {manifest}"
+    );
+    assert_eq!(
+        manifest.get("content_size").and_then(|v| v.as_u64()),
+        Some(b"hello world".len() as u64),
+        "content_size missing from decoded manifest: {manifest}"
+    );
+}
+
+#[tokio::test]
+async fn audit_edge_add_tags_round_trip() {
+    // Signed<T>.tags is serialized as `[{scope, label}, …]`; AuditRecord
+    // exposes them as `Vec<(String, String)>`. The audit UI uses
+    // `edge_source` / `edge_target` tags to render EdgeAdd rows as
+    // "Linked X → Y", so if the conversion drops them we get "? → ?".
+    let node = TestNode::new();
+    let entity_src = Entity {
+        id: memvault_core::EntityId::random(),
+        kind: "person".into(),
+        props: Default::default(),
+        edges_out: vec![],
+    };
+    let entity_tgt = Entity {
+        id: memvault_core::EntityId::random(),
+        kind: "service".into(),
+        props: Default::default(),
+        edges_out: vec![],
+    };
+    let src_id = node
+        .client
+        .add_entity(entity_src.clone(), Visibility::Internal, None)
+        .await
+        .unwrap();
+    let tgt_id = node
+        .client
+        .add_entity(entity_tgt.clone(), Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    let edge = memvault_doc::Edge {
+        id: memvault_core::EdgeId::random(),
+        relation: "works_with".into(),
+        target: memvault_core::NodeRef::Entity(tgt_id.clone()),
+        weight: None,
+        props: Default::default(),
+        provenance: None,
+    };
+    node.client
+        .add_link(
+            &memvault_core::NodeRef::Entity(src_id.clone()),
+            edge,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+
+    let records = node
+        .client
+        .audit(AuditQuery {
+            op_kind: Some(OpKind::EdgeAdd),
+            limit: Some(100),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let edge_record = records
+        .iter()
+        .find(|r| {
+            r.tags
+                .iter()
+                .any(|(s, l)| s == "edge_source" && l.contains(&hex::encode(src_id.0)))
+        })
+        .expect("EdgeAdd audit record should carry edge_source/edge_target tags");
+    assert!(
+        edge_record
+            .tags
+            .iter()
+            .any(|(s, l)| s == "edge_target" && l.contains(&hex::encode(tgt_id.0))),
+        "edge_target tag missing on EdgeAdd audit record: tags={:?}",
+        edge_record.tags
+    );
+}
+
+#[tokio::test]
 async fn audit_distinguishes_extraction_annotation_from_unknown() {
     // Doc with a wikilink triggers the extractor pipeline → cached
     // extraction annotation. Audit must classify it as Extraction, not

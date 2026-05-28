@@ -86,10 +86,20 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
         .await
     {
         for record in records {
-            if let Ok(Some(manifest_bytes)) = client.get_file_manifest(&record.cid).await {
-                if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) {
+            // record.cid is the AttachFile envelope CID — the manifest
+            // sits at record.attachment_cid. Skip records without one.
+            let Some(manifest_cid) = record.attachment_cid.clone() else {
+                continue;
+            };
+            if let Ok(Some(manifest_bytes)) = client.get_file_manifest(&manifest_cid).await {
+                // DAG-CBOR via the canonical helper — plain
+                // serde_json::from_slice would silently drop every
+                // field and produce blank "unnamed" rows.
+                if let Some(manifest) =
+                    memvault_store::deserialize_block(&manifest_bytes)
+                {
                     attachments.push(AttachmentInfo {
-                        cid: hex::encode(&record.cid),
+                        cid: hex::encode(&manifest_cid),
                         filename: manifest
                             .get("filename")
                             .and_then(|v| v.as_str())

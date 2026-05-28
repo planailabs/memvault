@@ -46,6 +46,16 @@ impl TestNode {
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
         client.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&seed));
 
+        // Node signing key — without one, every write goes down the
+        // unsigned fallback path in build_signed_envelope. That uses a
+        // different shape for `tags` than the real (Signed<T>) path,
+        // hiding tag-related parsing bugs that only show up against the
+        // daemon. Setting a key here makes smoke tests exercise the
+        // production envelope shape.
+        let mut node_seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut node_seed);
+        client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&node_seed));
+
         Self {
             _dir: dir,
             store,
