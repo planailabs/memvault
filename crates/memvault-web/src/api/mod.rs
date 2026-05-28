@@ -1,6 +1,7 @@
 //! API route registration.
 
 pub mod admin;
+pub mod agents;
 pub mod audit;
 pub mod auth;
 pub mod buckets;

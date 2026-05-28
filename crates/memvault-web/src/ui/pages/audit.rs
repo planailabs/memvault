@@ -53,24 +53,6 @@ impl AuditRow {
     }
 }
 
-/// Build a `cid → agent_id` map from all persisted AgentAttestations in
-/// the local store. Used to resolve audit-row attestation cids to
-/// human-readable agent IDs without re-reading per row.
-#[cfg(feature = "server")]
-fn build_agent_id_index(
-    local: &memvault_api::LocalClient,
-) -> std::collections::HashMap<Vec<u8>, String> {
-    let mut out = std::collections::HashMap::new();
-    if let Ok(atts) = memvault_api::sigchain::scan_agent_attestations(local) {
-        for att in atts {
-            if let Ok(bytes) = memvault_core::encode(&att) {
-                let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
-                out.insert(cid, att.agent_id.0);
-            }
-        }
-    }
-    out
-}
 
 #[server]
 async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
@@ -88,7 +70,7 @@ async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
     // Build the cid → agent_id lookup once per request so every row
     // resolves via an O(1) map hit instead of re-reading attestations.
     let agent_id_index = match crate::ui::state::local_client() {
-        Ok(local) => build_agent_id_index(&local),
+        Ok(local) => crate::api::agents::build_agent_id_index(&local),
         Err(_) => std::collections::HashMap::new(),
     };
 
