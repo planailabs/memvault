@@ -5,6 +5,7 @@ pub mod audit;
 pub mod auth;
 pub mod buckets;
 pub mod docs;
+pub mod enroll;
 pub mod events;
 pub mod files;
 pub mod graph;
@@ -114,6 +115,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/buckets/{id}/archive", post(buckets::archive_bucket))
         // ── Auth (session token for web UI) ───────────────────────
         .route("/auth/session-token", get(auth::get_session_token))
+        // ── Agent enrollment (token-authenticated; no Bearer needed).
+        //    Wire equivalent of `memctl agent-enroll`.
+        .route("/auth/enroll-agent", post(enroll::enroll_agent))
         // ── Events & Ops ───────────────────────────────────────────
         .route("/events", get(events::events_stream))
         .route("/metrics", get(ops::metrics))

@@ -80,6 +80,10 @@ pub fn TokenManagement() -> Element {
     let mut new_label = use_signal(String::new);
     let mut new_max_uses = use_signal(|| "1000".to_string());
     let mut issued_token = use_signal(|| None::<String>);
+    // Tracks whether the most-recently-issued token was for agent
+    // enrollment, so the success card can render an `agent-enroll`
+    // command snippet alongside the token.
+    let mut issued_agent_id = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
 
     let on_issue = move |e: Event<FormData>| {
@@ -87,10 +91,16 @@ pub fn TokenManagement() -> Element {
         let role = new_role.read().clone();
         let label = new_label.read().clone();
         let max_uses: u32 = new_max_uses.read().parse().unwrap_or(1000);
+        let agent_id_for_success = if role == "AgentHost" && !label.is_empty() {
+            Some(label.clone())
+        } else {
+            None
+        };
         spawn(async move {
             match issue_token(role, label, max_uses).await {
                 Ok(token) => {
                     issued_token.set(Some(token));
+                    issued_agent_id.set(agent_id_for_success);
                     tokens.restart();
                 }
                 Err(e) => error.set(Some(e.to_string())),
@@ -98,14 +108,32 @@ pub fn TokenManagement() -> Element {
         });
     };
 
+    // "Enroll an agent" shortcut: pre-populates the form for the
+    // common case (Role=AgentHost, max_uses=1, label = agent id).
+    // Operator types the agent id and submits; the success card shows
+    // the resulting `memctl agent-enroll` invocation.
+    let prefill_enrollment = move |_| {
+        new_role.set("AgentHost".to_string());
+        new_max_uses.set("1".to_string());
+        new_label.set(String::new());
+        show_form.set(true);
+    };
+
     rsx! {
         div { class: "space-y-4",
             div { class: "flex items-center justify-between",
                 PageHeader { class: "mb-0", {t!("tokens-title")} }
-                Button {
-                    variant: ButtonVariant::Primary,
-                    onclick: move |_| { let v = *show_form.read(); show_form.set(!v); },
-                    {t!("tokens-issue")}
+                div { class: "flex gap-2",
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        onclick: prefill_enrollment,
+                        "Enroll an agent"
+                    }
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        onclick: move |_| { let v = *show_form.read(); show_form.set(!v); },
+                        {t!("tokens-issue")}
+                    }
                 }
             }
 
@@ -117,6 +145,14 @@ pub fn TokenManagement() -> Element {
                 div { class: "alert alert-success",
                     p { class: "font-semibold", {t!("tokens-issued-message")} }
                     code { class: "block mt-1 font-mono text-sm break-all", "{token}" }
+                    if let Some(agent_id) = &*issued_agent_id.read() {
+                        p { class: "mt-3 text-sm",
+                            "Run on the agent host (or this node) to enroll:"
+                        }
+                        code { class: "block mt-1 font-mono text-sm break-all",
+                            "memctl agent-enroll --agent-id {agent_id} --token {token}"
+                        }
+                    }
                 }
             }
 

@@ -187,7 +187,7 @@ impl AgentIdentity {
     /// `scope`: space-separated OAuth-style scopes ("read write" / "admin" / etc.).
     /// `ttl_secs`: lifetime in seconds; typical values 300 (short-lived) — 3600.
     pub fn issue_jwt(&self, scope: &str, ttl_secs: u64) -> Result<String> {
-        memvault_auth::jwt::issue(&self.signing_key, &self.attestation, scope, ttl_secs)
+        memvault_auth::jwt::issue(&self.signing_key, &self.agent_id.0, scope, ttl_secs)
             .map_err(|e| ApiError::Other(format!("issue_jwt: {e}")))
     }
 }
@@ -256,6 +256,111 @@ fn parse_ed25519_pem(pem_bytes: &[u8]) -> Result<SigningKey> {
         .map_err(|_| ApiError::Other("PEM seed must be exactly 32 bytes".into()))?;
 
     Ok(SigningKey::from_bytes(&seed))
+}
+
+/// Outcome of [`enroll_remote_agent`].
+#[derive(Debug, Clone)]
+pub struct EnrollResult {
+    /// Freshly-minted (or reused) agent attestation.
+    pub attestation: memvault_auth::AgentAttestation,
+    /// CID of the attestation block in the sigchain.
+    pub attestation_cid: Vec<u8>,
+}
+
+/// Server-side agent enrollment for an HTTP / network caller.
+///
+/// The caller (typically the `POST /api/v1/auth/enroll-agent` handler)
+/// passes the encoded join token + the agent's chosen pubkey. This
+/// function:
+///   1. Decodes the token, verifies signature against the admin key
+///      held on `client`, checks time bounds, cluster_id, revocation,
+///      and `max_uses`.
+///   2. Reuses an existing `AgentAttestation` for the same
+///      `agent_pubkey` if one is on the chain (idempotent retries).
+///   3. Otherwise mints a fresh attestation with the node's signing
+///      key, publishes it to the sigchain, and records token
+///      consumption.
+///
+/// The agent never touches its private key on the server — only the
+/// pubkey crosses the wire.
+pub fn enroll_remote_agent(
+    client: &crate::LocalClient,
+    token_str: &str,
+    agent_id: &str,
+    agent_pubkey: [u8; 32],
+) -> Result<EnrollResult> {
+    // Decode + verify the token.
+    let token = memvault_auth::decode_token_string(token_str)
+        .map_err(|e| ApiError::Other(format!("decode token: {e}")))?;
+    let admin_vk = client
+        .admin_verifying_key()
+        .ok_or_else(|| ApiError::Other("no admin pubkey on this node".into()))?;
+    token
+        .verify_signature(&admin_vk)
+        .map_err(|_| ApiError::Other("token signature does not verify".into()))?;
+    let now_ns = memvault_core::wall_ns();
+    token
+        .verify_time_bounds(now_ns)
+        .map_err(|e| ApiError::Other(format!("token time bounds: {e}")))?;
+    if token.cluster_id.0.as_slice() != client.cluster_id() {
+        return Err(ApiError::Other("token cluster_id mismatch".into()));
+    }
+
+    // CID of the token, for consumption tracking + revocation lookup.
+    let token_cbor = serde_ipld_dagcbor::to_vec(&token)
+        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    let token_cid = memvault_core::cid_from_bytes(&token_cbor).to_bytes();
+
+    if client.store().is_revoked(&token_cid).unwrap_or(false) {
+        return Err(ApiError::Other("token revoked".into()));
+    }
+
+    // Idempotent re-enrollment: if we already minted for this pubkey,
+    // return the existing attestation without re-consuming.
+    if let Some(existing) = crate::sigchain::find_agent_attestation(client, &agent_pubkey)? {
+        let existing_bytes = serde_ipld_dagcbor::to_vec(&existing)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let existing_cid = memvault_core::cid_from_bytes(&existing_bytes).to_bytes();
+        return Ok(EnrollResult {
+            attestation: existing,
+            attestation_cid: existing_cid,
+        });
+    }
+
+    // Enforce max_uses BEFORE minting.
+    let used = client
+        .store()
+        .get_token_consumption_count(&token_cid)
+        .unwrap_or(0);
+    if used >= token.max_uses {
+        return Err(ApiError::Other(
+            "token already consumed (max_uses hit)".into(),
+        ));
+    }
+
+    // Mint + publish.
+    let node_sk = client
+        .node_signing_key()
+        .ok_or_else(|| ApiError::Other("no node signing key configured".into()))?;
+    let attestation = memvault_auth::sign_agent_attestation(
+        node_sk,
+        AgentId(agent_id.to_string()),
+        agent_pubkey,
+        token.role,
+        token.not_after_ns,
+    )
+    .map_err(|e| ApiError::Other(format!("sign attestation: {e}")))?;
+    let attestation_cid = crate::sigchain::publish_agent_attestation(client, &attestation)?;
+
+    // Record consumption.
+    let _ = client
+        .store()
+        .record_token_consumption(&token_cid, &agent_pubkey, now_ns);
+
+    Ok(EnrollResult {
+        attestation,
+        attestation_cid,
+    })
 }
 
 /// Issue a join token for an agent, signed by the admin key.

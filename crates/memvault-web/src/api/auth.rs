@@ -85,22 +85,47 @@ async fn verify_bearer(
     let token = header
         .strip_prefix("Bearer ")
         .ok_or_else(|| AuthRejection("expected Bearer scheme".into()))?;
-    let claims = memvault_auth::jwt::verify(token, state.admin_pubkey.as_ref(), |node_pk| {
-        // Filter revoked nodes: act as if they're not in the trust table.
-        if state
-            .revoked_nodes
-            .read()
-            .map(|s| s.contains(node_pk))
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        state
-            .node_trust
-            .read()
-            .ok()
-            .and_then(|m| m.get(node_pk).cloned())
-    })
+    // The web auth path always runs against the daemon's LocalClient
+    // (set via `ui::state::set_client` at bootstrap). Recover the
+    // concrete handle so we can call sigchain accessors.
+    let local_client = crate::ui::state::local_client()
+        .map_err(|e| AuthRejection(format!("local client not available: {e}")))?;
+    let claims = memvault_auth::jwt::verify(
+        token,
+        state.admin_pubkey.as_ref(),
+        |agent_pk| {
+            // Reject revoked agents up front by returning None — same
+            // effect as the post-verify revocation check below, but
+            // saves the chain walk.
+            if state
+                .revoked_agents
+                .read()
+                .map(|s| s.contains(agent_pk))
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            memvault_api::sigchain::find_agent_attestation(&local_client, agent_pk)
+                .ok()
+                .flatten()
+        },
+        |node_pk| {
+            // Filter revoked nodes: act as if they're not in the trust table.
+            if state
+                .revoked_nodes
+                .read()
+                .map(|s| s.contains(node_pk))
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            state
+                .node_trust
+                .read()
+                .ok()
+                .and_then(|m| m.get(node_pk).cloned())
+        },
+    )
     .map_err(|e| AuthRejection(format!("token: {e}")))?;
 
     // Revocation check — fails even if JWT signature + exp pass. The agent

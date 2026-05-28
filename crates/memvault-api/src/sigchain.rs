@@ -480,6 +480,29 @@ fn apply_sigchain_block(
 /// Unlike [`scan_trusted_agents`], this preserves the node→agent
 /// relationship and does not filter against node_trust or revocations —
 /// callers (e.g. the admin trust-tree UI) decide what to display.
+/// Look up a single `AgentAttestation` by agent pubkey. Used by the
+/// JWT verifier as `lookup_agent`. Returns the first signature-valid
+/// attestation whose `agent_pubkey` matches; later attestations for
+/// the same key (post-rotation, etc.) are ignored.
+pub fn find_agent_attestation(
+    client: &LocalClient,
+    agent_pubkey: &[u8; 32],
+) -> Result<Option<AgentAttestation>> {
+    for bytes in load_blocks_by_label(client, LABEL_AGENT_ATT)? {
+        let Ok(att) = serde_ipld_dagcbor::from_slice::<AgentAttestation>(&bytes) else {
+            continue;
+        };
+        if att.agent_pubkey != *agent_pubkey {
+            continue;
+        }
+        if att.verify_signature().is_err() {
+            continue;
+        }
+        return Ok(Some(att));
+    }
+    Ok(None)
+}
+
 pub fn scan_agent_attestations(client: &LocalClient) -> Result<Vec<AgentAttestation>> {
     let mut out = Vec::new();
     for bytes in load_blocks_by_label(client, LABEL_AGENT_ATT)? {

@@ -1,23 +1,30 @@
 //! Agent JWT — ed25519-signed bearer token issued by an agent for itself.
 //!
-//! The token carries the agent's [`AgentAttestation`] inline (in the `att`
-//! claim). The agent attestation is signed by a *node*, and the node's own
-//! [`NodeAttestation`] (admin-signed) lives in the cluster's sig-chain.
+//! The token carries only its claims (`iss`, `sub`, `exp`, `iat`, `scope`)
+//! plus the agent's signature. The agent's [`AgentAttestation`] is NOT
+//! embedded — the verifier looks it up by `sub` (agent pubkey) in its
+//! local sigchain. Same security guarantees, ~200 bytes smaller per
+//! token, no duplication between identity-dir state and chain state.
+//!
 //! Verification flow:
 //!
 //! 1. Decode JWT header + payload.
-//! 2. Pull `att` from payload, deserialize the [`AgentAttestation`].
-//! 3. Verify the agent attestation's signature against its embedded `node_pubkey`.
-//! 4. Look up the node's [`NodeAttestation`] via the caller-supplied
-//!    closure (the sig-chain table).
-//! 5. Verify that node attestation against the cluster admin's pubkey.
-//! 6. Verify the JWT signature against `att.agent_pubkey`.
-//! 7. Check `exp` is not in the past.
+//! 2. Parse `sub` as the agent's 32-byte ed25519 pubkey.
+//! 3. Verify the JWT signature against `sub`. Fast reject on tampering.
+//! 4. Look up the [`AgentAttestation`] for that pubkey via the
+//!    caller-supplied closure (typically backed by
+//!    `sigchain::find_agent_attestation`).
+//! 5. Verify the agent attestation's signature against its embedded
+//!    `node_pubkey`.
+//! 6. Look up the node's [`NodeAttestation`] via the second closure.
+//! 7. Verify that node attestation against the cluster admin's pubkey
+//!    (or accept `PreGenesis` when no admin is configured).
+//! 8. Check `exp` is not in the past.
 //!
 //! Scopes use OAuth-style space-separated strings ("read write admin").
 //!
 //! `iss` carries the human-readable `agent_id` for display / audit only —
-//! the security-relevant identity is `att.agent_pubkey`.
+//! the security-relevant identity is `sub`.
 
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -41,9 +48,11 @@ pub mod scope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTokenClaims {
     /// Issuer — agent_id string for display / audit (not authoritative;
-    /// authoritative identity is `attestation.member`).
+    /// authoritative identity is `sub`).
     pub iss: String,
-    /// Subject — peer-id hex (= attestation.member, agent's ed25519 pubkey).
+    /// Subject — agent's ed25519 pubkey, hex-encoded. This IS the
+    /// authoritative identity. Verifier looks up the matching
+    /// `AgentAttestation` from its local sigchain.
     pub sub: String,
     /// Expiration time, seconds since the unix epoch.
     pub exp: u64,
@@ -51,8 +60,6 @@ pub struct AgentTokenClaims {
     pub iat: u64,
     /// Space-separated scopes (OAuth-style).
     pub scope: String,
-    /// Base64-encoded CBOR of the agent's [`NodeAttestation`].
-    pub att: String,
 }
 
 impl AgentTokenClaims {
@@ -61,13 +68,13 @@ impl AgentTokenClaims {
         self.scope.split_whitespace().any(|s| s == scope)
     }
 
-    /// Decode the embedded agent attestation.
-    pub fn agent_attestation(&self) -> Result<AgentAttestation> {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&self.att)
-            .map_err(|e| AuthError::InvalidToken(format!("invalid att base64: {e}")))?;
-        serde_ipld_dagcbor::from_slice(&bytes)
-            .map_err(|e| AuthError::InvalidToken(format!("invalid attestation CBOR: {e}")))
+    /// Parse `sub` as a 32-byte ed25519 pubkey.
+    pub fn agent_pubkey(&self) -> Result<[u8; 32]> {
+        let bytes = hex::decode(&self.sub)
+            .map_err(|e| AuthError::InvalidToken(format!("sub hex: {e}")))?;
+        bytes
+            .try_into()
+            .map_err(|_| AuthError::InvalidToken("sub must decode to 32 bytes".into()))
     }
 }
 
@@ -82,27 +89,25 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Issue a JWT signed by `signing_key` (the agent's private key), embedding
-/// the agent's node-issued [`AgentAttestation`].
+/// Issue a JWT signed by `signing_key` (the agent's private key).
 ///
-/// `attestation.agent_pubkey` MUST match `signing_key.verifying_key()`.
-/// Caller chooses scopes and `ttl_secs`.
+/// The verifier will look up the agent's [`AgentAttestation`] from its
+/// local sigchain by `sub` — no attestation embed needed in the token.
+/// `agent_id` is a human-readable label carried in `iss` (display /
+/// audit only; not authoritative).
 pub fn issue(
     signing_key: &SigningKey,
-    attestation: &AgentAttestation,
+    agent_id: &str,
     scope: &str,
     ttl_secs: u64,
 ) -> Result<String> {
     let now = now_secs();
-    let att_bytes = serde_ipld_dagcbor::to_vec(attestation)
-        .map_err(|e| AuthError::InvalidToken(format!("encode attestation: {e}")))?;
     let claims = AgentTokenClaims {
-        iss: attestation.agent_id.0.clone(),
-        sub: hex::encode(attestation.agent_pubkey),
+        iss: agent_id.to_string(),
+        sub: hex::encode(signing_key.verifying_key().to_bytes()),
         iat: now,
         exp: now + ttl_secs,
         scope: scope.to_string(),
-        att: base64::engine::general_purpose::STANDARD.encode(att_bytes),
     };
 
     let header = serde_json::to_vec(&serde_json::json!({ "alg": ALG, "typ": TYP }))
@@ -143,6 +148,10 @@ pub enum NodeTrust {
 ///   if the lookup returns [`NodeTrust::Attested`].
 /// - `None` pre-genesis — only [`NodeTrust::PreGenesis`] entries verify.
 ///
+/// `lookup_agent` returns the `AgentAttestation` for the given agent
+/// pubkey (parsed from `sub`). Typically backed by a sigchain index
+/// scan; returning `None` rejects the token.
+///
 /// `lookup_node` returns the node's trust record from the in-memory table.
 /// Returning `None` rejects the token.
 ///
@@ -154,13 +163,15 @@ pub enum NodeTrust {
 /// pubkey (trusted because the lookup said so). No admin step.
 ///
 /// `exp` is always enforced.
-pub fn verify<F>(
+pub fn verify<FA, FN>(
     token: &str,
     admin_pubkey: Option<&VerifyingKey>,
-    lookup_node: F,
+    lookup_agent: FA,
+    lookup_node: FN,
 ) -> Result<AgentTokenClaims>
 where
-    F: FnOnce(&[u8; 32]) -> Option<NodeTrust>,
+    FA: FnOnce(&[u8; 32]) -> Option<AgentAttestation>,
+    FN: FnOnce(&[u8; 32]) -> Option<NodeTrust>,
 {
     let b64 = b64_url();
 
@@ -190,20 +201,52 @@ where
     let claims: AgentTokenClaims = serde_json::from_slice(&payload_bytes)
         .map_err(|e| AuthError::InvalidToken(format!("claims json: {e}")))?;
 
-    // Decode the agent attestation embedded in the JWT.
-    let agent_att = claims.agent_attestation()?;
+    // Parse the agent pubkey from `sub`.
+    let agent_pubkey_bytes = claims.agent_pubkey()?;
 
-    // Bind: sub must match the agent pubkey claimed by the attestation.
-    if claims.sub != hex::encode(agent_att.agent_pubkey) {
+    // Verify the JWT signature first — cheap fast-reject on tampering,
+    // and we want to authenticate the agent before any sigchain lookup.
+    let agent_pubkey = VerifyingKey::from_bytes(&agent_pubkey_bytes)
+        .map_err(|e| AuthError::InvalidToken(format!("agent pubkey: {e}")))?;
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthError::InvalidToken("signature must be 64 bytes".into()))?;
+    let signature = Signature::from_bytes(&sig_arr);
+    agent_pubkey
+        .verify(signing_input.as_bytes(), &signature)
+        .map_err(|e| AuthError::InvalidToken(format!("signature: {e}")))?;
+
+    // Look up the AgentAttestation by pubkey in the local sigchain.
+    let agent_att = lookup_agent(&agent_pubkey_bytes).ok_or_else(|| {
+        AuthError::InvalidToken(format!(
+            "unknown agent: {} — attestation not yet synced",
+            claims.sub
+        ))
+    })?;
+
+    // Bind: agent pubkey must match (defensive; lookup contract should
+    // already guarantee this).
+    if agent_att.agent_pubkey != agent_pubkey_bytes {
         return Err(AuthError::InvalidToken(
-            "sub does not match agent_attestation.agent_pubkey".into(),
+            "lookup returned attestation for a different pubkey".into(),
         ));
     }
+    // `iss` is cosmetic but we cross-check it as a sanity guard against
+    // confused-deputy: an honest agent's iss matches its attestation's
+    // agent_id. Mismatch is a sign of a manually-constructed token.
     if claims.iss != agent_att.agent_id.0 {
         return Err(AuthError::InvalidToken(
-            "iss does not match agent_attestation.agent_id".into(),
+            "iss does not match attestation.agent_id".into(),
         ));
     }
+
+    // Verify the agent attestation's signature against its embedded
+    // `node_pubkey` (a node-signed promise to admit this agent).
+    agent_att
+        .verify_signature()
+        .map_err(|e| AuthError::InvalidToken(format!("agent attestation: {e}")))?;
 
     // Look up the node's trust record. The lookup table is the source of truth
     // for which node_pubkeys are trusted in this cluster (or in pre-genesis,
@@ -232,9 +275,6 @@ where
             }
         }
         NodeTrust::PreGenesis => {
-            // Pre-genesis: no admin chain check. The agent attestation
-            // verification below still confirms the agent was issued by the
-            // claimed node, and the node was deemed trustworthy by the lookup.
             if admin_pubkey.is_some() {
                 return Err(AuthError::InvalidToken(
                     "PreGenesis trust returned but admin_pubkey is configured — \
@@ -244,24 +284,6 @@ where
             }
         }
     }
-
-    // Verify the agent attestation against the (now-trusted) node pubkey.
-    agent_att
-        .verify_signature()
-        .map_err(|e| AuthError::InvalidToken(format!("agent attestation: {e}")))?;
-
-    // Finally: verify the JWT signature against the agent pubkey.
-    let agent_pubkey = VerifyingKey::from_bytes(&agent_att.agent_pubkey)
-        .map_err(|e| AuthError::InvalidToken(format!("agent pubkey: {e}")))?;
-    let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let sig_arr: [u8; 64] = sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| AuthError::InvalidToken("signature must be 64 bytes".into()))?;
-    let signature = Signature::from_bytes(&sig_arr);
-    agent_pubkey
-        .verify(signing_input.as_bytes(), &signature)
-        .map_err(|e| AuthError::InvalidToken(format!("signature: {e}")))?;
 
     // Expiry.
     if claims.exp < now_secs() {
@@ -300,7 +322,10 @@ mod tests {
         a
     }
 
-    fn build_token(scope: &str, ttl: u64) -> (String, VerifyingKey, NodeAttestation) {
+    fn build_token(
+        scope: &str,
+        ttl: u64,
+    ) -> (String, VerifyingKey, NodeAttestation, AgentAttestation) {
         let admin = make_key();
         let node = make_key();
         let agent = make_key();
@@ -313,16 +338,19 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, &a_att, scope, ttl).unwrap();
-        (tok, admin.verifying_key(), n_att)
+        let tok = issue(&agent, "alice", scope, ttl).unwrap();
+        (tok, admin.verifying_key(), n_att, a_att)
     }
 
     #[test]
     fn roundtrip_valid_token() {
-        let (tok, admin_pk, n_att) = build_token("read write", 300);
-        let claims = verify(&tok, Some(&admin_pk), |_| {
-            Some(NodeTrust::Attested(n_att.clone()))
-        })
+        let (tok, admin_pk, n_att, a_att) = build_token("read write", 300);
+        let claims = verify(
+            &tok,
+            Some(&admin_pk),
+            |_| Some(a_att.clone()),
+            |_| Some(NodeTrust::Attested(n_att.clone())),
+        )
         .unwrap();
         assert_eq!(claims.iss, "alice");
         assert!(claims.has_scope("read"));
@@ -343,68 +371,107 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, &a_att, "read", 300).unwrap();
-        let claims = verify(&tok, None, |_| Some(NodeTrust::PreGenesis)).unwrap();
+        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let claims = verify(
+            &tok,
+            None,
+            |_| Some(a_att.clone()),
+            |_| Some(NodeTrust::PreGenesis),
+        )
+        .unwrap();
         assert_eq!(claims.iss, "alice");
     }
 
     #[test]
     fn rejects_pre_genesis_with_admin_configured() {
-        // Stale lookup: returns PreGenesis but admin_pubkey is Some.
-        let (tok, admin_pk, _) = build_token("read", 300);
-        assert!(verify(&tok, Some(&admin_pk), |_| Some(NodeTrust::PreGenesis)).is_err());
+        let (tok, admin_pk, _, a_att) = build_token("read", 300);
+        assert!(
+            verify(
+                &tok,
+                Some(&admin_pk),
+                |_| Some(a_att.clone()),
+                |_| Some(NodeTrust::PreGenesis),
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_attested_without_admin_pubkey() {
-        let (tok, _, n_att) = build_token("read", 300);
-        // No admin_pubkey but lookup returns Attested → reject.
-        assert!(verify(&tok, None, |_| Some(NodeTrust::Attested(n_att.clone()))).is_err());
+        let (tok, _, n_att, a_att) = build_token("read", 300);
+        assert!(
+            verify(
+                &tok,
+                None,
+                |_| Some(a_att.clone()),
+                |_| Some(NodeTrust::Attested(n_att.clone())),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_agent() {
+        let (tok, admin_pk, _, _) = build_token("read", 300);
+        assert!(
+            verify(&tok, Some(&admin_pk), |_| None, |_| None).is_err()
+        );
     }
 
     #[test]
     fn rejects_unknown_node() {
-        let (tok, admin_pk, _) = build_token("read", 300);
-        assert!(verify(&tok, Some(&admin_pk), |_| None).is_err());
+        let (tok, admin_pk, _, a_att) = build_token("read", 300);
+        assert!(
+            verify(&tok, Some(&admin_pk), |_| Some(a_att.clone()), |_| None)
+                .is_err()
+        );
     }
 
     #[test]
     fn rejects_wrong_admin_key() {
-        let (tok, _, n_att) = build_token("read", 300);
+        let (tok, _, n_att, a_att) = build_token("read", 300);
         let other_admin = make_key();
         assert!(
-            verify(&tok, Some(&other_admin.verifying_key()), |_| Some(
-                NodeTrust::Attested(n_att.clone())
-            ))
+            verify(
+                &tok,
+                Some(&other_admin.verifying_key()),
+                |_| Some(a_att.clone()),
+                |_| Some(NodeTrust::Attested(n_att.clone())),
+            )
             .is_err()
         );
     }
 
     #[test]
     fn rejects_tampered_payload() {
-        let (tok, admin_pk, n_att) = build_token("read", 300);
+        let (tok, admin_pk, n_att, a_att) = build_token("read", 300);
         let parts: Vec<&str> = tok.split('.').collect();
         let new_payload = b64_url().encode(
-            br#"{"iss":"alice","sub":"00","exp":99999999999,"iat":0,"scope":"admin","att":""}"#,
+            br#"{"iss":"alice","sub":"00","exp":99999999999,"iat":0,"scope":"admin"}"#,
         );
         let tampered = format!("{}.{}.{}", parts[0], new_payload, parts[2]);
         assert!(
-            verify(&tampered, Some(&admin_pk), |_| Some(NodeTrust::Attested(
-                n_att.clone()
-            )))
+            verify(
+                &tampered,
+                Some(&admin_pk),
+                |_| Some(a_att.clone()),
+                |_| Some(NodeTrust::Attested(n_att.clone())),
+            )
             .is_err()
         );
     }
 
     #[test]
     fn rejects_expired() {
-        let (tok, admin_pk, n_att) = build_token("read", 0);
+        let (tok, admin_pk, n_att, a_att) = build_token("read", 0);
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let err = verify(&tok, Some(&admin_pk), |_| {
-            Some(NodeTrust::Attested(n_att.clone()))
-        })
+        let err = verify(
+            &tok,
+            Some(&admin_pk),
+            |_| Some(a_att.clone()),
+            |_| Some(NodeTrust::Attested(n_att.clone())),
+        )
         .unwrap_err();
         assert!(format!("{err}").contains("expired"), "got: {err}");
     }
-
 }

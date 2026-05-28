@@ -75,7 +75,9 @@ fn test_jwt() -> String {
         u64::MAX,
     )
     .unwrap();
-    memvault_auth::jwt::issue(&agent, &agent_att, "read write admin", 3600).unwrap()
+    let _ = agent_att; // attestation now lives only in the sigchain; the
+    // JWT carries just the agent_id label in `iss`.
+    memvault_auth::jwt::issue(&agent, "test-agent", "read write admin", 3600).unwrap()
 }
 
 /// Mock client that returns canned responses.
