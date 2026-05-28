@@ -57,11 +57,123 @@ macro_rules! dual_impl {
 
 /// Extract the target node's tag label from an EdgeAdd op.
 /// Extract text from file content, catching panics from buggy extractors (e.g. pdf-extract).
-/// Result of text extraction — either the text or an error message to cache.
+/// Result of text extraction — either the text (with any discovered links)
+/// or an error message to cache.
 enum ExtractionResult {
-    Ok(String),
+    Ok {
+        text: String,
+        links: Vec<memvault_extract_abi::ExtractedLink>,
+    },
     Failed(String),
     Unsupported,
+}
+
+/// Describes the entity an extraction request is about — either an attachment
+/// (immutable manifest) or a document (mutable head snapshot). Both flow
+/// through the same extractor registry; only the annotation target differs.
+pub enum ExtractionSource<'a> {
+    Attachment {
+        manifest_cid: &'a [u8],
+        mime: &'a str,
+        data: &'a [u8],
+    },
+    /// Document head — wired up by the head-change reconciler in Phase 5+.
+    #[allow(dead_code)]
+    Document {
+        doc_id: memvault_core::DocId,
+        head_cid: &'a [u8],
+        mime: &'a str,
+        body: &'a [u8],
+    },
+}
+
+impl<'a> ExtractionSource<'a> {
+    /// Annotation target string, e.g. `"file:<hex>"` or `"doc:<hex>"`.
+    fn annotation_target(&self) -> String {
+        match self {
+            Self::Attachment { manifest_cid, .. } => {
+                format!("file:{}", hex::encode(manifest_cid))
+            }
+            Self::Document { head_cid, .. } => format!("doc:{}", hex::encode(head_cid)),
+        }
+    }
+
+    /// Bytes-for-lookup — the source CID (manifest CID or doc head CID).
+    fn cache_key(&self) -> &'a [u8] {
+        match self {
+            Self::Attachment { manifest_cid, .. } => manifest_cid,
+            Self::Document { head_cid, .. } => head_cid,
+        }
+    }
+
+    fn mime(&self) -> &'a str {
+        match self {
+            Self::Attachment { mime, .. } | Self::Document { mime, .. } => mime,
+        }
+    }
+
+    fn data(&self) -> &'a [u8] {
+        match self {
+            Self::Attachment { data, .. } => data,
+            Self::Document { body, .. } => body,
+        }
+    }
+
+    /// For attachments the canonical target uses the `"file:"` prefix; the
+    /// store carries a `"attachment:"` prefixed legacy variant we also want
+    /// to scan when reading.
+    fn legacy_target(&self) -> Option<String> {
+        match self {
+            Self::Attachment { manifest_cid, .. } => {
+                Some(format!("attachment:{}", hex::encode(manifest_cid)))
+            }
+            Self::Document { .. } => None,
+        }
+    }
+}
+
+/// Parse the `links` field of a cached extraction annotation. Returns an
+/// empty Vec for legacy entries (which lack the field) or anything that
+/// isn't shaped right.
+fn parse_cached_links(val: Option<&serde_json::Value>) -> Vec<memvault_extract_abi::ExtractedLink> {
+    use memvault_extract_abi::{ExtractedLink, LinkSyntax};
+    let Some(arr) = val.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(uri) = item.get("uri").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let display_text = item
+            .get("display_text")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let span_arr = item.get("byte_span").and_then(|v| v.as_array());
+        let byte_span = match span_arr {
+            Some(a) if a.len() == 2 => {
+                let s = a[0].as_u64().unwrap_or(0) as u32;
+                let e = a[1].as_u64().unwrap_or(0) as u32;
+                (s, e)
+            }
+            _ => (0, 0),
+        };
+        let syntax = match item.get("syntax").and_then(|v| v.as_str()).unwrap_or("") {
+            "Wikilink" => LinkSyntax::Wikilink,
+            "MarkdownLink" => LinkSyntax::MarkdownLink,
+            "HtmlAnchor" => LinkSyntax::HtmlAnchor,
+            "FrontmatterRef" => LinkSyntax::FrontmatterRef,
+            "EmbeddedHyperlink" => LinkSyntax::EmbeddedHyperlink,
+            _ => LinkSyntax::MarkdownLink,
+        };
+        out.push(ExtractedLink {
+            uri: uri.to_string(),
+            display_text,
+            byte_span,
+            syntax,
+        });
+    }
+    out
 }
 
 fn safe_extract_text(data: &[u8], mime_type: &str) -> ExtractionResult {
@@ -75,7 +187,10 @@ fn safe_extract_text(data: &[u8], mime_type: &str) -> ExtractionResult {
         let registry = memvault_extract::ExtractionRegistry::with_defaults();
         registry.extract(&data, &mime, &memvault_extract::ExtractionHints::default())
     }) {
-        Ok(Ok(extracted)) => ExtractionResult::Ok(extracted.text),
+        Ok(Ok(extracted)) => ExtractionResult::Ok {
+            text: extracted.text,
+            links: extracted.links,
+        },
         Ok(Err(e)) => {
             tracing::warn!("text extraction failed for {mime_type}: {e}");
             ExtractionResult::Failed(format!("{e}"))
@@ -849,7 +964,7 @@ impl LocalClient {
                             // Only use cached extraction during index rebuild.
                             let text = self.load_cached_extraction(&mcid)
                                 .and_then(|r| match r {
-                                    ExtractionResult::Ok(t) => Some(t),
+                                    ExtractionResult::Ok { text, .. } => Some(text),
                                     _ => None,
                                 });
                             let att_tags: Vec<(String, String)> =
@@ -993,18 +1108,18 @@ impl LocalClient {
         )
     }
 
-    /// Extract text from data, cache the result (success or failure) in the blockstore,
-    /// and return the extracted text if successful.
-    fn extract_and_cache(
+    /// Extract text + links from a source (attachment or document), cache
+    /// the result in the blockstore as an `"extraction"` annotation, and
+    /// return the extracted text if successful.
+    pub(crate) fn extract_source_and_cache(
         &self,
-        manifest_cid: &[u8],
-        data: &[u8],
-        mime_type: &str,
+        source: ExtractionSource<'_>,
     ) -> Option<String> {
-        tracing::debug!(mime_type, "extracting text");
+        let mime_type = source.mime();
+        tracing::debug!(mime_type, target = %source.annotation_target(), "extracting text");
         // Check cache first.
-        match self.load_cached_extraction(manifest_cid) {
-            Some(ExtractionResult::Ok(text)) => {
+        match self.load_cached_extraction_for(&source) {
+            Some(ExtractionResult::Ok { text, .. }) => {
                 tracing::debug!(mime_type, "extraction cache hit");
                 return Some(text);
             }
@@ -1016,59 +1131,111 @@ impl LocalClient {
         }
 
         // Extract fresh.
-        let result = safe_extract_text(data, mime_type);
+        let result = safe_extract_text(source.data(), mime_type);
 
         // Cache the result.
         match &result {
-            ExtractionResult::Ok(text) => {
-                // Embed extracted text directly in the annotation (syncs
-                // via gossip, bucket-scoped).  No separate raw block.
-                self.store_extraction_annotation(manifest_cid, Some(&text), None);
+            ExtractionResult::Ok { text, links } => {
+                self.store_extraction_annotation(&source, Some(text), Some(links), None);
                 tracing::debug!(
                     mime_type,
                     text_len = text.len(),
+                    link_count = links.len(),
                     "extraction succeeded, cached in annotation"
                 );
             }
             ExtractionResult::Failed(err) => {
                 tracing::debug!(mime_type, error = %err, "extraction failed, cached failure");
-                self.store_extraction_annotation(manifest_cid, None, Some(err));
+                self.store_extraction_annotation(&source, None, None, Some(err));
             }
             ExtractionResult::Unsupported => {}
         }
 
         match result {
-            ExtractionResult::Ok(text) => Some(text),
+            ExtractionResult::Ok { text, .. } => Some(text),
             _ => None,
         }
     }
 
-    fn store_extraction_annotation(
+    /// Backwards-compatible wrapper used by the attachment write path.
+    fn extract_and_cache(
         &self,
         manifest_cid: &[u8],
+        data: &[u8],
+        mime_type: &str,
+    ) -> Option<String> {
+        self.extract_source_and_cache(ExtractionSource::Attachment {
+            manifest_cid,
+            mime: mime_type,
+            data,
+        })
+    }
+
+    fn store_extraction_annotation(
+        &self,
+        source: &ExtractionSource<'_>,
         text: Option<&str>,
+        links: Option<&[memvault_extract_abi::ExtractedLink]>,
         error: Option<&str>,
     ) {
-        let target = format!("file:{}", hex::encode(manifest_cid));
+        let target = source.annotation_target();
+        let links_json = links.map(|ls| {
+            ls.iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "uri": l.uri,
+                        "display_text": l.display_text,
+                        "byte_span": [l.byte_span.0, l.byte_span.1],
+                        "syntax": format!("{:?}", l.syntax),
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
         let _ = self.store_annotation(
             &target,
             "extraction",
             serde_json::json!({
                 "extracted_text_inline": text,
                 "extraction_error": error,
+                "links": links_json,
                 "extractor": "memvault-extract",
                 "extracted_at_ns": memvault_core::wall_ns(),
             }),
         );
     }
 
+    /// Load cached extraction result for a generic source. Returns
+    /// `Some(ExtractionResult::Ok { text, links })` on cached success,
+    /// `Some(ExtractionResult::Failed(err))` on cached failure, `None` if
+    /// no cache exists. The result's `links` field is populated from the
+    /// `links` annotation field (empty for legacy entries).
+    fn load_cached_extraction_for(
+        &self,
+        source: &ExtractionSource<'_>,
+    ) -> Option<ExtractionResult> {
+        let target = source.annotation_target();
+        let legacy_target = source.legacy_target();
+        self.load_cached_extraction_by_targets(&target, legacy_target.as_deref(), source.cache_key())
+    }
+
     /// Load cached extraction result.
-    /// Returns `Some(ExtractionResult::Ok(text))` on cached success,
-    /// `Some(ExtractionResult::Failed(err))` on cached failure,
+    /// Returns `Some(ExtractionResult::Ok { text, links })` on cached
+    /// success, `Some(ExtractionResult::Failed(err))` on cached failure,
     /// `None` if no cache exists.
     fn load_cached_extraction(&self, manifest_cid: &[u8]) -> Option<ExtractionResult> {
         let target = format!("file:{}", hex::encode(manifest_cid));
         let legacy_target = format!("attachment:{}", hex::encode(manifest_cid));
+        self.load_cached_extraction_by_targets(&target, Some(&legacy_target), manifest_cid)
+    }
+
+    fn load_cached_extraction_by_targets(
+        &self,
+        target: &str,
+        legacy_target_attachment: Option<&str>,
+        manifest_cid: &[u8],
+    ) -> Option<ExtractionResult> {
+        // Kept for diff continuity — original implementation below.
+        let legacy_target = legacy_target_attachment.map(|s| s.to_string()).unwrap_or_default();
 
         // Try new unified annotation format first, then legacy manifest_update.
         let mut ann_cids = self.store.query_by_tag("_ann", &target, 0, 10).ok()?;
@@ -1095,12 +1262,17 @@ impl LocalClient {
                 }
             }
 
+            let links = parse_cached_links(data_field.get("links"));
+
             // New inline format: text embedded directly in annotation.
             if let Some(text) = data_field
                 .get("extracted_text_inline")
                 .and_then(|v| v.as_str())
             {
-                return Some(ExtractionResult::Ok(text.to_string()));
+                return Some(ExtractionResult::Ok {
+                    text: text.to_string(),
+                    links,
+                });
             }
 
             // Legacy format: text stored as separate block via CID ref.
@@ -1111,10 +1283,22 @@ impl LocalClient {
                 let et_bytes = self.store.get_block(&et_cid).ok()??;
                 let et: serde_json::Value = memvault_store::deserialize_block(&et_bytes)?;
                 let text = et.get("text").and_then(|v| v.as_str())?.to_string();
-                return Some(ExtractionResult::Ok(text));
+                return Some(ExtractionResult::Ok { text, links });
             }
         }
         None
+    }
+
+    /// Public read accessor — returns the cached extracted links for a
+    /// source, or empty if nothing cached. Used by the link reconciler.
+    pub fn load_cached_links_for_source(
+        &self,
+        source: &ExtractionSource<'_>,
+    ) -> Vec<memvault_extract_abi::ExtractedLink> {
+        match self.load_cached_extraction_for(source) {
+            Some(ExtractionResult::Ok { links, .. }) => links,
+            _ => Vec::new(),
+        }
     }
 
     /// Access the underlying store.
