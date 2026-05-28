@@ -1191,24 +1191,13 @@ fn build_join_response(
         return refuse(JoinRefuseReason::TokenRevoked);
     }
 
-    // Idempotency: if we already minted a NodeAttestation for this
-    // peer's pubkey, hand it back without consuming another use of the
-    // token. The peer's retry loop (every 15s while pending_token is
-    // set) needs to be safe to re-fire — otherwise admin would burn
-    // through max_uses on the very same join attempt.
-    let already_minted = already_attested(store, &claimed);
-
-    if !already_minted {
-        // Honour max_uses BEFORE minting so we don't over-issue.
-        let used = store.get_token_consumption_count(&token_cid).unwrap_or(0);
-        if used >= token.max_uses {
-            return refuse(JoinRefuseReason::TokenAlreadyConsumed);
-        }
-    }
-
-    // Mint the NodeAttestation and persist it. The store's index notifier
-    // will publish a `SigchainBlock` event so our own watcher updates trust
-    // state, and the post-create gossip bridge announces the CID to peers.
+    // Build the would-be NodeAttestation. Ed25519 signing is
+    // deterministic given the same admin key + same payload, so the
+    // serialised attestation bytes (and hence the CID) are stable
+    // across multiple JoinRequests from the same peer with the same
+    // role / cluster. We use that determinism for idempotence: if the
+    // block already exists in our store, this is a retry — return the
+    // existing block without consuming another use of the token.
     use ed25519_dalek::Signer;
     let mut node_att = memvault_auth::NodeAttestation {
         cluster_id: memvault_core::ClusterId(join_config.cluster_id),
@@ -1230,6 +1219,25 @@ fn build_join_response(
     };
     let cid = memvault_core::cid_from_bytes(&att_bytes);
     let cid_bytes = cid.to_bytes();
+
+    // Hard idempotence: BLOCKS-table existence check. Reliable
+    // regardless of BY_TAG state, race timing, or comparison gotchas.
+    // The previous tag-scan check (`already_attested`) was correct in
+    // theory but lost a race in practice when two JoinRequests from
+    // the same peer arrived ~20ms apart (libp2p retransmit, double
+    // ConnectionEstablished, etc.) — both saw "no attestation yet" if
+    // the redb commit hadn't propagated to the read txn in time.
+    let already_minted =
+        matches!(store.get_block(&cid_bytes), Ok(Some(_)));
+
+    if !already_minted {
+        // Honour max_uses BEFORE minting so we don't over-issue.
+        let used = store.get_token_consumption_count(&token_cid).unwrap_or(0);
+        if used >= token.max_uses {
+            return refuse(JoinRefuseReason::TokenAlreadyConsumed);
+        }
+    }
+
     let meta = memvault_store::EnvelopeMeta {
         author: claimed.to_vec(),
         tags: vec![("sigchain".to_string(), "node_att".to_string())],
@@ -1237,14 +1245,17 @@ fn build_join_response(
         cluster_id: Some(join_config.cluster_id.to_vec()),
         ..Default::default()
     };
-    if store.insert_envelope(&cid_bytes, &att_bytes, &meta).is_err() {
-        return refuse(JoinRefuseReason::TokenInvalidSignature);
+    // insert_envelope is idempotent on the BLOCKS-table key (same CID
+    // overwrites with identical bytes) but adds a fresh BY_TAG entry
+    // every call. Skip the insert entirely on a hit to keep tag
+    // index clean.
+    if !already_minted {
+        if store.insert_envelope(&cid_bytes, &att_bytes, &meta).is_err() {
+            return refuse(JoinRefuseReason::TokenInvalidSignature);
+        }
     }
 
-    // Record token consumption on first mint only. The
-    // `already_minted` check above makes retries by the same peer
-    // idempotent — the token's used-count only ticks once per
-    // distinct attestation.
+    // Record token consumption on first mint only.
     if !already_minted {
         if let Err(e) = store.record_token_consumption(&token_cid, &claimed, now_ns) {
             tracing::warn!(%peer, %e, "failed to record token consumption");
@@ -1312,29 +1323,6 @@ fn refuse(reason: JoinRefuseReason) -> JoinResponse {
             try_peers: vec![],
         },
     }
-}
-
-/// Does our local sigchain already contain a `NodeAttestation` whose
-/// `member` pubkey equals `peer_pubkey`? Used by the /join/1.0 server
-/// to skip token-consumption when the same peer retries — the retry
-/// loop fires every 15s while a pending_token exists, and we don't
-/// want to burn `max_uses` on a single peer's reconnect chatter.
-fn already_attested(store: &MemvaultStore, peer_pubkey: &[u8; 32]) -> bool {
-    let cids = match store.query_by_tag("sigchain", "node_att", 0, 1024) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    for cid in cids {
-        let Ok(Some(bytes)) = store.get_block(&cid) else {
-            continue;
-        };
-        if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes) {
-            if att.member.0 == peer_pubkey {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn peer_id_matches_pubkey(peer: libp2p::PeerId, pubkey: &[u8; 32]) -> bool {
