@@ -153,10 +153,20 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     if let Some(ref bucket) = legacy_bucket {
         // Re-sign rewritten envelopes with the local node key so they
         // match the production envelope shape. The unsigned-fallback
-        // path was removed in the same change set; leaving rewrites
+        // path was removed in build_signed_envelope; leaving rewrites
         // unsigned would re-introduce a divergent shape and reproduce
-        // exactly the bug class that motivated the removal.
-        let node_signing_key = client.node_signing_key();
+        // exactly the bug class that motivated the removal. If no node
+        // key is installed, bail out of the rebuild entirely rather
+        // than silently committing unsigned blocks — the operator can
+        // re-run after wiring up the key.
+        let node_signing_key = client.node_signing_key().ok_or_else(|| {
+            ApiError::Other(format!(
+                "rebuild has {} unbucketed envelope(s) to rewrite but no node signing key is \
+                 configured; call set_node_signing_key before running repair-index so \
+                 migrated envelopes can be re-signed",
+                to_rewrite.len()
+            ))
+        })?;
         for (old_cid, data, _) in &to_rewrite {
             let mut val = match memvault_store::deserialize_block(data) {
                 Some(v) => v,
@@ -180,24 +190,26 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                 }
             }
 
-            // Re-sign as a Signed<T> envelope if a node key is
-            // installed; the legacy author attribution is replaced by
-            // the local node's pubkey (the original signature was
-            // already invalidated by the bucket_id mutation, so there's
-            // nothing to preserve). If no node key is configured (e.g.
-            // tooling that only inspects), fall back to the raw rewrite.
-            let new_bytes = if let Some(sk) = node_signing_key {
-                match resign_legacy_envelope(&val, bucket, sk, client.peer_id()) {
-                    Some(b) => b,
-                    None => match serde_ipld_dagcbor::to_vec(&val) {
-                        Ok(b) => b,
-                        Err(_) => continue,
-                    },
-                }
-            } else {
-                match serde_ipld_dagcbor::to_vec(&val) {
-                    Ok(b) => b,
-                    Err(_) => continue,
+            // Re-sign as a Signed<T> envelope. The legacy author
+            // attribution is replaced by the local node's pubkey — the
+            // original signature was already invalidated by the
+            // bucket_id mutation, so there's nothing meaningful to
+            // preserve. If we can't even shape the payload into a
+            // Signed<T> for this specific block, skip it rather than
+            // commit an unsigned variant.
+            let new_bytes = match resign_legacy_envelope(
+                &val,
+                bucket,
+                node_signing_key,
+                client.peer_id(),
+            ) {
+                Some(b) => b,
+                None => {
+                    tracing::warn!(
+                        old_cid = %hex::encode(old_cid),
+                        "skipping legacy envelope: could not coerce to Signed<T> shape"
+                    );
+                    continue;
                 }
             };
             let new_cid_bytes = memvault_core::cid_from_bytes(&new_bytes).to_bytes();

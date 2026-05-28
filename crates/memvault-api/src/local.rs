@@ -559,6 +559,15 @@ impl LocalClient {
     ///
     /// The envelope is fully deterministic: uses cluster_id as author and
     /// wall_ns=0 so every node in the cluster produces the same block.
+    ///
+    /// **Sole remaining unsigned-envelope producer.** Called only from
+    /// `rebuild_store` when no legacy bucket exists yet, so we need to
+    /// mint one before any node signing key is necessarily available
+    /// (and the cluster as a whole — not any single node — is the
+    /// nominal author). Every other write path goes through
+    /// `build_signed_envelope`, which now refuses to fall back to an
+    /// unsigned envelope. See `resign_legacy_envelope` in rebuild.rs
+    /// for how legacy data adopted into this bucket is re-signed.
     pub fn create_bucket_with_id(
         &self,
         bucket_id: BucketId,
@@ -2895,6 +2904,14 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn create_view(&self, view: crate::types::View) -> Result<()> {
+        // Views are typed side blocks (like attachment manifests,
+        // bucket grants, and BucketTrust): the stored block IS the
+        // View struct, not a Signed<T> envelope wrapping it. They
+        // intentionally bypass build_signed_envelope because their
+        // integrity model is "by-CID lookup of a self-describing
+        // payload" rather than "audit log of authored events". Don't
+        // route this through Signed<T> without coordinated reader
+        // changes in list_views / get_view / delete_view.
         let view_bytes =
             serde_ipld_dagcbor::to_vec(&view).map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&view_bytes);

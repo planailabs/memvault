@@ -115,7 +115,31 @@ impl MemvaultStore {
         // both legacy raw-JSON envelopes and Signed<T> payload-nested
         // kind fields uniformly.
         let author: Vec<u8> = view.author();
-        let mut tags: Vec<(String, String)> = view.get_as("tags").unwrap_or_default();
+        // Signed<T> envelopes serialize `tags` as a list of Tag structs
+        // (`[{"scope":"x","label":"y"}, …]`); the legacy raw-JSON
+        // fallback used the tuple shape (`[["x","y"], …]`). Try the
+        // struct shape first and fall back to the tuple shape so the
+        // secondary tag index gets populated for both. Without this,
+        // every reindexed Signed<T> envelope would be invisible to
+        // tag-scoped lookups (list_entities, list_docs, audit
+        // edge_source/edge_target).
+        let mut tags: Vec<(String, String)> = view
+            .field("tags")
+            .and_then(|raw| {
+                if let Ok(structured) =
+                    serde_json::from_value::<Vec<memvault_core::Tag>>(raw.clone())
+                {
+                    Some(
+                        structured
+                            .into_iter()
+                            .map(|t| (t.scope, t.label))
+                            .collect(),
+                    )
+                } else {
+                    serde_json::from_value::<Vec<(String, String)>>(raw.clone()).ok()
+                }
+            })
+            .unwrap_or_default();
 
         // Legacy annotation blocks stored tags only in EnvelopeMeta, not in
         // the body. Recover _ann tag from the annotation target field.

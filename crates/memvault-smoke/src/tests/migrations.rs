@@ -185,6 +185,23 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
         default_bucket
     };
 
+    // RepairIndex's rebuild path now refuses to commit unsigned
+    // legacy-rewrite blocks; it needs a node signing key to re-sign
+    // them as Signed<T>. memctl's create_client() reads its data_dir
+    // from MEMVAULT_DATA_DIR (not from the CLI struct), then loads the
+    // node key from `<data_dir>/identity/libp2p.key` (raw 32-byte
+    // ed25519 seed). Seed a deterministic one for the test and point
+    // the env var at it.
+    let id_dir = dir.path().join("identity");
+    std::fs::create_dir_all(&id_dir).unwrap();
+    std::fs::write(id_dir.join("libp2p.key"), [9u8; 32]).unwrap();
+    // SAFETY: smoke tests run single-threaded enough that env mutation
+    // is not racing other code; mirrors the pattern memctl::run uses
+    // for MEMVAULT_AGENT_ID.
+    unsafe {
+        std::env::set_var("MEMVAULT_DATA_DIR", dir.path());
+    }
+
     let cli = memctl::Cli {
         data_dir: Some(dir.path().to_path_buf()),
         agent_id: None,
