@@ -22,6 +22,13 @@ struct FileData {
     has_extracted_text: bool,
     extracted_text: Option<String>,
     linked_items: Vec<FileLinkedItem>,
+    /// Hex-encoded envelope author (node pubkey post-Signed<T>, or
+    /// agent pubkey for legacy unsigned writes). Empty when the
+    /// attachment envelope can't be located.
+    uploaded_by_author: String,
+    /// Human-readable agent_id when the attachment envelope carries an
+    /// `agent_attestation` cid resolvable via the trust state.
+    uploaded_by_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +73,39 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
         .unwrap_or_default();
 
     let extracted_text = client.read_extracted_text(&cid_bytes).await.unwrap_or(None);
+
+    // Locate the attachment envelope via the `_manifest` tag so we can
+    // surface who uploaded the file. Falls back to empty author/agent
+    // when the envelope can't be found (legacy data or sync gaps).
+    let (uploaded_by_author, uploaded_by_agent) = {
+        let local = crate::ui::state::local_client().ok();
+        let mcid_hex = hex::encode(&cid_bytes);
+        let mut author_hex = String::new();
+        let mut agent_id: Option<String> = None;
+        if let Some(local) = local.as_ref() {
+            if let Ok(env_cids) = local
+                .store()
+                .query_by_tag("_manifest", &mcid_hex, 0, 1)
+            {
+                if let Some(env_cid) = env_cids.into_iter().next() {
+                    if let Ok(Some(bytes)) = local.store().get_block(&env_cid) {
+                        if let Some(view) = memvault_store::EnvelopeView::parse(&bytes) {
+                            let author = view.author();
+                            if !author.is_empty() {
+                                author_hex = hex::encode(&author);
+                            }
+                            if let Some(att_cid) = view.agent_attestation_cid() {
+                                let index =
+                                    crate::api::agents::build_agent_id_index(local);
+                                agent_id = index.get(&att_cid).cloned();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (author_hex, agent_id)
+    };
 
     Ok(FileData {
         cid,
@@ -120,6 +160,8 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
             }
             items
         },
+        uploaded_by_author,
+        uploaded_by_agent,
     })
 }
 
@@ -208,6 +250,21 @@ fn FileView(data: FileData) -> Element {
                             tr {
                                 td { class: "td font-medium text-sm", {t!("file-meta-replication")} }
                                 td { class: "td text-sm font-mono", "{data.replication}" }
+                            }
+                            if !data.uploaded_by_author.is_empty() || data.uploaded_by_agent.is_some() {
+                                tr {
+                                    td { class: "td font-medium text-sm", {t!("file-meta-uploaded-by")} }
+                                    td { class: "td text-sm",
+                                        if let Some(agent_id) = &data.uploaded_by_agent {
+                                            span { class: "font-medium", "{agent_id}" }
+                                            span { class: "text-[10px] opacity-60 ml-1",
+                                                CidDisplay { cid: data.uploaded_by_author.clone(), len: Some(8) }
+                                            }
+                                        } else {
+                                            CidDisplay { cid: data.uploaded_by_author.clone(), len: Some(8) }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

@@ -18,12 +18,17 @@ struct BucketRow {
     role: String,        // "standard", "legacy", "agent"
     cluster_hex: String, // empty if unbound
     envelope_count: u64,
+    /// Owner agent_id (from `owner_agent` on the bucket decl). Empty
+    /// for cluster-owned buckets — bucket-detail uses "cluster" as
+    /// the placeholder; the list keeps it blank for compactness.
+    owner: String,
 }
 
 impl BucketRow {
     fn matches_search(&self, query: &str) -> bool {
         self.name.to_lowercase().contains(query)
             || self.status.contains(query)
+            || self.owner.to_lowercase().contains(query)
             || self.id_hex.contains(query)
     }
 }
@@ -55,6 +60,7 @@ async fn list_buckets() -> Result<Vec<BucketRow>, ServerFnError> {
                 role: format!("{:?}", b.role).to_lowercase(),
                 cluster_hex: b.cluster_id.map(|c| hex::encode(c.0)).unwrap_or_default(),
                 envelope_count: b.envelope_count,
+                owner: b.owner_agent.map(|a| a.0).unwrap_or_default(),
             }
         })
         .collect())
@@ -203,6 +209,7 @@ fn BucketTable(list: Vec<BucketRow>) -> Element {
                 SortableTh { label: "Name".to_string(), sort_key: "name".to_string(), sort }
                 SortableTh { label: "Status".to_string(), sort_key: "status".to_string(), sort }
                 th { class: "th", "Role" }
+                th { class: "th", "Owner" }
                 th { class: "th", "Cluster" }
                 SortableTh { label: "Items".to_string(), sort_key: "items".to_string(), sort }
             },
@@ -227,6 +234,15 @@ fn BucketTable(list: Vec<BucketRow>) -> Element {
                                 "agent" => rsx! { Pill { variant: PillVariant::Info, "agent" } },
                                 _ => rsx! { Pill { variant: PillVariant::Muted, "standard" } },
                             }}
+                        }
+                        TdMuted {
+                            {
+                                if b.owner.is_empty() {
+                                    "cluster".to_string()
+                                } else {
+                                    b.owner.clone()
+                                }
+                            }
                         }
                         TdMuted {
                             {

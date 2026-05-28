@@ -121,6 +121,7 @@ file-meta-dimensions = Abmessungen
 file-meta-duration = Dauer
 file-meta-cid = CID
 file-meta-replication = Replikation
+file-meta-uploaded-by = Hochgeladen von
 file-section-links = Verknüpfungen ({ $count })
 file-section-text = Extrahierter Text
 
