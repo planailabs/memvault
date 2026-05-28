@@ -1845,10 +1845,8 @@ mod native {
                 agent_id,
                 identity_dir,
             } => {
-                // Decode the join token to extract cluster info
-                let join_token = memvault_auth::decode_token_string(&token)
-                    .map_err(|e| anyhow::anyhow!("failed to decode token: {e}"))?;
-
+                // Identity dir layout: `<data-dir>/agents/<agent-id>/`
+                // unless explicitly overridden.
                 let identity_dir =
                     identity_dir.unwrap_or_else(|| data_dir.join("agents").join(&agent_id));
 
@@ -1861,59 +1859,56 @@ mod native {
                     return Ok(());
                 }
 
-                // For CLI enrollment, we need an admin key to sign the enrollment.
-                // In the local case, we generate a temporary admin identity.
-                // In production, this would go through the /join/1.0 protocol.
-                let _store = make_store()?;
+                // Generate the agent's keypair locally — the private key
+                // never leaves this host.
+                let mut agent_seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut agent_seed);
+                let agent_sk = ed25519_dalek::SigningKey::from_bytes(&agent_seed);
+                let agent_pubkey = agent_sk.verifying_key().to_bytes();
 
-                // Read cluster_id from the data dir
-                let cluster_id_path = data_dir.join("cluster_id");
-                let cluster_id_hex = std::fs::read_to_string(&cluster_id_path).map_err(|e| {
-                    anyhow::anyhow!("failed to read cluster_id: {e} (run genesis first)")
-                })?;
-                let cluster_id_bytes = hex::decode(cluster_id_hex.trim())?;
-                let cluster_id_arr: [u8; 32] = cluster_id_bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("cluster_id must be 32 bytes"))?;
-                let cluster_id = ClusterId(cluster_id_arr);
-
-                // Load or generate admin key from identity dir
-                let admin_key_path = data_dir.join("identity").join("admin_key.pem");
-                let admin_sk = if admin_key_path.exists() {
-                    let id = memvault_api::agent_identity::AgentIdentity::load(
-                        &data_dir.join("identity"),
-                    )
-                    .map_err(|e| anyhow::anyhow!("failed to load admin identity: {e}"))?;
-                    id.signing_key
-                } else {
-                    // Generate a temporary admin key for local enrollment
-                    let mut secret = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
-                    ed25519_dalek::SigningKey::from_bytes(&secret)
-                };
-
-                // Single-key dev-mode enrollment: admin == node. Real multi-node
-                // enrollment will pass the joining node's own signing key here.
-                let identity = memvault_api::agent_identity::AgentIdentity::generate_local(
-                    &identity_dir,
+                // Delegate to the same helper the HTTP endpoint uses:
+                // verifies the token signature against the admin pubkey
+                // held on this client, enforces max_uses, mints the
+                // node-signed AgentAttestation, publishes to sigchain,
+                // and records token consumption. The previous CLI path
+                // bypassed all of these (and would even mint a fresh
+                // admin key if none was on disk — a security hole this
+                // closes).
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let result = memvault_api::agent_identity::enroll_remote_agent(
+                    &client,
+                    &token,
                     &agent_id,
-                    &cluster_id,
-                    &admin_sk,
-                    join_token.role,
-                    join_token
-                        .not_after_ns
-                        .saturating_sub(memvault_core::time::wall_ns()),
+                    agent_pubkey,
                 )
                 .map_err(|e| anyhow::anyhow!("enrollment failed: {e}"))?;
 
+                // Persist the identity dir via the canonical writer.
+                // The attestation is already on the chain (verifiers
+                // look it up by agent_pubkey) — caching it locally is
+                // for back-compat with `AgentIdentity::load` callers
+                // that read attestation.cbor directly.
+                std::fs::create_dir_all(&identity_dir)?;
+                let meta = memvault_api::agent_identity::AgentMeta {
+                    agent_id: agent_id.clone(),
+                    cluster_id: hex::encode(client.cluster_id()),
+                    enrolled_at_ns: memvault_core::time::wall_ns(),
+                };
+                memvault_api::agent_identity::write_identity_dir(
+                    &identity_dir,
+                    &agent_sk,
+                    &result.attestation,
+                    &meta,
+                )
+                .map_err(|e| anyhow::anyhow!("write identity dir: {e}"))?;
+
                 println!("Agent enrolled successfully.");
                 println!("  Agent ID:     {agent_id}");
-                println!("  Cluster:      {}", hex::encode(cluster_id.0));
+                println!("  Cluster:      {}", hex::encode(client.cluster_id()));
                 println!("  Identity dir: {}", identity_dir.display());
-                println!(
-                    "  Public key:   {}",
-                    hex::encode(identity.verifying_key.as_bytes())
-                );
+                println!("  Public key:   {}", hex::encode(agent_pubkey));
+                println!("  Attestation:  {}", hex::encode(&result.attestation_cid));
             }
             Commands::AgentList => {
                 let agents_dir = dirs::data_local_dir()

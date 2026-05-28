@@ -193,7 +193,11 @@ impl AgentIdentity {
 }
 
 /// Write all identity files to disk.
-fn write_identity_dir(
+/// Persist all three identity files (private_key.pem, attestation.cbor,
+/// agent.json) under `dir`. Used by `generate_local` and by CLI/HTTP
+/// enrollment paths that mint via `enroll_remote_agent` and want to
+/// cache the identity locally.
+pub fn write_identity_dir(
     dir: &Path,
     signing_key: &SigningKey,
     attestation: &memvault_auth::AgentAttestation,
