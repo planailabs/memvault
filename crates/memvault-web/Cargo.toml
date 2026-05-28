@@ -20,6 +20,7 @@ embed = ["dioxus?/embed"]
 server = [
     "webui", "dioxus/server",
     "dep:memvault-api", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth", "dep:memvault-store",
+    "dep:memvault-extract-abi",
     "dep:axum", "dep:tokio", "dep:tokio-stream",
     "dep:tower", "dep:tower-http", "dep:thiserror",
     "dep:dirs", "dep:rand", "dep:ed25519-dalek",
@@ -56,6 +57,7 @@ rand = { version = "0.8", optional = true }
 memvault-doc = { path = "../memvault-doc", optional = true }
 memvault-query = { path = "../memvault-query", optional = true }
 memvault-auth = { path = "../memvault-auth", optional = true }
+memvault-extract-abi = { path = "../memvault-extract-abi", optional = true }
 ed25519-dalek = { version = "2", optional = true }
 axum = { version = "0.8", features = ["multipart"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }

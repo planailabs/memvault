@@ -69,10 +69,10 @@ async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Document not found"))?;
 
-    // Render markdown to HTML server-side.
-    let parser = pulldown_cmark::Parser::new(&doc.body);
-    let mut body_html = String::new();
-    pulldown_cmark::html::push_html(&mut body_html, parser);
+    // Render markdown to HTML server-side. Wikilinks (`[[doc:hex]]`,
+    // `[[Alice]]`, `[[entity:hex|alias]]`) and `memvault://…` URIs are
+    // rewritten to the matching in-app routes by `notes::render`.
+    let body_html = crate::ui::pages::notes::render::render_doc_body(&doc.body);
 
     // Fetch attachments from audit log for this document.
     let mut attachments = Vec::new();
