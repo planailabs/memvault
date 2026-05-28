@@ -82,16 +82,28 @@ async fn put_sync_search_retract() {
     // Also replicate the envelope via insert_envelope metadata so queries work.
     let block_data = store1.get_block(&cid).unwrap().unwrap();
 
-    // Parse the envelope to extract metadata for indexing on remote nodes.
-    let envelope: serde_json::Value = serde_json::from_slice(&block_data).unwrap();
-    let wall_ns = envelope
-        .get("wall_ns")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let tags_val: Vec<(String, String)> = envelope
-        .get("tags")
-        .and_then(|t| serde_json::from_value(t.clone()).ok())
-        .unwrap_or_default();
+    // Parse the envelope to extract metadata for indexing on remote
+    // nodes. Use EnvelopeView so this works for both legacy raw-JSON
+    // envelopes and Signed<T> envelopes (which store bytes as DAG-CBOR
+    // with byte-string fields that serde_json::from_slice can't parse).
+    let view = memvault_store::EnvelopeView::parse(&block_data)
+        .expect("envelope must parse via EnvelopeView");
+    let wall_ns = view.field("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+    // Tags on Signed<T> envelopes serialise as Vec<Tag { scope, label }>
+    // rather than [scope, label] tuples; try both shapes.
+    let tags_val: Vec<(String, String)> = match view
+        .field("tags")
+        .and_then(|t| serde_json::from_value::<Vec<(String, String)>>(t.clone()).ok())
+    {
+        Some(v) => v,
+        None => view
+            .field("tags")
+            .and_then(|t| {
+                serde_json::from_value::<Vec<memvault_core::tags::Tag>>(t.clone()).ok()
+            })
+            .map(|tags| tags.into_iter().map(|t| (t.scope, t.label)).collect())
+            .unwrap_or_default(),
+    };
 
     let meta = memvault_store::EnvelopeMeta {
         author: vec![0u8; 32],
