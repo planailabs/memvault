@@ -48,6 +48,18 @@ mod native {
         #[arg(long, global = true, env = "MEMVAULT_AGENT_ID")]
         pub agent_id: Option<String>,
 
+        /// Target a specific bucket for the command. Hex-encoded
+        /// 32-byte BucketId. When unset, bucket-aware commands fall
+        /// back to the bound agent's own bucket (when `--agent-id`
+        /// is also set) — auto-created via
+        /// `LocalClient::ensure_agent_bucket_for`. If neither is
+        /// set, the command hard-fails: we deliberately do NOT
+        /// auto-pick "the first existing bucket", and we don't allow
+        /// writes to land in the void either. Buckets are
+        /// tenant-scoped; the operator should always know which one.
+        #[arg(long, global = true, env = "MEMVAULT_BUCKET_ID")]
+        pub bucket_id: Option<String>,
+
         #[command(flatten)]
         pub client: memvault_api::ClientArgs,
 
@@ -723,6 +735,39 @@ mod native {
         Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
     }
 
+    /// Resolve the target bucket for a bucket-aware command. Hard-fails
+    /// when no bucket can be determined — writes don't get to "go
+    /// nowhere", even pre-genesis. (`LocalClient::require_bucket` does
+    /// have a pre-genesis carve-out for legacy adoption, but at the
+    /// memctl level we expect the operator to specify or bind one.)
+    ///
+    /// Order (we deliberately do NOT auto-pick "first existing bucket"):
+    ///   1. `MEMVAULT_BUCKET_ID` env var, set by the global `--bucket-id`
+    ///      flag — explicit user choice always wins.
+    ///   2. The bound agent's own bucket when an agent is loaded on
+    ///      the client (auto-created via `ensure_agent_bucket_for`).
+    pub async fn resolve_target_bucket(
+        client: &LocalClient,
+    ) -> Result<memvault_core::BucketId> {
+        if let Ok(hex_str) = std::env::var("MEMVAULT_BUCKET_ID") {
+            if !hex_str.is_empty() {
+                let bytes = hex::decode(hex_str.trim())
+                    .map_err(|e| anyhow::anyhow!("--bucket-id is not valid hex: {e}"))?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("--bucket-id must decode to 32 bytes"))?;
+                return Ok(memvault_core::BucketId(arr));
+            }
+        }
+        if let Some(aid) = client.agent_id().cloned() {
+            return Ok(client.ensure_agent_bucket_for(&aid).await?);
+        }
+        anyhow::bail!(
+            "no bucket selected: pass --bucket-id <hex> or --agent-id <id> \
+             (or set MEMVAULT_BUCKET_ID / MEMVAULT_AGENT_ID)"
+        );
+    }
+
     pub fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
         if key_path.exists() {
             let mut key_bytes = std::fs::read(key_path)?;
@@ -766,16 +811,21 @@ mod native {
         let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
         let client_args = cli.client;
 
-        // Bridge the global `--agent-id` flag to `create_client_with_bus`
-        // (which lives a few layers down and is also called from non-CLI
-        // contexts) via the same env var clap reads from. Setting it here
-        // means every `create_client*` call below this point picks up the
-        // agent identity without each match arm having to thread it.
+        // Bridge the global `--agent-id` and `--bucket-id` flags to
+        // helpers that live a few layers down and are also called from
+        // non-CLI contexts. Setting the env vars here means every
+        // `create_client*` and bucket-resolving call below this point
+        // picks up the values without each match arm threading them.
         if let Some(ref id) = cli.agent_id {
             // SAFETY: single-threaded at this point — run() is called once
             // from main before any tokio task spawning that reads env.
             unsafe {
                 std::env::set_var("MEMVAULT_AGENT_ID", id);
+            }
+        }
+        if let Some(ref b) = cli.bucket_id {
+            unsafe {
+                std::env::set_var("MEMVAULT_BUCKET_ID", b);
             }
         }
 
@@ -901,6 +951,7 @@ mod native {
                 let client = create_client(store)?;
                 let tags = memvault_api::docs::parse_tags(&tag);
                 let vis = memvault_api::docs::parse_visibility(Some(&visibility));
+                let bucket = resolve_target_bucket(&client).await?;
                 let result = memvault_api::docs::create_doc(
                     &client,
                     &text,
@@ -909,7 +960,7 @@ mod native {
                     tags,
                     vis,
                     None,
-                    None,
+                    Some(&bucket),
                 )
                 .await?;
                 println!("{}", result.node_id);
