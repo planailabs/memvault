@@ -106,11 +106,26 @@ impl MemvaultStore {
             .get("tags")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        // `kind` may live either at the top level (legacy raw-JSON
+        // envelopes) or one level down inside `payload` (post-Signed<T>
+        // migration). Try the body first, fall back to payload.
+        let kind_str = val
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .or_else(|| val.get("payload").and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
+        let target_str = val
+            .get("target")
+            .and_then(|v| v.as_str())
+            .or_else(|| val.get("payload").and_then(|p| p.get("target")).and_then(|v| v.as_str()));
+        let manifest_cid_val = val
+            .get("manifest_cid")
+            .or_else(|| val.get("payload").and_then(|p| p.get("manifest_cid")));
+
         // Legacy annotation blocks stored tags only in EnvelopeMeta, not in
         // the body. Recover _ann tag from the annotation target field.
         if tags.is_empty() {
-            if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
-                if let Some(target) = val.get("target").and_then(|v| v.as_str()) {
+            if kind_str == Some("annotation") {
+                if let Some(target) = target_str {
                     tags.push(("_ann".to_string(), target.to_string()));
                 }
             }
@@ -118,9 +133,8 @@ impl MemvaultStore {
         // For attachment envelopes, add a manifest→envelope reverse lookup tag
         // so get_file_manifest can find the envelope when the manifest block
         // is missing (legacy files).
-        if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
-            if let Some(mcid) = val
-                .get("manifest_cid")
+        if kind_str == Some("attachment") {
+            if let Some(mcid) = manifest_cid_val
                 .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
             {
                 tags.push(("_manifest".to_string(), hex::encode(&mcid)));

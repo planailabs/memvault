@@ -17,8 +17,7 @@ use crate::error::{ApiError, Result};
 use crate::local::LocalClient;
 use memvault_auth::jwt::NodeTrust;
 use memvault_auth::{
-    AdminGenesis, AgentAttestation, AgentRevocation, EnvelopeAuthorship, NodeAttestation,
-    NodeRevocation,
+    AdminGenesis, AgentAttestation, AgentRevocation, NodeAttestation, NodeRevocation,
 };
 use memvault_store::insert::EnvelopeMeta;
 
@@ -28,10 +27,6 @@ const LABEL_NODE_ATT: &str = "node_att";
 const LABEL_AGENT_ATT: &str = "agent_att";
 const LABEL_AGENT_REV: &str = "agent_rev";
 const LABEL_NODE_REV: &str = "node_rev";
-const LABEL_ENV_AUTH: &str = "envelope_auth";
-/// Secondary tag carrying the hex-encoded envelope CID, so a verifier can
-/// look up the authorship sidecar in O(1) given just the envelope CID.
-const KIND_ENV_AUTH_BY_CID: &str = "env_auth_by_cid";
 
 fn write_block(client: &LocalClient, label: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     write_block_with_extra_tags(client, label, bytes, Vec::new())
@@ -161,92 +156,110 @@ pub fn publish_node_revocation(
     write_block(client, LABEL_NODE_REV, &bytes)
 }
 
-/// Persist an `EnvelopeAuthorship` sidecar block. Also tags it with the
-/// envelope CID so the verifier can look it up in O(1).
-pub fn publish_envelope_authorship(
-    client: &LocalClient,
-    auth: &EnvelopeAuthorship,
-) -> Result<Vec<u8>> {
-    let bytes =
-        serde_ipld_dagcbor::to_vec(auth).map_err(|e| ApiError::Serialization(e.to_string()))?;
-    let extra = vec![(
-        KIND_ENV_AUTH_BY_CID.to_string(),
-        hex::encode(&auth.envelope_cid),
-    )];
-    write_block_with_extra_tags(client, LABEL_ENV_AUTH, &bytes, extra)
-}
-
-/// Look up the authorship sidecar for a given envelope CID. Returns the
-/// first successfully decoded block; on a well-behaved node there should
-/// only be one. Does not verify the signature — caller's responsibility.
-pub fn lookup_envelope_authorship(
-    client: &LocalClient,
-    envelope_cid: &[u8],
-) -> Result<Option<EnvelopeAuthorship>> {
-    let hex_cid = hex::encode(envelope_cid);
-    let cids = client
-        .store()
-        .query_by_tag(KIND_ENV_AUTH_BY_CID, &hex_cid, 0, usize::MAX)
-        .map_err(|e| ApiError::Other(format!("query envelope_auth: {e}")))?;
-    for cid in cids {
-        if let Ok(Some(bytes)) = client.store().get_block(&cid) {
-            if let Ok(auth) = serde_ipld_dagcbor::from_slice::<EnvelopeAuthorship>(&bytes) {
-                return Ok(Some(auth));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Outcome of [`verify_envelope_authorship`]. Distinguishes "no sidecar
-/// exists" (system or pre-auth write — common) from "sidecar exists but is
-/// invalid" (tampered or revoked — fail closed).
+/// Outcome of [`verify_envelope_authorship`]. The verifier checks the
+/// envelope as a `Signed<T>` block — there is no sidecar path anymore.
+/// Pre-migration raw-JSON envelopes have no `signature` field and read
+/// as [`AuthorshipStatus::NoSidecar`] (unattributed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorshipStatus {
-    /// No sidecar block exists for this envelope CID — read is allowed as
-    /// "unattributed" (e.g. system writes, rebuild, pre-genesis bootstrap).
+    /// Envelope has no signature — legacy raw-JSON or system/rebuild
+    /// write. Treat as unattributed; read paths can decide whether to
+    /// enforce.
     NoSidecar,
-    /// Sidecar exists, signature verifies, agent is currently trusted.
+    /// Node signature verifies AND the agent co-signature verifies
+    /// against a currently-trusted agent. `agent_pubkey` identifies
+    /// the agent on whose behalf the write was made.
     Valid { agent_pubkey: [u8; 32] },
-    /// Sidecar exists but the signature does not verify against the embedded
-    /// agent pubkey.
+    /// Node signature verifies but there is no agent co-signature —
+    /// this was a pure node write. `node_pubkey` is the signer.
+    NodeSigned { node_pubkey: [u8; 32] },
+    /// A signature was present but failed to verify (node or agent).
+    /// Treat as tampered / fail closed.
     BadSignature,
-    /// Sidecar verifies but the agent is not in any known attestation, OR
-    /// has been revoked.
+    /// Signatures verify but the agent_attestation cid is not in the
+    /// currently-trusted set — revoked, unknown, or issued by an
+    /// untrusted node.
     AgentNotTrusted { agent_pubkey: [u8; 32] },
 }
 
-/// Verify the authorship sidecar for an envelope CID. Walks:
+/// Verify the envelope's authorship via its embedded `Signed<T>`
+/// signatures.
 ///
-/// 1. **CID lookup** — find the sidecar (none → [`AuthorshipStatus::NoSidecar`]).
-/// 2. **Signature** — `signature` verifies against the embedded `agent_pubkey`.
-/// 3. **Attestation chain** — the agent pubkey must be present in an
-///    [`memvault_auth::AgentAttestation`] issued by a currently-trusted
-///    node, AND must not appear in the revoked-agents set.
-///
-/// `trusted_agent_pubkeys` is a set of agent pubkeys that the caller has
-/// already determined to be currently trusted (i.e. attested by a node in
-/// `node_trust` and not in `revoked_agents`). Building this set is the
-/// caller's job — the verifier doesn't scan the chain again per call.
+/// Trust inputs are passed in by the caller — the verifier doesn't
+/// re-scan the sigchain per call:
+/// - `trusted_attestations` — `cid → agent_pubkey` map used to resolve
+///   an envelope's inline `agent_attestation` field.
+/// - `trusted_node_pubkeys` — currently-trusted node pubkeys
+///   (admitted via NodeAttestation, not revoked).
 pub fn verify_envelope_authorship(
     client: &LocalClient,
     envelope_cid: &[u8],
-    trusted_agent_pubkeys: &HashSet<[u8; 32]>,
+    trusted_attestations: &HashMap<Vec<u8>, [u8; 32]>,
+    trusted_node_pubkeys: &HashSet<[u8; 32]>,
 ) -> Result<AuthorshipStatus> {
-    let Some(auth) = lookup_envelope_authorship(client, envelope_cid)? else {
+    let Ok(Some(bytes)) = client.store().get_block(envelope_cid) else {
         return Ok(AuthorshipStatus::NoSidecar);
     };
-    if auth.verify_signature().is_err() {
+    let Ok(signed) =
+        serde_ipld_dagcbor::from_slice::<memvault_core::Signed<serde_json::Value>>(&bytes)
+    else {
+        return Ok(AuthorshipStatus::NoSidecar);
+    };
+    if signed.signature.is_empty() {
+        return Ok(AuthorshipStatus::NoSidecar);
+    }
+    verify_signed_envelope(&signed, trusted_attestations, trusted_node_pubkeys)
+}
+
+/// Verify a Signed<T> envelope's node signature plus its optional agent
+/// co-signature. Returns the most specific applicable status.
+fn verify_signed_envelope(
+    signed: &memvault_core::Signed<serde_json::Value>,
+    trusted_attestations: &HashMap<Vec<u8>, [u8; 32]>,
+    trusted_node_pubkeys: &HashSet<[u8; 32]>,
+) -> Result<AuthorshipStatus> {
+    // Convert author bytes → ed25519 verifying key.
+    let author_bytes: [u8; 32] = match signed.author.0.as_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => return Ok(AuthorshipStatus::BadSignature),
+    };
+    let author_vk = match ed25519_dalek::VerifyingKey::from_bytes(&author_bytes) {
+        Ok(vk) => vk,
+        Err(_) => return Ok(AuthorshipStatus::BadSignature),
+    };
+
+    if signed.verify(&author_vk).is_err() {
         return Ok(AuthorshipStatus::BadSignature);
     }
-    if !trusted_agent_pubkeys.contains(&auth.agent_pubkey) {
+
+    // Node-only writes (no agent_attestation): require the signing node
+    // to be currently trusted.
+    let Some(att_cid) = signed.agent_attestation.as_ref() else {
+        if trusted_node_pubkeys.contains(&author_bytes) {
+            return Ok(AuthorshipStatus::NodeSigned {
+                node_pubkey: author_bytes,
+            });
+        }
+        // Genesis / pre-trust writes — treat as unattributed rather
+        // than blocking. Read paths can decide whether to enforce.
+        return Ok(AuthorshipStatus::NoSidecar);
+    };
+
+    // Agent-attributed write: resolve the cid → pubkey, verify the
+    // agent co-signature, return Valid.
+    let Some(agent_pubkey) = trusted_attestations.get(att_cid).copied() else {
         return Ok(AuthorshipStatus::AgentNotTrusted {
-            agent_pubkey: auth.agent_pubkey,
+            agent_pubkey: [0u8; 32],
         });
+    };
+    let agent_vk = match ed25519_dalek::VerifyingKey::from_bytes(&agent_pubkey) {
+        Ok(vk) => vk,
+        Err(_) => return Ok(AuthorshipStatus::BadSignature),
+    };
+    if signed.verify_agent(&agent_vk).is_err() {
+        return Ok(AuthorshipStatus::BadSignature);
     }
-    Ok(AuthorshipStatus::Valid {
-        agent_pubkey: auth.agent_pubkey,
-    })
+    Ok(AuthorshipStatus::Valid { agent_pubkey })
 }
 
 /// Live trust state shared between the verifier (HTTP request path) and the
@@ -267,6 +280,12 @@ pub struct LiveTrustState {
     /// whenever a relevant block lands. Verifiers use this for O(1) lookups
     /// instead of rescanning the chain per request.
     pub trusted_agents: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
+    /// Cached map from AgentAttestation CID → agent pubkey for the
+    /// currently-trusted attestations. Lets the Signed<T> verifier
+    /// resolve an envelope's inline `agent_attestation` field to the
+    /// pubkey needed to verify `agent_signature`, without re-scanning
+    /// the sigchain per request.
+    pub trusted_attestations: std::sync::Arc<std::sync::RwLock<HashMap<Vec<u8>, [u8; 32]>>>,
 }
 
 /// Spawn the sigchain watcher into the current tokio runtime.
@@ -319,9 +338,10 @@ async fn run_watcher(
     }
 }
 
-/// Recompute the cached set of currently-trusted agent pubkeys from the
-/// node_trust + revoked_agents handles in `state`. Called by the watcher
-/// whenever an agent attestation or revocation lands.
+/// Recompute the cached set of currently-trusted agent pubkeys AND the
+/// `cid → pubkey` map for the Signed<T> verifier. Called by the watcher
+/// whenever an agent attestation or revocation lands. The two views are
+/// refreshed together so verifiers always see a consistent snapshot.
 fn refresh_trusted_agents(client: &LocalClient, state: &LiveTrustState) {
     let nt = state
         .node_trust
@@ -333,11 +353,15 @@ fn refresh_trusted_agents(client: &LocalClient, state: &LiveTrustState) {
         .read()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let Ok(fresh) = scan_trusted_agents(client, &nt, &ra) else {
-        return;
-    };
-    if let Ok(mut w) = state.trusted_agents.write() {
-        *w = fresh;
+    if let Ok(fresh) = scan_trusted_agents(client, &nt, &ra) {
+        if let Ok(mut w) = state.trusted_agents.write() {
+            *w = fresh;
+        }
+    }
+    if let Ok(fresh) = scan_trusted_attestations(client, &nt, &ra) {
+        if let Ok(mut w) = state.trusted_attestations.write() {
+            *w = fresh;
+        }
     }
 }
 
@@ -439,6 +463,10 @@ fn apply_sigchain_block(
             // Drop from trusted_agents too — fail closed on subsequent reads.
             if let Ok(mut w) = state.trusted_agents.write() {
                 w.remove(&rev.agent_pubkey);
+            }
+            // And drop any attestation cids pointing to the revoked pubkey.
+            if let Ok(mut w) = state.trusted_attestations.write() {
+                w.retain(|_cid, pk| *pk != rev.agent_pubkey);
             }
         }
         LABEL_AGENT_ATT => {
@@ -546,6 +574,42 @@ pub fn scan_trusted_agents(
             continue;
         }
         out.insert(att.agent_pubkey);
+    }
+    Ok(out)
+}
+
+/// Build the `cid → agent_pubkey` map for the currently-trusted set
+/// of agent attestations. The Signed<T> verifier resolves an envelope's
+/// inline `agent_attestation` cid through this map to get the pubkey
+/// needed to verify `agent_signature`.
+///
+/// Uses the same filter as [`scan_trusted_agents`] (issuer node trusted,
+/// signature OK, pubkey not revoked) so the two maps stay consistent.
+pub fn scan_trusted_attestations(
+    client: &LocalClient,
+    node_trust: &HashMap<[u8; 32], NodeTrust>,
+    revoked_agents: &HashSet<[u8; 32]>,
+) -> Result<HashMap<Vec<u8>, [u8; 32]>> {
+    let mut out = HashMap::new();
+    for bytes in load_blocks_by_label(client, LABEL_AGENT_ATT)? {
+        let att: AgentAttestation = match serde_ipld_dagcbor::from_slice(&bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping corrupt agent attestation block");
+                continue;
+            }
+        };
+        if !node_trust.contains_key(&att.node_pubkey) {
+            continue;
+        }
+        if att.verify_signature().is_err() {
+            continue;
+        }
+        if revoked_agents.contains(&att.agent_pubkey) {
+            continue;
+        }
+        let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+        out.insert(cid, att.agent_pubkey);
     }
     Ok(out)
 }

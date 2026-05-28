@@ -157,16 +157,23 @@ async fn enroll_agent_then_write_and_verify_authorship() {
         .await
         .expect("agent put_doc");
 
-    // ── 5. Verify the authorship sidecar exists and chains back ────
-    let auth = sigchain::lookup_envelope_authorship(&client_arc, &cid)
-        .expect("lookup authorship")
-        .expect("authorship sidecar must exist for an agent-bound write");
-    assert_eq!(
-        auth.agent_pubkey, agent_pk_bytes,
-        "authorship sidecar must name the writing agent"
+    // ── 5. Verify agent attribution travels inline on the Signed<T> envelope
+    //       (post-EnvelopeAuthorship-sidecar removal). ────────────────
+    let env_bytes = client_arc
+        .store()
+        .get_block(&cid)
+        .expect("get envelope block")
+        .expect("envelope block present");
+    let signed: memvault_core::Signed<serde_json::Value> =
+        serde_ipld_dagcbor::from_slice(&env_bytes).expect("envelope decodes as Signed");
+    assert!(
+        signed.agent_attestation.is_some(),
+        "agent-bound write must carry agent_attestation cid on the envelope"
     );
-    auth.verify_signature()
-        .expect("authorship signature verifies against agent pubkey");
+    assert!(
+        !signed.agent_signature.is_empty(),
+        "agent-bound write must carry agent co-signature"
+    );
 
     // The agent must be in our trusted-agents cache (chain: admin →
     // node → agent, none revoked).

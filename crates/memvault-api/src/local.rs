@@ -94,6 +94,22 @@ fn op_edge_target_label(op: &Op) -> Option<String> {
     }
 }
 
+/// Identity bundle for a new write — returned by
+/// [`LocalClient::signer_for_writes`]. The node always signs; the agent
+/// additionally co-signs iff `agent_signing_key` is `Some` (i.e. an
+/// `AgentIdentity` is bound).
+///
+/// `author` is the node's pubkey-derived peer_id, matching
+/// `node_signing_key.verifying_key()` so `Signed::verify(author)` accepts.
+/// `agent_attestation` and `agent_signing_key` are `Some` together — they
+/// always travel as a pair.
+pub(crate) struct WriteSigner<'a> {
+    pub node_signing_key: &'a ed25519_dalek::SigningKey,
+    pub author: memvault_core::PeerId,
+    pub agent_signing_key: Option<&'a ed25519_dalek::SigningKey>,
+    pub agent_attestation: Option<Vec<u8>>,
+}
+
 /// LocalClient implements MemvaultClient by calling directly into the store.
 pub struct LocalClient {
     store: Arc<MemvaultStore>,
@@ -231,12 +247,22 @@ impl LocalClient {
         let Some(state) = self.trust_state.get() else {
             return Ok(crate::sigchain::AuthorshipStatus::NoSidecar);
         };
-        let trusted = state
-            .trusted_agents
+        let trusted_atts = state
+            .trusted_attestations
             .read()
-            .map(|s| s.clone())
+            .map(|m| m.clone())
             .unwrap_or_default();
-        crate::sigchain::verify_envelope_authorship(self, envelope_cid, &trusted)
+        let trusted_nodes = state
+            .node_trust
+            .read()
+            .map(|m| m.keys().copied().collect::<std::collections::HashSet<_>>())
+            .unwrap_or_default();
+        crate::sigchain::verify_envelope_authorship(
+            self,
+            envelope_cid,
+            &trusted_atts,
+            &trusted_nodes,
+        )
     }
 
     /// Register the store's index notifier to bridge to the client's event
@@ -279,37 +305,6 @@ impl LocalClient {
     /// Write-once; subsequent calls are silently ignored.
     pub fn set_agent_identity(&self, identity: crate::agent_identity::AgentIdentity) {
         let _ = self.agent_identity.set(identity);
-    }
-
-    /// Insert an envelope and, if an agent identity is bound, publish a
-    /// matching [`memvault_auth::EnvelopeAuthorship`] sidecar block.
-    ///
-    /// Existing write paths can opt-in to attribution by going through this
-    /// helper instead of calling `store().insert_envelope(...)` directly.
-    /// When no agent identity is configured (system writes, rebuild,
-    /// pre-genesis bootstrap), this is equivalent to a plain insert.
-    pub fn sign_and_insert_envelope(
-        &self,
-        cid_bytes: &[u8],
-        envelope_bytes: &[u8],
-        meta: &memvault_store::insert::EnvelopeMeta,
-    ) -> Result<()> {
-        self.store
-            .insert_envelope(cid_bytes, envelope_bytes, meta)?;
-        if let Some(identity) = self.agent_identity.get() {
-            let auth = memvault_auth::sign_envelope_authorship(
-                &identity.signing_key,
-                cid_bytes.to_vec(),
-            )
-            .map_err(|e| ApiError::Other(format!("sign envelope authorship: {e}")))?;
-            if let Err(e) = crate::sigchain::publish_envelope_authorship(self, &auth) {
-                tracing::warn!(
-                    error = %e,
-                    "envelope inserted, but failed to publish authorship sidecar"
-                );
-            }
-        }
-        Ok(())
     }
 
     /// Issue a `NodeAttestation` for a peer's pubkey, signed by this
@@ -512,6 +507,15 @@ impl LocalClient {
         self.agent_identity.get().map(|i| &i.agent_id)
     }
 
+    /// CID of the bound agent's attestation block, if an agent identity is
+    /// bound. Used by envelope builders to embed an inline attribution
+    /// reference so reads can resolve the agent without a sidecar.
+    pub fn agent_attestation_cid(&self) -> Option<&[u8]> {
+        self.agent_identity
+            .get()
+            .map(|i| i.attestation_cid.as_slice())
+    }
+
     /// The effective author identity for write operations.
     /// Uses the agent's peer ID (derived from its public key) if an agent
     /// identity is set, otherwise falls back to the raw peer_id.
@@ -521,6 +525,104 @@ impl LocalClient {
         } else {
             self.peer_id.clone()
         }
+    }
+
+    /// Identity to sign a new write with. The node always signs; the
+    /// agent additionally co-signs when an agent identity is bound.
+    /// Returns `None` only when no node SK is configured (pre-genesis
+    /// bootstrap), in which case the caller must use an unsigned write
+    /// path.
+    ///
+    /// `author` is always the node's pubkey-derived peer_id — matches
+    /// `node_signing_key.verifying_key()`. `agent_attestation` and
+    /// `agent_signing_key` are `Some` together iff an agent identity is
+    /// bound; the verifier resolves the cid to the same pubkey the
+    /// co-signature verifies against.
+    pub(crate) fn signer_for_writes(&self) -> Option<WriteSigner<'_>> {
+        let node_signing_key = self.node_signing_key.get()?;
+        let agent = self.agent_identity.get();
+        Some(WriteSigner {
+            node_signing_key,
+            author: memvault_core::PeerId(self.peer_id.clone()),
+            agent_signing_key: agent.map(|a| &a.signing_key),
+            agent_attestation: agent.map(|a| a.attestation_cid.clone()),
+        })
+    }
+
+    /// Build a `Signed<Value>` envelope for an agent-attributable write
+    /// and return its `(cid_bytes, envelope_bytes)`. The node always
+    /// signs; when an agent identity is bound, the agent additionally
+    /// co-signs the same payload bytes.
+    ///
+    /// `payload` is the kind-specific JSON content (e.g. the op for ops,
+    /// the annotation body for annotations, …). The helper wraps it in
+    /// the canonical envelope shape — author, tags, visibility, wall_ns,
+    /// bucket_id, attestation cids — and signs.
+    ///
+    /// `tags` is the existing `(scope, label)` shape used at call sites;
+    /// it's converted to `Vec<Tag>` here so callers don't repeat the
+    /// boilerplate.
+    fn build_signed_envelope(
+        &self,
+        payload: serde_json::Value,
+        tags: &[(String, String)],
+        visibility: Visibility,
+        wall_ns: u64,
+        bucket_id: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let tags_typed: Vec<memvault_core::tags::Tag> = tags
+            .iter()
+            .map(|(s, l)| memvault_core::tags::Tag::new(s.clone(), l.clone()))
+            .collect();
+        let bucket_id_typed: Option<BucketId> = bucket_id.and_then(|b| {
+            let arr: [u8; 32] = b.try_into().ok()?;
+            Some(BucketId(arr))
+        });
+
+        // When a signer is available, produce a fully-signed Signed<T>
+        // envelope (node always signs, agent co-signs when bound).
+        if let Some(signer) = self.signer_for_writes() {
+            let envelope = memvault_core::Signed::sign(
+                payload,
+                signer.node_signing_key,
+                signer.author,
+                vec![], // causal — not tracked in the JSON envelope era
+                vec![], // provenance — likewise
+                tags_typed,
+                visibility,
+                0, // lamport — not tracked yet
+                wall_ns,
+                None, // capability
+                bucket_id_typed,
+                None, // node_attestation — wire up once trust_state has the cid
+                signer.agent_attestation,
+                signer.agent_signing_key,
+            )
+            .map_err(|e| ApiError::Other(format!("sign envelope: {e}")))?;
+
+            let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            let cid_bytes = memvault_core::cid_from_bytes(&envelope_bytes).to_bytes();
+            return Ok((cid_bytes, envelope_bytes));
+        }
+
+        // Fallback: no node signing key configured (tests, pre-genesis
+        // bootstrap, headless tooling). Emit an unsigned envelope with
+        // the same field shape so the store extracts metadata correctly
+        // and the verifier reports `NoSidecar` rather than failing.
+        let envelope = serde_json::json!({
+            "version": 1,
+            "payload": payload,
+            "author": self.peer_id,
+            "tags": tags,
+            "visibility": visibility,
+            "wall_ns": wall_ns,
+            "bucket_id": bucket_id,
+        });
+        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid_bytes = memvault_core::cid_from_bytes(&envelope_bytes).to_bytes();
+        Ok((cid_bytes, envelope_bytes))
     }
 
     /// Build a BucketInfo from a bucket_id and its decl CID.
@@ -733,17 +835,29 @@ impl LocalClient {
                 .map_err(|e| ApiError::Serialization(e.to_string()))?;
             for (_, data) in &blocks {
                 if let Some(val) = memvault_store::deserialize_block(data) {
-                    if val.get("kind").and_then(|v| v.as_str()) == Some("attachment") {
+                    // `kind` may live at top level (legacy) or inside
+                    // `payload` (post-Signed<T> attachment envelopes).
+                    let payload = val.get("payload");
+                    let kind = val
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
+                    if kind == Some("attachment") {
                         // Skip attachments without a bucket.
                         if val.get("bucket_id").and_then(|v| v.as_array()).is_none() {
                             continue;
                         }
                         let manifest_cid = val
                             .get("manifest_cid")
+                            .or_else(|| payload.and_then(|p| p.get("manifest_cid")))
                             .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
-                        let filename = val.get("filename").and_then(|v| v.as_str());
+                        let filename = val
+                            .get("filename")
+                            .or_else(|| payload.and_then(|p| p.get("filename")))
+                            .and_then(|v| v.as_str());
                         let mime_type = val
                             .get("mime_type")
+                            .or_else(|| payload.and_then(|p| p.get("mime_type")))
                             .and_then(|v| v.as_str())
                             .unwrap_or("application/octet-stream");
                         if let Some(mcid) = manifest_cid {
@@ -768,13 +882,29 @@ impl LocalClient {
             // Replay tag updates and retractions
             for (_, data) in &blocks {
                 if let Some(val) = memvault_store::deserialize_block(data) {
-                    let kind = val.get("kind").and_then(|v| v.as_str());
+                    let payload = val.get("payload");
+                    let kind = val
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
 
                     // Unified annotation format
                     if kind == Some("annotation") {
-                        let target = val.get("target").and_then(|v| v.as_str()).unwrap_or("");
-                        let ann_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let ann_data = val.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        let target = val
+                            .get("target")
+                            .or_else(|| payload.and_then(|p| p.get("target")))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let ann_type = val
+                            .get("type")
+                            .or_else(|| payload.and_then(|p| p.get("type")))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let ann_data = val
+                            .get("data")
+                            .or_else(|| payload.and_then(|p| p.get("data")))
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
                         if !target.is_empty() {
                             let mut idx = idx_write!();
                             match ann_type {
@@ -851,19 +981,20 @@ impl LocalClient {
         }
 
         let wall_ns = memvault_core::wall_ns();
-        let block = serde_json::json!({
+        let payload = serde_json::json!({
             "kind": "annotation",
             "target": target,
             "type": ann_type,
             "data": data,
-            "wall_ns": wall_ns,
-            "tags": tags,
             "cluster_id": self.cluster_id.clone(),
-            "bucket_id": bucket_id.clone(),
         });
-        let block_bytes = serde_ipld_dagcbor::to_vec(&block)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&block_bytes);
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            wall_ns,
+            bucket_id.as_deref(),
+        )?;
         let meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: vec![("_ann".to_string(), target.to_string())],
@@ -874,8 +1005,7 @@ impl LocalClient {
             bucket_id,
                     ..Default::default()
         };
-        self.store
-            .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+        self.store.insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
         Ok(())
     }
 
@@ -1154,6 +1284,15 @@ impl LocalClient {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
+    /// Top-level `agent_attestation` CID from an envelope, if present.
+    /// Returns `None` for legacy envelopes (pre-Signed<T> v3) and for
+    /// system writes that weren't agent-attributed.
+    fn agent_attestation_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
+        let val: serde_json::Value = memvault_store::deserialize_block(data)?;
+        val.get("agent_attestation")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
     fn author_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
         let val: serde_json::Value = memvault_store::deserialize_block(data)?;
         val.get("author")
@@ -1187,13 +1326,28 @@ impl LocalClient {
         self.latest_bucket_from_cids(&cids)
     }
 
-    /// Returns true if at least one block in `cids` was authored by the local peer.
+    /// Returns true if at least one block in `cids` was authored by
+    /// the local node or, when an agent identity is bound, by that
+    /// agent. Handles both legacy raw-JSON envelopes (author == agent
+    /// pubkey or peer_id at write time) and post-migration Signed<T>
+    /// envelopes (author == node peer_id; agent identity carried in
+    /// `agent_attestation`).
     fn has_local_author(&self, cids: &[Vec<u8>]) -> bool {
-        let local = self.effective_author();
+        let local_effective = self.effective_author();
+        let local_peer_id = &self.peer_id;
+        let local_agent_att = self.agent_attestation_cid().map(|c| c.to_vec());
         for cid in cids {
             if let Ok(Some(data)) = self.store.get_block(cid) {
+                // Signed<T> v3: agent attribution lives in `agent_attestation`.
+                if let Some(att) = Self::agent_attestation_from_envelope_bytes(&data) {
+                    if local_agent_att.as_ref() == Some(&att) {
+                        return true;
+                    }
+                }
                 if let Some(author) = Self::author_from_envelope_bytes(&data) {
-                    if author == local {
+                    // Match legacy (author == effective_author at write
+                    // time) and Signed<T> node-only writes (author == peer_id).
+                    if author == local_effective || &author == local_peer_id {
                         return true;
                     }
                 }
@@ -1260,22 +1414,19 @@ impl LocalClient {
         let wall_ns = memvault_core::wall_ns();
         let bucket_id = self.require_bucket(bucket)?;
 
-        // CID is computed from the envelope bytes so any peer receiving the
-        // block can verify: CID == hash(block_bytes).
-        let envelope = serde_json::json!({
-            "version": 2,
-            "payload": op,
-            "author": self.peer_id,
-            "tags": tags,
-            "visibility": vis,
-            "wall_ns": wall_ns,
-            "cluster_id": Some(self.cluster_id.clone()),
-            "bucket_id": bucket_id.clone(),
-        });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
+        // The op IS the payload — preserves `payload.<OpKind>` access for
+        // existing readers (`list_docs` extracting `DocCreate`, etc.).
+        // `cluster_id` is conveyed via `meta` for indexing rather than
+        // a top-level envelope field.
+        let payload = serde_json::to_value(op)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&envelope_bytes);
-        let cid_bytes = cid.to_bytes();
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            tags,
+            vis.clone(),
+            wall_ns,
+            bucket_id.as_deref(),
+        )?;
 
         let meta = EnvelopeMeta {
             author: self.effective_author(),
@@ -1287,10 +1438,8 @@ impl LocalClient {
             bucket_id,
         };
 
-        // Inserts the envelope and, if an agent identity is bound, publishes
-        // a co-signed authorship sidecar block (rides on RBSR sync, verified
-        // on read against the agent attestation chain).
-        self.sign_and_insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
         Ok(cid_bytes)
     }
@@ -1654,24 +1803,28 @@ impl MemvaultClient for LocalClient {
             bucket_id,
                     ..Default::default()
         };
-        let envelope = serde_json::json!({
-            "version": 1,
+        let payload = serde_json::json!({
             "kind": "attachment",
             "manifest_cid": manifest_cid_bytes,
             "filename": filename,
             "mime_type": mime_type,
             "size": data.len(),
-            "visibility": visibility,
-            "tags": tags,
-            "wall_ns": meta.wall_ns,
             "cluster_id": meta.cluster_id,
-            "bucket_id": meta.bucket_id,
         });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let env_cid = cid_from_bytes(&envelope_bytes);
+        let visibility_typed = match visibility {
+            "public" => Visibility::Public,
+            "federated" => Visibility::Federated,
+            _ => Visibility::Internal,
+        };
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            visibility_typed,
+            meta.wall_ns,
+            meta.bucket_id.as_deref(),
+        )?;
         self.store
-            .insert_envelope(&env_cid.to_bytes(), &envelope_bytes, &meta)?;
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
         tracing::info!(filename = ?filename, mime_type, size = data.len(), "file attached");
 
         // Extract text and cache the result (success or failure) in the blockstore.
@@ -2356,18 +2509,18 @@ impl MemvaultClient for LocalClient {
             ("kind".to_string(), "bucket-decl".to_string()),
             ("bucket".to_string(), bucket_id.to_string()),
         ];
-        let envelope = serde_json::json!({
-            "version": 1,
-            "payload": { "BucketCreate": decl },
-            "author": self.peer_id,
-            "tags": tags,
-            "wall_ns": now_ns,
-            "bucket_id": bucket_id.0,
+        // Payload shape preserves `payload.BucketCreate` so `parse_bucket_decl`
+        // continues to find the decl after the Signed<T> migration.
+        let payload = serde_json::json!({
+            "BucketCreate": decl,
         });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&envelope_bytes);
-        let cid_bytes = cid.to_bytes();
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            now_ns,
+            Some(&bucket_id.0),
+        )?;
 
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
@@ -2427,23 +2580,31 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {
-        // Store a rename operation as a block
-        let rename = serde_json::json!({
-            "op": "BucketRename",
-            "bucket_id": id.0,
-            "new_name": new_name,
-            "wall_ns": memvault_core::wall_ns(),
+        let wall_ns = memvault_core::wall_ns();
+        let tags = vec![
+            ("kind".to_string(), "bucket-rename".to_string()),
+            ("bucket".to_string(), id.to_string()),
+        ];
+        // `payload.BucketRename` shape matches audit parsing
+        // (`memvault_query::audit::parse_audit_record`).
+        let payload = serde_json::json!({
+            "BucketRename": {
+                "bucket_id": id.0,
+                "new_name": new_name,
+                "wall_ns": wall_ns,
+            }
         });
-        let block_bytes =
-            serde_ipld_dagcbor::to_vec(&rename).map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&block_bytes);
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            wall_ns,
+            Some(&id.0),
+        )?;
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
-            tags: vec![
-                ("kind".to_string(), "bucket-rename".to_string()),
-                ("bucket".to_string(), id.to_string()),
-            ],
-            wall_ns: memvault_core::wall_ns(),
+            tags,
+            wall_ns,
             causal: vec![],
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
@@ -2451,7 +2612,7 @@ impl MemvaultClient for LocalClient {
                     ..Default::default()
         };
         self.store
-            .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
         // Update the name in the bucket decl by storing a new decl with the updated name
         if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
@@ -2548,21 +2709,29 @@ impl MemvaultClient for LocalClient {
 
     async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
         let now_ns = memvault_core::wall_ns();
-        let archive_block = serde_json::json!({
-            "op": "BucketArchive",
-            "bucket_id": id.0,
-            "reason": reason,
-            "archived_at_ns": now_ns,
+        let tags = vec![
+            ("kind".to_string(), "bucket-archive".to_string()),
+            ("bucket".to_string(), id.to_string()),
+        ];
+        // `payload.BucketArchive` shape matches audit parsing
+        // (`memvault_query::audit::parse_audit_record`).
+        let payload = serde_json::json!({
+            "BucketArchive": {
+                "bucket_id": id.0,
+                "reason": reason,
+                "archived_at_ns": now_ns,
+            }
         });
-        let block_bytes = serde_ipld_dagcbor::to_vec(&archive_block)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&block_bytes);
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            now_ns,
+            Some(&id.0),
+        )?;
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
-            tags: vec![
-                ("kind".to_string(), "bucket-archive".to_string()),
-                ("bucket".to_string(), id.to_string()),
-            ],
+            tags,
             wall_ns: now_ns,
             causal: vec![],
             provenance: vec![],
@@ -2571,7 +2740,7 @@ impl MemvaultClient for LocalClient {
                     ..Default::default()
         };
         self.store
-            .insert_envelope(&cid.to_bytes(), &block_bytes, &meta)?;
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
 
         // Mark the bucket decl as archived by storing an updated decl
         if let Some(decl_cid) = self.store.get_bucket(&id.0)? {

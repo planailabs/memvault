@@ -35,7 +35,19 @@ pub struct AgentIdentity {
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
     pub attestation: memvault_auth::AgentAttestation,
+    /// CID of `attestation` as it lives in the sigchain. Computed at
+    /// load/generate time so envelope builders can embed it as an inline
+    /// attribution reference without re-encoding the attestation per write.
+    pub attestation_cid: Vec<u8>,
     pub cluster_id: ClusterId,
+}
+
+/// Derive the dag-cbor CID of an attestation. Same encoding used by
+/// `publish_agent_attestation`, so the value matches what's on the chain.
+fn attestation_cid_for(attestation: &memvault_auth::AgentAttestation) -> Result<Vec<u8>> {
+    let bytes = serde_ipld_dagcbor::to_vec(attestation)
+        .map_err(|e| ApiError::Other(format!("encode attestation for CID: {e}")))?;
+    Ok(memvault_core::cid_from_bytes(&bytes).to_bytes())
 }
 
 impl AgentIdentity {
@@ -79,11 +91,14 @@ impl AgentIdentity {
                 .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))?,
         );
 
+        let attestation_cid = attestation_cid_for(&attestation)?;
+
         Ok(Self {
             agent_id: AgentId(meta.agent_id),
             signing_key,
             verifying_key,
             attestation,
+            attestation_cid,
             cluster_id,
         })
     }
@@ -136,11 +151,14 @@ impl AgentIdentity {
             },
         )?;
 
+        let attestation_cid = attestation_cid_for(&attestation)?;
+
         Ok(Self {
             agent_id: AgentId(agent_id.to_string()),
             signing_key,
             verifying_key,
             attestation,
+            attestation_cid,
             cluster_id: cluster_id.clone(),
         })
     }

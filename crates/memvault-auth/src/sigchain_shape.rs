@@ -16,8 +16,7 @@
 //! [`sigchain_label_for`], and [`detect_sigchain_shape`].
 
 use crate::{
-    AdminGenesis, AgentAttestation, AgentRevocation, EnvelopeAuthorship, NodeAttestation,
-    NodeRevocation,
+    AdminGenesis, AgentAttestation, AgentRevocation, NodeAttestation, NodeRevocation,
 };
 
 /// Discriminator for the recognised sigchain block types. Mirrors the
@@ -29,7 +28,6 @@ pub enum SigchainKind {
     AgentAttestation,
     AgentRevocation,
     NodeRevocation,
-    EnvelopeAuthorship,
 }
 
 impl SigchainKind {
@@ -41,7 +39,6 @@ impl SigchainKind {
             Self::AgentAttestation => "agent_att",
             Self::AgentRevocation => "agent_rev",
             Self::NodeRevocation => "node_rev",
-            Self::EnvelopeAuthorship => "envelope_auth",
         }
     }
 }
@@ -99,12 +96,6 @@ pub fn detect_sigchain_shape(bytes: &[u8]) -> Option<SigchainKind> {
             return Some(SigchainKind::AgentRevocation);
         }
     }
-    // EnvelopeAuthorship: envelope_cid + agent_pubkey + signature.
-    if let Ok(auth) = serde_ipld_dagcbor::from_slice::<EnvelopeAuthorship>(bytes) {
-        if !auth.envelope_cid.is_empty() {
-            return Some(SigchainKind::EnvelopeAuthorship);
-        }
-    }
     None
 }
 
@@ -112,8 +103,7 @@ pub fn detect_sigchain_shape(bytes: &[u8]) -> Option<SigchainKind> {
 mod tests {
     use super::*;
     use crate::{
-        sign_admin_genesis, sign_agent_attestation, sign_agent_revocation,
-        sign_envelope_authorship, sign_node_revocation,
+        sign_admin_genesis, sign_agent_attestation, sign_agent_revocation, sign_node_revocation,
     };
     use ed25519_dalek::SigningKey;
     use memvault_core::{AgentId, ClusterId, PeerId};
@@ -183,14 +173,6 @@ mod tests {
         let rev = sign_node_revocation(&admin, node_pk, "compromised").unwrap();
         let bytes = serde_ipld_dagcbor::to_vec(&rev).unwrap();
         assert_eq!(sigchain_label_for(&bytes), Some("node_rev"));
-    }
-
-    #[test]
-    fn detects_envelope_authorship() {
-        let agent = make_key();
-        let auth = sign_envelope_authorship(&agent, b"some-cid".to_vec()).unwrap();
-        let bytes = serde_ipld_dagcbor::to_vec(&auth).unwrap();
-        assert_eq!(sigchain_label_for(&bytes), Some("envelope_auth"));
     }
 
     #[test]

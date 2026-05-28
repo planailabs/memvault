@@ -212,19 +212,7 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             // already in our store (either we minted it locally or it
             // passed sync's signature gate via `vet_sync_block`), so the
             // shape is enough.
-            let mut tags = vec![("sigchain".to_string(), label.to_string())];
-            // EnvelopeAuthorship gets a secondary tag for O(1) lookup
-            // by envelope CID — mirror `publish_envelope_authorship`.
-            if label == "envelope_auth" {
-                if let Ok(auth) =
-                    serde_ipld_dagcbor::from_slice::<memvault_auth::EnvelopeAuthorship>(data)
-                {
-                    tags.push((
-                        "env_auth_by_cid".to_string(),
-                        hex::encode(&auth.envelope_cid),
-                    ));
-                }
-            }
+            let tags = vec![("sigchain".to_string(), label.to_string())];
             let meta = memvault_store::EnvelopeMeta {
                 author: client.peer_id().to_vec(),
                 tags,
@@ -575,8 +563,16 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
 
     // Old-format extraction annotation: references extracted_text by CID
     // instead of inline.  Drop — text will be re-extracted inline on access.
-    if val.get("kind").and_then(|v| v.as_str()) == Some("annotation") {
-        if let Some(data) = val.get("data") {
+    let ann_payload = val.get("payload");
+    let kind_here = val
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .or_else(|| ann_payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
+    if kind_here == Some("annotation") {
+        let data_here = val
+            .get("data")
+            .or_else(|| ann_payload.and_then(|p| p.get("data")));
+        if let Some(data) = data_here {
             if data.get("extracted_text").is_some()
                 && data.get("extracted_text_inline").is_none()
             {

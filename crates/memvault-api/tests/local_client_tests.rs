@@ -818,6 +818,9 @@ fn envelope_v1_no_bucket_roundtrip() {
         1000,
         None,
         None, // no bucket = v1
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 
@@ -849,6 +852,9 @@ fn envelope_v2_with_bucket_roundtrip() {
         1000,
         None,
         Some(bucket.clone()),
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 
@@ -879,6 +885,9 @@ fn envelope_v2_tampered_bucket_fails_verify() {
         1000,
         None,
         Some(BucketId::random()),
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 

@@ -191,12 +191,20 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
     };
     let trusted_agents = Arc::new(RwLock::new(trusted_agents_set));
 
+    let trusted_attestations_map = {
+        let nt = node_trust.read().map(|m| m.clone()).unwrap_or_default();
+        let ra = revoked_agents.read().map(|s| s.clone()).unwrap_or_default();
+        sigchain::scan_trusted_attestations(client, &nt, &ra)?
+    };
+    let trusted_attestations = Arc::new(RwLock::new(trusted_attestations_map));
+
     // (Step 6) Publish to the client and return.
     let trust_state = LiveTrustState {
         node_trust,
         revoked_agents,
         revoked_nodes,
         trusted_agents,
+        trusted_attestations,
     };
     client.set_trust_state(trust_state.clone());
 

@@ -230,6 +230,9 @@ fn v1_envelope_no_bucket_signs_and_verifies() {
         1000,
         None,
         None, // v1: no bucket
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 
@@ -258,6 +261,9 @@ fn v1_envelope_serialization_compatible_with_v2_deserialize() {
         1000,
         None,
         None,
+        None, // no node_attestation
+        None, // no agent_attestation
+        None, // no agent co-signer
     )
     .unwrap();
 

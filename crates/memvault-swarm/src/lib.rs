@@ -864,41 +864,9 @@ fn vet_sync_block(
         return SyncDisposition::Drop;
     }
 
-    // EnvelopeAuthorship: signed by an agent. Verify against the
-    // embedded agent_pubkey; the agent-trust check happens at read time.
-    if let Ok(auth) =
-        serde_ipld_dagcbor::from_slice::<memvault_auth::EnvelopeAuthorship>(bytes)
-    {
-        // Heuristic to avoid colliding with other shapes: envelope_cid
-        // must be non-empty.
-        if !auth.envelope_cid.is_empty() {
-            if auth.verify_signature().is_ok() {
-                let now_ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                let env_cid_hex = hex::encode(&auth.envelope_cid);
-                return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
-                    author: author_peer_pubkey
-                        .map(|p| p.to_vec())
-                        .unwrap_or_else(|| auth.agent_pubkey.to_vec()),
-                    tags: vec![
-                        ("sigchain".to_string(), "envelope_auth".to_string()),
-                        ("env_auth_by_cid".to_string(), env_cid_hex),
-                    ],
-                    wall_ns: now_ns,
-                    cluster_id: Some(cluster_id.to_vec()),
-                    ..Default::default()
-                });
-            } else {
-                tracing::warn!(
-                    agent = %hex::encode(auth.agent_pubkey),
-                    "dropped sync'd EnvelopeAuthorship: bad signature"
-                );
-                return SyncDisposition::Drop;
-            }
-        }
-    }
+    // EnvelopeAuthorship sidecar removed — agent attribution now lives
+    // in the Signed<T> envelope itself (signature + agent_signature +
+    // agent_attestation), so there's nothing to dispatch separately.
 
     // Non-sigchain (or sigchain-shaped but cluster mismatch — fall back
     // to opaque; receiver's existing indexer will handle docs / files).

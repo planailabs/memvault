@@ -37,7 +37,17 @@ pub enum OpKind {
 pub struct AuditRecord {
     pub cid: Vec<u8>,
     pub op_kind: OpKind,
+    /// Envelope-level author. For Signed<T> envelopes this is the node
+    /// pubkey that signed; for legacy raw-JSON envelopes it's whoever the
+    /// `effective_author()` was at write time (agent pubkey when an
+    /// agent identity was bound, otherwise the node peer_id).
     pub author: Vec<u8>,
+    /// CID of the `AgentAttestation` covering the agent that authored
+    /// this write, when present. Set on Signed<T> envelopes whenever an
+    /// agent identity was bound. UIs should prefer this for "who did
+    /// this" attribution.
+    #[serde(default)]
+    pub agent_attestation: Option<Vec<u8>>,
     pub wall_ns: u64,
     pub doc_id: Option<DocId>,
     pub entity_id: Option<Vec<u8>>,
@@ -138,8 +148,18 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
             OpKind::Other("unknown".into())
         }
     } else {
-        let kind = val.get("kind").and_then(|v| v.as_str());
-        let ann_type = val.get("type").and_then(|v| v.as_str());
+        // Some envelope kinds (annotation, attachment) carry their
+        // `kind` either at the top level (legacy) or inside `payload`
+        // (post-Signed<T> migration). Look in both places.
+        let payload = val.get("payload");
+        let kind = val
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .or_else(|| payload.and_then(|p| p.get("kind")).and_then(|v| v.as_str()));
+        let ann_type = val
+            .get("type")
+            .and_then(|v| v.as_str())
+            .or_else(|| payload.and_then(|p| p.get("type")).and_then(|v| v.as_str()));
         let kind_tag = tags
             .iter()
             .find(|(s, _)| s == "kind")
@@ -200,15 +220,24 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         None
     });
 
-    // For attachment envelopes, extract the manifest_cid.
+    // For attachment envelopes, extract the manifest_cid. Pre-Signed<T>
+    // it was top-level; post-migration it lives inside `payload`.
     let attachment_cid = val
         .get("manifest_cid")
+        .or_else(|| val.get("payload").and_then(|p| p.get("manifest_cid")))
+        .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
+
+    // Agent attribution lives in `agent_attestation` on Signed<T> v3+
+    // envelopes. Absent on legacy raw-JSON envelopes (None).
+    let agent_attestation = val
+        .get("agent_attestation")
         .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok());
 
     AuditRecord {
         cid: cid.to_vec(),
         op_kind,
         author,
+        agent_attestation,
         wall_ns,
         doc_id,
         entity_id,
