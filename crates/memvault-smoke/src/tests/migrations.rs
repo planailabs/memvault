@@ -116,13 +116,18 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
             vec![9u8; 32],
             cluster_id.0.to_vec(),
         );
+        // Use BucketRole::Legacy so `rebuild_store::find_legacy_bucket`
+        // picks it up and routes the unbucketed entity into it.
+        // Standard-role buckets are intentionally ignored by the
+        // legacy-adoption path; the rebuild auto-creates its own
+        // deterministic Legacy bucket if none exists.
         let default_bucket = client
             .bucket_create(
                 "default",
                 None,
                 Visibility::Internal,
                 classification::Classification::Internal,
-                BucketRole::Standard,
+                BucketRole::Legacy,
             )
             .await
             .unwrap();
