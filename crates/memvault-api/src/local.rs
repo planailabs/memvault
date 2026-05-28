@@ -132,6 +132,23 @@ impl<'a> ExtractionSource<'a> {
     }
 }
 
+/// Pick the MIME for a document body. Markdown is the default; opt-in to
+/// HTML via `frontmatter.mime` (full MIME like `text/html`) or
+/// `frontmatter.format` (shorthand `"html"` / `"markdown"`).
+fn doc_mime_from_frontmatter(
+    frontmatter: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> &'static str {
+    let raw = frontmatter
+        .get("mime")
+        .and_then(|v| v.as_str())
+        .or_else(|| frontmatter.get("format").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    match raw {
+        "html" | "text/html" | "application/xhtml+xml" => "text/html",
+        _ => "text/markdown",
+    }
+}
+
 /// Parse the `links` field of a cached extraction annotation. Returns an
 /// empty Vec for legacy entries (which lack the field) or anything that
 /// isn't shaped right.
@@ -1171,6 +1188,26 @@ impl LocalClient {
         })
     }
 
+    /// Extract text + links from a document body and cache the result as an
+    /// `"extraction"` annotation keyed by the head op CID. MIME defaults to
+    /// `text/markdown`; opt into `text/html` via `frontmatter.mime` or
+    /// `frontmatter.format`.
+    pub(crate) fn extract_doc_and_cache(
+        &self,
+        doc_id: &DocId,
+        head_cid: &[u8],
+        body: &str,
+        frontmatter: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Option<String> {
+        let mime = doc_mime_from_frontmatter(frontmatter);
+        self.extract_source_and_cache(ExtractionSource::Document {
+            doc_id: doc_id.clone(),
+            head_cid,
+            mime,
+            body: body.as_bytes(),
+        })
+    }
+
     fn store_extraction_annotation(
         &self,
         source: &ExtractionSource<'_>,
@@ -1772,6 +1809,11 @@ impl MemvaultClient for LocalClient {
         let cid_bytes = self.store_op(&op, &all_tags, &vis, bucket)?;
         tracing::info!(doc_id = %hex::encode(doc.id.0), "doc created");
 
+        // Run the body through the extractor pipeline so links land in the
+        // annotation cache. Failures and unsupported MIMEs are silently
+        // ignored — the body is still saved.
+        let _ = self.extract_doc_and_cache(&doc.id, &cid_bytes, &doc.body, &doc.frontmatter);
+
         // Index for search
         let title = doc
             .frontmatter
@@ -1784,7 +1826,7 @@ impl MemvaultClient for LocalClient {
         }
 
         self.event_bus.publish(MemvaultEvent::DocCreated {
-            doc_id: doc.id,
+            doc_id: doc.id.clone(),
             cid: cid_bytes.clone(),
         });
 
@@ -1808,6 +1850,12 @@ impl MemvaultClient for LocalClient {
             .map(BucketId);
         let cid_bytes =
             self.store_op(&op, &tags, &Visibility::Internal, inferred_bucket.as_ref())?;
+
+        // After the edit lands, re-extract the doc body so cached links
+        // track the new head.
+        if let Ok(Some(doc)) = self.get_doc_async(id).await {
+            let _ = self.extract_doc_and_cache(id, &cid_bytes, &doc.body, &doc.frontmatter);
+        }
 
         self.event_bus.publish(MemvaultEvent::DocUpdated {
             doc_id: id.clone(),
