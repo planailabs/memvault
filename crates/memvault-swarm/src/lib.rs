@@ -1180,6 +1180,32 @@ fn build_join_response(
         return refuse(JoinRefuseReason::PeerIdMismatch);
     }
 
+    // The token's CID — keys the CONSUMED_TOKENS / REVOCATIONS tables.
+    let token_cbor = match serde_ipld_dagcbor::to_vec(&token) {
+        Ok(b) => b,
+        Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
+    };
+    let token_cid = memvault_core::cid_from_bytes(&token_cbor).to_bytes();
+
+    if store.is_revoked(&token_cid).unwrap_or(false) {
+        return refuse(JoinRefuseReason::TokenRevoked);
+    }
+
+    // Idempotency: if we already minted a NodeAttestation for this
+    // peer's pubkey, hand it back without consuming another use of the
+    // token. The peer's retry loop (every 15s while pending_token is
+    // set) needs to be safe to re-fire — otherwise admin would burn
+    // through max_uses on the very same join attempt.
+    let already_minted = already_attested(store, &claimed);
+
+    if !already_minted {
+        // Honour max_uses BEFORE minting so we don't over-issue.
+        let used = store.get_token_consumption_count(&token_cid).unwrap_or(0);
+        if used >= token.max_uses {
+            return refuse(JoinRefuseReason::TokenAlreadyConsumed);
+        }
+    }
+
     // Mint the NodeAttestation and persist it. The store's index notifier
     // will publish a `SigchainBlock` event so our own watcher updates trust
     // state, and the post-create gossip bridge announces the CID to peers.
@@ -1213,6 +1239,16 @@ fn build_join_response(
     };
     if store.insert_envelope(&cid_bytes, &att_bytes, &meta).is_err() {
         return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+
+    // Record token consumption on first mint only. The
+    // `already_minted` check above makes retries by the same peer
+    // idempotent — the token's used-count only ticks once per
+    // distinct attestation.
+    if !already_minted {
+        if let Err(e) = store.record_token_consumption(&token_cid, &claimed, now_ns) {
+            tracing::warn!(%peer, %e, "failed to record token consumption");
+        }
     }
 
     tracing::info!(%peer, "minted NodeAttestation via /join/1.0");
@@ -1276,6 +1312,29 @@ fn refuse(reason: JoinRefuseReason) -> JoinResponse {
             try_peers: vec![],
         },
     }
+}
+
+/// Does our local sigchain already contain a `NodeAttestation` whose
+/// `member` pubkey equals `peer_pubkey`? Used by the /join/1.0 server
+/// to skip token-consumption when the same peer retries — the retry
+/// loop fires every 15s while a pending_token exists, and we don't
+/// want to burn `max_uses` on a single peer's reconnect chatter.
+fn already_attested(store: &MemvaultStore, peer_pubkey: &[u8; 32]) -> bool {
+    let cids = match store.query_by_tag("sigchain", "node_att", 0, 1024) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for cid in cids {
+        let Ok(Some(bytes)) = store.get_block(&cid) else {
+            continue;
+        };
+        if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes) {
+            if att.member.0 == peer_pubkey {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn peer_id_matches_pubkey(peer: libp2p::PeerId, pubkey: &[u8; 32]) -> bool {
