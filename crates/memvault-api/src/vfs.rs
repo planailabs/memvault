@@ -15,8 +15,10 @@ use memvault_doc::{Edge, Entity};
 use crate::MemvaultClient;
 use crate::error::Result;
 
-pub const VFS_DIR_KIND: &str = "vfs:dir";
-pub const VFS_CHILD_REL: &str = "vfs:child";
+// Wire constants live in memvault-core so the WASM web build can reach
+// them without pulling this server-only crate. Re-exported here for
+// back-compat with `memvault_api::vfs::VFS_*` import sites.
+pub use memvault_core::{VFS_CHILD_REL, VFS_DIR_KIND};
 
 /// Find or create the VFS root entity for a specific bucket.
 pub async fn ensure_root<C: MemvaultClient + ?Sized>(

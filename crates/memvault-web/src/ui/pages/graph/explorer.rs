@@ -6,9 +6,6 @@ use plan_ai_design::{Card, PageHeader, Pill};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[cfg(feature = "server")]
-use memvault_api::vfs::{VFS_CHILD_REL, VFS_DIR_KIND};
-
 use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
 use crate::ui::app::Route;
 use crate::ui::components::cid_display::CidDisplay;
@@ -90,7 +87,7 @@ async fn list_graph_nodes(
                     memvault_core::NodeRef::from_tag_label(id)
                 {
                     if let Ok(Some(e)) = client.get_entity(&eid).await {
-                        if e.kind == VFS_DIR_KIND {
+                        if e.kind == memvault_core::VFS_DIR_KIND {
                             continue;
                         }
                     }
@@ -100,7 +97,7 @@ async fn list_graph_nodes(
             if let Some(node_ref) = memvault_core::NodeRef::from_tag_label(id) {
                 if let Ok(edge_list) = client.edges_of(&node_ref).await {
                     for (src, edge) in &edge_list {
-                        if src != &node_ref || edge.relation == VFS_CHILD_REL {
+                        if src != &node_ref || edge.relation == memvault_core::VFS_CHILD_REL {
                             continue;
                         }
                         edges.push(EdgeSummary {
@@ -132,7 +129,7 @@ async fn list_graph_nodes(
 
     let mut nodes: Vec<NodeSummary> = entities
         .into_iter()
-        .filter(|entity| entity.kind != VFS_DIR_KIND)
+        .filter(|entity| entity.kind != memvault_core::VFS_DIR_KIND)
         .map(|entity| {
             let label = entity
                 .props
@@ -150,7 +147,7 @@ async fn list_graph_nodes(
                 edges: entity
                     .edges_out
                     .iter()
-                    .filter(|e| e.relation != VFS_CHILD_REL)
+                    .filter(|e| e.relation != memvault_core::VFS_CHILD_REL)
                     .map(|e| EdgeSummary {
                         edge_id: hex::encode(e.id.0),
                         relation: e.relation.clone(),
@@ -216,7 +213,7 @@ async fn list_graph_nodes(
             memvault_core::NodeRef::Entity(eid) => {
                 // Skip vfs:dir entities that appear as edge targets.
                 if let Ok(Some(e)) = client.get_entity(eid).await {
-                    if e.kind == VFS_DIR_KIND {
+                    if e.kind == memvault_core::VFS_DIR_KIND {
                         continue;
                     }
                     let label = e
