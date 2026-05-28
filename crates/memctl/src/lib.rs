@@ -128,6 +128,32 @@ mod native {
             /// Hex-encoded DocId
             doc_id: String,
         },
+        /// List outlinks for a document (cached, from the latest extracted-text
+        /// annotation under doc:<head-cid>).
+        DocLinks {
+            /// Hex-encoded DocId
+            doc_id: String,
+        },
+        /// List backlinks pointing at a node (any kind).
+        DocBacklinks {
+            /// Target tag label, e.g. `doc:abcd…`, `entity:1234…`, `file:c0ffee…`.
+            node: String,
+        },
+        /// List body-extracted edges whose target is a pending (unresolved)
+        /// alias placeholder. These are the dangling links.
+        DocDangling {
+            /// Optional bucket filter (hex bucket-id).
+            #[arg(long)]
+            bucket: Option<String>,
+        },
+        /// Force a re-parse of a document's body — drops the cached
+        /// extraction annotation and re-runs the extractor, which in turn
+        /// re-reconciles graph edges.
+        DocReindexLinks {
+            /// Hex-encoded DocId. If omitted, reindex every doc.
+            #[arg(long)]
+            doc_id: Option<String>,
+        },
         /// Retract a memory
         Retract {
             /// Hex-encoded CID to retract
@@ -821,6 +847,34 @@ mod native {
         EntityId::from_hex(hex_str).map_err(Into::into)
     }
 
+    fn parse_doc_id(hex_str: &str) -> Result<DocId> {
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("invalid hex for doc_id: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "doc_id must be 32 bytes (64 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(DocId(arr))
+    }
+
+    fn parse_bucket_id(hex_str: &str) -> Result<memvault_core::BucketId> {
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("invalid hex for bucket_id: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "bucket_id must be 32 bytes (64 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(memvault_core::BucketId(arr))
+    }
+
     /// Run the memctl CLI with the given parsed arguments.
     pub async fn run(cli: Cli) -> Result<()> {
         let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
@@ -1105,6 +1159,84 @@ mod native {
                 println!("History for doc {doc_id}: {} ops", records.len());
                 for r in records {
                     println!("  {} kind={:?}", hex::encode(&r.cid), r.op_kind);
+                }
+            }
+            Commands::DocLinks { doc_id } => {
+                let did = parse_doc_id(&doc_id)?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let links = client.doc_outlinks(&did);
+                println!("Outlinks for doc {doc_id}: {} links", links.len());
+                for l in links {
+                    let display = l.display_text.as_deref().unwrap_or("");
+                    println!(
+                        "  {} [{}]{}{}",
+                        l.uri,
+                        format!("{:?}", l.syntax),
+                        if display.is_empty() { String::new() } else { format!(" — {display}") },
+                        if l.byte_span != (0, 0) {
+                            format!(" @[{}..{}]", l.byte_span.0, l.byte_span.1)
+                        } else {
+                            String::new()
+                        },
+                    );
+                }
+            }
+            Commands::DocBacklinks { node } => {
+                let Some(node_ref) = memvault_core::NodeRef::from_tag_label(&node) else {
+                    return Err(anyhow::anyhow!(
+                        "node must be `doc:<hex>`, `entity:<hex>`, or `file:<hex>`"
+                    ));
+                };
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let edges = client.doc_backlinks(&node_ref)?;
+                println!("Backlinks to {node}: {} edges", edges.len());
+                for (source, edge) in edges {
+                    let prov = memvault_doc::link::LinkProvenance::of(&edge)
+                        .map(|p| p.as_str())
+                        .unwrap_or("asserted");
+                    println!(
+                        "  {} —[{}/{}]→ {}",
+                        source,
+                        edge.relation,
+                        prov,
+                        edge.target,
+                    );
+                }
+            }
+            Commands::DocDangling { bucket } => {
+                let bucket_id = match bucket {
+                    Some(s) => Some(parse_bucket_id(&s)?),
+                    None => None,
+                };
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let dangling = client.dangling_link_edges(bucket_id.as_ref())?;
+                println!("Dangling links: {} entries", dangling.len());
+                for (source, alias) in dangling {
+                    println!("  {source} → [[{alias}]]");
+                }
+            }
+            Commands::DocReindexLinks { doc_id } => {
+                let store = make_store()?;
+                let client = create_client(store)?;
+                match doc_id {
+                    Some(id_hex) => {
+                        let did = parse_doc_id(&id_hex)?;
+                        match client.reindex_doc_links(&did).await? {
+                            Some(cid) => println!(
+                                "Reindexed doc {} (head {})",
+                                id_hex,
+                                hex::encode(&cid)
+                            ),
+                            None => println!("No body to reindex for {id_hex}"),
+                        }
+                    }
+                    None => {
+                        let count = client.reindex_all_doc_links().await?;
+                        println!("Reindexed {count} doc(s).");
+                    }
                 }
             }
             Commands::GraphAdd { kind, prop } => {

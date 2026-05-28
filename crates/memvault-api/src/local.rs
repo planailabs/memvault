@@ -1717,6 +1717,133 @@ impl LocalClient {
         self.inferred_node_bucket(node)
     }
 
+    /// Find the most recent op CID for a document (its "head").
+    pub fn latest_doc_head_cid(&self, doc_id: &DocId) -> Option<Vec<u8>> {
+        let label: String = doc_id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX).ok()?;
+        // query_by_tag returns insertion order; the most recent is last.
+        cids.into_iter().last()
+    }
+
+    /// Cached out-links for a document (read from the latest extraction
+    /// annotation). Returns an empty vec if nothing is cached.
+    pub fn doc_outlinks(&self, doc_id: &DocId) -> Vec<memvault_extract_abi::ExtractedLink> {
+        let Some(head_cid) = self.latest_doc_head_cid(doc_id) else {
+            return Vec::new();
+        };
+        let source = ExtractionSource::Document {
+            doc_id: doc_id.clone(),
+            head_cid: &head_cid,
+            mime: "text/markdown",
+            body: &[],
+        };
+        self.load_cached_links_for_source(&source)
+    }
+
+    /// In-links pointing at `node` — graph edges whose target is `node`
+    /// and whose provenance is body/frontmatter (operator-asserted edges
+    /// are returned too).
+    pub fn doc_backlinks(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
+        let all = self.edges_of_sync(node)?;
+        Ok(all
+            .into_iter()
+            .filter(|(_, edge)| edge.target == *node)
+            .collect())
+    }
+
+    /// Body-provenance edges whose target is an alias placeholder. Each
+    /// entry is `(source_node, alias_string)`. `bucket` filters by inferred
+    /// source bucket when provided.
+    pub fn dangling_link_edges(
+        &self,
+        bucket_filter: Option<&BucketId>,
+    ) -> Result<Vec<(NodeRef, String)>> {
+        // Scan all body-provenance edges across docs by walking the
+        // `edge_source` tag space — we know every doc-sourced edge gets
+        // tagged with `edge_source: doc:<hex>`.
+        let labels = self
+            .store
+            .query_unique_labels("edge_source", usize::MAX)
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for label in labels {
+            // Only docs are interesting as link sources here.
+            let Some(node) = NodeRef::from_tag_label(&label) else {
+                continue;
+            };
+            if !matches!(node, NodeRef::Doc(_)) {
+                continue;
+            }
+            if let Some(bf) = bucket_filter {
+                let Some(inferred) = self.inferred_node_bucket(&node) else {
+                    continue;
+                };
+                if inferred != bf.0.to_vec() {
+                    continue;
+                }
+            }
+            let edges = self.edges_of_sync(&node)?;
+            for (src, edge) in edges {
+                if src != node {
+                    continue;
+                }
+                if memvault_doc::link::LinkProvenance::of(&edge)
+                    != Some(memvault_doc::link::LinkProvenance::BodyMarkdown)
+                {
+                    continue;
+                }
+                if let Some(alias) = edge
+                    .props
+                    .get("pending_alias")
+                    .and_then(|v| v.as_str())
+                {
+                    out.push((node.clone(), alias.to_string()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Re-parse and re-reconcile a single document's body. Returns the
+    /// op CID of the head that was re-extracted, or `Ok(None)` if there's
+    /// no body to extract.
+    pub async fn reindex_doc_links(&self, doc_id: &DocId) -> Result<Option<Vec<u8>>> {
+        let head_cid = match self.latest_doc_head_cid(doc_id) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        let Some(doc) = self.get_doc_async(doc_id).await? else {
+            return Ok(None);
+        };
+        let _ = self.extract_doc_and_cache(doc_id, &head_cid, &doc.body, &doc.frontmatter);
+        Ok(Some(head_cid))
+    }
+
+    /// Re-parse and re-reconcile every document's body. Returns the
+    /// number of docs visited.
+    pub async fn reindex_all_doc_links(&self) -> Result<usize> {
+        let labels = self
+            .store
+            .query_unique_labels("doc", usize::MAX)
+            .unwrap_or_default();
+        let mut count = 0usize;
+        for label in labels {
+            let Ok(bytes) = hex::decode(&label) else {
+                continue;
+            };
+            if bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            let doc_id = DocId(arr);
+            if self.reindex_doc_links(&doc_id).await?.is_some() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Public wrapper around [`Self::store_op`] for the link reconciler.
     pub fn store_op_pub(
         &self,
