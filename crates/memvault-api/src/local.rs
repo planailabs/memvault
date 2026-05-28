@@ -1200,12 +1200,127 @@ impl LocalClient {
         frontmatter: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Option<String> {
         let mime = doc_mime_from_frontmatter(frontmatter);
-        self.extract_source_and_cache(ExtractionSource::Document {
+        let source = ExtractionSource::Document {
             doc_id: doc_id.clone(),
             head_cid,
             mime,
             body: body.as_bytes(),
-        })
+        };
+        let text = self.extract_source_and_cache(source);
+
+        // Reconcile cached links into graph edges. Failures here are
+        // non-fatal — the body itself is already saved.
+        if let Err(e) = self.reconcile_doc_link_edges(doc_id, head_cid, mime, body) {
+            tracing::warn!(
+                doc_id = %hex::encode(doc_id.0),
+                error = %e,
+                "doc-link reconciliation failed"
+            );
+        }
+
+        text
+    }
+
+    /// Read the cached links for the doc's head, reconcile against the
+    /// existing body-provenance edges, and commit the diff as graph ops.
+    fn reconcile_doc_link_edges(
+        &self,
+        doc_id: &DocId,
+        head_cid: &[u8],
+        mime: &str,
+        body: &str,
+    ) -> Result<()> {
+        let alias_index = crate::link_reconcile::AliasIndex::build(&self.store);
+
+        let source = ExtractionSource::Document {
+            doc_id: doc_id.clone(),
+            head_cid,
+            mime,
+            body: body.as_bytes(),
+        };
+        let current_links = self.load_cached_links_for_source(&source);
+
+        // Reload existing body-provenance edges out of this doc using the
+        // sync read path (inline mirror of edges_of).
+        let doc_node = NodeRef::Doc(doc_id.clone());
+        let existing = self.edges_of_sync(&doc_node)?;
+        let body_edges = crate::link_reconcile::filter_body_provenance(existing);
+
+        // We treat existing body edges as the "prev" baseline; the diff
+        // gives us removes for vanished targets and adds for new ones.
+        let input = crate::link_reconcile::ReconcileInput {
+            doc_id,
+            current_links: &current_links,
+            previous_links: &[],
+            existing_body_edges: &body_edges,
+            alias_index: &alias_index,
+        };
+        let mut ops = crate::link_reconcile::compute_reconcile_ops(&input);
+
+        // Also remove body-provenance edges whose target is absent in the
+        // current resolved set — the pure-add diff above wouldn't catch
+        // these. Build a key set from current resolved links.
+        let resolved_keys: std::collections::HashSet<(NodeRef, String)> = current_links
+            .iter()
+            .filter_map(|l| crate::link_reconcile::resolve_extracted_link(l, &alias_index))
+            .map(|r| (r.target, r.relation))
+            .collect();
+        for edge in &body_edges {
+            if !resolved_keys.contains(&(edge.target.clone(), edge.relation.clone())) {
+                ops.push(Op::EdgeRemove {
+                    source: doc_node.clone(),
+                    edge_id: edge.id.clone(),
+                });
+            }
+        }
+
+        if ops.is_empty() {
+            return Ok(());
+        }
+        crate::link_reconcile::apply_reconcile_ops(self, &ops)
+    }
+
+    /// Synchronous equivalent of `MemvaultClient::edges_of` — used by the
+    /// link reconciler which runs inside a sync write path. Mirrors the
+    /// implementation in the async method.
+    fn edges_of_sync(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
+        let label = node.tag_label();
+        let mut results = Vec::new();
+        let mut removed_ids: std::collections::HashSet<EdgeId> =
+            std::collections::HashSet::new();
+
+        let source_cids = self
+            .store
+            .query_by_tag("edge_source", &label, 0, usize::MAX)?;
+        let target_cids = self
+            .store
+            .query_by_tag("edge_target", &label, 0, usize::MAX)?;
+
+        let mut all_cids = source_cids;
+        all_cids.extend(target_cids);
+
+        for cid in &all_cids {
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        match serde_json::from_value::<Op>(payload.clone()) {
+                            Ok(Op::EdgeAdd { source, edge }) => {
+                                results.push((source, edge));
+                            }
+                            Ok(Op::EdgeRemove { edge_id, .. }) => {
+                                removed_ids.insert(edge_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        results.retain(|(_, edge)| !removed_ids.contains(&edge.id));
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|(_, edge)| seen.insert(edge.id.clone()));
+        Ok(results)
     }
 
     fn store_extraction_annotation(
@@ -1594,6 +1709,23 @@ impl LocalClient {
             return self.inferred_attachment_bucket(&cid);
         }
         None
+    }
+
+    /// Public wrapper around [`Self::inferred_node_bucket`] for the
+    /// link reconciler module.
+    pub fn inferred_node_bucket_pub(&self, node: &NodeRef) -> Option<Vec<u8>> {
+        self.inferred_node_bucket(node)
+    }
+
+    /// Public wrapper around [`Self::store_op`] for the link reconciler.
+    pub fn store_op_pub(
+        &self,
+        op: &Op,
+        tags: &[(String, String)],
+        vis: &Visibility,
+        bucket: Option<&BucketId>,
+    ) -> Result<Vec<u8>> {
+        self.store_op(op, tags, vis, bucket)
     }
 
     fn store_op(

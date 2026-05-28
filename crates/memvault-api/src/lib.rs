@@ -9,6 +9,7 @@ pub mod files;
 pub mod health;
 #[cfg(feature = "http-client")]
 pub mod http;
+pub mod link_reconcile;
 pub mod local;
 pub mod metrics;
 pub mod node_key;
