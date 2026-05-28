@@ -128,36 +128,49 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         .and_then(|v| v.get_as("tags"))
         .unwrap_or_default();
 
-    let op_kind = if let Some(p) = val.get("payload") {
+    // First try the Op-variant tags inside `payload` (the Signed<T>
+    // shape that put_doc / add_entity / add_link etc. produce). If none
+    // matches, FALL THROUGH to the kind/type/tag check below — the
+    // previous version hard-returned Other("unknown") here, which made
+    // every attachment envelope and every annotation (extraction,
+    // tag_update, retraction) come back as Other("unknown") because
+    // their payload object lacks any Op variant key.
+    let payload_op_kind = val.get("payload").and_then(|p| {
         if p.get("DocCreate").is_some() {
-            OpKind::DocCreate
+            Some(OpKind::DocCreate)
         } else if p.get("DocEdit").is_some() {
-            OpKind::DocEdit
+            Some(OpKind::DocEdit)
         } else if p.get("AttachFile").is_some() {
-            OpKind::AttachFile
+            Some(OpKind::AttachFile)
         } else if p.get("DetachFile").is_some() {
-            OpKind::DetachFile
+            Some(OpKind::DetachFile)
         } else if p.get("EntityCreate").is_some() {
-            OpKind::EntityCreate
+            Some(OpKind::EntityCreate)
         } else if p.get("EdgeAdd").is_some() {
-            OpKind::EdgeAdd
+            Some(OpKind::EdgeAdd)
         } else if p.get("EdgeRemove").is_some() {
-            OpKind::EdgeRemove
+            Some(OpKind::EdgeRemove)
         } else if p.get("BucketCreate").is_some() {
-            OpKind::BucketCreate
+            Some(OpKind::BucketCreate)
         } else if p.get("BucketRename").is_some() {
-            OpKind::BucketRename
+            Some(OpKind::BucketRename)
         } else if p.get("BucketAttach").is_some() {
-            OpKind::BucketAttach
+            Some(OpKind::BucketAttach)
         } else if p.get("BucketArchive").is_some() {
-            OpKind::BucketArchive
+            Some(OpKind::BucketArchive)
         } else if p.get("BucketBind").is_some() {
-            OpKind::BucketBind
+            Some(OpKind::BucketBind)
         } else {
-            OpKind::Other("unknown".into())
+            None
         }
+    });
+
+    let op_kind = if let Some(k) = payload_op_kind {
+        k
     } else {
-        // EnvelopeView handles the legacy-vs-Signed<T> shape unification.
+        // EnvelopeView handles the legacy-vs-Signed<T> shape unification,
+        // so the same match works whether `kind`/`type` live at the top
+        // level (legacy raw JSON) or inside `payload` (Signed<T>).
         let kind = view.as_ref().and_then(|v| v.str_field("kind"));
         let ann_type = view.as_ref().and_then(|v| v.str_field("type"));
         let kind_tag = tags

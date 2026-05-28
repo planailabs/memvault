@@ -40,11 +40,23 @@ impl LamportClock {
 }
 
 /// Returns wall-clock time in nanoseconds since Unix epoch.
+///
+/// On `wasm32-unknown-unknown` `std::time::SystemTime::now()` panics with
+/// "time not implemented on this platform"; route through `js_sys::Date`
+/// in that case so any code reachable from the WASM client (audit
+/// timestamps, identity-dir metadata, etc.) gets a real timestamp
+/// instead of panicking.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn wall_ns() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn wall_ns() -> u64 {
+    (js_sys::Date::now() * 1_000_000.0) as u64
 }
 
 #[cfg(test)]
