@@ -970,28 +970,23 @@ fn handle_block_response(
 /// Without this, file data chunks (stored via `put_block`, no BY_TIME
 /// entry) are invisible to RBSR and silently diverge between nodes.
 fn extract_dependent_cids(block_data: &[u8]) -> Vec<Vec<u8>> {
-    // Try JSON first (envelopes, manifests).
-    if let Some(val) = memvault_store::deserialize_block(block_data) {
+    // Try the canonical envelope view first — handles both legacy
+    // raw-JSON envelopes and Signed<T> payload-nested attachments.
+    if let Some(view) = memvault_store::EnvelopeView::parse(block_data) {
         let mut deps = Vec::new();
 
-        // Attachment envelope → manifest_cid
-        if let Some(mcid) = val
-            .get("manifest_cid")
-            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
-        {
+        // Attachment envelope → manifest_cid (top-level or in payload).
+        if let Some(mcid) = view.get_as::<Vec<u8>>("manifest_cid") {
             deps.push(mcid);
         }
 
-        // AttachmentManifest → content_root (UnixFS DAG root CID)
-        if let Some(root) = val
-            .get("content_root")
-            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
-        {
+        // AttachmentManifest → content_root (UnixFS DAG root CID).
+        if let Some(root) = view.get_as::<Vec<u8>>("content_root") {
             deps.push(root);
         }
 
-        // Causal / provenance links (envelope references to prior blocks)
-        if let Some(arr) = val.get("causal").and_then(|v| v.as_array()) {
+        // Causal links — always at the envelope level, not nested.
+        if let Some(arr) = view.field("causal").and_then(|v| v.as_array()) {
             for v in arr {
                 if let Ok(cid) = serde_json::from_value::<Vec<u8>>(v.clone()) {
                     deps.push(cid);
