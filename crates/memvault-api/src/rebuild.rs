@@ -40,6 +40,24 @@ pub fn deterministic_legacy_id(client: &LocalClient) -> BucketId {
     BucketId(id)
 }
 
+/// Deterministic agent-bucket ID — a stable function of
+/// `(cluster_id, agent_id)` so every node in the cluster lands on the
+/// same bucket without consulting any list. Pre-genesis (zero
+/// cluster_id) the seed degrades to "agent_id alone" — still
+/// idempotent on this node, and `rebuild` swaps the legacy bucket out
+/// at first post-genesis rebuild the same way `deterministic_legacy_id`
+/// does for the unbucketed-adoption bucket.
+pub fn deterministic_agent_bucket_id(cluster_id: &[u8], agent_id: &str) -> BucketId {
+    let mut payload: Vec<u8> = Vec::with_capacity(cluster_id.len() + agent_id.len() + 16);
+    payload.extend_from_slice(cluster_id);
+    payload.extend_from_slice(b"::agent::");
+    payload.extend_from_slice(agent_id.as_bytes());
+    let cid = memvault_core::cid_from_bytes(&payload);
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&cid.to_bytes()[..32]);
+    BucketId(id)
+}
+
 /// Summary of what the rebuild did.
 #[derive(Debug, Default)]
 pub struct RebuildReport {

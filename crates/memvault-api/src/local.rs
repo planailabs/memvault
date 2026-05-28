@@ -518,31 +518,153 @@ impl LocalClient {
 
     /// Find or create an `Agent`-role bucket for the given agent ID.
     /// Returns the bucket ID (existing or newly created).
+    /// Signed `bucket_create` with an explicit `bucket_id` and optional
+    /// `owner_agent_override`. Public-facing `bucket_create` calls this
+    /// with a random ID and a `None` override (so the owner falls back
+    /// to whatever's bound on the client); `ensure_agent_bucket_for`
+    /// calls it with a deterministic ID + an explicit owner so the
+    /// bucket can be located on subsequent runs without depending on
+    /// the LocalClient already being agent-bound at creation time.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn bucket_create_inner(
+        &self,
+        bucket_id: memvault_core::BucketId,
+        name: &str,
+        description: Option<&str>,
+        default_visibility: Visibility,
+        default_classification: memvault_core::classification::Classification,
+        role: memvault_doc::BucketRole,
+        owner_agent_override: Option<memvault_core::AgentId>,
+    ) -> Result<memvault_core::BucketId> {
+        use memvault_doc::BucketDecl;
+
+        let now_ns = memvault_core::wall_ns();
+
+        // Auto-attach to cluster if the node has one (non-zero cluster_id).
+        // Buckets are only private when created before genesis (no cluster yet).
+        let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
+        let owner_agent = owner_agent_override
+            .or_else(|| self.agent_identity.get().map(|i| i.agent_id.clone()));
+        let decl = BucketDecl {
+            bucket_id: bucket_id.clone(),
+            name: name.to_string(),
+            description: description.map(|s| s.to_string()),
+            owner_agent,
+            default_visibility,
+            default_classification,
+            created_ns: now_ns,
+            private_to_peer: if has_cluster {
+                None
+            } else {
+                Some(memvault_core::PeerId(self.peer_id.clone()))
+            },
+            role,
+        };
+
+        let tags = vec![
+            ("kind".to_string(), "bucket-decl".to_string()),
+            ("bucket".to_string(), bucket_id.to_string()),
+        ];
+        let payload = serde_json::json!({
+            "BucketCreate": decl,
+        });
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            now_ns,
+            Some(&bucket_id.0),
+        )?;
+
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.effective_author(),
+            tags,
+            wall_ns: now_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(bucket_id.0.to_vec()),
+                    ..Default::default()
+        };
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
+
+        if has_cluster {
+            let _ = self
+                .store
+                .bind_bucket(&bucket_id.0, &self.cluster_id);
+        }
+
+        self.event_bus.publish(MemvaultEvent::BucketCreated {
+            bucket_id: bucket_id.clone(),
+            cid: cid_bytes,
+        });
+
+        tracing::info!(bucket = %bucket_id, name, has_cluster, "bucket created");
+        Ok(bucket_id)
+    }
+
     pub async fn ensure_agent_bucket_for(
         &self,
         agent_id: &memvault_core::AgentId,
     ) -> Result<memvault_core::BucketId> {
-        // Check if an agent bucket already exists for this agent.
-        let buckets = self.bucket_list().await?;
-        for b in &buckets {
-            if b.role == memvault_doc::BucketRole::Agent
-                && b.owner_agent.as_ref() == Some(agent_id)
-            {
-                return Ok(b.id.clone());
+        // Bucket id is a stable function of (cluster_id, agent_id) so
+        // every node lands on the same id without needing to scan the
+        // bucket list. The old listing path checked
+        // `b.owner_agent == Some(agent_id)`, but `bucket_create` set
+        // `owner_agent` from the LocalClient's currently-bound
+        // identity — the MCP server invokes ensure_agent_bucket BEFORE
+        // it has any agent bound, so every BucketDecl was written with
+        // `owner_agent: None` and the next lookup created a duplicate.
+        let bucket_id =
+            crate::rebuild::deterministic_agent_bucket_id(&self.cluster_id, &agent_id.0);
+        let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
+        if self
+            .store
+            .get_bucket(&bucket_id.0)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            // Bucket already exists. Make sure it's bound to the current
+            // cluster — covers the pre-genesis-then-genesis case where
+            // the BucketDecl landed before cluster_id was set, and
+            // nothing has rebound it since.
+            if has_cluster {
+                let _ = self.store.bind_bucket(&bucket_id.0, &self.cluster_id);
             }
+            return Ok(bucket_id);
         }
 
         let name = format!("agent:{}", agent_id.0);
         let bid = self
-            .bucket_create(
+            .bucket_create_inner(
+                bucket_id,
                 &name,
                 Some("auto-created agent bucket"),
                 Visibility::Internal,
                 memvault_core::classification::Classification::Internal,
                 memvault_doc::BucketRole::Agent,
+                Some(agent_id.clone()),
             )
             .await?;
-        tracing::info!(agent = %agent_id.0, bucket = %bid, "created agent bucket");
+        // bucket_create_inner already auto-binds when has_cluster, but
+        // surface bind errors here (the inner path swallows them since
+        // a fresh bucket without a cluster is a valid pre-genesis
+        // state). For an explicitly-named agent bucket we want hard
+        // failure if the bind step refuses.
+        if has_cluster {
+            self.store
+                .bind_bucket(&bid.0, &self.cluster_id)
+                .map_err(|e| {
+                    ApiError::Other(format!(
+                        "bind agent bucket {} to cluster: {e}",
+                        hex::encode(bid.0)
+                    ))
+                })?;
+        }
+        tracing::info!(agent = %agent_id.0, bucket = %bid, "created and bound agent bucket");
         Ok(bid)
     }
 
@@ -2987,80 +3109,18 @@ impl MemvaultClient for LocalClient {
         default_classification: memvault_core::classification::Classification,
         role: memvault_doc::BucketRole,
     ) -> Result<memvault_core::BucketId> {
-        use memvault_doc::BucketDecl;
-
-        let bucket_id = memvault_core::BucketId::random();
-        let now_ns = memvault_core::wall_ns();
-
-        // Auto-attach to cluster if the node has one (non-zero cluster_id).
-        // Buckets are only private when created before genesis (no cluster yet).
-        let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
-        let decl = BucketDecl {
-            bucket_id: bucket_id.clone(),
-            name: name.to_string(),
-            description: description.map(|s| s.to_string()),
-            owner_agent: self.agent_identity.get().map(|i| i.agent_id.clone()),
+        self.bucket_create_inner(
+            memvault_core::BucketId::random(),
+            name,
+            description,
             default_visibility,
             default_classification,
-            created_ns: now_ns,
-            private_to_peer: if has_cluster {
-                None
-            } else {
-                Some(memvault_core::PeerId(self.peer_id.clone()))
-            },
             role,
-        };
-
-        // Wrap BucketDecl in an envelope so the block is self-describing
-        // (carries its own tags/author/wall_ns for reindexing after sync).
-        let tags = vec![
-            ("kind".to_string(), "bucket-decl".to_string()),
-            ("bucket".to_string(), bucket_id.to_string()),
-        ];
-        // Payload shape preserves `payload.BucketCreate` so `parse_bucket_decl`
-        // continues to find the decl after the Signed<T> migration.
-        let payload = serde_json::json!({
-            "BucketCreate": decl,
-        });
-        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
-            payload,
-            &tags,
-            Visibility::Internal,
-            now_ns,
-            Some(&bucket_id.0),
-        )?;
-
-        let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.effective_author(),
-            tags,
-            wall_ns: now_ns,
-            causal: vec![],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: Some(bucket_id.0.to_vec()),
-                    ..Default::default()
-        };
-        self.store
-            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
-
-        // Record in BUCKETS table
-        self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
-
-        // Auto-bind to cluster if one exists
-        if has_cluster {
-            let _ = self
-                .store
-                .bind_bucket(&bucket_id.0, &self.cluster_id);
-        }
-
-        self.event_bus.publish(MemvaultEvent::BucketCreated {
-            bucket_id: bucket_id.clone(),
-            cid: cid_bytes,
-        });
-
-        tracing::info!(bucket = %bucket_id, name, has_cluster, "bucket created");
-        Ok(bucket_id)
+            None,
+        )
+        .await
     }
+
 
     async fn bucket_list(&self) -> Result<Vec<crate::types::BucketInfo>> {
         let buckets = self.store.list_buckets()?;
