@@ -128,30 +128,19 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
         ));
     }
 
-    let cluster_id = parsed
-        .get("cluster_id")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| hex::encode(attestation.node_pubkey));
-
-    std::fs::create_dir_all(&identity_dir)?;
-    let meta = memvault_api::agent_identity::AgentMeta {
-        agent_id: args.agent_id.clone(),
-        cluster_id,
-        enrolled_at_ns: memvault_core::time::wall_ns(),
-    };
-    memvault_api::agent_identity::write_identity_dir(
-        &identity_dir,
-        &agent_sk,
-        &attestation,
-        &meta,
-    )
-    .map_err(|e| anyhow!("write identity dir: {e}"))?;
-
     let att_cid = parsed
         .get("attestation_cid")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    std::fs::create_dir_all(&identity_dir)?;
+    let meta = memvault_api::agent_identity::AgentMeta {
+        agent_id: args.agent_id.clone(),
+        attestation_cid_hex: att_cid.to_string(),
+    };
+    memvault_api::agent_identity::write_identity_dir(&identity_dir, &agent_sk, &meta)
+        .map_err(|e| anyhow!("write identity dir: {e}"))?;
+    let _ = attestation; // attestation is no longer persisted locally
     println!("Agent enrolled.");
     println!("  Agent ID:     {}", args.agent_id);
     println!("  Server:       {}", args.server);

@@ -90,7 +90,7 @@ async fn enroll_agent_then_write_and_verify_authorship() {
 
     // ── 3. Enroll the agent locally (the `memctl agent-enroll` path) ──
     let agent_dir = tempdir().expect("agent identity dir");
-    let agent = AgentIdentity::generate_local(
+    let (agent, attestation) = AgentIdentity::generate_local(
         agent_dir.path(),
         "test-agent",
         &node.cluster_id,
@@ -99,20 +99,19 @@ async fn enroll_agent_then_write_and_verify_authorship() {
         365 * 24 * 60 * 60 * 1_000_000_000,
     )
     .expect("generate agent identity");
-    assert_eq!(agent.attestation.role, Role::AgentHost);
+    assert_eq!(attestation.role, Role::AgentHost);
     assert_eq!(
-        agent.attestation.node_pubkey,
+        attestation.node_pubkey,
         node_sk.verifying_key().to_bytes(),
         "agent attestation must be signed by the node we asked"
     );
-    agent
-        .attestation
+    attestation
         .verify_signature()
         .expect("agent attestation signature verifies");
 
     // Publish the agent attestation to the local sigchain so peers (and
     // the local verifier) can reach it.
-    sigchain::publish_agent_attestation(&client_arc, &agent.attestation)
+    sigchain::publish_agent_attestation(&client_arc, &attestation)
         .expect("publish agent attestation");
 
     // ── 4. Bind agent to a writing client + put a bucket and a doc ──

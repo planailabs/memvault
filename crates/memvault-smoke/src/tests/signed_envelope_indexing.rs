@@ -205,7 +205,7 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
     // Mint and publish an agent attestation off the node's SK.
     let role = memvault_auth::Role::AgentHost;
     let dir = tempfile::tempdir().unwrap();
-    let agent = memvault_api::agent_identity::AgentIdentity::generate_local(
+    let (agent, attestation) = memvault_api::agent_identity::AgentIdentity::generate_local(
         dir.path(),
         "audit-test-agent",
         &node.cluster_id,
@@ -214,7 +214,7 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
         365 * 24 * 3600 * 1_000_000_000,
     )
     .expect("generate agent identity");
-    memvault_api::sigchain::publish_agent_attestation(&node.client, &agent.attestation)
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &attestation)
         .expect("publish agent attestation");
     let expected_att_cid = agent.attestation_cid.clone();
 
@@ -289,7 +289,7 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
     // Mint an agent attestation off the node's SK.
     let role = memvault_auth::Role::AgentHost;
     let dir = tempfile::tempdir().unwrap();
-    let agent = memvault_api::agent_identity::AgentIdentity::generate_local(
+    let (agent, _attestation) = memvault_api::agent_identity::AgentIdentity::generate_local(
         dir.path(),
         "regression-agent",
         &node.cluster_id,

@@ -13,7 +13,7 @@ fn generate_and_load_identity() {
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
     let node_sk = ed25519_dalek::SigningKey::from_bytes(&secret);
 
-    let id = AgentIdentity::generate_local(
+    let (id, attestation) = AgentIdentity::generate_local(
         &identity_dir,
         "smoke-agent",
         &cluster_id,
@@ -24,16 +24,20 @@ fn generate_and_load_identity() {
     .unwrap();
 
     assert_eq!(id.agent_id.0, "smoke-agent");
-    // Agent attestation is node-signed; verify it against its embedded node pubkey.
-    id.attestation.verify_signature().unwrap();
+    // Attestation is returned but not persisted — verify it here, then
+    // confirm only the CID lives on disk.
+    attestation.verify_signature().unwrap();
     assert_eq!(
-        id.attestation.node_pubkey,
+        attestation.node_pubkey,
         node_sk.verifying_key().to_bytes()
     );
+    assert!(!id.attestation_cid.is_empty());
+    assert!(!identity_dir.join("attestation.cbor").exists());
 
-    // Load from disk
+    // Load from disk — only private_key.pem + agent.json are needed.
     let loaded = AgentIdentity::load(&identity_dir).unwrap();
     assert_eq!(loaded.signing_key.to_bytes(), id.signing_key.to_bytes());
+    assert_eq!(loaded.attestation_cid, id.attestation_cid);
 }
 
 #[test]
