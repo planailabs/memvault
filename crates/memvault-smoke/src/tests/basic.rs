@@ -79,19 +79,33 @@ async fn put_sync_search_retract() {
     copy_blocks(&store1, &store2, &[cid.clone()]);
     copy_blocks(&store1, &store3, &[cid.clone()]);
 
-    // Re-index the synced envelope metadata so tag/time/bucket queries work on
-    // remote nodes. Envelopes are currently DAG-CBOR in normal writes, so avoid
-    // assuming JSON here.
+    // Also replicate the envelope via insert_envelope metadata so queries work.
     let block_data = store1.get_block(&cid).unwrap().unwrap();
-    store2.reindex_block(&cid, &block_data).unwrap();
-    store3.reindex_block(&cid, &block_data).unwrap();
 
-    // Parse the envelope to extract the tags for the in-memory text indexes.
-    let envelope = memvault_store::deserialize_block(&block_data).unwrap();
+    // Parse the envelope to extract metadata for indexing on remote nodes.
+    let envelope: serde_json::Value = serde_json::from_slice(&block_data).unwrap();
+    let wall_ns = envelope
+        .get("wall_ns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let tags_val: Vec<(String, String)> = envelope
         .get("tags")
         .and_then(|t| serde_json::from_value(t.clone()).ok())
         .unwrap_or_default();
+
+    let meta = memvault_store::EnvelopeMeta {
+        author: vec![0u8; 32],
+        tags: tags_val.clone(),
+        wall_ns,
+        causal: vec![],
+        provenance: vec![],
+        cluster_id: Some(vec![0u8; 32]),
+        bucket_id: None,
+    };
+
+    // Insert envelope on nodes 2 and 3 so their indexes are populated.
+    store2.insert_envelope(&cid, &block_data, &meta).unwrap();
+    store3.insert_envelope(&cid, &block_data, &meta).unwrap();
 
     // Create clients for nodes 2 and 3 with their own indexes.
     let index2 = Arc::new(RwLock::new(TextIndex::new()));

@@ -92,7 +92,7 @@ fn old_envelope_reindexes_without_bucket() {
 }
 
 #[tokio::test]
-async fn repair_index_adopts_legacy_unbucketed_entities_into_legacy_bucket() {
+async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("blocks.redb");
     let cluster_id = ClusterId::random();
@@ -117,15 +117,17 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_legacy_bucket() {
         );
         let default_bucket = client
             .bucket_create(
-                "legacy",
+                "default",
                 None,
                 Visibility::Internal,
                 classification::Classification::Internal,
-                BucketRole::Legacy,
+                BucketRole::Standard,
             )
             .await
             .unwrap();
-        store.bind_bucket(&default_bucket.0, &cluster_id.0).unwrap();
+        store
+            .bind_bucket(&default_bucket.0, &cluster_id.0)
+            .unwrap();
 
         let entity_label = hex::encode(entity.id.0);
         let wall_ns = wall_ns();
