@@ -740,137 +740,139 @@ fn peer_is_trusted_node(
     false
 }
 
+/// Outcome of validating a candidate sigchain block from a sync ingress.
+/// Used internally by [`vet_sync_block`] to compress the per-type
+/// validation arms into a single dispatcher.
+enum SyncSigchainVerdict {
+    /// Bytes don't look like any known sigchain type — caller treats
+    /// the block as a regular envelope and lets the receiver's
+    /// existing indexer handle it.
+    NotSigchain,
+    /// Bytes parsed as a known sigchain type but the signature didn't
+    /// verify (or admin/cluster mismatch). Reason string is logged at
+    /// the call site for debugging.
+    Drop {
+        reason: &'static str,
+    },
+    /// Sigchain block validated successfully. Caller wraps `label`
+    /// + `signer_pubkey` into the canonical `AsSigchain` meta.
+    Accept {
+        label: &'static str,
+        signer_pubkey: Vec<u8>,
+    },
+}
+
+/// Single dispatcher for all sigchain block types arriving via sync.
+/// Each arm: parse → verify signature → return label + signer pubkey,
+/// or Drop with a reason. Centralises the per-type validation that
+/// used to live as four near-duplicate arms inside `vet_sync_block`.
+fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSigchainVerdict {
+    let cluster_id = join_config.cluster_id;
+
+    // NodeAttestation: admin-signed; verify against the pinned admin.
+    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(bytes) {
+        if att.cluster_id.0 == cluster_id && !att.member.0.is_empty() {
+            let Some(admin_pk) = join_config.pinned_admin_pubkey else {
+                return SyncSigchainVerdict::Drop {
+                    reason: "node_att: no pinned admin pubkey",
+                };
+            };
+            let Ok(admin_vk) = ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) else {
+                return SyncSigchainVerdict::Drop {
+                    reason: "node_att: pinned admin pubkey is not a valid ed25519 key",
+                };
+            };
+            if att.verify_signature(&admin_vk).is_err() {
+                return SyncSigchainVerdict::Drop {
+                    reason: "node_att: signature does not verify against pinned admin",
+                };
+            }
+            return SyncSigchainVerdict::Accept {
+                label: "node_att",
+                signer_pubkey: att.member.0.clone(),
+            };
+        }
+    }
+
+    // AgentAttestation: node-signed; chain-up-to-admin check happens
+    // later in `scan_trusted_agents`.
+    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(bytes) {
+        if att.verify_signature().is_err() {
+            return SyncSigchainVerdict::Drop {
+                reason: "agent_att: bad node signature",
+            };
+        }
+        return SyncSigchainVerdict::Accept {
+            label: "agent_att",
+            signer_pubkey: att.node_pubkey.to_vec(),
+        };
+    }
+
+    // AgentRevocation: node-signed; trust-of-node check is deferred.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentRevocation>(bytes) {
+        if rev.verify_signature().is_err() {
+            return SyncSigchainVerdict::Drop {
+                reason: "agent_rev: bad node signature",
+            };
+        }
+        return SyncSigchainVerdict::Accept {
+            label: "agent_rev",
+            signer_pubkey: rev.node_pubkey.to_vec(),
+        };
+    }
+
+    // NodeRevocation: admin-signed; require pinned admin match.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeRevocation>(bytes) {
+        let Some(pin) = join_config.pinned_admin_pubkey else {
+            return SyncSigchainVerdict::Drop {
+                reason: "node_rev: no pinned admin pubkey",
+            };
+        };
+        if rev.admin_pubkey != pin || rev.verify_signature().is_err() {
+            return SyncSigchainVerdict::Drop {
+                reason: "node_rev: bad signature or admin mismatch",
+            };
+        }
+        return SyncSigchainVerdict::Accept {
+            label: "node_rev",
+            signer_pubkey: rev.admin_pubkey.to_vec(),
+        };
+    }
+
+    SyncSigchainVerdict::NotSigchain
+}
+
 fn vet_sync_block(
     bytes: &[u8],
     join_config: &JoinConfig,
     author_peer_pubkey: Option<[u8; 32]>,
 ) -> SyncDisposition {
-    let cluster_id = join_config.cluster_id;
-
-    // NodeAttestation: admin-signed; verify against the pinned admin pubkey.
-    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(bytes) {
-        // Heuristic to distinguish from unrelated CBOR maps that happen
-        // to parse: NodeAttestation has a 32-byte signature field, a
-        // PeerId member, and cluster_id. If cluster_id agrees, treat it
-        // as a NodeAttestation.
-        if att.cluster_id.0 == cluster_id && !att.member.0.is_empty() {
-            let Some(admin_pk) = join_config.pinned_admin_pubkey else {
-                tracing::warn!("dropped sync'd NodeAttestation: no pinned admin pubkey");
-                return SyncDisposition::Drop;
-            };
-            let admin_vk = match ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) {
-                Ok(k) => k,
-                Err(_) => return SyncDisposition::Drop,
-            };
-            if att.verify_signature(&admin_vk).is_err() {
-                tracing::warn!(
-                    member = %hex::encode(&att.member.0),
-                    "dropped sync'd NodeAttestation: signature does not verify against pinned admin"
-                );
-                return SyncDisposition::Drop;
-            }
+    match validate_sigchain_for_sync(bytes, join_config) {
+        SyncSigchainVerdict::NotSigchain => SyncDisposition::AsIs,
+        SyncSigchainVerdict::Drop { reason } => {
+            tracing::warn!(reason, "dropped sync'd sigchain block");
+            SyncDisposition::Drop
+        }
+        SyncSigchainVerdict::Accept {
+            label,
+            signer_pubkey,
+        } => {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
             let author = author_peer_pubkey
                 .map(|p| p.to_vec())
-                .unwrap_or_else(|| att.member.0.clone());
-            return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
+                .unwrap_or(signer_pubkey);
+            SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
                 author,
-                tags: vec![("sigchain".to_string(), "node_att".to_string())],
+                tags: vec![("sigchain".to_string(), label.to_string())],
                 wall_ns: now_ns,
-                cluster_id: Some(cluster_id.to_vec()),
+                cluster_id: Some(join_config.cluster_id.to_vec()),
                 ..Default::default()
-            });
+            })
         }
     }
-
-    // AgentAttestation: signed by a node (not by admin). Verify against
-    // the embedded node_pubkey; the chain-up-to-admin check happens
-    // later in `scan_trusted_agents` (which filters by node_trust).
-    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(bytes) {
-        if att.verify_signature().is_ok() {
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let author = author_peer_pubkey
-                .map(|p| p.to_vec())
-                .unwrap_or_else(|| att.node_pubkey.to_vec());
-            return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
-                author,
-                tags: vec![("sigchain".to_string(), "agent_att".to_string())],
-                wall_ns: now_ns,
-                cluster_id: Some(cluster_id.to_vec()),
-                ..Default::default()
-            });
-        } else {
-            tracing::warn!(
-                agent = %hex::encode(att.agent_pubkey),
-                "dropped sync'd AgentAttestation: bad node signature"
-            );
-            return SyncDisposition::Drop;
-        }
-    }
-
-    // AgentRevocation: signed by a node. Verify against embedded
-    // node_pubkey; trust-of-node check is deferred to the watcher.
-    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentRevocation>(bytes) {
-        if rev.verify_signature().is_ok() {
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
-                author: author_peer_pubkey
-                    .map(|p| p.to_vec())
-                    .unwrap_or_else(|| rev.node_pubkey.to_vec()),
-                tags: vec![("sigchain".to_string(), "agent_rev".to_string())],
-                wall_ns: now_ns,
-                cluster_id: Some(cluster_id.to_vec()),
-                ..Default::default()
-            });
-        } else {
-            tracing::warn!("dropped sync'd AgentRevocation: bad signature");
-            return SyncDisposition::Drop;
-        }
-    }
-
-    // NodeRevocation: admin-signed. Verify against the pinned admin
-    // pubkey AND require the embedded admin_pubkey matches the pin.
-    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeRevocation>(bytes) {
-        if let Some(pin) = join_config.pinned_admin_pubkey {
-            if rev.admin_pubkey == pin && rev.verify_signature().is_ok() {
-                let now_ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                return SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
-                    author: author_peer_pubkey
-                        .map(|p| p.to_vec())
-                        .unwrap_or_else(|| rev.admin_pubkey.to_vec()),
-                    tags: vec![("sigchain".to_string(), "node_rev".to_string())],
-                    wall_ns: now_ns,
-                    cluster_id: Some(cluster_id.to_vec()),
-                    ..Default::default()
-                });
-            } else {
-                tracing::warn!("dropped sync'd NodeRevocation: bad signature or admin mismatch");
-                return SyncDisposition::Drop;
-            }
-        }
-        // No pinned admin → can't verify NodeRevocation; drop.
-        return SyncDisposition::Drop;
-    }
-
-    // EnvelopeAuthorship sidecar removed — agent attribution now lives
-    // in the Signed<T> envelope itself (signature + agent_signature +
-    // agent_attestation), so there's nothing to dispatch separately.
-
-    // Non-sigchain (or sigchain-shaped but cluster mismatch — fall back
-    // to opaque; receiver's existing indexer will handle docs / files).
-    SyncDisposition::AsIs
 }
 
 fn handle_block_response(
