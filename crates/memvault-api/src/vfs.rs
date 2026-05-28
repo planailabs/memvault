@@ -10,11 +10,13 @@
 use std::collections::BTreeMap;
 
 use memvault_core::{BucketId, EdgeId, EntityId, NodeRef, Visibility};
-pub use memvault_core::{VFS_CHILD_REL, VFS_DIR_KIND};
 use memvault_doc::{Edge, Entity};
 
 use crate::MemvaultClient;
 use crate::error::Result;
+
+pub const VFS_DIR_KIND: &str = "vfs:dir";
+pub const VFS_CHILD_REL: &str = "vfs:child";
 
 /// Find or create the VFS root entity for a specific bucket.
 pub async fn ensure_root<C: MemvaultClient + ?Sized>(
@@ -261,7 +263,10 @@ pub async fn link_node_at_path<C: MemvaultClient + ?Sized>(
 }
 
 /// Resolve the display type for a node ("dir", "entity", "doc", "file").
-pub async fn resolve_node_type<C: MemvaultClient + ?Sized>(client: &C, node: &NodeRef) -> String {
+pub async fn resolve_node_type<C: MemvaultClient + ?Sized>(
+    client: &C,
+    node: &NodeRef,
+) -> String {
     match node {
         NodeRef::Entity(eid) => {
             if let Ok(Some(e)) = client.get_entity(eid).await {
@@ -410,15 +415,9 @@ fn walk_node<'a, C: MemvaultClient + ?Sized + Sync>(
         if node_type == "dir" && depth < max_depth {
             let kids = list_children(client, &node).await?;
             for (kid_name, kid_node, kid_edge) in kids {
-                let child = walk_node(
-                    client,
-                    kid_name,
-                    kid_node,
-                    Some(kid_edge),
-                    max_depth,
-                    depth + 1,
-                )
-                .await?;
+                let child =
+                    walk_node(client, kid_name, kid_node, Some(kid_edge), max_depth, depth + 1)
+                        .await?;
                 children.push(child);
             }
             children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -519,7 +518,12 @@ pub async fn find_paths<C: MemvaultClient + ?Sized + Sync>(
     Ok(paths)
 }
 
-fn collect_target_paths(node: &VfsTreeNode, target: &NodeRef, prefix: &str, out: &mut Vec<String>) {
+fn collect_target_paths(
+    node: &VfsTreeNode,
+    target: &NodeRef,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
     for child in &node.children {
         let child_path = format!("{prefix}/{}", child.name);
         if &child.node == target {
