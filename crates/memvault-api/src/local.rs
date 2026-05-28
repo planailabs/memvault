@@ -738,23 +738,19 @@ impl LocalClient {
             return Ok((cid_bytes, envelope_bytes));
         }
 
-        // Fallback: no node signing key configured (tests, pre-genesis
-        // bootstrap, headless tooling). Emit an unsigned envelope with
-        // the same field shape so the store extracts metadata correctly
-        // and the verifier reports `NoSidecar` rather than failing.
-        let envelope = serde_json::json!({
-            "version": 1,
-            "payload": payload,
-            "author": self.peer_id,
-            "tags": tags,
-            "visibility": visibility,
-            "wall_ns": wall_ns,
-            "bucket_id": bucket_id,
-        });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid_bytes = memvault_core::cid_from_bytes(&envelope_bytes).to_bytes();
-        Ok((cid_bytes, envelope_bytes))
+        // No node signing key configured. Previously we silently fell
+        // back to an unsigned JSON envelope with a different `tags`
+        // serialization, which let smoke tests pass while production
+        // (signed) envelopes carried a different shape — that's how the
+        // EdgeAdd "? → ?" audit bug went undetected for so long. The
+        // node key is now load-bearing: refuse the write outright so
+        // misconfigured callers get a clear error instead of a divergent
+        // envelope shape.
+        Err(ApiError::Other(
+            "node_signing_key not configured on LocalClient; call \
+             set_node_signing_key before issuing writes"
+                .into(),
+        ))
     }
 
     /// Build a BucketInfo from a bucket_id and its decl CID.

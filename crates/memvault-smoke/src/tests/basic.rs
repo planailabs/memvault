@@ -20,14 +20,19 @@ fn open_temp_store(dir: &tempfile::TempDir, name: &str) -> Arc<MemvaultStore> {
 }
 
 fn make_client(store: Arc<MemvaultStore>) -> LocalClient {
-    LocalClient::new(
+    let client = LocalClient::new(
         store,
         Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
         Arc::new(EventBus::new(64)),
         vec![0u8; 32],
         vec![0u8; 32],
-    )
+    );
+    // LocalClient now refuses writes without a node signing key (the
+    // unsigned-JSON fallback was deleted). Install a deterministic key
+    // so this read-and-write client can actually emit envelopes.
+    client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
+    client
 }
 
 /// Copy all blocks from source store to destination store (simulates sync).

@@ -116,6 +116,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
             vec![9u8; 32],
             cluster_id.0.to_vec(),
         );
+        client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]));
         // Use BucketRole::Legacy so `rebuild_store::find_legacy_bucket`
         // picks it up and routes the unbucketed entity into it.
         // Standard-role buckets are intentionally ignored by the
@@ -610,6 +611,7 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
             vec![0u8; 32], // zero peer_id
             vec![0u8; 32], // zero cluster_id = no cluster
         );
+        client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]));
         // Create buckets — these will be private/unbound since no cluster
         let b1 = client
             .bucket_create(
