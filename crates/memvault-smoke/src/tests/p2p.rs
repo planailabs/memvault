@@ -298,7 +298,7 @@ async fn join_request_response() {
                     ))) = event {
                         if let libp2p::request_response::Message::Response { response, .. } = message {
                             match response.result {
-                                JoinResult::Success { attestation_block, enrollment_block } => {
+                                JoinResult::Success { attestation_block, enrollment_block, .. } => {
                                     assert_eq!(attestation_block, b"welcome");
                                     assert_eq!(enrollment_block, Some(b"enrolled".to_vec()));
                                 }
@@ -319,6 +319,7 @@ async fn join_request_response() {
                                 result: JoinResult::Success {
                                     attestation_block: b"welcome".to_vec(),
                                     enrollment_block: Some(b"enrolled".to_vec()),
+                                    bootstrap_blocks: vec![],
                                 },
                             };
                             swarm_b.behaviour_mut().join.send_response(channel, response).unwrap();

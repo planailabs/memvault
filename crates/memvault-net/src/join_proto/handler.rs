@@ -16,16 +16,21 @@ pub fn validate_join_request(req: &JoinRequest) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Build a successful join response with the new attestation and optional enrollment.
+/// Build a successful join response with the new attestation, optional
+/// enrollment, and bootstrap sigchain blocks (admin's NodeAttestation,
+/// AdminGenesis, etc.) the joining peer needs to verify cluster trust
+/// without an unrestricted block-exchange round.
 pub fn build_join_success(
     attestation_block: Vec<u8>,
     enrollment_block: Option<Vec<u8>>,
+    bootstrap_blocks: Vec<Vec<u8>>,
 ) -> JoinResponse {
     JoinResponse {
         version: 1,
         result: JoinResult::Success {
             attestation_block,
             enrollment_block,
+            bootstrap_blocks,
         },
     }
 }

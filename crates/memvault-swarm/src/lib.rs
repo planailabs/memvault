@@ -1216,13 +1216,56 @@ fn build_join_response(
     }
 
     tracing::info!(%peer, "minted NodeAttestation via /join/1.0");
+
+    // Bootstrap bundle: hand the joining peer the sigchain blocks it
+    // needs to verify cluster trust before its first block-exchange
+    // round (the trust gate in `serve_block_request` would otherwise
+    // refuse — peer isn't attested yet from admin's POV until the
+    // attestation we just minted reaches admin's trust state via the
+    // sigchain notifier, and from peer's POV admin isn't attested
+    // until admin's own NodeAttestation arrives). Bundling avoids the
+    // chicken-and-egg without opening up unauthenticated block
+    // exchange. Each block is shape-and-signature-verified at the
+    // peer via `vet_sync_block`, so a malicious admin can't inject
+    // arbitrary blocks here.
+    let bootstrap_blocks = gather_bootstrap_blocks(store);
+
     JoinResponse {
         version: 1,
         result: JoinResult::Success {
             attestation_block: att_bytes,
             enrollment_block: None,
+            bootstrap_blocks,
         },
     }
+}
+
+/// Collect the sigchain blocks a joining peer needs to verify cluster
+/// trust before its first block-exchange round: every NodeAttestation
+/// we hold (so peer learns who else is attested) and every
+/// AdminGenesis block (the cluster's pin material, in case the peer
+/// wants to cross-check). Size is bounded by cluster size + 1.
+fn gather_bootstrap_blocks(store: &MemvaultStore) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for (kind, label) in &[
+        ("sigchain", "node_att"),
+        ("sigchain", "admin_genesis"),
+    ] {
+        if let Ok(cids) = store.query_by_tag(kind, label, 0, 1024) {
+            // Tag entries may repeat the same CID (pre-fix duplicate
+            // publishes); dedupe before reading.
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+            for cid in cids {
+                if !seen.insert(cid.clone()) {
+                    continue;
+                }
+                if let Ok(Some(bytes)) = store.get_block(&cid) {
+                    out.push(bytes);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn refuse(reason: JoinRefuseReason) -> JoinResponse {
@@ -1254,8 +1297,45 @@ fn handle_join_response(
 ) -> bool {
     match response.result {
         JoinResult::Success {
-            attestation_block, ..
+            attestation_block,
+            bootstrap_blocks,
+            ..
         } => {
+            // Bootstrap bundle first: each block (admin's
+            // NodeAttestation, AdminGenesis, etc.) goes through
+            // vet_sync_block for signature verification and proper
+            // tagging. After this, admin's identity is in our
+            // sigchain index — the block-exchange gate on the peer
+            // side won't refuse admin's serve_block_request once we
+            // ask. And from admin's POV, the attestation it just
+            // minted for us is already in admin's local sigchain, so
+            // admin's peer_is_trusted_node(us) returns true.
+            for boot in &bootstrap_blocks {
+                let boot_cid = memvault_core::cid_from_bytes(boot).to_bytes();
+                match vet_sync_block(boot, join_config, None) {
+                    SyncDisposition::AsSigchain(meta) => {
+                        if let Err(e) = store.insert_envelope(&boot_cid, boot, &meta) {
+                            tracing::warn!(%peer, %e, "failed to insert bootstrap block");
+                        }
+                    }
+                    SyncDisposition::Drop => {
+                        tracing::warn!(
+                            %peer,
+                            "dropped bootstrap block: signature does not verify"
+                        );
+                    }
+                    SyncDisposition::AsIs => {
+                        tracing::debug!(
+                            %peer,
+                            "ignoring non-sigchain bootstrap block"
+                        );
+                    }
+                }
+            }
+
+            // Now the main attestation_block (peer's own
+            // NodeAttestation). Same shape: vet + tag.
+            //
             // Route through vet_sync_block so the NodeAttestation is
             // signature-verified against the pinned admin pubkey AND
             // tagged `sigchain/node_att`. Going through put_block +

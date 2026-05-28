@@ -747,3 +747,183 @@ async fn rebuild_retags_sigchain_blocks() {
         "scan_trusted_nodes must find the re-tagged NodeAttestation"
     );
 }
+
+/// After a /join/1.0 round-trip, the joining peer's store must contain
+/// admin's own NodeAttestation — handed over in the
+/// `JoinResult::Success.bootstrap_blocks` bundle. Without this the
+/// block-exchange gate on admin's side would refuse to serve the
+/// admin's NodeAttestation to the peer (peer not attested yet from
+/// admin's POV at request time), creating a permanent chicken-and-egg.
+#[tokio::test]
+async fn join_bundles_admin_node_attestation() {
+    let admin_seed = random_seed();
+    let admin_sk = SigningKey::from_bytes(&admin_seed);
+    let admin_pubkey = admin_sk.verifying_key().to_bytes();
+    let cluster_id = ClusterId::random();
+    let genesis = sign_admin_genesis(&admin_sk, cluster_id.clone(), memvault_core::wall_ns())
+        .expect("sign admin_genesis");
+
+    // Admin libp2p identity.
+    let admin_kp = libp2p_keypair_from_seed(&random_seed());
+    let admin_node_pubkey = pubkey_from_libp2p(&admin_kp);
+
+    // Pre-seed admin's store with admin's OWN NodeAttestation tagged
+    // sigchain/node_att (what `bootstrap_cluster_trust` would do at
+    // genesis time). This is the block we expect to be bundled.
+    use ed25519_dalek::Signer;
+    let mut admin_self_att = memvault_auth::NodeAttestation {
+        cluster_id: cluster_id.clone(),
+        member: memvault_core::PeerId(admin_node_pubkey.to_vec()),
+        role: Role::AgentHost,
+        not_after_ns: u64::MAX,
+        issued_via: memvault_auth::AttestationOrigin::Direct,
+        signature: [0u8; 64],
+    };
+    let admin_self_bytes = admin_self_att.signing_bytes().unwrap();
+    admin_self_att.signature = admin_sk.sign(&admin_self_bytes).to_bytes();
+    let admin_self_cbor = serde_ipld_dagcbor::to_vec(&admin_self_att).unwrap();
+    let admin_self_cid = memvault_core::cid_from_bytes(&admin_self_cbor).to_bytes();
+
+    let admin_dir = tempfile::tempdir().unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let admin_store =
+        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store =
+        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
+    peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
+
+    admin_store
+        .insert_envelope(
+            &admin_self_cid,
+            &admin_self_cbor,
+            &memvault_store::EnvelopeMeta {
+                author: admin_node_pubkey.to_vec(),
+                tags: vec![("sigchain".to_string(), "node_att".to_string())],
+                wall_ns: memvault_core::wall_ns(),
+                cluster_id: Some(cluster_id.0.to_vec()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // Peer libp2p identity + token.
+    let peer_kp = libp2p_keypair_from_seed(&random_seed());
+    let peer_pubkey = pubkey_from_libp2p(&peer_kp);
+    let admin_peer_for_token = PeerId(admin_node_pubkey.to_vec());
+    let token = issue_token(&admin_sk, &admin_peer_for_token, &cluster_id, &genesis);
+    let token_str = encode_token_string(&token).expect("encode token");
+
+    let mut admin_swarm = standalone_swarm(
+        admin_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let admin_listen = await_listen_addr(&mut admin_swarm).await;
+
+    let mut peer_swarm = standalone_swarm(
+        peer_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let _ = await_listen_addr(&mut peer_swarm).await;
+
+    peer_swarm.dial(admin_listen.clone()).unwrap();
+
+    let admin_join = JoinConfig {
+        pending_token: None,
+        node_pubkey: admin_node_pubkey,
+        admin_signing_key: Some(admin_sk.clone()),
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        on_join_success: None,
+    };
+    let peer_join = JoinConfig {
+        pending_token: Some(token_str),
+        node_pubkey: peer_pubkey,
+        admin_signing_key: None,
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        on_join_success: None,
+    };
+
+    let (_atx, admin_head_rx) = mpsc::unbounded_channel::<OutboundHead>();
+    let (_ptx, peer_head_rx) = mpsc::unbounded_channel::<OutboundHead>();
+    let admin_store_t = Arc::clone(&admin_store);
+    let admin_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut admin_swarm,
+            admin_store_t,
+            admin_head_rx,
+            SyncConfig {
+                cluster_id: cluster_id.0.to_vec(),
+                ..Default::default()
+            },
+            admin_join,
+        )
+        .await;
+    });
+    let peer_store_t = Arc::clone(&peer_store);
+    let peer_cluster = cluster_id.0;
+    let peer_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut peer_swarm,
+            peer_store_t,
+            peer_head_rx,
+            SyncConfig {
+                cluster_id: peer_cluster.to_vec(),
+                ..Default::default()
+            },
+            peer_join,
+        )
+        .await;
+    });
+
+    // Poll the peer's store for admin's own NodeAttestation specifically.
+    // It should arrive via /join/1.0's bootstrap_blocks bundle, NOT via
+    // block-exchange (which the trust gate would refuse to serve).
+    let found_admin = timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(cids) = peer_store.query_by_tag("sigchain", "node_att", 0, 64) {
+                for cid in cids {
+                    if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
+                        if let Ok(att) = serde_ipld_dagcbor::from_slice::<
+                            memvault_auth::NodeAttestation,
+                        >(&bytes)
+                        {
+                            // Admin's attestation: `member` == admin's
+                            // node pubkey.
+                            if att.member.0 == admin_node_pubkey.to_vec() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    admin_task.abort();
+    peer_task.abort();
+    let _ = admin_task.await;
+    let _ = peer_task.await;
+
+    assert!(
+        found_admin,
+        "Peer's store must contain admin's own NodeAttestation after \
+         /join/1.0. This block must be bundled in JoinResult::Success.\
+         bootstrap_blocks because the trust gate on admin's \
+         serve_block_request would refuse to serve it to a peer that \
+         isn't attested yet (and the peer isn't attested by admin's \
+         POV until its attestation propagates through admin's local \
+         sigchain notifier — which happens after the join handshake \
+         returns)."
+    );
+}
