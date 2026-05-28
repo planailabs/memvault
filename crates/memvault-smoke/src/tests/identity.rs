@@ -25,19 +25,20 @@ fn generate_and_load_identity() {
 
     assert_eq!(id.agent_id.0, "smoke-agent");
     // Attestation is returned but not persisted — verify it here, then
-    // confirm only the CID lives on disk.
+    // confirm no other files leak onto disk.
     attestation.verify_signature().unwrap();
     assert_eq!(
         attestation.node_pubkey,
         node_sk.verifying_key().to_bytes()
     );
-    assert!(!id.attestation_cid.is_empty());
     assert!(!identity_dir.join("attestation.cbor").exists());
+    assert!(!identity_dir.join("agent.json").exists());
 
-    // Load from disk — only private_key.pem + agent.json are needed.
+    // Load from disk — private_key.pem is the only required file;
+    // agent_id derives from the directory basename.
     let loaded = AgentIdentity::load(&identity_dir).unwrap();
     assert_eq!(loaded.signing_key.to_bytes(), id.signing_key.to_bytes());
-    assert_eq!(loaded.attestation_cid, id.attestation_cid);
+    assert_eq!(loaded.agent_id.0, "agent-test");
 }
 
 #[test]

@@ -273,6 +273,12 @@ pub struct LocalClient {
     /// Optional agent identity for agent-scoped operations. Write-once
     /// via `OnceLock` so it can be installed through a shared `Arc`.
     agent_identity: std::sync::OnceLock<crate::agent_identity::AgentIdentity>,
+    /// Cached attestation CID for the bound agent. Populated by
+    /// `enroll_local_agent` after publishing the attestation, so
+    /// `signer_for_writes` can embed an inline attribution pointer
+    /// without a sigchain scan per write. Empty until that runs;
+    /// envelope readers fall back to author-pubkey lookup when absent.
+    agent_attestation_cid_cache: std::sync::OnceLock<Vec<u8>>,
     start_time: std::time::Instant,
 }
 
@@ -297,6 +303,7 @@ impl LocalClient {
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
             agent_identity: std::sync::OnceLock::new(),
+            agent_attestation_cid_cache: std::sync::OnceLock::new(),
             start_time: std::time::Instant::now(),
         };
 
@@ -648,13 +655,24 @@ impl LocalClient {
         self.agent_identity.get().map(|i| &i.agent_id)
     }
 
-    /// CID of the bound agent's attestation block, if an agent identity is
-    /// bound. Used by envelope builders to embed an inline attribution
-    /// reference so reads can resolve the agent without a sidecar.
+    /// CID of the bound agent's attestation block, if a recent
+    /// enrollment pass cached it via `set_agent_attestation_cid`. The
+    /// cache is purely an optimization — when absent, envelope
+    /// builders fall back to the on-chain lookup by author pubkey
+    /// that the JWT verifier already does, so writes still attribute
+    /// correctly.
     pub fn agent_attestation_cid(&self) -> Option<&[u8]> {
-        self.agent_identity
+        self.agent_attestation_cid_cache
             .get()
-            .map(|i| i.attestation_cid.as_slice())
+            .map(|v| v.as_slice())
+    }
+
+    /// Cache the bound agent's attestation CID. Called by
+    /// `enroll_local_agent` (which has the freshly-published CID in
+    /// scope) so subsequent writes embed the inline attribution
+    /// pointer without re-scanning the sigchain on every write.
+    pub fn set_agent_attestation_cid(&self, cid: Vec<u8>) {
+        let _ = self.agent_attestation_cid_cache.set(cid);
     }
 
     /// The effective author identity for write operations.
@@ -686,7 +704,11 @@ impl LocalClient {
             node_signing_key,
             author: memvault_core::PeerId(self.peer_id.clone()),
             agent_signing_key: agent.map(|a| &a.signing_key),
-            agent_attestation: agent.map(|a| a.attestation_cid.clone()),
+            // Inline attribution CID is sourced from the post-enroll
+            // cache; absent until the daemon publishes the
+            // attestation. Readers fall back to author-pubkey lookup
+            // on the sigchain when this is None.
+            agent_attestation: agent.and(self.agent_attestation_cid_cache.get().cloned()),
         })
     }
 

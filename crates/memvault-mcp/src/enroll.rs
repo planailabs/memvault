@@ -134,13 +134,9 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
         .unwrap_or("");
 
     std::fs::create_dir_all(&identity_dir)?;
-    let meta = memvault_api::agent_identity::AgentMeta {
-        agent_id: args.agent_id.clone(),
-        attestation_cid_hex: att_cid.to_string(),
-    };
-    memvault_api::agent_identity::write_identity_dir(&identity_dir, &agent_sk, &meta)
+    memvault_api::agent_identity::write_identity_dir(&identity_dir, &agent_sk)
         .map_err(|e| anyhow!("write identity dir: {e}"))?;
-    let _ = attestation; // attestation is no longer persisted locally
+    let _ = attestation; // attestation lives on the sigchain, not the disk
     println!("Agent enrolled.");
     println!("  Agent ID:     {}", args.agent_id);
     println!("  Server:       {}", args.server);

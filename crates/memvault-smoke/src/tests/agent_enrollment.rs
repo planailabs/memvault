@@ -110,9 +110,13 @@ async fn enroll_agent_then_write_and_verify_authorship() {
         .expect("agent attestation signature verifies");
 
     // Publish the agent attestation to the local sigchain so peers (and
-    // the local verifier) can reach it.
-    sigchain::publish_agent_attestation(&client_arc, &attestation)
-        .expect("publish agent attestation");
+    // the local verifier) can reach it. Capture the CID so we can hand
+    // it to the agent-bound LocalClient below — AgentIdentity no
+    // longer carries the CID after the disk-state slimdown, and the
+    // cache is per-LocalClient.
+    let attestation_cid =
+        sigchain::publish_agent_attestation(&client_arc, &attestation)
+            .expect("publish agent attestation");
 
     // ── 4. Bind agent to a writing client + put a bucket and a doc ──
     // We need an agent-bound client to author writes. Build one off the
@@ -131,6 +135,7 @@ async fn enroll_agent_then_write_and_verify_authorship() {
     // raw-JSON envelope shape and the assertions below fail.
     agent_client.set_node_signing_key(node_sk.clone());
     agent_client.set_agent_identity(agent);
+    agent_client.set_agent_attestation_cid(attestation_cid);
 
     // Need a bucket — agent-attributed writes go through the bucket gate.
     let bucket = agent_client

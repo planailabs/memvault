@@ -1,97 +1,67 @@
 //! Agent identity: key storage, loading, enrollment, and signing.
 //!
-//! Each agent gets an identity directory containing just two files:
-//! - `private_key.pem` — Ed25519 private key (used to sign JWTs +
-//!   per-write `Signed<T>` agent co-signatures).
-//! - `agent.json` — `{ agent_id, attestation_cid_hex }`. The full
-//!   `AgentAttestation` no longer needs to be persisted locally: the
-//!   JWT verifier (cd0bd54b dropped JWT attestation embed) looks the
-//!   attestation up on the sigchain by agent pubkey, and write
-//!   attribution embeds just the CID — not the attestation bytes.
+//! Each agent's identity directory contains exactly one file:
+//! - `private_key.pem` — Ed25519 private key (signs JWTs + per-write
+//!   `Signed<T>` agent co-signatures).
 //!
-//! Anything else that previously lived on disk (`attestation.cbor`,
-//! `enrollment.cbor`, `cluster_id` in `agent.json`) was redundant with
-//! the sigchain copy and is gone.
+//! Everything else is derived or looked up:
+//! - `agent_id` comes from the directory's basename.
+//! - `verifying_key` is derived from the private key.
+//! - The full `AgentAttestation` lives on the sigchain (the JWT
+//!   verifier already resolves it by agent pubkey — cd0bd54b dropped
+//!   JWT attestation embed). Envelope attribution falls back to the
+//!   same chain lookup by author pubkey, so the per-write inline
+//!   attestation CID was unnecessary local state and is gone.
 
 use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use memvault_auth::{JoinToken, Role, encode_token_string};
 use memvault_core::{AgentId, ClusterId, PeerId};
-use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, Result};
 
-/// Metadata written to `agent.json` alongside the private key. Slim by
-/// design: anything that can be derived (verifying key from the private
-/// key, attestation from the sigchain by pubkey, cluster_id from the
-/// daemon's `LocalClient`) is not persisted here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentMeta {
-    pub agent_id: String,
-    /// Hex CID of the node-signed `AgentAttestation` on the sigchain.
-    /// Used at write time to populate `Signed<T>.agent_attestation`
-    /// without scanning the chain for every envelope. Cleared/refreshed
-    /// by `enroll_local_agent` whenever the agent re-attests.
-    pub attestation_cid_hex: String,
-}
-
-/// A loaded agent identity: signing key + the CID of the node-issued
-/// attestation that authorizes it. The full attestation isn't kept in
-/// memory — verifiers resolve it from the sigchain via the agent's
-/// pubkey, and writes only need the CID for inline attribution.
+/// A loaded agent identity: the signing key + the agent_id derived from
+/// the identity directory's basename. The attestation and its CID are
+/// not held in process — readers and writers resolve them from the
+/// sigchain via the agent's pubkey.
 #[derive(Debug, Clone)]
 pub struct AgentIdentity {
     pub agent_id: AgentId,
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
-    /// CID of this agent's attestation on the sigchain. Empty when no
-    /// attestation has been published yet (the post-construction window
-    /// during enrollment).
-    pub attestation_cid: Vec<u8>,
 }
 
-/// Derive the dag-cbor CID of an attestation. Same encoding used by
-/// `publish_agent_attestation`, so the value matches what's on the chain.
-fn attestation_cid_for(attestation: &memvault_auth::AgentAttestation) -> Result<Vec<u8>> {
-    let bytes = serde_ipld_dagcbor::to_vec(attestation)
-        .map_err(|e| ApiError::Other(format!("encode attestation for CID: {e}")))?;
-    Ok(memvault_core::cid_from_bytes(&bytes).to_bytes())
-}
 
 impl AgentIdentity {
     /// Load an existing agent identity from an identity directory.
     ///
-    /// The directory must contain `private_key.pem` and `agent.json`.
-    /// The full attestation is not kept on disk — readers resolve it
-    /// from the sigchain by agent pubkey when needed; writes use just
-    /// `attestation_cid_hex` from `agent.json` for inline attribution.
+    /// The directory must contain `private_key.pem`. `agent_id` is
+    /// derived from the directory's basename (e.g.
+    /// `…/agents/openclaw/` → `"openclaw"`).
     pub fn load(identity_dir: &Path) -> Result<Self> {
         let key_path = identity_dir.join("private_key.pem");
-        let meta_path = identity_dir.join("agent.json");
 
         let pem_bytes = std::fs::read(&key_path)
             .map_err(|e| ApiError::Other(format!("failed to read {}: {e}", key_path.display())))?;
         let signing_key = parse_ed25519_pem(&pem_bytes)?;
         let verifying_key = signing_key.verifying_key();
 
-        let meta_bytes = std::fs::read(&meta_path)
-            .map_err(|e| ApiError::Other(format!("failed to read {}: {e}", meta_path.display())))?;
-        let meta: AgentMeta = serde_json::from_slice(&meta_bytes)
-            .map_err(|e| ApiError::Other(format!("failed to decode agent.json: {e}")))?;
-
-        let attestation_cid = if meta.attestation_cid_hex.is_empty() {
-            Vec::new()
-        } else {
-            hex::decode(&meta.attestation_cid_hex)
-                .map_err(|e| ApiError::Other(format!("invalid attestation_cid_hex: {e}")))?
-        };
+        let agent_id_str = identity_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                ApiError::Other(format!(
+                    "could not derive agent_id from identity dir basename: {}",
+                    identity_dir.display()
+                ))
+            })?
+            .to_string();
 
         Ok(Self {
-            agent_id: AgentId(meta.agent_id),
+            agent_id: AgentId(agent_id_str),
             signing_key,
             verifying_key,
-            attestation_cid,
         })
     }
 
@@ -99,15 +69,14 @@ impl AgentIdentity {
     ///
     /// The node's own [`NodeAttestation`](memvault_auth::NodeAttestation)
     /// must already be in the cluster's sig-chain; verifiers will look it up
-    /// at JWT-verify time. The signed `AgentAttestation` itself is returned
-    /// alongside the identity (call sites need it to publish to the
-    /// sigchain) but **is not persisted** — only its CID is recorded in
-    /// `agent.json`.
+    /// at JWT-verify time. The signed `AgentAttestation` is returned for
+    /// the caller to publish via `sigchain::publish_agent_attestation`;
+    /// nothing about it is persisted locally — `private_key.pem` is the
+    /// only file written.
     ///
     /// `cluster_id` is accepted for API stability with older call sites
-    /// but is no longer written to disk (it never participated in
-    /// runtime trust; the node attestation on-chain is the source of
-    /// truth for cluster membership).
+    /// but is no longer used: the on-chain node attestation is the
+    /// source of truth for cluster membership.
     pub fn generate_local(
         identity_dir: &Path,
         agent_id: &str,
@@ -135,23 +104,14 @@ impl AgentIdentity {
             not_after_ns,
         )
         .map_err(|e| ApiError::Other(format!("sign agent attestation: {e}")))?;
-        let attestation_cid = attestation_cid_for(&attestation)?;
 
-        write_identity_dir(
-            identity_dir,
-            &signing_key,
-            &AgentMeta {
-                agent_id: agent_id.to_string(),
-                attestation_cid_hex: hex::encode(&attestation_cid),
-            },
-        )?;
+        write_identity_dir(identity_dir, &signing_key)?;
 
         Ok((
             Self {
                 agent_id: AgentId(agent_id.to_string()),
                 signing_key,
                 verifying_key,
-                attestation_cid,
             },
             attestation,
         ))
@@ -160,7 +120,6 @@ impl AgentIdentity {
     /// Check if an identity directory already has a valid identity.
     pub fn exists(identity_dir: &Path) -> bool {
         identity_dir.join("private_key.pem").exists()
-            && identity_dir.join("agent.json").exists()
     }
 
     /// Load if exists, otherwise generate locally. When generating, the
@@ -311,21 +270,19 @@ pub fn enroll_local_agent(
         )?,
     };
 
-    crate::sigchain::publish_agent_attestation(client, &attestation)
+    let attestation_cid = crate::sigchain::publish_agent_attestation(client, &attestation)
         .map_err(|e| ApiError::Other(format!("publish agent attestation: {e}")))?;
+    // Hand the CID to the LocalClient so subsequent writes can embed
+    // it as inline attribution without re-scanning the sigchain.
+    client.set_agent_attestation_cid(attestation_cid);
 
     Ok(identity)
 }
 
-/// Persist the two-file identity (private_key.pem + agent.json) under
-/// `dir`. The attestation itself is no longer written locally —
-/// verifiers resolve it from the sigchain via the agent's pubkey, so
-/// only its CID (in `meta.attestation_cid_hex`) needs to live on disk.
-pub fn write_identity_dir(
-    dir: &Path,
-    signing_key: &SigningKey,
-    meta: &AgentMeta,
-) -> Result<()> {
+/// Persist the agent's private key. That's the entire on-disk identity
+/// now — `agent_id` derives from the parent directory's basename and
+/// the attestation lives on the sigchain.
+pub fn write_identity_dir(dir: &Path, signing_key: &SigningKey) -> Result<()> {
     let pem = encode_ed25519_pem(signing_key);
     std::fs::write(dir.join("private_key.pem"), pem.as_bytes())
         .map_err(|e| ApiError::Other(format!("failed to write private_key.pem: {e}")))?;
@@ -337,11 +294,6 @@ pub fn write_identity_dir(
         let perms = std::fs::Permissions::from_mode(0o600);
         let _ = std::fs::set_permissions(dir.join("private_key.pem"), perms);
     }
-
-    let meta_json = serde_json::to_string_pretty(meta)
-        .map_err(|e| ApiError::Other(format!("failed to serialize agent.json: {e}")))?;
-    std::fs::write(dir.join("agent.json"), meta_json.as_bytes())
-        .map_err(|e| ApiError::Other(format!("failed to write agent.json: {e}")))?;
 
     Ok(())
 }
@@ -569,10 +521,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(identity.agent_id.0, "test-agent");
-        assert!(!identity.attestation_cid.is_empty());
 
-        // Verify the (returned, not persisted) attestation against its
-        // embedded node pubkey — the disk side now only stores the CID.
+        // The signed attestation is returned but not persisted —
+        // verify it here, then confirm no other files leak onto disk.
         attestation.verify_signature().unwrap();
         assert_eq!(
             attestation.node_pubkey,
@@ -581,16 +532,16 @@ mod tests {
         );
         let _ = admin_peer_id;
 
-        // Load from disk
+        // Load from disk: agent_id derives from the directory basename.
         let loaded = AgentIdentity::load(&identity_dir).unwrap();
-        assert_eq!(loaded.agent_id.0, "test-agent");
+        assert_eq!(loaded.agent_id.0, "agent-test");
         assert_eq!(
             loaded.signing_key.to_bytes(),
             identity.signing_key.to_bytes()
         );
-        assert_eq!(loaded.attestation_cid, identity.attestation_cid);
-        // attestation.cbor must no longer be written.
+        // private_key.pem is the only file the dir should contain now.
         assert!(!identity_dir.join("attestation.cbor").exists());
+        assert!(!identity_dir.join("agent.json").exists());
     }
 
     #[test]

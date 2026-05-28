@@ -216,7 +216,12 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
     .expect("generate agent identity");
     memvault_api::sigchain::publish_agent_attestation(&node.client, &attestation)
         .expect("publish agent attestation");
-    let expected_att_cid = agent.attestation_cid.clone();
+    // Compute the attestation CID inline — AgentIdentity no longer
+    // caches it locally; readers look it up by author pubkey.
+    let expected_att_cid = memvault_core::cid_from_bytes(
+        &serde_ipld_dagcbor::to_vec(&attestation).expect("encode attestation"),
+    )
+    .to_bytes();
 
     // Build a separate agent-bound client off the same store.
     let agent_client = memvault_api::LocalClient::new(
@@ -229,6 +234,10 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
     );
     agent_client.set_node_signing_key(node_sk.clone());
     agent_client.set_agent_identity(agent);
+    // AgentIdentity no longer carries the attestation_cid; hand it
+    // through explicitly so signer_for_writes embeds the inline
+    // attribution pointer the assertions below expect.
+    agent_client.set_agent_attestation_cid(expected_att_cid.clone());
 
     let bucket = agent_client
         .bucket_create(
@@ -289,7 +298,7 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
     // Mint an agent attestation off the node's SK.
     let role = memvault_auth::Role::AgentHost;
     let dir = tempfile::tempdir().unwrap();
-    let (agent, _attestation) = memvault_api::agent_identity::AgentIdentity::generate_local(
+    let (agent, attestation) = memvault_api::agent_identity::AgentIdentity::generate_local(
         dir.path(),
         "regression-agent",
         &node.cluster_id,
@@ -298,7 +307,12 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
         365 * 24 * 3600 * 1_000_000_000,
     )
     .expect("generate agent identity");
-    let expected_att_cid = agent.attestation_cid.clone();
+    // Compute the attestation CID inline — AgentIdentity no longer
+    // caches it locally; readers look it up by author pubkey.
+    let expected_att_cid = memvault_core::cid_from_bytes(
+        &serde_ipld_dagcbor::to_vec(&attestation).expect("encode attestation"),
+    )
+    .to_bytes();
 
     // Build a separate agent-bound client off the same store.
     let agent_client = memvault_api::LocalClient::new(
@@ -311,6 +325,10 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
     );
     agent_client.set_node_signing_key(node_sk.clone());
     agent_client.set_agent_identity(agent);
+    // AgentIdentity no longer carries the attestation_cid; hand it
+    // through explicitly so signer_for_writes embeds the inline
+    // attribution pointer the assertions below expect.
+    agent_client.set_agent_attestation_cid(expected_att_cid.clone());
 
     let bucket = agent_client
         .bucket_create(

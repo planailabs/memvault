@@ -2038,16 +2038,8 @@ mod native {
                 // for back-compat with `AgentIdentity::load` callers
                 // that read attestation.cbor directly.
                 std::fs::create_dir_all(&identity_dir)?;
-                let meta = memvault_api::agent_identity::AgentMeta {
-                    agent_id: agent_id.clone(),
-                    attestation_cid_hex: hex::encode(&result.attestation_cid),
-                };
-                memvault_api::agent_identity::write_identity_dir(
-                    &identity_dir,
-                    &agent_sk,
-                    &meta,
-                )
-                .map_err(|e| anyhow::anyhow!("write identity dir: {e}"))?;
+                memvault_api::agent_identity::write_identity_dir(&identity_dir, &agent_sk)
+                    .map_err(|e| anyhow::anyhow!("write identity dir: {e}"))?;
 
                 println!("Agent enrolled successfully.");
                 println!("  Agent ID:     {agent_id}");
@@ -2078,10 +2070,9 @@ mod native {
                         match memvault_api::agent_identity::AgentIdentity::load(&agent_dir) {
                             Ok(id) => {
                                 println!(
-                                    "{} pubkey={} attestation_cid={}",
+                                    "{} pubkey={}",
                                     id.agent_id.0,
                                     hex::encode(id.verifying_key.as_bytes()),
-                                    hex::encode(&id.attestation_cid),
                                 );
                                 found = true;
                             }
@@ -2112,18 +2103,14 @@ mod native {
 
                 println!("Agent: {}", id.agent_id.0);
                 println!(
-                    "  Public key:      {}",
+                    "  Public key:   {}",
                     hex::encode(id.verifying_key.as_bytes())
                 );
+                println!("  Identity dir: {}", agent_dir.display());
                 println!(
-                    "  Attestation CID: {}",
-                    hex::encode(&id.attestation_cid)
-                );
-                println!("  Identity dir:    {}", agent_dir.display());
-                println!(
-                    "  (role/expiry now live on-chain in the AgentAttestation \
-                     — fetch via `memctl audit --kind agent-attestation` \
-                     or the web trust-tree)"
+                    "  (attestation / role / expiry live on the sigchain — \
+                     fetch via `memctl audit --kind agent-attestation` or \
+                     the web trust-tree)"
                 );
             }
             Commands::Seed {
