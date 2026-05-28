@@ -19,6 +19,7 @@ mod tests {
     pub mod identity;
     pub mod join_protocol;
     pub mod lifecycle;
+    pub mod links;
     pub mod migrations;
     pub mod p2p;
     pub mod sharing;

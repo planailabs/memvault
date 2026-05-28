@@ -1403,10 +1403,21 @@ impl LocalClient {
 
         for cid in ann_cids.iter().chain(legacy_cids.iter()) {
             let block_data = self.store.get_block(cid).ok()??;
-            let val: serde_json::Value = memvault_store::deserialize_block(&block_data)?;
+            // EnvelopeView normalises top-level vs Signed<T>-nested
+            // field access, so the `data` field is reached regardless of
+            // whether the annotation came from the legacy raw-JSON or
+            // the new Signed<T> envelope path.
+            let view = memvault_store::EnvelopeView::parse(&block_data)?;
+            let val: serde_json::Value = view.raw().clone();
 
-            // Unified annotation format
-            let data_field = val.get("data").unwrap_or(&val);
+            // Unified annotation format — pull `data` via the view first;
+            // fall back to the legacy top-level layout if the field is
+            // absent.
+            let data_field_owned = view
+                .field("data")
+                .cloned()
+                .unwrap_or_else(|| val.clone());
+            let data_field = &data_field_owned;
 
             if let Some(err) = data_field.get("extraction_error").and_then(|v| v.as_str()) {
                 if !err.is_empty() {
