@@ -2300,6 +2300,7 @@ mod native {
         let file_exts = [
             ("txt", "text/plain"),
             ("md", "text/markdown"),
+            ("html", "text/html"),
             ("json", "application/json"),
             ("csv", "text/csv"),
             ("log", "text/plain"),
@@ -2321,69 +2322,19 @@ mod native {
         }
         println!("  VFS directories created: {}", vfs_dirs.len());
 
-        // Track all created node refs for linking later.
+        // Track all created node refs for linking later. Created in order
+        // so docs/files can embed memvault:// references to already-existing
+        // entities and earlier docs — this exercises the link reconciler
+        // end-to-end alongside operator-asserted edges below.
         let mut all_nodes: Vec<NodeRef> = Vec::new();
+        let mut entity_ids: Vec<EntityId> = Vec::new();
+        let mut doc_ids: Vec<DocId> = Vec::new();
+        // Aliases we expose so wikilinks like `[[Alice]]` resolve via the
+        // alias index (entity.props["name"] is what AliasIndex picks up).
+        let mut entity_aliases: Vec<String> = Vec::new();
+        let allowlisted_relations = ["mentions", "cites", "embeds", "replies-to"];
 
-        // ── Documents ───────────────────────────────────────────────────
-        for i in 0..n_docs {
-            let topic = topics[rng.gen_range(0..topics.len())];
-            let adj = adjectives[rng.gen_range(0..adjectives.len())];
-            let title = format!("{} {} notes #{}", adj, topic, i + 1);
-            let paragraphs: usize = rng.gen_range(2..6);
-            let mut body = String::new();
-            for _ in 0..paragraphs {
-                let sentences: usize = rng.gen_range(2..5);
-                for _ in 0..sentences {
-                    let t1 = topics[rng.gen_range(0..topics.len())];
-                    let t2 = topics[rng.gen_range(0..topics.len())];
-                    let a = adjectives[rng.gen_range(0..adjectives.len())];
-                    body.push_str(&format!(
-                        "The {} approach to {} integrates well with {}. ",
-                        a, t1, t2
-                    ));
-                }
-                body.push('\n');
-            }
-            let mut fm = BTreeMap::new();
-            fm.insert(
-                "title".to_string(),
-                serde_json::Value::String(title.clone()),
-            );
-            let doc = memvault_doc::Document::new(DocId::random(), body, fm);
-            let mut tags = vec![("topic".to_string(), topic.to_string())];
-            if rng.gen_bool(0.3) {
-                tags.push((
-                    "priority".to_string(),
-                    ["low", "medium", "high"][rng.gen_range(0..3)].to_string(),
-                ));
-            }
-            let cid = client
-                .put_doc(doc.clone(), tags, Visibility::Internal, Some(&bucket))
-                .await?;
-            all_nodes.push(NodeRef::Doc(doc.id.clone()));
-
-            // Place some docs in VFS
-            if rng.gen_bool(0.5) {
-                let dir = vfs_dirs[rng.gen_range(0..vfs_dirs.len())];
-                let slug: String = title
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || *c == ' ')
-                    .collect::<String>()
-                    .replace(' ', "-")
-                    .to_lowercase();
-                let path = format!("{}/{}.md", dir, &slug[..slug.len().min(40)]);
-                let node_id = format!("doc:{}", hex::encode(doc.id.0));
-                let _ =
-                    memvault_api::vfs::link_node_at_path(client, &bucket, &path, &node_id).await;
-            }
-
-            if (i + 1) % 10 == 0 || i + 1 == n_docs {
-                println!("  Documents: {}/{}", i + 1, n_docs);
-            }
-            let _ = cid;
-        }
-
-        // ── Entities ────────────────────────────────────────────────────
+        // ── Entities (first, so docs/files can link to them) ────────────
         for i in 0..n_entities {
             let kind = entity_kinds[rng.gen_range(0..entity_kinds.len())];
             let name = match kind {
@@ -2398,7 +2349,7 @@ mod native {
                 _ => format!("{}-{}", kind, rng.gen_range(1..100u32)),
             };
             let mut props = BTreeMap::new();
-            props.insert("name".to_string(), serde_json::json!(name));
+            props.insert("name".to_string(), serde_json::json!(name.clone()));
             if rng.gen_bool(0.4) {
                 props.insert(
                     "description".to_string(),
@@ -2426,20 +2377,154 @@ mod native {
             let eid = client
                 .add_entity(entity.clone(), Visibility::Internal, Some(&bucket))
                 .await?;
-            all_nodes.push(NodeRef::Entity(eid));
-
+            all_nodes.push(NodeRef::Entity(eid.clone()));
+            entity_ids.push(eid);
+            entity_aliases.push(name);
             if (i + 1) % 10 == 0 || i + 1 == n_entities {
                 println!("  Entities:  {}/{}", i + 1, n_entities);
             }
         }
 
-        // ── Files ───────────────────────────────────────────────────────
+        // ── Documents — some bodies embed [[wikilinks]] / markdown links /
+        //    `[[Alias]]` references to entities so the link reconciler
+        //    populates body-provenance graph edges. ─────────────────────
+        for i in 0..n_docs {
+            let topic = topics[rng.gen_range(0..topics.len())];
+            let adj = adjectives[rng.gen_range(0..adjectives.len())];
+            let title = format!("{} {} notes #{}", adj, topic, i + 1);
+            let paragraphs: usize = rng.gen_range(2..6);
+            let mut body = String::new();
+            for _ in 0..paragraphs {
+                let sentences: usize = rng.gen_range(2..5);
+                for _ in 0..sentences {
+                    let t1 = topics[rng.gen_range(0..topics.len())];
+                    let t2 = topics[rng.gen_range(0..topics.len())];
+                    let a = adjectives[rng.gen_range(0..adjectives.len())];
+                    body.push_str(&format!(
+                        "The {} approach to {} integrates well with {}. ",
+                        a, t1, t2
+                    ));
+                }
+                body.push('\n');
+            }
+
+            // Sprinkle memvault links so the reconciler has work to do.
+            // 60% of docs reference 1–3 prior nodes via mixed syntaxes.
+            if rng.gen_bool(0.6) {
+                let n_refs: usize = rng.gen_range(1..4);
+                body.push_str("\n## References\n");
+                for _ in 0..n_refs {
+                    let roll = rng.gen_range(0..4);
+                    match roll {
+                        // [[doc:hex]] wikilink
+                        0 if !doc_ids.is_empty() => {
+                            let tgt = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                            body.push_str(&format!(
+                                "- See [[doc:{}]] for related notes.\n",
+                                hex::encode(tgt.0)
+                            ));
+                        }
+                        // [[entity:hex|alias]] wikilink, demoted/kept rel
+                        1 if !entity_ids.is_empty() => {
+                            let idx = rng.gen_range(0..entity_ids.len());
+                            let tgt = &entity_ids[idx];
+                            let alias = &entity_aliases[idx];
+                            body.push_str(&format!(
+                                "- Owned by [[entity:{}|{}]].\n",
+                                hex::encode(tgt.0),
+                                alias
+                            ));
+                        }
+                        // [Alice](memvault://entity/hex?rel=cites) markdown link
+                        2 if !entity_ids.is_empty() => {
+                            let idx = rng.gen_range(0..entity_ids.len());
+                            let tgt = &entity_ids[idx];
+                            let alias = &entity_aliases[idx];
+                            let rel = allowlisted_relations
+                                [rng.gen_range(0..allowlisted_relations.len())];
+                            body.push_str(&format!(
+                                "- Per [{}](memvault://entity/{}?rel={}).\n",
+                                alias,
+                                hex::encode(tgt.0),
+                                rel,
+                            ));
+                        }
+                        // bare-alias [[Alice]] (relies on alias index)
+                        _ if !entity_aliases.is_empty() => {
+                            let alias =
+                                &entity_aliases[rng.gen_range(0..entity_aliases.len())];
+                            body.push_str(&format!("- Coordinated with [[{alias}]].\n"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut fm = BTreeMap::new();
+            fm.insert(
+                "title".to_string(),
+                serde_json::Value::String(title.clone()),
+            );
+            // 25% of docs declare frontmatter `links:` referencing earlier docs.
+            if rng.gen_bool(0.25) && !doc_ids.is_empty() {
+                let take: usize = rng.gen_range(1..3.min(doc_ids.len() + 1));
+                let links: Vec<serde_json::Value> = (0..take)
+                    .map(|_| {
+                        let t = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                        serde_json::Value::String(format!(
+                            "memvault://doc/{}",
+                            hex::encode(t.0)
+                        ))
+                    })
+                    .collect();
+                fm.insert("links".to_string(), serde_json::Value::Array(links));
+            }
+            let doc = memvault_doc::Document::new(DocId::random(), body, fm);
+            let mut tags = vec![("topic".to_string(), topic.to_string())];
+            if rng.gen_bool(0.3) {
+                tags.push((
+                    "priority".to_string(),
+                    ["low", "medium", "high"][rng.gen_range(0..3)].to_string(),
+                ));
+            }
+            let cid = client
+                .put_doc(doc.clone(), tags, Visibility::Internal, Some(&bucket))
+                .await?;
+            all_nodes.push(NodeRef::Doc(doc.id.clone()));
+            doc_ids.push(doc.id.clone());
+
+            // Place some docs in VFS
+            if rng.gen_bool(0.5) {
+                let dir = vfs_dirs[rng.gen_range(0..vfs_dirs.len())];
+                let slug: String = title
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == ' ')
+                    .collect::<String>()
+                    .replace(' ', "-")
+                    .to_lowercase();
+                let path = format!("{}/{}.md", dir, &slug[..slug.len().min(40)]);
+                let node_id = format!("doc:{}", hex::encode(doc.id.0));
+                let _ =
+                    memvault_api::vfs::link_node_at_path(client, &bucket, &path, &node_id).await;
+            }
+
+            if (i + 1) % 10 == 0 || i + 1 == n_docs {
+                println!("  Documents: {}/{}", i + 1, n_docs);
+            }
+            let _ = cid;
+        }
+
+        // ── Files — markdown/html variants embed memvault:// references
+        //    so the extractor pipeline produces body-provenance edges
+        //    out of the attachment too. ───────────────────────────────────
         for i in 0..n_files {
             let (ext, mime) = file_exts[rng.gen_range(0..file_exts.len())];
             let topic = topics[rng.gen_range(0..topics.len())];
             let filename = format!("{}-report-{}.{}", topic, rng.gen_range(1..999u32), ext);
 
-            // Generate plausible file content
+            // Generate plausible file content. Markdown and HTML variants
+            // embed memvault:// references so the extractor pipeline
+            // emits body-provenance edges out of the attachment node too.
             let content = match ext {
                 "json" => serde_json::to_vec_pretty(&serde_json::json!({
                     "report": topic,
@@ -2463,6 +2548,62 @@ mod native {
                         ));
                     }
                     csv.into_bytes()
+                }
+                "md" => {
+                    let mut md = format!("# {} report\n\n", topic);
+                    for _ in 0..rng.gen_range(2..5) {
+                        let a = adjectives[rng.gen_range(0..adjectives.len())];
+                        md.push_str(&format!("- {} {} analysis.\n", a, topic));
+                    }
+                    md.push_str("\n## Related\n");
+                    if !doc_ids.is_empty() {
+                        let t = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                        md.push_str(&format!(
+                            "- [[doc:{}]]\n",
+                            hex::encode(t.0)
+                        ));
+                    }
+                    if !entity_ids.is_empty() {
+                        let idx = rng.gen_range(0..entity_ids.len());
+                        let e = &entity_ids[idx];
+                        let alias = &entity_aliases[idx];
+                        md.push_str(&format!(
+                            "- See [{}](memvault://entity/{}?rel=cites).\n",
+                            alias,
+                            hex::encode(e.0),
+                        ));
+                    }
+                    md.into_bytes()
+                }
+                "html" => {
+                    let mut html = format!(
+                        "<!doctype html><html><body><h1>{} report</h1>",
+                        topic
+                    );
+                    for _ in 0..rng.gen_range(2..5) {
+                        let a = adjectives[rng.gen_range(0..adjectives.len())];
+                        html.push_str(&format!("<p>{} {} analysis.</p>", a, topic));
+                    }
+                    html.push_str("<h2>Related</h2><ul>");
+                    if !doc_ids.is_empty() {
+                        let t = &doc_ids[rng.gen_range(0..doc_ids.len())];
+                        html.push_str(&format!(
+                            "<li><a href=\"memvault://doc/{}\">related doc</a></li>",
+                            hex::encode(t.0)
+                        ));
+                    }
+                    if !entity_ids.is_empty() {
+                        let idx = rng.gen_range(0..entity_ids.len());
+                        let e = &entity_ids[idx];
+                        let alias = &entity_aliases[idx];
+                        html.push_str(&format!(
+                            "<li><a href=\"memvault://entity/{}?rel=cites\">{}</a></li>",
+                            hex::encode(e.0),
+                            alias
+                        ));
+                    }
+                    html.push_str("</ul></body></html>");
+                    html.into_bytes()
                 }
                 _ => {
                     let mut text = String::new();
