@@ -2,14 +2,28 @@
 
 use redb::ReadableTable;
 
-/// Deserialize block bytes as a JSON Value.  Detects format by first
+/// Deserialize block bytes as a JSON Value. Detects format by first
 /// byte: `{` (0x7B) → JSON, otherwise → DAG-CBOR.
+///
+/// Signed<T> envelopes contain byte-string fields (signature,
+/// agent_signature, the typed PeerId/Cid arrays) that DAG-CBOR encodes
+/// as CBOR major-type-2 byte strings — those don't roundtrip cleanly
+/// through `serde_json::Value`, which has no byte-string variant. When
+/// the direct CBOR-to-Value decode fails, we fall back to decoding as
+/// `Signed<serde_json::Value>` (the typed struct handles byte fields
+/// correctly) and re-serialize via `serde_json::to_value` so callers
+/// see a Value with all byte fields normalised to arrays of numbers.
 pub fn deserialize_block(data: &[u8]) -> Option<serde_json::Value> {
     if data.first() == Some(&b'{') {
-        serde_json::from_slice(data).ok()
-    } else {
-        serde_ipld_dagcbor::from_slice(data).ok()
+        return serde_json::from_slice(data).ok();
     }
+    if let Ok(v) = serde_ipld_dagcbor::from_slice::<serde_json::Value>(data) {
+        return Some(v);
+    }
+    // Fall back: Signed<T> with byte-string fields.
+    let signed: memvault_core::Signed<serde_json::Value> =
+        serde_ipld_dagcbor::from_slice(data).ok()?;
+    serde_json::to_value(signed).ok()
 }
 
 /// Deserialize block bytes into a typed struct.  Same detection as
