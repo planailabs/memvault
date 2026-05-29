@@ -276,6 +276,11 @@ mod native {
         ClusterJoin {
             /// Join token (`mvjoin1:…`) issued by the cluster admin.
             token: String,
+            /// Also request co-admin status: generate a fresh admin key and
+            /// present it for admission during the join. Only works if the
+            /// token was issued with `token issue --admit-as-admin`.
+            #[arg(long)]
+            admit_as_admin: bool,
         },
         /// Attest a peer node into the cluster (admin-only)
         ///
@@ -381,6 +386,11 @@ mod native {
             /// Human-readable label
             #[arg(long)]
             label: Option<String>,
+            /// Also admit the redeeming node as a co-equal cluster admin.
+            /// The joiner must run `cluster-join --admit-as-admin` so it
+            /// presents an admin key + POP; the admission is minted at join.
+            #[arg(long)]
+            admit_as_admin: bool,
         },
         /// List tokens
         List,
@@ -826,10 +836,39 @@ mod native {
             cluster_arr.copy_from_slice(cluster_id);
         }
 
+        // Opt-in co-admin join: if `cluster-join --admit-as-admin` stashed a
+        // key at identity/pending_admit_admin.key, present it for admission.
+        // `send_join_request` signs a fresh POP with it; the admin only mints
+        // an AdminKeyAdmission if the redeemed token has `admit_as_admin`.
+        let identity_dir = data_dir.join("identity");
+        let pending_admit_path = identity_dir.join("pending_admit_admin.key");
+        let admin_key_path = identity_dir.join("admin.key");
+        let admit_admin_key = std::fs::read(&pending_admit_path)
+            .ok()
+            .filter(|b| b.len() >= 32)
+            .map(|b| {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&b[..32]);
+                ed25519_dalek::SigningKey::from_bytes(&seed)
+            });
+
         let pending_token_path_for_cb = pending_token_path.clone();
         let on_join_success: std::sync::Arc<dyn Fn() + Send + Sync> =
             std::sync::Arc::new(move || {
                 let _ = std::fs::remove_file(&pending_token_path_for_cb);
+                // Promote the admitted admin key to this node's admin.key so
+                // it loads it (→ keystore) and can sign as admin on next
+                // start. Only on success — a refused admission leaves the
+                // key pending and unused.
+                if pending_admit_path.exists() {
+                    if let Err(e) = std::fs::rename(&pending_admit_path, &admin_key_path) {
+                        tracing::warn!(error = %e, "could not promote admitted admin key");
+                    } else {
+                        tracing::info!(
+                            "/join/1.0 admitted this node as co-admin; restart to activate admin capability"
+                        );
+                    }
+                }
                 tracing::info!("/join/1.0 success; cleared pending token file");
             });
 
@@ -837,7 +876,7 @@ mod native {
         // the same revocation + max_uses state as HTTP enrollment (tokens
         // now live off redb). Best-effort: None falls back to redb.
         let keystore =
-            memvault_api::keystore_open::open_token_keystore(data_dir.join("identity")).ok();
+            memvault_api::keystore_open::open_token_keystore(&identity_dir).ok();
 
         Ok(memvault_swarm::JoinConfig {
             pending_token,
@@ -845,9 +884,7 @@ mod native {
             admin_signing_key,
             pinned_admin_pubkey,
             cluster_id: cluster_arr,
-            // Admin admission at join is opt-in and not wired into the
-            // default CLI join path; callers that want it set this field.
-            admit_admin_key: None,
+            admit_admin_key,
             keystore,
             on_join_success: Some(on_join_success),
         })
@@ -1248,6 +1285,7 @@ mod native {
                 ttl,
                 max_uses,
                 label,
+                admit_as_admin,
             }) => {
                 let role: Role = role.into();
                 // Keystore-only: never opens redb, so this works while the
@@ -1289,9 +1327,15 @@ mod native {
                 });
                 let token_str = memvault_api::tokens::issue_token(
                     &peer_id, &cluster_id, &admin_key, role, ttl, max_uses, label, genesis,
-                    false, &ks,
+                    admit_as_admin, &ks,
                 )?;
                 println!("{token_str}");
+                if admit_as_admin {
+                    println!(
+                        "  NOTE: this token also admits the joiner as a cluster admin; \
+                         have them run `memctl cluster-join --admit-as-admin <token>`."
+                    );
+                }
             }
             Commands::Token(TokenCommands::List) => {
                 let ks = memvault_api::keystore_open::open_token_keystore(
@@ -2066,7 +2110,10 @@ mod native {
                     .await;
                 }
             }
-            Commands::ClusterJoin { token } => {
+            Commands::ClusterJoin {
+                token,
+                admit_as_admin,
+            } => {
                 // Token-only join. Decode + verify the embedded
                 // AdminGenesis, then pin it; without the pin the joining
                 // node has no trust root.
@@ -2114,7 +2161,29 @@ mod native {
                 std::fs::write(&token_path, &token)?;
                 println!("  Token stashed: {}", token_path.display());
 
-                // NOTE: do NOT mint a local admin.key. Peers are not admins.
+                // NOTE: do NOT mint a local admin.key here. Peers are not
+                // admins — unless the operator asked for co-admin admission.
+                if admit_as_admin {
+                    if !parsed.admit_as_admin {
+                        println!(
+                            "  WARNING: this token was not issued with --admit-as-admin; \
+                             the admin will refuse the admission and attest you as a normal node."
+                        );
+                    }
+                    let mut seed = [0u8; 32];
+                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+                    let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                    let admit_path = data_dir.join("identity").join("pending_admit_admin.key");
+                    write_secret_file(&admit_path, &seed)?;
+                    println!(
+                        "  Admin key staged: {} (pubkey {})",
+                        admit_path.display(),
+                        hex::encode(sk.verifying_key().to_bytes())
+                    );
+                    println!(
+                        "  On a successful join it is promoted to admin.key; restart to activate."
+                    );
+                }
 
                 println!("Joined cluster {cluster_hex}");
                 println!("  Data dir:  {}", data_dir.display());
