@@ -954,6 +954,20 @@ fn handle_block_response(
             if store.get_block(&entry.cid).ok().flatten().is_some() {
                 continue; // already have it
             }
+            // Content-addressing integrity: the claimed CID MUST equal the
+            // hash of the bytes. Without this a peer could serve content Y
+            // under a CID X it isn't (substitution / id-reuse) — poisoning
+            // the store so a later lookup of X returns the wrong content,
+            // or shadowing a not-yet-held legitimate block. Every block in
+            // the system is keyed by `cid_from_bytes(bytes)`, so a mismatch
+            // is always malicious or corrupt; drop it.
+            if memvault_core::cid_from_bytes(&entry.data).to_bytes() != entry.cid {
+                tracing::warn!(
+                    cid = %hex::encode(&entry.cid),
+                    "dropping synced block: CID does not match content hash"
+                );
+                continue;
+            }
             // Gate sigchain block ingress: a synced NodeAttestation must
             // verify against the pinned admin pubkey before being stored.
             // Other shapes pass through to the existing path.
