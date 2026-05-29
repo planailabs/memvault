@@ -2,7 +2,7 @@
 //!
 //! Implements block storage with indexed queries over signed envelopes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod audit_index;
 pub mod blockstore;
@@ -34,13 +34,18 @@ pub type IndexNotifier = std::sync::Arc<dyn Fn(&str, &str, &[u8]) + Send + Sync>
 /// The main memvault persistent store backed by redb.
 pub struct MemvaultStore {
     db: redb::Database,
+    /// Filesystem path of the redb database. Retained so upper layers can
+    /// site sibling state (e.g. the keystore at `<dir>/identity/`) next to
+    /// the blockstore without threading a separate data-dir everywhere.
+    path: PathBuf,
     pub(crate) index_notifier: std::sync::OnceLock<IndexNotifier>,
 }
 
 impl MemvaultStore {
     /// Open (or create) a memvault store at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let db = redb::Database::create(path)?;
+        let path = path.as_ref().to_path_buf();
+        let db = redb::Database::create(&path)?;
 
         // Ensure all tables exist by opening them in a write transaction.
         let txn = db.begin_write()?;
@@ -73,8 +78,20 @@ impl MemvaultStore {
 
         Ok(Self {
             db,
+            path,
             index_notifier: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Filesystem path of the backing redb database.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Directory containing the store (parent of [`Self::path`]). Sibling
+    /// state like the keystore lives under here.
+    pub fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
     }
 
     /// Register a callback to be invoked every time a block is indexed

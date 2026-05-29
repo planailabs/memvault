@@ -638,27 +638,102 @@ impl KeyStore {
             .lock()
             .map_err(|_| KeyStoreError::Corrupt("writer lock poisoned".into()))?;
         self.lock_file.lock_exclusive()?;
-        let res = (|| -> Result<()> {
-            // Catch up on external appends / external compaction (reopen) so
-            // we append at the true end and our map is current.
-            self.reconcile(&mut f)?;
-            // A torn tail from a crashed writer would sit past loaded_len;
-            // cut it before appending (safe — we hold the exclusive lock).
-            let cur = f.metadata()?.len();
+        let res = self.sync_and_append(&mut f, rec);
+        let _ = FileExt::unlock(&self.lock_file);
+        res
+    }
+
+    /// Reconcile external writes and append `rec` at EOF. Caller must hold
+    /// the writer mutex *and* the exclusive `flock`.
+    fn sync_and_append(&self, f: &mut File, rec: &[u8]) -> Result<()> {
+        self.reconcile(f)?;
+        // A torn tail from a crashed writer would sit past loaded_len; cut it
+        // before appending (safe — we hold the exclusive lock).
+        let cur = f.metadata()?.len();
+        let loaded = self.loaded_len.load(Ordering::Acquire);
+        if cur > loaded {
+            f.set_len(loaded)?;
+            f.sync_all()?;
+        }
+        f.seek(SeekFrom::End(0))?;
+        f.write_all(rec)?;
+        f.sync_all()?;
+        self.loaded_len.fetch_add(rec.len() as u64, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Atomic read-modify-write under the exclusive lock. `f` receives the
+    /// current value (`None` if absent) and returns the new value (`None`
+    /// deletes). The whole RMW — including reconciling any concurrent
+    /// external appends — happens while we hold the inter-process lock, so
+    /// counters survive a cross-process race (unlike a `get` then `put`).
+    /// Returns the new value.
+    pub fn update(
+        &self,
+        key: &[u8],
+        f: impl FnOnce(Option<&[u8]>) -> Option<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut file = self
+            .writer
+            .lock()
+            .map_err(|_| KeyStoreError::Corrupt("writer lock poisoned".into()))?;
+        self.lock_file.lock_exclusive()?;
+        let res = (|| -> Result<Option<Vec<u8>>> {
+            self.reconcile(&mut file)?;
+            let current = self.map.read().ok().and_then(|m| m.get(key).cloned());
+            let new = f(current.as_deref());
+            let rec = match &new {
+                Some(v) => Self::encode_record(0, key, &self.cipher.seal(v)?),
+                None => Self::encode_record(FLAG_TOMBSTONE, key, &[]),
+            };
+            // Torn-tail truncate then append (we hold the exclusive lock).
+            let cur = file.metadata()?.len();
             let loaded = self.loaded_len.load(Ordering::Acquire);
             if cur > loaded {
-                f.set_len(loaded)?;
-                f.sync_all()?;
+                file.set_len(loaded)?;
+                file.sync_all()?;
             }
-            f.seek(SeekFrom::End(0))?;
-            f.write_all(rec)?;
-            f.sync_all()?;
-            self.loaded_len
-                .fetch_add(rec.len() as u64, Ordering::AcqRel);
-            Ok(())
+            file.seek(SeekFrom::End(0))?;
+            file.write_all(&rec)?;
+            file.sync_all()?;
+            self.loaded_len.fetch_add(rec.len() as u64, Ordering::AcqRel);
+            if let Ok(mut m) = self.map.write() {
+                match &new {
+                    Some(v) => {
+                        m.insert(key.to_vec(), v.clone());
+                    }
+                    None => {
+                        m.remove(key);
+                    }
+                }
+            }
+            Ok(new)
         })();
         let _ = FileExt::unlock(&self.lock_file);
         res
+    }
+
+    /// Atomically add `delta` to a little-endian `u32` counter stored at
+    /// `key` (absent = 0), returning the new value. Cross-process safe.
+    pub fn fetch_add_u32(&self, key: &[u8], delta: u32) -> Result<u32> {
+        let mut new_val = 0u32;
+        self.update(key, |cur| {
+            let prev = cur
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_le_bytes)
+                .unwrap_or(0);
+            new_val = prev.saturating_add(delta);
+            Some(new_val.to_le_bytes().to_vec())
+        })?;
+        Ok(new_val)
+    }
+
+    /// Read a little-endian `u32` counter (absent = 0).
+    pub fn get_u32(&self, key: &[u8]) -> u32 {
+        self.get(key)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0)
     }
 
     /// Rewrite the log with only live records (drops superseded entries
@@ -999,6 +1074,57 @@ mod tests {
         // b can still append after the other process compacted.
         b.put(b"after", b"ok").unwrap();
         assert_eq!(a.get(b"after").as_deref(), Some(&b"ok"[..]));
+    }
+
+    #[test]
+    fn fetch_add_u32_accumulates_across_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = KeyStore::open(&path).unwrap();
+        let b = KeyStore::open(&path).unwrap();
+        assert_eq!(a.get_u32(b"c"), 0);
+        assert_eq!(a.fetch_add_u32(b"c", 1).unwrap(), 1);
+        // b's increment must build on a's, not clobber it.
+        assert_eq!(b.fetch_add_u32(b"c", 1).unwrap(), 2);
+        assert_eq!(a.fetch_add_u32(b"c", 3).unwrap(), 5);
+        assert_eq!(b.get_u32(b"c"), 5);
+    }
+
+    #[test]
+    fn concurrent_fetch_add_loses_no_increments() {
+        use std::sync::Arc;
+        use std::thread;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = Arc::new(KeyStore::open(&path).unwrap());
+        let b = Arc::new(KeyStore::open(&path).unwrap());
+        let n = 150;
+        let ta = {
+            let a = Arc::clone(&a);
+            thread::spawn(move || for _ in 0..n {
+                a.fetch_add_u32(b"hits", 1).unwrap();
+            })
+        };
+        let tb = {
+            let b = Arc::clone(&b);
+            thread::spawn(move || for _ in 0..n {
+                b.fetch_add_u32(b"hits", 1).unwrap();
+            })
+        };
+        ta.join().unwrap();
+        tb.join().unwrap();
+        let c = KeyStore::open(&path).unwrap();
+        assert_eq!(c.get_u32(b"hits"), n * 2, "no lost updates under contention");
+    }
+
+    #[test]
+    fn update_can_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = KeyStore::open(dir.path().join("ks.mvks")).unwrap();
+        ks.put(b"k", b"v").unwrap();
+        let out = ks.update(b"k", |_| None).unwrap();
+        assert_eq!(out, None);
+        assert_eq!(ks.get(b"k"), None);
     }
 
     #[test]

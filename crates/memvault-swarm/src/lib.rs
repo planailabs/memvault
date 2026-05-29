@@ -84,6 +84,12 @@ pub struct JoinConfig {
     /// successful join returns + stores the `AdminKeyAdmission`. `None`
     /// for a normal (non-admin) join.
     pub admit_admin_key: Option<ed25519_dalek::SigningKey>,
+    /// Optional token keystore (shared with the daemon's LocalClient). When
+    /// present, token revocation and `max_uses` consumption for incoming
+    /// libp2p joins are checked/recorded here instead of redb — keeping the
+    /// libp2p join path consistent with HTTP enrollment now that tokens live
+    /// off redb. `None` falls back to the redb tables.
+    pub keystore: Option<std::sync::Arc<memvault_keystore::KeyStore>>,
     /// Called once after a successful join. Callers typically use this to
     /// delete the pending-token file on disk so we don't try to redeem it
     /// again on the next restart.
@@ -1244,7 +1250,15 @@ fn build_join_response(
     };
     let token_cid = memvault_core::cid_from_bytes(&token_cbor).to_bytes();
 
-    if store.is_revoked(&token_cid).unwrap_or(false) {
+    // Token revocation: keystore first (where revocations now live), then
+    // the legacy redb table.
+    let revoked = join_config
+        .keystore
+        .as_ref()
+        .map(|ks| ks.contains(format!("tokrevoked:{}", hex::encode(&token_cid)).as_bytes()))
+        .unwrap_or(false)
+        || store.is_revoked(&token_cid).unwrap_or(false);
+    if revoked {
         return refuse(JoinRefuseReason::TokenRevoked);
     }
 
@@ -1288,8 +1302,19 @@ fn build_join_response(
         matches!(store.get_block(&cid_bytes), Ok(Some(_)));
 
     if !already_minted {
-        // Honour max_uses BEFORE minting so we don't over-issue.
-        let used = store.get_token_consumption_count(&token_cid).unwrap_or(0);
+        // Honour max_uses BEFORE minting so we don't over-issue. Keystore
+        // first (where consumption now accrues), then redb.
+        let used = match &join_config.keystore {
+            Some(ks) => {
+                let k = format!("tokused:{}", hex::encode(&token_cid));
+                if ks.contains(k.as_bytes()) {
+                    ks.get_u32(k.as_bytes())
+                } else {
+                    store.get_token_consumption_count(&token_cid).unwrap_or(0)
+                }
+            }
+            None => store.get_token_consumption_count(&token_cid).unwrap_or(0),
+        };
         if used >= token.max_uses {
             return refuse(JoinRefuseReason::TokenAlreadyConsumed);
         }
@@ -1312,10 +1337,21 @@ fn build_join_response(
         }
     }
 
-    // Record token consumption on first mint only.
+    // Record token consumption on first mint only. Keystore (atomic,
+    // cross-process) when present, else redb.
     if !already_minted {
-        if let Err(e) = store.record_token_consumption(&token_cid, &claimed, now_ns) {
-            tracing::warn!(%peer, %e, "failed to record token consumption");
+        match &join_config.keystore {
+            Some(ks) => {
+                let k = format!("tokused:{}", hex::encode(&token_cid));
+                if let Err(e) = ks.fetch_add_u32(k.as_bytes(), 1) {
+                    tracing::warn!(%peer, %e, "failed to record token consumption (keystore)");
+                }
+            }
+            None => {
+                if let Err(e) = store.record_token_consumption(&token_cid, &claimed, now_ns) {
+                    tracing::warn!(%peer, %e, "failed to record token consumption");
+                }
+            }
         }
     }
 

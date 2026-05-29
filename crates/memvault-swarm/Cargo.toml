@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 memvault-core = { path = "../memvault-core" }
 memvault-store = { path = "../memvault-store" }
+memvault-keystore = { path = "../memvault-keystore" }
 memvault-net = { path = "../memvault-net" }
 memvault-attach = { path = "../memvault-attach" }
 memvault-auth = { path = "../memvault-auth" }

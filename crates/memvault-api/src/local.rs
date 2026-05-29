@@ -299,11 +299,13 @@ pub struct LocalClient {
     /// without a sigchain scan per write. Empty until that runs;
     /// envelope readers fall back to author-pubkey lookup when absent.
     agent_attestation_cid_cache: std::sync::OnceLock<Vec<u8>>,
-    /// Optional lock-free, redb-bypassing store for tokens + key material
-    /// (see `memvault-keystore`). Installed by the daemon/memctl via
-    /// `set_keystore`; `None` in tests and headless tooling that don't
-    /// need cross-process token issuance or at-rest key encryption.
-    keystore: std::sync::OnceLock<std::sync::Arc<memvault_keystore::KeyStore>>,
+    /// Lock-free, redb-bypassing store for tokens + key material (see
+    /// `memvault-keystore`). **Always present** — opened from the store's
+    /// own directory at construction — because it is the source of truth
+    /// for tokens and key material; there is no redb fallback. A second
+    /// process (memctl) can issue/list/revoke tokens against the same file
+    /// while the daemon holds the blockstore.
+    keystore: std::sync::Arc<memvault_keystore::KeyStore>,
     start_time: std::time::Instant,
 }
 
@@ -316,6 +318,39 @@ impl LocalClient {
         peer_id: Vec<u8>,
         cluster_id: Vec<u8>,
     ) -> Self {
+        // The keystore lives beside the blockstore at `<dir>/identity/`.
+        // Opening it here (honouring MEMVAULT_KEYSTORE_PASSPHRASE) makes it
+        // a required, always-present field. A failure to open it is a fatal
+        // environment problem (the same directory already holds redb).
+        let keystore = crate::keystore_open::open_token_keystore(store.dir().join("identity"))
+            .unwrap_or_else(|e| panic!("open token keystore beside {:?}: {e}", store.dir()));
+        Self::with_keystore(store, index, quotas, event_bus, peer_id, cluster_id, keystore)
+    }
+
+    /// Construct with an explicitly-provided keystore (the daemon/CLI share
+    /// one keystore file across in-process handles this way; tests inject a
+    /// scratch keystore). Records node identity so keystore-only tooling
+    /// has the issuer peer_id + cluster_id.
+    pub fn with_keystore(
+        store: Arc<MemvaultStore>,
+        index: Arc<RwLock<TextIndex>>,
+        quotas: Arc<RwLock<QuotaManager>>,
+        event_bus: Arc<EventBus>,
+        peer_id: Vec<u8>,
+        cluster_id: Vec<u8>,
+        keystore: std::sync::Arc<memvault_keystore::KeyStore>,
+    ) -> Self {
+        // Record node identity (issuer peer_id + cluster_id) so keystore-only
+        // tooling can mint tokens without opening redb.
+        if peer_id.iter().any(|&b| b != 0) && !keystore.contains(b"peerid") {
+            let _ = keystore.put(b"peerid", &peer_id);
+        }
+        if cluster_id.iter().any(|&b| b != 0)
+            && keystore.get(b"clusterid").as_deref() != Some(cluster_id.as_slice())
+        {
+            let _ = keystore.put(b"clusterid", &cluster_id);
+        }
+
         let client = Self {
             store,
             index,
@@ -332,7 +367,7 @@ impl LocalClient {
             pinned_admin_genesis: std::sync::OnceLock::new(),
             agent_identity: std::sync::OnceLock::new(),
             agent_attestation_cid_cache: std::sync::OnceLock::new(),
-            keystore: std::sync::OnceLock::new(),
+            keystore,
             start_time: std::time::Instant::now(),
         };
 
@@ -403,80 +438,23 @@ impl LocalClient {
         }
     }
 
-    /// Install the redb-bypassing keystore (tokens + key material). Write-once.
-    pub fn set_keystore(&self, ks: std::sync::Arc<memvault_keystore::KeyStore>) {
-        let _ = self.keystore.set(ks);
+    /// Run the one-off redb→keystore token migration. Idempotent (guarded
+    /// by a keystore marker). Called by the daemon/CLI on `open`.
+    pub fn migrate_tokens_to_keystore(&self) -> usize {
+        crate::tokens::migrate_redb_tokens(&self.store, &self.keystore).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "token migration to keystore failed");
+            0
+        })
     }
 
-    /// Open (or create) a plaintext keystore at `path` and install it.
-    /// Encapsulates the `memvault-keystore` dependency so callers (the
-    /// daemon, memctl) don't take it directly. At-rest encryption is a
-    /// separate opt-in entry point.
-    pub fn open_keystore_at(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
-        let ks = memvault_keystore::KeyStore::open(path)
-            .map_err(|e| ApiError::Other(format!("open keystore: {e}")))?;
-        self.set_keystore(std::sync::Arc::new(ks));
-        Ok(())
-    }
-
-    /// Open (or create) a keystore whose record values are AEAD-encrypted at
-    /// rest with a passphrase-derived key (XChaCha20-Poly1305 + Argon2id).
-    /// A 16-byte salt is generated once and kept in `<path>.salt`.
-    pub fn open_encrypted_keystore_at(
-        &self,
-        path: impl AsRef<std::path::Path>,
-        passphrase: &[u8],
-    ) -> Result<()> {
-        let path = path.as_ref();
-        let salt_path = {
-            let mut s = path.as_os_str().to_os_string();
-            s.push(".salt");
-            std::path::PathBuf::from(s)
-        };
-        let salt: [u8; 16] = match std::fs::read(&salt_path) {
-            Ok(b) if b.len() == 16 => b.try_into().unwrap(),
-            _ => {
-                let mut s = [0u8; 16];
-                use rand::RngCore;
-                rand::thread_rng().fill_bytes(&mut s);
-                if let Some(parent) = salt_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::fs::write(&salt_path, s)
-                    .map_err(|e| ApiError::Other(format!("write keystore salt: {e}")))?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &salt_path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
-                }
-                s
-            }
-        };
-        let key = memvault_keystore::derive_key(passphrase, &salt)
-            .map_err(|e| ApiError::Other(format!("derive keystore key: {e}")))?;
-        let ks = memvault_keystore::KeyStore::open_with_cipher(
-            path,
-            memvault_keystore::Cipher::aead(key),
-        )
-        .map_err(|e| ApiError::Other(format!("open encrypted keystore: {e}")))?;
-        self.set_keystore(std::sync::Arc::new(ks));
-        Ok(())
-    }
-
-    /// The installed keystore, if any. `None` in tests/headless tooling.
-    pub fn keystore(&self) -> Option<&std::sync::Arc<memvault_keystore::KeyStore>> {
-        self.keystore.get()
+    /// The keystore (always present — see the field docs).
+    pub fn keystore(&self) -> &std::sync::Arc<memvault_keystore::KeyStore> {
+        &self.keystore
     }
 
     /// Persist a held admin signing secret to the keystore under
-    /// `adminkey:<pubkey-hex>`. No-op when no keystore is installed.
+    /// `adminkey:<pubkey-hex>`.
     fn persist_admin_signing_key(&self, pubkey: &[u8; 32]) -> Result<()> {
-        let Some(ks) = self.keystore.get() else {
-            return Ok(());
-        };
         let seed = {
             let held = self
                 .held_admin_keys
@@ -488,7 +466,8 @@ impl LocalClient {
             }
         };
         let key = format!("adminkey:{}", hex::encode(pubkey));
-        ks.put(key.as_bytes(), &seed)
+        self.keystore
+            .put(key.as_bytes(), &seed)
             .map_err(|e| ApiError::Other(format!("keystore put admin key: {e}")))?;
         Ok(())
     }
@@ -497,12 +476,9 @@ impl LocalClient {
     /// it in memory. Returns the count loaded. Called by the daemon at
     /// startup before the chain rescan. No-op without a keystore.
     pub fn load_admin_keys_from_keystore(&self) -> usize {
-        let Some(ks) = self.keystore.get() else {
-            return 0;
-        };
         let mut n = 0;
-        for k in ks.keys_with_prefix(b"adminkey:") {
-            if let Some(seed) = ks.get(&k) {
+        for k in self.keystore.keys_with_prefix(b"adminkey:") {
+            if let Some(seed) = self.keystore.get(&k) {
                 if seed.len() == 32 {
                     let mut s = [0u8; 32];
                     s.copy_from_slice(&seed);
@@ -516,19 +492,35 @@ impl LocalClient {
         n
     }
 
-    /// Persist the pinned cluster `AdminGenesis` (CBOR bytes) to the keystore
-    /// under `genesis`. No-op without a keystore.
+    /// Persist the pinned cluster `AdminGenesis` (CBOR bytes) under `genesis`.
     pub fn persist_pinned_admin_genesis_bytes(&self, cbor: &[u8]) -> Result<()> {
-        let Some(ks) = self.keystore.get() else {
-            return Ok(());
-        };
-        ks.put(b"genesis", cbor)
+        self.keystore
+            .put(b"genesis", cbor)
             .map_err(|e| ApiError::Other(format!("keystore put genesis: {e}")))
     }
 
     /// The pinned `AdminGenesis` CBOR bytes from the keystore, if present.
     pub fn pinned_admin_genesis_bytes_from_keystore(&self) -> Option<Vec<u8>> {
-        self.keystore.get().and_then(|ks| ks.get(b"genesis"))
+        self.keystore.get(b"genesis")
+    }
+
+    /// Whether a join-token CID is revoked (keystore is authoritative).
+    pub fn token_is_revoked(&self, cid: &[u8]) -> bool {
+        crate::tokens::token_revoked(&self.keystore, cid)
+    }
+
+    /// How many times a join token has been consumed (keystore authoritative).
+    pub fn token_consumption_count(&self, cid: &[u8]) -> u32 {
+        crate::tokens::token_consumed(&self.keystore, cid)
+    }
+
+    /// Record one consumption of a join token, returning the new count. Uses
+    /// the keystore's atomic counter (cross-process safe, preserves
+    /// `max_uses`). The `consumer`/`at_ns` audit detail is not retained.
+    pub fn record_token_consumption(&self, cid: &[u8], _consumer: &[u8], _at_ns: u64) -> u32 {
+        self.keystore
+            .fetch_add_u32(&crate::tokens::token_used_key(cid), 1)
+            .unwrap_or(0)
     }
 
     /// Replace the cluster admin-key validity state wholesale. Called by
@@ -2959,7 +2951,7 @@ impl LocalClient {
             label,
             self.pinned_admin_genesis().cloned(),
             true,
-            &self.store,
+            &self.keystore,
         )
     }
 
@@ -4021,17 +4013,18 @@ impl MemvaultClient for LocalClient {
             label,
             self.pinned_admin_genesis().cloned(),
             false,
-            &self.store,
+            &self.keystore,
         )
     }
 
     async fn list_tokens(&self) -> Result<Vec<TokenStatus>> {
-        crate::tokens::list_tokens(&self.store)
+        crate::tokens::list_tokens(&self.keystore)
     }
 
     async fn revoke_token(&self, token_cid: &[u8], reason: &str) -> Result<()> {
-        self.store.record_revocation(token_cid, reason.as_bytes())?;
-        Ok(())
+        // Keystore is authoritative — works without a redb open, so a
+        // separate process can revoke while the daemon holds the blockstore.
+        crate::tokens::revoke_token(&self.keystore, token_cid, reason)
     }
 
     async fn list_rotations(&self) -> Result<Vec<RotationInfo>> {

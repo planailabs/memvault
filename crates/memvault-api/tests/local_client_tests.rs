@@ -946,7 +946,10 @@ fn join_token_admit_as_admin_is_signature_bound() {
 // ---------------------------------------------------------------------------
 
 fn bare_client(dir: &tempfile::TempDir, name: &[u8]) -> Arc<LocalClient> {
-    let store = Arc::new(MemvaultStore::open(dir.path().join("ks-test.redb")).unwrap());
+    // Each client gets its OWN redb (redb takes a cross-process exclusive
+    // lock — the very limitation the shared keystore exists to bypass).
+    let redb_name = format!("redb-{}", String::from_utf8_lossy(name));
+    let store = Arc::new(MemvaultStore::open(dir.path().join(redb_name)).unwrap());
     let index = Arc::new(RwLock::new(TextIndex::new()));
     let quotas = Arc::new(RwLock::new(QuotaManager::default()));
     let event_bus = Arc::new(EventBus::new(64));
@@ -962,80 +965,99 @@ fn bare_client(dir: &tempfile::TempDir, name: &[u8]) -> Arc<LocalClient> {
     ))
 }
 
+// All bare_clients built under one tempdir share `store.dir()`, so they
+// auto-open the SAME keystore (`<dir>/identity/keystore.mvks`) while keeping
+// separate redb files — exactly the daemon + memctl cross-process model.
+
 #[test]
 fn admin_key_persists_to_keystore_and_reloads() {
     let dir = tempfile::tempdir().unwrap();
-    let ks_path = dir.path().join("identity").join("keystore.mvks");
     let seed = [42u8; 32];
     let pubkey = memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed)
         .verifying_key()
         .to_bytes();
 
-    // First client installs the admin key (which persists to the keystore).
-    {
-        let c = bare_client(&dir, b"node-a");
-        c.open_keystore_at(&ks_path).unwrap();
-        assert_eq!(c.load_admin_keys_from_keystore(), 0, "empty to start");
-        c.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed));
-        assert!(c.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey));
-    }
+    // First client installs the admin key (auto-persisted to the keystore).
+    let a = bare_client(&dir, b"node-a");
+    assert_eq!(a.load_admin_keys_from_keystore(), 0, "empty to start");
+    a.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed));
+    assert!(a.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey));
 
-    // A fresh client opening the same keystore recovers the admin key with
+    // A second client (own redb, shared keystore) recovers the admin key —
     // no plaintext admin.key file in play.
-    {
-        let c = bare_client(&dir, b"node-b");
-        c.open_keystore_at(&ks_path).unwrap();
-        assert_eq!(c.load_admin_keys_from_keystore(), 1, "reloaded from keystore");
-        assert!(
-            c.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey),
-            "admin pubkey survives reopen"
-        );
-    }
+    let b = bare_client(&dir, b"node-b");
+    assert_eq!(b.load_admin_keys_from_keystore(), 1, "reloaded from keystore");
+    assert!(
+        b.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey),
+        "admin pubkey visible across handles"
+    );
 }
 
 #[test]
 fn genesis_pin_round_trips_through_keystore() {
     let dir = tempfile::tempdir().unwrap();
-    let ks_path = dir.path().join("identity").join("keystore.mvks");
     let blob = b"\xa1\x01\x02 some-cbor-ish-genesis-bytes".to_vec();
-    {
-        let c = bare_client(&dir, b"g1");
-        c.open_keystore_at(&ks_path).unwrap();
-        assert!(c.pinned_admin_genesis_bytes_from_keystore().is_none());
-        c.persist_pinned_admin_genesis_bytes(&blob).unwrap();
-    }
-    {
-        let c = bare_client(&dir, b"g2");
-        c.open_keystore_at(&ks_path).unwrap();
-        assert_eq!(c.pinned_admin_genesis_bytes_from_keystore(), Some(blob));
-    }
+    let a = bare_client(&dir, b"g1");
+    assert!(a.pinned_admin_genesis_bytes_from_keystore().is_none());
+    a.persist_pinned_admin_genesis_bytes(&blob).unwrap();
+    let b = bare_client(&dir, b"g2");
+    assert_eq!(b.pinned_admin_genesis_bytes_from_keystore(), Some(blob));
 }
 
 #[test]
-fn admin_key_survives_encrypted_keystore_reopen() {
+fn encrypted_keystore_open_round_trips_and_hides_plaintext() {
+    // The at-rest encryption path used when MEMVAULT_KEYSTORE_PASSPHRASE is
+    // set, exercised directly (no global env mutation).
     let dir = tempfile::tempdir().unwrap();
-    let ks_path = dir.path().join("identity").join("keystore.mvks");
-    let seed = [7u8; 32];
-    let pubkey = memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed)
-        .verifying_key()
-        .to_bytes();
+    let path = dir.path().join("ks.mvks");
     {
-        let c = bare_client(&dir, b"enc-a");
-        c.open_encrypted_keystore_at(&ks_path, b"correct horse battery staple")
-            .unwrap();
-        c.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed));
+        let ks = memvault_api::keystore_open::open_encrypted(&path, b"correct horse").unwrap();
+        ks.put(b"adminkey:1", b"super-secret-seed").unwrap();
     }
-    // The raw keystore file must not contain the seed in the clear.
-    let raw = std::fs::read(&ks_path).unwrap();
+    let raw = std::fs::read(&path).unwrap();
     assert!(
-        !raw.windows(32).any(|w| w == seed),
-        "admin seed leaked to disk under encryption"
+        !raw.windows(17).any(|w| w == b"super-secret-seed"),
+        "seed leaked to disk under encryption"
     );
-    {
-        let c = bare_client(&dir, b"enc-b");
-        c.open_encrypted_keystore_at(&ks_path, b"correct horse battery staple")
-            .unwrap();
-        assert_eq!(c.load_admin_keys_from_keystore(), 1);
-        assert!(c.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey));
-    }
+    let ks = memvault_api::keystore_open::open_encrypted(&path, b"correct horse").unwrap();
+    assert_eq!(ks.get(b"adminkey:1").as_deref(), Some(&b"super-secret-seed"[..]));
+}
+
+// ---------------------------------------------------------------------------
+// Keystore-backed tokens (issue / list / consume / revoke, cross-process)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_lifecycle_through_keystore_is_cross_process() {
+    use memvault_api::MemvaultClient;
+    let dir = tempfile::tempdir().unwrap();
+
+    // Issuer (e.g. the daemon): keystore auto-opened beside its store.
+    let issuer = bare_client(&dir, b"issuer");
+    issuer.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]));
+
+    let _tok = issuer
+        .issue_token(memvault_auth::Role::AgentHost, 3600, 2, Some("k".into()))
+        .await
+        .unwrap();
+
+    let listed = issuer.list_tokens().await.unwrap();
+    assert_eq!(listed.len(), 1, "token visible via keystore");
+    let cid = listed[0].cid.clone();
+    assert_eq!(listed[0].consumed_count, 0);
+    assert!(!listed[0].revoked);
+
+    // A SECOND process (e.g. memctl): own redb, shared keystore.
+    let other = bare_client(&dir, b"memctl");
+    assert_eq!(other.list_tokens().await.unwrap().len(), 1, "cross-process list");
+
+    // Consume from the issuer; the other process observes the count.
+    assert_eq!(issuer.record_token_consumption(&cid, b"agent-x", 1), 1);
+    assert_eq!(other.token_consumption_count(&cid), 1, "cross-process count");
+
+    // Revoke from the second process; the issuer observes it.
+    other.revoke_token(&cid, "compromised").await.unwrap();
+    assert!(issuer.token_is_revoked(&cid), "cross-process revocation");
+    let after = issuer.list_tokens().await.unwrap();
+    assert!(after[0].revoked);
 }

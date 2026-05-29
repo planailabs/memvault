@@ -384,7 +384,7 @@ pub fn enroll_remote_agent(
         .map_err(|e| ApiError::Serialization(e.to_string()))?;
     let token_cid = memvault_core::cid_from_bytes(&token_cbor).to_bytes();
 
-    if client.store().is_revoked(&token_cid).unwrap_or(false) {
+    if client.token_is_revoked(&token_cid) {
         return Err(ApiError::Other("token revoked".into()));
     }
 
@@ -401,10 +401,7 @@ pub fn enroll_remote_agent(
     }
 
     // Enforce max_uses BEFORE minting.
-    let used = client
-        .store()
-        .get_token_consumption_count(&token_cid)
-        .unwrap_or(0);
+    let used = client.token_consumption_count(&token_cid);
     if used >= token.max_uses {
         return Err(ApiError::Other(
             "token already consumed (max_uses hit)".into(),
@@ -426,9 +423,7 @@ pub fn enroll_remote_agent(
     let attestation_cid = crate::sigchain::publish_agent_attestation(client, &attestation)?;
 
     // Record consumption.
-    let _ = client
-        .store()
-        .record_token_consumption(&token_cid, &agent_pubkey, now_ns);
+    let _ = client.record_token_consumption(&token_cid, &agent_pubkey, now_ns);
 
     Ok(EnrollResult {
         attestation,

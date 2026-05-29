@@ -10,6 +10,7 @@ pub mod files;
 pub mod health;
 #[cfg(feature = "http-client")]
 pub mod http;
+pub mod keystore_open;
 pub mod link_reconcile;
 pub mod local;
 pub mod metrics;

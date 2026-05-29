@@ -582,9 +582,14 @@ mod native {
             cluster_id,
         )
         .map_err(|e| anyhow::anyhow!("LocalClient::open: {e}"))?;
-        // Load admin signing key if available (enables token issuance)
-        let admin_key_path = data_dir.join("identity").join("admin.key");
-        if admin_key_path.exists() {
+        // The keystore is opened by LocalClient itself (beside the
+        // blockstore). Run the one-off redb→keystore token migration here
+        // where redb is available.
+        let _ = client.migrate_tokens_to_keystore();
+        // Load admin signing key (enables token issuance): prefer the
+        // keystore, migrating a legacy admin.key file into it on first use.
+        if client.load_admin_keys_from_keystore() == 0 {
+            let admin_key_path = data_dir.join("identity").join("admin.key");
             if let Ok(key_bytes) = std::fs::read(&admin_key_path) {
                 if key_bytes.len() >= 32 {
                     let mut seed = [0u8; 32];
@@ -676,6 +681,17 @@ mod native {
         create_client_with_data_dir(store, &data_dir)
     }
 
+    /// Resolve the data dir from `MEMVAULT_DATA_DIR` or the platform default.
+    fn cli_data_dir() -> PathBuf {
+        std::env::var("MEMVAULT_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::data_local_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("memvault")
+            })
+    }
+
     /// Assemble the `JoinConfig` for the swarm:
     /// - Reads the pending join token from
     ///   `<data_dir>/identity/pending_join_token.txt` if present (the
@@ -737,6 +753,12 @@ mod native {
                 tracing::info!("/join/1.0 success; cleared pending token file");
             });
 
+        // Share the token keystore so the libp2p admin join path enforces
+        // the same revocation + max_uses state as HTTP enrollment (tokens
+        // now live off redb). Best-effort: None falls back to redb.
+        let keystore =
+            memvault_api::keystore_open::open_token_keystore(data_dir.join("identity")).ok();
+
         Ok(memvault_swarm::JoinConfig {
             pending_token,
             node_pubkey,
@@ -746,6 +768,7 @@ mod native {
             // Admin admission at join is opt-in and not wired into the
             // default CLI join path; callers that want it set this field.
             admit_admin_key: None,
+            keystore,
             on_join_success: Some(on_join_success),
         })
     }
@@ -1152,15 +1175,55 @@ mod native {
                     "service" => Role::Service,
                     _ => Role::AgentHost,
                 };
-                let store = make_store()?;
-                let client = create_client(store)?;
-                let token_str = client.issue_token(role, ttl, max_uses, label).await?;
+                // Keystore-only: never opens redb, so this works while the
+                // daemon holds the blockstore. Identity (admin key, peer_id,
+                // cluster_id, genesis) is read from the keystore, populated by
+                // the daemon / a prior full memctl run / genesis.
+                let ks = memvault_api::keystore_open::open_token_keystore(
+                    cli_data_dir().join("identity"),
+                )
+                .map_err(|e| anyhow::anyhow!("open token keystore: {e}"))?;
+                let admin_key = ks
+                    .keys_with_prefix(b"adminkey:")
+                    .into_iter()
+                    .next()
+                    .and_then(|k| ks.get(&k))
+                    .filter(|s| s.len() == 32)
+                    .map(|s| {
+                        let mut a = [0u8; 32];
+                        a.copy_from_slice(&s);
+                        ed25519_dalek::SigningKey::from_bytes(&a)
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no admin key in keystore — run `memctl genesis` or start the daemon once"
+                        )
+                    })?;
+                let peer_id = memvault_core::PeerId(ks.get(b"peerid").ok_or_else(|| {
+                    anyhow::anyhow!("no node peer_id in keystore — start the daemon once")
+                })?);
+                let cluster_id = ks
+                    .get(b"clusterid")
+                    .and_then(|v| <[u8; 32]>::try_from(v).ok())
+                    .map(ClusterId)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("no cluster_id in keystore — run genesis/join first")
+                    })?;
+                let genesis = ks.get(b"genesis").and_then(|b| {
+                    serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok()
+                });
+                let token_str = memvault_api::tokens::issue_token(
+                    &peer_id, &cluster_id, &admin_key, role, ttl, max_uses, label, genesis,
+                    false, &ks,
+                )?;
                 println!("{token_str}");
             }
             Commands::TokenList => {
-                let store = make_store()?;
-                let client = create_client(store)?;
-                let tokens = client.list_tokens().await?;
+                let ks = memvault_api::keystore_open::open_token_keystore(
+                    cli_data_dir().join("identity"),
+                )
+                .map_err(|e| anyhow::anyhow!("open token keystore: {e}"))?;
+                let tokens = memvault_api::tokens::list_tokens(&ks)?;
                 for t in tokens {
                     let label = t.label.unwrap_or_else(|| "-".into());
                     let status = if t.revoked { "revoked" } else { "active" };
@@ -1177,9 +1240,11 @@ mod native {
             }
             Commands::TokenRevoke { cid, reason } => {
                 let cid_bytes = hex::decode(&cid)?;
-                let store = make_store()?;
-                let client = create_client(store)?;
-                client.revoke_token(&cid_bytes, &reason).await?;
+                let ks = memvault_api::keystore_open::open_token_keystore(
+                    cli_data_dir().join("identity"),
+                )
+                .map_err(|e| anyhow::anyhow!("open token keystore: {e}"))?;
+                memvault_api::tokens::revoke_token(&ks, &cid_bytes, &reason)?;
                 println!("Token revoked.");
             }
             Commands::Admin(sub) => {
