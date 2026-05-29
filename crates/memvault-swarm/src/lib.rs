@@ -769,24 +769,54 @@ enum SyncSigchainVerdict {
 fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSigchainVerdict {
     let cluster_id = join_config.cluster_id;
 
-    // NodeAttestation: admin-signed; verify against the pinned admin.
-    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(bytes) {
-        if att.cluster_id.0 == cluster_id && !att.member.0.is_empty() {
-            let Some(admin_pk) = join_config.pinned_admin_pubkey else {
+    // AdminKeyAdmission: verify the admitting self-signature + the
+    // incoming POP here. The authoritative "admitting key was a valid
+    // admin at admission time" check is deferred to
+    // `rebuild_admin_key_state` (same deferral pattern as AgentAttestation
+    // trust-of-node) — a block that passes here but fails the chain
+    // validation there simply has no effect on the admin set.
+    if let Ok(adm) = serde_ipld_dagcbor::from_slice::<memvault_auth::AdminKeyAdmission>(bytes) {
+        if adm.cluster_id.0 == cluster_id && adm.new_pubkey.iter().any(|&b| b != 0) {
+            if adm.verify().is_err() {
                 return SyncSigchainVerdict::Drop {
-                    reason: "node_att: no pinned admin pubkey",
-                };
-            };
-            let Ok(admin_vk) = ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) else {
-                return SyncSigchainVerdict::Drop {
-                    reason: "node_att: pinned admin pubkey is not a valid ed25519 key",
-                };
-            };
-            if att.verify_signature(&admin_vk).is_err() {
-                return SyncSigchainVerdict::Drop {
-                    reason: "node_att: signature does not verify against pinned admin",
+                    reason: "admin_admission: bad admitting signature or POP",
                 };
             }
+            return SyncSigchainVerdict::Accept {
+                label: "admin_admission",
+                signer_pubkey: adm.admitting_pubkey.to_vec(),
+            };
+        }
+    }
+
+    // AdminKeyRetirement: verify the retiring self-signature here; the
+    // "retiring key was a valid admin / no-lockout" checks are deferred
+    // to `rebuild_admin_key_state`.
+    if let Ok(ret) = serde_ipld_dagcbor::from_slice::<memvault_auth::AdminKeyRetirement>(bytes) {
+        if ret.cluster_id.0 == cluster_id && ret.retired_pubkey.iter().any(|&b| b != 0) {
+            if ret.verify_retiring_signature().is_err() {
+                return SyncSigchainVerdict::Drop {
+                    reason: "admin_retirement: bad retiring signature",
+                };
+            }
+            return SyncSigchainVerdict::Accept {
+                label: "admin_retirement",
+                signer_pubkey: ret.retiring_pubkey.to_vec(),
+            };
+        }
+    }
+
+    // NodeAttestation: admin-signed. Under multi-admin the signer may be
+    // an admitted admin the swarm can't see (it only pins the anchor), and
+    // sync may deliver the attestation before the admission that
+    // authorises its signer. So we fast-path on the anchor signature but
+    // otherwise DEFER: accept the well-formed, cluster-matching block and
+    // let the receiver's `scan_trusted_nodes` (which verifies against the
+    // full, eventually-complete admin set) decide trust. A bogus
+    // attestation that never verifies there simply never enters
+    // node_trust — no auth bypass, same deferral as AgentAttestation.
+    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(bytes) {
+        if att.cluster_id.0 == cluster_id && !att.member.0.is_empty() {
             return SyncSigchainVerdict::Accept {
                 label: "node_att",
                 signer_pubkey: att.member.0.clone(),
@@ -821,22 +851,24 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
         };
     }
 
-    // NodeRevocation: admin-signed; require pinned admin match.
+    // NodeRevocation: admin-signed. Verify the self-signature against the
+    // embedded admin_pubkey (cheap garbage filter — the signer set
+    // admin_pubkey and signed it). The authoritative "admin_pubkey is a
+    // known cluster admin" check is deferred to the receiver's
+    // `scan_revocations` (full admin set), so an admitted admin's
+    // revocation is honoured even though the swarm only pins the anchor.
     if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeRevocation>(bytes) {
-        let Some(pin) = join_config.pinned_admin_pubkey else {
-            return SyncSigchainVerdict::Drop {
-                reason: "node_rev: no pinned admin pubkey",
-            };
-        };
-        if rev.admin_pubkey != pin || rev.verify_signature().is_err() {
-            return SyncSigchainVerdict::Drop {
-                reason: "node_rev: bad signature or admin mismatch",
+        if rev.node_pubkey.iter().any(|&b| b != 0) {
+            if rev.verify_signature().is_err() {
+                return SyncSigchainVerdict::Drop {
+                    reason: "node_rev: bad self-signature",
+                };
+            }
+            return SyncSigchainVerdict::Accept {
+                label: "node_rev",
+                signer_pubkey: rev.admin_pubkey.to_vec(),
             };
         }
-        return SyncSigchainVerdict::Accept {
-            label: "node_rev",
-            signer_pubkey: rev.admin_pubkey.to_vec(),
-        };
     }
 
     SyncSigchainVerdict::NotSigchain

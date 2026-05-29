@@ -16,7 +16,8 @@
 //! [`sigchain_label_for`], and [`detect_sigchain_shape`].
 
 use crate::{
-    AdminGenesis, AgentAttestation, AgentRevocation, NodeAttestation, NodeRevocation,
+    AdminGenesis, AdminKeyAdmission, AdminKeyRetirement, AgentAttestation, AgentRevocation,
+    NodeAttestation, NodeRevocation,
 };
 
 /// Discriminator for the recognised sigchain block types. Mirrors the
@@ -24,6 +25,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SigchainKind {
     AdminGenesis,
+    AdminKeyAdmission,
+    AdminKeyRetirement,
     NodeAttestation,
     AgentAttestation,
     AgentRevocation,
@@ -35,6 +38,8 @@ impl SigchainKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::AdminGenesis => "admin_genesis",
+            Self::AdminKeyAdmission => "admin_admission",
+            Self::AdminKeyRetirement => "admin_retirement",
             Self::NodeAttestation => "node_att",
             Self::AgentAttestation => "agent_att",
             Self::AgentRevocation => "agent_rev",
@@ -66,6 +71,19 @@ pub fn detect_sigchain_shape(bytes: &[u8]) -> Option<SigchainKind> {
         // strict — admin pubkey could theoretically be zeros in tests).
         if g.cluster_id.0.len() == 32 {
             return Some(SigchainKind::AdminGenesis);
+        }
+    }
+    // AdminKeyAdmission: admitting_pubkey + new_pubkey + pop (unique
+    // fields; no other shape carries them).
+    if let Ok(adm) = serde_ipld_dagcbor::from_slice::<AdminKeyAdmission>(bytes) {
+        if adm.new_pubkey.iter().any(|&b| b != 0) {
+            return Some(SigchainKind::AdminKeyAdmission);
+        }
+    }
+    // AdminKeyRetirement: retiring_pubkey + retired_pubkey + reason.
+    if let Ok(ret) = serde_ipld_dagcbor::from_slice::<AdminKeyRetirement>(bytes) {
+        if ret.retired_pubkey.iter().any(|&b| b != 0) {
+            return Some(SigchainKind::AdminKeyRetirement);
         }
     }
     // NodeAttestation: cluster_id + member + role + issued_via.
@@ -173,6 +191,38 @@ mod tests {
         let rev = sign_node_revocation(&admin, node_pk, "compromised").unwrap();
         let bytes = serde_ipld_dagcbor::to_vec(&rev).unwrap();
         assert_eq!(sigchain_label_for(&bytes), Some("node_rev"));
+    }
+
+    #[test]
+    fn detects_admin_admission() {
+        use crate::{sign_admin_admission, sign_admin_pop};
+        let admin = make_key();
+        let new = make_key();
+        let cluster = ClusterId([1u8; 32]);
+        let pop = sign_admin_pop(&new, &cluster);
+        let adm = sign_admin_admission(
+            &admin,
+            new.verifying_key().to_bytes(),
+            cluster,
+            10,
+            10,
+            None,
+            pop,
+        )
+        .unwrap();
+        let bytes = serde_ipld_dagcbor::to_vec(&adm).unwrap();
+        assert_eq!(sigchain_label_for(&bytes), Some("admin_admission"));
+    }
+
+    #[test]
+    fn detects_admin_retirement() {
+        use crate::sign_admin_retirement;
+        let surviving = make_key();
+        let retired = make_key().verifying_key().to_bytes();
+        let ret =
+            sign_admin_retirement(&surviving, retired, ClusterId([1u8; 32]), 20, "x", None).unwrap();
+        let bytes = serde_ipld_dagcbor::to_vec(&ret).unwrap();
+        assert_eq!(sigchain_label_for(&bytes), Some("admin_retirement"));
     }
 
     #[test]
