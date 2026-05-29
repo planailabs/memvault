@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 thiserror = "2"
 tracing = "0.1"
+fs2 = "0.4"
 chacha20poly1305 = "0.10"
 argon2 = "0.5"
 rand = "0.9"

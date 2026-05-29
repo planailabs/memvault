@@ -5,10 +5,27 @@
 //! ## Why a separate store
 //!
 //! redb takes a single exclusive write transaction for the whole
-//! database, so issuing tokens or reading key material contends with the
-//! daemon's long-running block writes. This store decouples that: reads
-//! are served from an in-memory map (an `RwLock` read, never touching the
-//! file or the blockstore lock), and writes are short appends to a log.
+//! database **and a cross-process exclusive file lock**, so a second
+//! process (e.g. `memctl` issuing a token) cannot write while the daemon
+//! holds the database open, and even in-process, token/key ops contend
+//! with the daemon's long-running block writes. This store decouples
+//! that: reads are served from an in-memory map (an `RwLock` read), and
+//! writes are short appends to a log.
+//!
+//! ## Multi-process access
+//!
+//! Multiple processes may open the same keystore at once (the daemon plus
+//! a `memctl` invocation). Correctness comes from two mechanisms:
+//!   * **Append exclusion** — `put`/`delete`/`compact` take an OS advisory
+//!     exclusive lock (`flock`) on the file for the duration of the
+//!     append, so records from different processes never interleave at the
+//!     byte level.
+//!   * **Read freshness** — every read first compares the file length to
+//!     the offset we have replayed (`loaded_len`); if another process has
+//!     appended (file grew) it replays just the new tail under a shared
+//!     lock, and if the file shrank/was replaced (another process
+//!     compacted) it fully reopens. In the common case (no external
+//!     writes) a read is one `stat` plus an `RwLock` read.
 //!
 //! ## On-disk layout (log-structured KV)
 //!
@@ -33,7 +50,10 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
+
+use fs2::FileExt;
 
 const MAGIC: &[u8; 4] = b"MVKS";
 const VERSION: u8 = 1;
@@ -292,13 +312,23 @@ pub mod tpm {
     }
 }
 
-/// Append-only key-value store. Cheap to clone-read, short-lock to write.
+/// Append-only key-value store. Cheap to clone-read, short-lock to write,
+/// and safe to open from several processes at once (see module docs).
 pub struct KeyStore {
     path: PathBuf,
-    /// In-memory view (plaintext). Reads take a read lock; never touch disk.
+    /// In-memory view (plaintext). Reads take a read lock.
     map: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
-    /// Append path: serialized writers + fsync. Reads never wait on this.
+    /// Append path: intra-process serialization (the `Mutex`) layered over
+    /// inter-process exclusion (the `flock` on `lock_file`).
     writer: Mutex<File>,
+    /// Dedicated sidecar lock file (`<path>.lock`). All `flock`ing happens
+    /// here, not on the data file, so the lock identity is **stable across
+    /// compaction's rename** of the data file.
+    lock_file: File,
+    /// File offset (bytes) we have replayed into `map`. A read whose `stat`
+    /// shows a larger file replays the tail before serving; a smaller file
+    /// (another process compacted) triggers a full reopen.
+    loaded_len: AtomicU64,
     cipher: Cipher,
 }
 
@@ -327,19 +357,105 @@ impl KeyStore {
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
 
-        let map = Self::replay(&mut file, &cipher)?;
+        // Sidecar lock file with a stable identity across compaction.
+        let lock_path = Self::lock_path(&path);
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        // Replay under the exclusive lock so we may safely truncate a torn
+        // tail left by a crashed writer without racing a live one.
+        lock_file.lock_exclusive()?;
+        let replay = Self::replay(&mut file, &cipher, true);
+        let _ = FileExt::unlock(&lock_file);
+        let (map, good_end) = replay?;
 
         Ok(Self {
             path,
             map: RwLock::new(map),
             writer: Mutex::new(file),
+            lock_file,
+            loaded_len: AtomicU64::new(good_end),
             cipher,
         })
     }
 
-    /// Replay the log into a map, writing the header if the file is empty
-    /// and truncating any torn trailing record left by a crash.
-    fn replay(file: &mut File, cipher: &Cipher) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+    fn lock_path(path: &Path) -> PathBuf {
+        let mut s = path.as_os_str().to_os_string();
+        s.push(".lock");
+        PathBuf::from(s)
+    }
+
+    /// Whether `f`'s open inode still matches the file at `path` (Unix). A
+    /// mismatch means another process replaced the data file (compaction).
+    #[cfg(unix)]
+    fn same_inode(f: &File, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match (f.metadata(), std::fs::metadata(path)) {
+            (Ok(a), Ok(b)) => a.ino() == b.ino() && a.dev() == b.dev(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    fn same_inode(_f: &File, _path: &Path) -> bool {
+        true
+    }
+
+    /// Bring the data handle `f` and `map` in sync with what's on disk,
+    /// assuming the caller holds the appropriate `flock`. Reopens `f` if the
+    /// data file was replaced (compaction), replays any appended tail, and
+    /// leaves `f` positioned at EOF. Does not truncate.
+    fn reconcile(&self, f: &mut File) -> Result<()> {
+        if !Self::same_inode(f, &self.path) {
+            // Data file was replaced by another process's compaction.
+            let mut nf = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            let (fresh, end) = Self::replay(&mut nf, &self.cipher, false)?;
+            if let Ok(mut m) = self.map.write() {
+                *m = fresh;
+            }
+            self.loaded_len.store(end, Ordering::Release);
+            nf.seek(SeekFrom::End(0))?;
+            *f = nf;
+            return Ok(());
+        }
+        let cur = f.metadata()?.len();
+        let loaded = self.loaded_len.load(Ordering::Acquire);
+        if cur < loaded {
+            // Same inode but shorter than replayed — defensive full replay.
+            let (fresh, end) = Self::replay(f, &self.cipher, false)?;
+            if let Ok(mut m) = self.map.write() {
+                *m = fresh;
+            }
+            self.loaded_len.store(end, Ordering::Release);
+        } else if cur > loaded {
+            let mut m = self
+                .map
+                .write()
+                .map_err(|_| KeyStoreError::Corrupt("map lock poisoned".into()))?;
+            let end = Self::apply_records_from(f, &self.cipher, &mut m, loaded)?;
+            self.loaded_len.store(end, Ordering::Release);
+        }
+        f.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+
+    /// Replay the log from the header into a fresh map, writing the header
+    /// if the file is empty. With `allow_truncate`, a torn trailing record
+    /// is cut back (only safe under an exclusive lock). Returns the map and
+    /// the offset just past the last complete record.
+    fn replay(
+        file: &mut File,
+        cipher: &Cipher,
+        allow_truncate: bool,
+    ) -> Result<(HashMap<Vec<u8>, Vec<u8>>, u64)> {
         let len = file.metadata()?.len();
         file.seek(SeekFrom::Start(0))?;
 
@@ -348,7 +464,7 @@ impl KeyStore {
             file.write_all(MAGIC)?;
             file.write_all(&[VERSION])?;
             file.sync_all()?;
-            return Ok(HashMap::new());
+            return Ok((HashMap::new(), 5));
         }
 
         let mut header = [0u8; 5];
@@ -359,9 +475,28 @@ impl KeyStore {
         }
 
         let mut map = HashMap::new();
-        // Offset of the byte just past the last *complete* record. A torn
-        // tail is truncated back to here.
-        let mut good_end = 5u64;
+        let good_end = Self::apply_records_from(file, cipher, &mut map, 5)?;
+
+        if allow_truncate && good_end < len {
+            // Truncate the torn tail so the next append starts clean.
+            file.set_len(good_end)?;
+            file.sync_all()?;
+        }
+        file.seek(SeekFrom::End(0))?;
+        Ok((map, good_end))
+    }
+
+    /// Apply complete records starting at `start` into `map`, stopping at a
+    /// torn/partial trailing record. Returns the offset past the last
+    /// complete record. Does not truncate (caller decides).
+    fn apply_records_from(
+        file: &mut File,
+        cipher: &Cipher,
+        map: &mut HashMap<Vec<u8>, Vec<u8>>,
+        start: u64,
+    ) -> Result<u64> {
+        file.seek(SeekFrom::Start(start))?;
+        let mut good_end = start;
         loop {
             let mut len_buf = [0u8; 4];
             match file.read_exact(&mut len_buf) {
@@ -372,7 +507,7 @@ impl KeyStore {
             let body_len = u32::from_le_bytes(len_buf) as usize;
             let mut body = vec![0u8; body_len];
             if file.read_exact(&mut body).is_err() {
-                // Torn trailing record — stop and truncate below.
+                // Torn/partial trailing record — stop here.
                 break;
             }
             match Self::decode_record(&body, cipher) {
@@ -391,14 +526,32 @@ impl KeyStore {
                 }
             }
         }
+        Ok(good_end)
+    }
 
-        if good_end < len {
-            // Truncate the torn tail so the next append starts clean.
-            file.set_len(good_end)?;
-            file.sync_all()?;
+    /// Bring `map` up to date if another process has appended to (or
+    /// replaced) the file since our last replay. Cheap when nothing
+    /// changed: one `stat` and an atomic load.
+    fn refresh_if_changed(&self) -> Result<()> {
+        let on_disk = match std::fs::metadata(&self.path) {
+            Ok(m) => m.len(),
+            Err(_) => return Ok(()), // path gone mid-rename; next read retries
+        };
+        if on_disk == self.loaded_len.load(Ordering::Acquire) {
+            return Ok(());
         }
-        file.seek(SeekFrom::End(0))?;
-        Ok(map)
+
+        // Changed — serialize vs. our own appends (writer mutex) and wait
+        // out any live external appender (shared flock on the sidecar lock),
+        // so we never read a torn record.
+        let mut f = self
+            .writer
+            .lock()
+            .map_err(|_| KeyStoreError::Corrupt("writer lock poisoned".into()))?;
+        self.lock_file.lock_shared()?;
+        let res = self.reconcile(&mut f);
+        let _ = FileExt::unlock(&self.lock_file);
+        res
     }
 
     fn decode_record(body: &[u8], cipher: &Cipher) -> Result<(u8, Vec<u8>, Vec<u8>)> {
@@ -427,19 +580,21 @@ impl KeyStore {
         out
     }
 
-    /// Get a value. Lock-free vs. writes and the blockstore — a read lock
-    /// on the in-memory map only.
+    /// Get a value. Refreshes from disk first if another process appended.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let _ = self.refresh_if_changed();
         self.map.read().ok()?.get(key).cloned()
     }
 
     /// Whether a key exists.
     pub fn contains(&self, key: &[u8]) -> bool {
+        let _ = self.refresh_if_changed();
         self.map.read().map(|m| m.contains_key(key)).unwrap_or(false)
     }
 
     /// All keys that start with `prefix` (e.g. `b"token:"`).
     pub fn keys_with_prefix(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
+        let _ = self.refresh_if_changed();
         self.map
             .read()
             .map(|m| {
@@ -451,18 +606,12 @@ impl KeyStore {
             .unwrap_or_default()
     }
 
-    /// Insert/overwrite `key`. Appends a record (fsync'd) then updates the
-    /// in-memory map. Holds the writer lock only for the append.
+    /// Insert/overwrite `key`. Appends a record (fsync'd) under an
+    /// inter-process exclusive lock, then updates the in-memory map.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let sealed = self.cipher.seal(value)?;
         let rec = Self::encode_record(0, key, &sealed);
-        {
-            let mut f = self.writer.lock().map_err(|_| {
-                KeyStoreError::Corrupt("writer lock poisoned".into())
-            })?;
-            f.write_all(&rec)?;
-            f.sync_all()?;
-        }
+        self.append_locked(&rec)?;
         if let Ok(mut m) = self.map.write() {
             m.insert(key.to_vec(), value.to_vec());
         }
@@ -472,64 +621,109 @@ impl KeyStore {
     /// Delete `key` (writes a tombstone).
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         let rec = Self::encode_record(FLAG_TOMBSTONE, key, &[]);
-        {
-            let mut f = self.writer.lock().map_err(|_| {
-                KeyStoreError::Corrupt("writer lock poisoned".into())
-            })?;
-            f.write_all(&rec)?;
-            f.sync_all()?;
-        }
+        self.append_locked(&rec)?;
         if let Ok(mut m) = self.map.write() {
             m.remove(key);
         }
         Ok(())
     }
 
-    /// Rewrite the log with only live records (drops superseded entries
-    /// and tombstones), via a temp file + atomic rename. Bounds log growth.
-    pub fn compact(&self) -> Result<()> {
-        // Snapshot live entries.
-        let entries: Vec<(Vec<u8>, Vec<u8>)> = {
-            let m = self
-                .map
-                .read()
-                .map_err(|_| KeyStoreError::Corrupt("map lock poisoned".into()))?;
-            m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-        };
-
-        // Hold the writer lock across the swap so no append races the rename.
+    /// Append a pre-encoded record under the writer mutex + an inter-process
+    /// exclusive `flock`. Before appending we replay any records other
+    /// processes wrote since our last sync (so we append at the true end and
+    /// our map stays current), then write at EOF and advance `loaded_len`.
+    fn append_locked(&self, rec: &[u8]) -> Result<()> {
         let mut f = self
             .writer
             .lock()
             .map_err(|_| KeyStoreError::Corrupt("writer lock poisoned".into()))?;
+        self.lock_file.lock_exclusive()?;
+        let res = (|| -> Result<()> {
+            // Catch up on external appends / external compaction (reopen) so
+            // we append at the true end and our map is current.
+            self.reconcile(&mut f)?;
+            // A torn tail from a crashed writer would sit past loaded_len;
+            // cut it before appending (safe — we hold the exclusive lock).
+            let cur = f.metadata()?.len();
+            let loaded = self.loaded_len.load(Ordering::Acquire);
+            if cur > loaded {
+                f.set_len(loaded)?;
+                f.sync_all()?;
+            }
+            f.seek(SeekFrom::End(0))?;
+            f.write_all(rec)?;
+            f.sync_all()?;
+            self.loaded_len
+                .fetch_add(rec.len() as u64, Ordering::AcqRel);
+            Ok(())
+        })();
+        let _ = FileExt::unlock(&self.lock_file);
+        res
+    }
 
-        let tmp = self.path.with_extension("mvks.compact");
-        {
-            let mut out = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
-            #[cfg(unix)]
+    /// Rewrite the log with only live records (drops superseded entries
+    /// and tombstones), via a temp file + atomic rename. Bounds log growth.
+    ///
+    /// Cross-process: held under the exclusive sidecar lock, and we first
+    /// `reconcile` so any records another process appended since our last
+    /// sync are folded into the snapshot rather than lost. Other processes
+    /// detect the rename on their next read (length/inode change) and
+    /// reopen. Concurrent compaction by two processes is not supported —
+    /// run it from a single coordinator (the daemon).
+    pub fn compact(&self) -> Result<()> {
+        let mut f = self
+            .writer
+            .lock()
+            .map_err(|_| KeyStoreError::Corrupt("writer lock poisoned".into()))?;
+        self.lock_file.lock_exclusive()?;
+        let res = (|| -> Result<()> {
+            // Fold in external appends before snapshotting.
+            self.reconcile(&mut f)?;
+            let entries: Vec<(Vec<u8>, Vec<u8>)> = {
+                let m = self
+                    .map
+                    .read()
+                    .map_err(|_| KeyStoreError::Corrupt("map lock poisoned".into()))?;
+                m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            };
+
+            let tmp = self.path.with_extension("mvks.compact");
+            let mut new_len = 5u64;
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                let mut out = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&tmp)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &tmp,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                out.write_all(MAGIC)?;
+                out.write_all(&[VERSION])?;
+                for (k, v) in &entries {
+                    let sealed = self.cipher.seal(v)?;
+                    let rec = Self::encode_record(0, k, &sealed);
+                    out.write_all(&rec)?;
+                    new_len += rec.len() as u64;
+                }
+                out.sync_all()?;
             }
-            out.write_all(MAGIC)?;
-            out.write_all(&[VERSION])?;
-            for (k, v) in &entries {
-                let sealed = self.cipher.seal(v)?;
-                out.write_all(&Self::encode_record(0, k, &sealed))?;
-            }
-            out.sync_all()?;
-        }
-        std::fs::rename(&tmp, &self.path)?;
+            std::fs::rename(&tmp, &self.path)?;
 
-        // Reopen the live file handle at its end for subsequent appends.
-        let mut reopened = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        reopened.seek(SeekFrom::End(0))?;
-        *f = reopened;
-        Ok(())
+            // Reopen the live handle on the new inode at its end.
+            let mut reopened = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            reopened.seek(SeekFrom::End(0))?;
+            *f = reopened;
+            self.loaded_len.store(new_len, Ordering::Release);
+            Ok(())
+        })();
+        let _ = FileExt::unlock(&self.lock_file);
+        res
     }
 }
 
@@ -740,6 +934,123 @@ mod tests {
         assert_eq!(k1, k2, "same passphrase+salt → same key");
         assert_ne!(k1, k3, "different salt → different key");
         assert_ne!(k1, k4, "different passphrase → different key");
+    }
+
+    #[test]
+    fn two_handles_see_each_others_writes() {
+        // Two KeyStore handles on one path stand in for two processes: each
+        // opens the same lock file as a distinct open-file-description, so
+        // flock gives real mutual exclusion.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = KeyStore::open(&path).unwrap();
+        let b = KeyStore::open(&path).unwrap();
+
+        a.put(b"token:1", b"from-a").unwrap();
+        // b must observe a's append (refresh-on-read).
+        assert_eq!(b.get(b"token:1").as_deref(), Some(&b"from-a"[..]));
+
+        b.put(b"adminkey:x", b"from-b").unwrap();
+        assert_eq!(a.get(b"adminkey:x").as_deref(), Some(&b"from-b"[..]));
+
+        // Overwrite from the other side is seen too.
+        b.put(b"token:1", b"from-b-2").unwrap();
+        assert_eq!(a.get(b"token:1").as_deref(), Some(&b"from-b-2"[..]));
+
+        // Delete from one side observed by the other.
+        a.delete(b"adminkey:x").unwrap();
+        assert_eq!(b.get(b"adminkey:x"), None);
+    }
+
+    #[test]
+    fn interleaved_appends_from_two_handles_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = KeyStore::open(&path).unwrap();
+        let b = KeyStore::open(&path).unwrap();
+        for i in 0..25 {
+            a.put(format!("a:{i}").as_bytes(), b"av").unwrap();
+            b.put(format!("b:{i}").as_bytes(), b"bv").unwrap();
+        }
+        // A fresh handle replays the whole interleaved log without corruption.
+        let c = KeyStore::open(&path).unwrap();
+        assert_eq!(c.keys_with_prefix(b"a:").len(), 25);
+        assert_eq!(c.keys_with_prefix(b"b:").len(), 25);
+        assert_eq!(c.get(b"a:0").as_deref(), Some(&b"av"[..]));
+        assert_eq!(c.get(b"b:24").as_deref(), Some(&b"bv"[..]));
+    }
+
+    #[test]
+    fn second_handle_recovers_after_other_compacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = KeyStore::open(&path).unwrap();
+        let b = KeyStore::open(&path).unwrap();
+        for i in 0..40 {
+            a.put(b"hot", format!("v{i}").as_bytes()).unwrap();
+        }
+        a.put(b"keep", b"yes").unwrap();
+        // b reads the pre-compaction state.
+        assert_eq!(b.get(b"hot").as_deref(), Some(&b"v39"[..]));
+        // a compacts (rename → new inode); b must detect and reopen.
+        a.compact().unwrap();
+        assert_eq!(b.get(b"hot").as_deref(), Some(&b"v39"[..]));
+        assert_eq!(b.get(b"keep").as_deref(), Some(&b"yes"[..]));
+        // b can still append after the other process compacted.
+        b.put(b"after", b"ok").unwrap();
+        assert_eq!(a.get(b"after").as_deref(), Some(&b"ok"[..]));
+    }
+
+    #[test]
+    fn concurrent_handles_under_thread_contention() {
+        // Two handles, two threads, hammering appends at once. flock must
+        // keep records from interleaving at the byte level; a fresh reopen
+        // must then replay every record cleanly.
+        use std::sync::Arc;
+        use std::thread;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = Arc::new(KeyStore::open(&path).unwrap());
+        let b = Arc::new(KeyStore::open(&path).unwrap());
+        let n = 200;
+        let ta = {
+            let a = Arc::clone(&a);
+            thread::spawn(move || {
+                for i in 0..n {
+                    a.put(format!("a:{i:04}").as_bytes(), b"x").unwrap();
+                }
+            })
+        };
+        let tb = {
+            let b = Arc::clone(&b);
+            thread::spawn(move || {
+                for i in 0..n {
+                    b.put(format!("b:{i:04}").as_bytes(), b"y").unwrap();
+                }
+            })
+        };
+        ta.join().unwrap();
+        tb.join().unwrap();
+        let c = KeyStore::open(&path).unwrap();
+        assert_eq!(c.keys_with_prefix(b"a:").len(), n);
+        assert_eq!(c.keys_with_prefix(b"b:").len(), n);
+    }
+
+    #[test]
+    fn compaction_folds_in_concurrent_external_append() {
+        // If b appends after a's last sync, a.compact() must not drop it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = KeyStore::open(&path).unwrap();
+        let b = KeyStore::open(&path).unwrap();
+        a.put(b"k1", b"v1").unwrap();
+        // b appends; a has not refreshed its map yet.
+        b.put(b"k2", b"v2").unwrap();
+        a.compact().unwrap();
+        // The compacted log must still contain b's record.
+        let c = KeyStore::open(&path).unwrap();
+        assert_eq!(c.get(b"k1").as_deref(), Some(&b"v1"[..]));
+        assert_eq!(c.get(b"k2").as_deref(), Some(&b"v2"[..]));
     }
 
     #[test]
