@@ -100,6 +100,11 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route("/admin/tokens/{cid}", delete(admin::revoke_token))
         .route("/admin/rotations", get(admin::list_rotations))
+        .route(
+            "/admin/keys",
+            get(admin::list_admin_keys).post(admin::admit_admin_key),
+        )
+        .route("/admin/keys/retire", post(admin::retire_admin_key))
         // ── Buckets ────────────────────────────────────────────────
         .route(
             "/buckets",

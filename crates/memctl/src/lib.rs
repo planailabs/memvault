@@ -189,6 +189,9 @@ mod native {
         },
         /// List key rotations
         Rotations,
+        /// Multi-admin key management
+        #[command(subcommand)]
+        Admin(AdminCommands),
         /// Show node status
         Status,
         /// Add an entity to the knowledge graph
@@ -464,6 +467,45 @@ mod native {
         },
     }
 
+    /// Multi-admin key management subcommands.
+    #[derive(Subcommand, Debug)]
+    pub enum AdminCommands {
+        /// Generate a new admin keypair, writing the 32-byte seed to a file.
+        GenKey {
+            /// Output path for the new admin key seed.
+            #[arg(long)]
+            out: PathBuf,
+        },
+        /// Print a proof-of-possession for an admin key seed file, to hand
+        /// to an existing admin for admission. Requires the cluster id.
+        Pop {
+            /// Path to the admin key seed file (from `gen-key`).
+            #[arg(long)]
+            key: PathBuf,
+        },
+        /// Admit a new admin key. Provide its pubkey (hex) and POP (hex),
+        /// produced by the incoming operator via `gen-key` + `pop`.
+        Admit {
+            /// New admin verifying key (64 hex chars).
+            #[arg(long)]
+            new_pubkey: String,
+            /// Proof-of-possession (128 hex chars) from the incoming admin.
+            #[arg(long)]
+            pop: String,
+        },
+        /// Retire an admin key (hex pubkey). Cannot retire the last admin.
+        Retire {
+            /// Admin verifying key to retire (64 hex chars).
+            #[arg(long)]
+            pubkey: String,
+            /// Reason (audit).
+            #[arg(long, default_value = "retired")]
+            reason: String,
+        },
+        /// List the cluster's admin keys and their validity windows.
+        List,
+    }
+
     fn default_data_dir() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -567,6 +609,18 @@ mod native {
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "decode pinned admin_genesis"),
+            }
+        }
+        // Rebuild the multi-admin key set from the chain so admitted admins
+        // (and retirements) are known to this short-lived CLI client, not
+        // just the seeded anchor.
+        if let Some(anchor) = client
+            .pinned_admin_genesis()
+            .and_then(|g| ed25519_dalek::VerifyingKey::from_bytes(&g.admin_pubkey).ok())
+            .or_else(|| client.admin_verifying_key())
+        {
+            if let Err(e) = memvault_api::sigchain::rebuild_admin_key_state(&client, &anchor) {
+                tracing::warn!(error = %e, "rebuild admin key state");
             }
         }
         // Bind agent identity if `MEMVAULT_AGENT_ID` is set (the global
@@ -1122,6 +1176,9 @@ mod native {
                 let client = create_client(store)?;
                 client.revoke_token(&cid_bytes, &reason).await?;
                 println!("Token revoked.");
+            }
+            Commands::Admin(sub) => {
+                run_admin(sub, make_store()?).await?;
             }
             Commands::Rotations => {
                 let store = make_store()?;
@@ -2182,6 +2239,95 @@ mod native {
                 }
             }
         });
+    }
+
+    fn read_admin_seed(path: &Path) -> Result<ed25519_dalek::SigningKey> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("read admin key {path:?}: {e}"))?;
+        if bytes.len() < 32 {
+            anyhow::bail!("admin key file {path:?} is too short (need 32 bytes)");
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&bytes[..32]);
+        Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+    }
+
+    fn parse_hex32(s: &str, what: &str) -> Result<[u8; 32]> {
+        let v = hex::decode(s).map_err(|e| anyhow::anyhow!("{what} not hex: {e}"))?;
+        v.as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("{what} must be 32 bytes (64 hex chars)"))
+    }
+
+    async fn run_admin(sub: AdminCommands, store: Arc<MemvaultStore>) -> Result<()> {
+        match sub {
+            AdminCommands::GenKey { out } => {
+                use rand::RngCore;
+                let mut seed = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut seed);
+                let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                std::fs::write(&out, seed)
+                    .map_err(|e| anyhow::anyhow!("write {out:?}: {e}"))?;
+                println!("admin pubkey: {}", hex::encode(sk.verifying_key().to_bytes()));
+                println!("seed written to {out:?} (keep it secret)");
+            }
+            AdminCommands::Pop { key } => {
+                let sk = read_admin_seed(&key)?;
+                let cluster_bytes = store
+                    .get_local_cluster_id()
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| anyhow::anyhow!("no local cluster id; run genesis/join first"))?;
+                let cluster = memvault_core::ClusterId(parse_hex32(
+                    &hex::encode(&cluster_bytes),
+                    "cluster_id",
+                )?);
+                let pop = memvault_auth::sign_admin_pop(&sk, &cluster);
+                println!("pubkey: {}", hex::encode(sk.verifying_key().to_bytes()));
+                println!("pop:    {}", hex::encode(pop));
+            }
+            AdminCommands::Admit { new_pubkey, pop } => {
+                let new_pk = parse_hex32(&new_pubkey, "new_pubkey")?;
+                let pop_bytes = hex::decode(&pop)
+                    .map_err(|e| anyhow::anyhow!("pop not hex: {e}"))?;
+                let pop_arr: [u8; 64] = pop_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("pop must be 64 bytes (128 hex chars)"))?;
+                let client = create_client(store)?;
+                let cid = client.admit_admin_key(new_pk, pop_arr, None).await?;
+                println!("admin admitted (admission cid: {})", hex::encode(cid));
+            }
+            AdminCommands::Retire { pubkey, reason } => {
+                let pk = parse_hex32(&pubkey, "pubkey")?;
+                let client = create_client(store)?;
+                let cid = client.retire_admin_key(pk, reason).await?;
+                println!("admin retired (retirement cid: {})", hex::encode(cid));
+            }
+            AdminCommands::List => {
+                let client = create_client(store)?;
+                let state = client.admin_key_state();
+                let now = memvault_core::wall_ns();
+                let anchor = state.anchor;
+                for (pk, v) in &state.keys {
+                    let is_anchor = Some(*pk) == anchor;
+                    let valid = v.valid_at(now);
+                    println!(
+                        "{}{} valid_from={} valid_until={} {}",
+                        hex::encode(pk),
+                        if is_anchor { " (anchor)" } else { "" },
+                        v.valid_from_ns,
+                        if v.valid_until_ns == u64::MAX {
+                            "never".to_string()
+                        } else {
+                            v.valid_until_ns.to_string()
+                        },
+                        if valid { "[valid now]" } else { "[expired]" },
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn run_seed(

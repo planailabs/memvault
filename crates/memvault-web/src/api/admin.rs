@@ -152,3 +152,106 @@ fn parse_role(s: &str) -> Result<memvault_auth::Role, ApiError> {
         _ => Err(ApiError::bad_request(format!("Unknown role: {s}"))),
     }
 }
+
+// ── Multi-admin key management ───────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AdmitAdminRequest {
+    /// New admin verifying key (64 hex chars).
+    pub new_pubkey: String,
+    /// Proof-of-possession (128 hex chars), produced offline by the
+    /// incoming admin via `memctl admin pop`.
+    pub pop: String,
+    /// Optional validity start (ns). Defaults to now.
+    #[serde(default)]
+    pub valid_from_ns: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub struct RetireAdminRequest {
+    /// Admin verifying key to retire (64 hex chars).
+    pub pubkey: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AdminKeyResponse {
+    pub pubkey: String,
+    pub is_anchor: bool,
+    pub valid_from_ns: u64,
+    pub valid_until_ns: u64,
+    pub valid_now: bool,
+}
+
+fn parse_hex32(s: &str, what: &str) -> Result<[u8; 32], ApiError> {
+    let v = hex::decode(s).map_err(|_| ApiError::bad_request(format!("{what} not hex")))?;
+    v.as_slice()
+        .try_into()
+        .map_err(|_| ApiError::bad_request(format!("{what} must be 32 bytes")))
+}
+
+/// POST /api/v1/admin/keys — admit a new admin key.
+pub async fn admit_admin_key(
+    _auth: RequireAdmin,
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<AdmitAdminRequest>,
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
+    let new_pk = parse_hex32(&req.new_pubkey, "new_pubkey")?;
+    let pop_bytes = hex::decode(&req.pop).map_err(|_| ApiError::bad_request("pop not hex"))?;
+    let pop: [u8; 64] = pop_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::bad_request("pop must be 64 bytes"))?;
+    let cid = client
+        .admit_admin_key(new_pk, pop, req.valid_from_ns)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({ "admission_cid": hex::encode(cid) })),
+    ))
+}
+
+/// POST /api/v1/admin/keys/retire — retire an admin key.
+pub async fn retire_admin_key(
+    _auth: RequireAdmin,
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<RetireAdminRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
+    let pk = parse_hex32(&req.pubkey, "pubkey")?;
+    let reason = req.reason.unwrap_or_else(|| "retired via API".to_string());
+    let cid = client
+        .retire_admin_key(pk, reason)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "retirement_cid": hex::encode(cid) })))
+}
+
+/// GET /api/v1/admin/keys — list admin keys and validity windows.
+pub async fn list_admin_keys(
+    _auth: RequireAdmin,
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<Vec<AdminKeyResponse>>, ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
+    let state = client.admin_key_state();
+    let now = memvault_core::wall_ns();
+    let anchor = state.anchor;
+    let out = state
+        .keys
+        .iter()
+        .map(|(pk, v)| AdminKeyResponse {
+            pubkey: hex::encode(pk),
+            is_anchor: Some(*pk) == anchor,
+            valid_from_ns: v.valid_from_ns,
+            valid_until_ns: v.valid_until_ns,
+            valid_now: v.valid_at(now),
+        })
+        .collect();
+    Ok(Json(out))
+}
