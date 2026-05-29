@@ -6,6 +6,15 @@ edition = "2024"
 [dependencies]
 thiserror = "2"
 tracing = "0.1"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+rand = "0.9"
+tss-esapi = { version = "7", optional = true }
+
+[features]
+# Optional: seal the keystore's data key in the TPM (Linux/TSS2).
+# Off by default — enabling it links tss-esapi and requires a TPM.
+tpm = ["dep:tss-esapi"]
 
 [dev-dependencies]
 tempfile = "3"
