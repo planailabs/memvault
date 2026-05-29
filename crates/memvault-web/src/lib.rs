@@ -120,7 +120,9 @@ mod server_router {
             "_ui",
             &ui_identity_dir,
             memvault_auth::Role::AgentHost,
-            365 * 24 * 60 * 60 * 1_000_000_000,
+            // Daemon-managed identity — no expiry. `generate_local`
+            // saturates so this is treated as effectively never-expires.
+            u64::MAX,
         )?;
         super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
         Ok(())

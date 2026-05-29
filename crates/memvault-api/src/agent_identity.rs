@@ -94,7 +94,9 @@ impl AgentIdentity {
         let verifying_key = signing_key.verifying_key();
 
         let now_ns = memvault_core::time::wall_ns();
-        let not_after_ns = now_ns + ttl_ns;
+        // `saturating_add` so callers can pass `u64::MAX` for "never expires"
+        // without wrapping.
+        let not_after_ns = now_ns.saturating_add(ttl_ns);
 
         let attestation = memvault_auth::sign_agent_attestation(
             node_signing_key,
@@ -456,7 +458,7 @@ pub fn issue_join_token(
         role,
         initial_grants: vec![],
         not_before_ns: now_ns,
-        not_after_ns: now_ns + ttl_ns,
+        not_after_ns: now_ns.saturating_add(ttl_ns),
         max_uses,
         nonce,
         label,
