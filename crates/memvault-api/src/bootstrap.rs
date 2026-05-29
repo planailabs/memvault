@@ -188,6 +188,12 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
     // (Step 4) Revocations.
     let (revoked_agents_set, revoked_nodes_set) =
         sigchain::scan_revocations(client, &admin_keys, &node_trust_map)?;
+    // Apply any admin-signed bucket-grant revocations that landed (locally
+    // or via sync) so revoked grants don't keep conferring access after a
+    // restart.
+    if let Err(e) = sigchain::scan_grant_revocations(client, &admin_keys) {
+        tracing::warn!(error = %e, "scan grant revocations");
+    }
 
     let node_trust = Arc::new(RwLock::new(node_trust_map));
     let revoked_agents = Arc::new(RwLock::new(revoked_agents_set));

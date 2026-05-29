@@ -788,3 +788,144 @@ async fn migrate_legacy_grants_reissues_under_admin() {
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
         .expect("reissued admin-signed grant grants access under strict");
 }
+
+/// A grant whose signed `bucket_scopes` is bucket A must NOT authorize
+/// bucket B even if its storage tag points at B (tag is unsigned; the
+/// signed scope is authoritative). Guards the tag-vs-scope confusion.
+#[tokio::test]
+async fn grant_scoped_to_other_bucket_denied() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "scope-agent", Role::AgentHost).await;
+    let bucket_a = make_bucket(&node, "scope-bucket-a").await;
+    let bucket_b = make_bucket(&node, "scope-bucket-b").await;
+
+    let admin_key = node.client.admin_signing_key().expect("admin key");
+    let admin_pk = admin_key.verifying_key().to_bytes();
+
+    // Build a grant SIGNED for bucket_a, but store it under bucket_b's tag.
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let mut grant = Grant {
+        issuer: PeerId(node.client.peer_id().to_vec()),
+        issuing_cluster: node.cluster_id.clone(),
+        admin_pubkey: admin_pk,
+        audience: GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        scopes: vec![],
+        actions: vec![Action::Read],
+        not_before_ns: 1,
+        not_after_ns: u64::MAX,
+        parent: None,
+        nonce,
+        bucket_scopes: vec![bucket_a.clone()], // signed scope = A
+        signature: [0u8; 64],
+    };
+    use ed25519_dalek::Signer;
+    let sb = grant.signing_bytes().expect("signing bytes");
+    grant.signature = admin_key.sign(&sb).to_bytes();
+    let grant_bytes = serde_ipld_dagcbor::to_vec(&grant).expect("encode");
+    let cid = memvault_core::cid_from_bytes(&grant_bytes);
+    let meta = memvault_store::EnvelopeMeta {
+        author: node.client.peer_id().to_vec(),
+        tags: vec![
+            ("grant".to_string(), hex::encode(bucket_b.0)), // mis-tagged under B
+            ("kind".to_string(), "grant".to_string()),
+        ],
+        wall_ns: 1,
+        cluster_id: Some(node.cluster_id.0.to_vec()),
+        bucket_id: Some(bucket_b.0.to_vec()),
+        ..Default::default()
+    };
+    node.client
+        .store()
+        .insert_envelope(&cid.to_bytes(), &grant_bytes, &meta)
+        .expect("insert");
+
+    // The grant is admin-signed and valid, but its signed scope is A —
+    // it must NOT confer access on B.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket_b, Action::Read)
+        .expect_err("grant scoped to A must not authorize B");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+/// A future-dated grant (not_before in the future) must not yet confer
+/// access.
+#[tokio::test]
+async fn future_dated_grant_denied() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "future-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "future-bucket").await;
+    let admin_key = node.client.admin_signing_key().expect("admin key");
+
+    insert_raw_grant_at(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        admin_key.verifying_key().to_bytes(),
+        Some(&admin_key),
+        u64::MAX - 1, // not_before far in the future
+    );
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect_err("future-dated grant must not be valid yet");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+/// A synced grant-revocation block (admin-signed) must be applied to the
+/// local revocation index by scan_grant_revocations — the path a peer
+/// uses at bootstrap. Models cross-node revocation propagation: the
+/// revocation block arrives via sync but record_revocation wasn't called
+/// locally, yet the grant must stop conferring access once scanned.
+#[tokio::test]
+async fn synced_grant_revocation_applies_on_scan() {
+    let node = TestNode::new();
+    let (agent_pk, agent_id) = setup_agent(&node, "syncrev-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "syncrev-bucket").await;
+
+    let grant_cid = node
+        .client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::Agent(agent_id),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("issue grant");
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("grant works before revocation");
+
+    // Build an admin-signed GrantRevocation and insert it as a sigchain
+    // block WITHOUT calling record_revocation (simulating arrival via sync).
+    let admin_key = node.client.admin_signing_key().expect("admin key");
+    let raw_grant = node.client.store().get_block(&grant_cid).unwrap().unwrap();
+    let target_cid = memvault_core::cid_from_bytes(&raw_grant);
+    let rev = memvault_auth::sign_grant_revocation(&admin_key, target_cid, "synced")
+        .expect("sign revocation");
+    let rev_bytes = serde_ipld_dagcbor::to_vec(&rev).expect("encode");
+    let rev_cid = memvault_core::cid_from_bytes(&rev_bytes);
+    let meta = memvault_store::EnvelopeMeta {
+        author: node.client.peer_id().to_vec(),
+        tags: vec![("sigchain".to_string(), "grant_revocation".to_string())],
+        wall_ns: 1,
+        cluster_id: Some(node.cluster_id.0.to_vec()),
+        ..Default::default()
+    };
+    node.client
+        .store()
+        .insert_envelope(&rev_cid.to_bytes(), &rev_bytes, &meta)
+        .expect("insert revocation block");
+
+    // Not yet applied to the index → still authorized.
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("still works before scan applies the revocation");
+
+    // The bootstrap-equivalent scan applies it.
+    let admin_keys = node.client.admin_verifying_keys();
+    let applied =
+        memvault_api::sigchain::scan_grant_revocations(&node.client, &admin_keys).expect("scan");
+    assert_eq!(applied, 1);
+
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect_err("revoked after scan");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}

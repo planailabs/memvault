@@ -18,7 +18,7 @@ use crate::local::LocalClient;
 use memvault_auth::jwt::NodeTrust;
 use memvault_auth::{
     AdminGenesis, AdminKeyAdmission, AdminKeyRetirement, AdminKeyState, AgentAttestation,
-    AgentRevocation, NodeAttestation, NodeRevocation,
+    AgentRevocation, GrantRevocation, NodeAttestation, NodeRevocation,
 };
 use memvault_store::insert::EnvelopeMeta;
 
@@ -30,6 +30,7 @@ const LABEL_AGENT_REV: &str = "agent_rev";
 const LABEL_NODE_REV: &str = "node_rev";
 const LABEL_ADMIN_ADMISSION: &str = "admin_admission";
 const LABEL_ADMIN_RETIREMENT: &str = "admin_retirement";
+const LABEL_GRANT_REVOCATION: &str = "grant_revocation";
 
 fn write_block(client: &LocalClient, label: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     write_block_with_extra_tags(client, label, bytes, Vec::new())
@@ -134,6 +135,62 @@ pub fn publish_admin_retirement(
     let bytes = serde_ipld_dagcbor::to_vec(retirement)
         .map_err(|e| ApiError::Serialization(e.to_string()))?;
     write_block(client, LABEL_ADMIN_RETIREMENT, &bytes)
+}
+
+/// Persist a [`GrantRevocation`] as a sigchain block so it propagates to
+/// peers and fires the watcher (which applies it to the local revocation
+/// index). The caller also records it locally for immediate effect.
+pub fn publish_grant_revocation(
+    client: &LocalClient,
+    revocation: &GrantRevocation,
+) -> Result<Vec<u8>> {
+    let bytes = serde_ipld_dagcbor::to_vec(revocation)
+        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    write_block(client, LABEL_GRANT_REVOCATION, &bytes)
+}
+
+/// Apply a single [`GrantRevocation`] to the local revocation index if it
+/// is signed by a currently-known cluster admin key. Returns true if
+/// recorded. Used by both the bootstrap scan and the live watcher.
+fn apply_grant_revocation(
+    client: &LocalClient,
+    admin_keys: &[ed25519_dalek::VerifyingKey],
+    bytes: &[u8],
+) -> bool {
+    let Ok(rev) = serde_ipld_dagcbor::from_slice::<GrantRevocation>(bytes) else {
+        return false;
+    };
+    // The embedded admin_pubkey must be a known cluster admin and the
+    // signature must verify against it.
+    if !admin_keys.iter().any(|k| k.to_bytes() == rev.admin_pubkey) {
+        return false;
+    }
+    if rev.verify_signature().is_err() {
+        return false;
+    }
+    client
+        .store()
+        .record_revocation(&rev.grant_cid.to_bytes(), bytes)
+        .is_ok()
+}
+
+/// Scan every persisted [`GrantRevocation`] block and apply the
+/// admin-signed ones to the local revocation index. Run at bootstrap so
+/// revocations issued (or synced) while this node was down take effect.
+pub fn scan_grant_revocations(
+    client: &LocalClient,
+    admin_keys: &[ed25519_dalek::VerifyingKey],
+) -> Result<usize> {
+    if admin_keys.is_empty() {
+        return Ok(0);
+    }
+    let mut applied = 0usize;
+    for bytes in load_blocks_by_label(client, LABEL_GRANT_REVOCATION)? {
+        if apply_grant_revocation(client, admin_keys, &bytes) {
+            applied += 1;
+        }
+    }
+    Ok(applied)
 }
 
 /// Rebuild the cluster's [`AdminKeyState`] from the pinned anchor plus
@@ -667,6 +724,14 @@ fn apply_sigchain_block(
             }
             // Every agent attested by this node is now transitively untrusted.
             refresh_trusted_agents(client, state);
+        }
+        LABEL_GRANT_REVOCATION => {
+            // A bucket-grant revocation landed (local or synced). Apply it
+            // to the revocation index if admin-signed; ACL's `is_revoked`
+            // check reads that index directly (uncached), so the revoked
+            // grant stops conferring access on the next check.
+            let admin_keys = client.admin_verifying_keys();
+            let _ = apply_grant_revocation(client, &admin_keys, &bytes);
         }
         LABEL_ADMIN_ADMISSION | LABEL_ADMIN_RETIREMENT => {
             // Admin-key set changed. SECURITY: never apply incrementally

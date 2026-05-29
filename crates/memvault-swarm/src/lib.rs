@@ -871,6 +871,23 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
         }
     }
 
+    // GrantRevocation: admin-signed. Verify the self-signature against the
+    // embedded admin_pubkey; defer the "admin_pubkey is a known cluster
+    // admin" check to the receiver's grant-revocation scan/watcher.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::GrantRevocation>(bytes) {
+        if rev.admin_pubkey.iter().any(|&b| b != 0) {
+            if rev.verify_signature().is_err() {
+                return SyncSigchainVerdict::Drop {
+                    reason: "grant_revocation: bad self-signature",
+                };
+            }
+            return SyncSigchainVerdict::Accept {
+                label: "grant_revocation",
+                signer_pubkey: rev.admin_pubkey.to_vec(),
+            };
+        }
+    }
+
     SyncSigchainVerdict::NotSigchain
 }
 

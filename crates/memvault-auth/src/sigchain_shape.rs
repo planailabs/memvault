@@ -17,7 +17,7 @@
 
 use crate::{
     AdminGenesis, AdminKeyAdmission, AdminKeyRetirement, AgentAttestation, AgentRevocation,
-    NodeAttestation, NodeRevocation,
+    GrantRevocation, NodeAttestation, NodeRevocation,
 };
 
 /// Discriminator for the recognised sigchain block types. Mirrors the
@@ -31,6 +31,7 @@ pub enum SigchainKind {
     AgentAttestation,
     AgentRevocation,
     NodeRevocation,
+    GrantRevocation,
 }
 
 impl SigchainKind {
@@ -44,6 +45,7 @@ impl SigchainKind {
             Self::AgentAttestation => "agent_att",
             Self::AgentRevocation => "agent_rev",
             Self::NodeRevocation => "node_rev",
+            Self::GrantRevocation => "grant_revocation",
         }
     }
 }
@@ -112,6 +114,14 @@ pub fn detect_sigchain_shape(bytes: &[u8]) -> Option<SigchainKind> {
     if let Ok(rev) = serde_ipld_dagcbor::from_slice::<AgentRevocation>(bytes) {
         if rev.agent_pubkey.iter().any(|&b| b != 0) {
             return Some(SigchainKind::AgentRevocation);
+        }
+    }
+    // GrantRevocation: admin_pubkey + grant_cid (Cid) + reason +
+    // revoked_at_ns. The `grant_cid` field (a CID, not a 32-byte pubkey)
+    // distinguishes it from NodeRevocation.
+    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<GrantRevocation>(bytes) {
+        if rev.admin_pubkey.iter().any(|&b| b != 0) {
+            return Some(SigchainKind::GrantRevocation);
         }
     }
     None

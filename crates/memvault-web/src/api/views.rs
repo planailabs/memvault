@@ -26,11 +26,14 @@ pub struct TagUpdateRequest {
 
 /// PUT /api/v1/tags/:node_id — add tags to an item.
 pub async fn add_tags(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
     Json(req): Json<TagUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Tags drive view membership and search visibility — mutating them is
+    // a write to the node's bucket.
+    crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Write)?;
     state.client.add_tags(&node_id, req.tags).await?;
     tracing::debug!(node_id = %node_id, "API: tags added");
     Ok(Json(
@@ -40,11 +43,12 @@ pub async fn add_tags(
 
 /// DELETE /api/v1/tags/:node_id — remove tags from an item.
 pub async fn remove_tags(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
     Json(req): Json<TagUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Write)?;
     state.client.remove_tags(&node_id, req.tags).await?;
     Ok(Json(
         serde_json::json!({ "node_id": node_id, "status": "tags_removed" }),
@@ -53,10 +57,11 @@ pub async fn remove_tags(
 
 /// GET /api/v1/tags/:node_id — get effective tags for an item.
 pub async fn get_tags(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Read)?;
     let tags = state.client.get_tags(&node_id).await?;
     Ok(Json(
         serde_json::json!({ "node_id": node_id, "tags": tags }),

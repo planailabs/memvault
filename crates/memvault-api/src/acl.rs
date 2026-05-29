@@ -57,7 +57,18 @@ pub fn check_bucket_access(
     let now_ns = memvault_core::wall_ns();
     let grants = client.list_bucket_grants(bucket_id)?;
     for (cid, grant) in grants {
-        if grant.not_after_ns <= now_ns {
+        // Trust the grant's *signed* bucket scope, not the storage tag it
+        // was indexed under. `list_bucket_grants` looks grants up by the
+        // `("grant", <bucket_hex>)` tag, which is unsigned metadata — a
+        // mis-tagged or sync-injected block could otherwise let a grant
+        // scoped to bucket A authorise bucket B. `bucket_scopes` is part
+        // of `signing_bytes`, so this is the authoritative scope.
+        if !grant.covers_bucket(bucket_id) {
+            continue;
+        }
+        // Temporal validity (both bounds). `not_after` excludes expired;
+        // `not_before` excludes not-yet-valid (future-dated) grants.
+        if now_ns < grant.not_before_ns || grant.not_after_ns <= now_ns {
             continue;
         }
         // Per-grant revocation (see `LocalClient::revoke_bucket_grant`).

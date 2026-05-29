@@ -551,6 +551,16 @@ impl LocalClient {
             if grant.is_legacy_unsigned() || !founders.contains(&grant.admin_pubkey) {
                 continue;
             }
+            // Only launder grants that actually carry a valid founder
+            // signature — never re-sign an unverified block (which a peer
+            // could have injected with a founder pubkey it doesn't hold)
+            // under the cluster admin key.
+            if grant.verify_admin_signature().is_err() {
+                continue;
+            }
+            if !grant.covers_bucket(bucket) {
+                continue;
+            }
             if self.store.is_revoked(&cid).unwrap_or(false) {
                 continue;
             }
@@ -685,19 +695,15 @@ impl LocalClient {
                 out.push(vk);
             }
         }
-        drop(state);
-        // Local founder keys (pre-genesis, this node only) — included so a
-        // node attestation/JWT chain signed under the founder key before
-        // genesis still verifies locally.
-        if let Ok(founders) = self.local_founder_keys.read() {
-            for k in founders.iter() {
-                if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(k) {
-                    if !out.contains(&vk) {
-                        out.push(vk);
-                    }
-                }
-            }
-        }
+        // NB: local founder keys are deliberately NOT included here.
+        // `admin_verifying_keys` gates node-attestation and JWT trust;
+        // founder keys are a *local, grant-only* trust extension (see
+        // `is_admin_key_valid_at`). Excluding them bounds the blast radius
+        // of a leaked `founder_admin.key` to grant-signing on this node's
+        // own private buckets — it cannot mint trusted node attestations
+        // or JWTs. Pre-genesis, the founder key is the chain anchor (via
+        // `set_admin_signing_key`) and is already present above through
+        // `state.anchor`, so pre-genesis self-attestation still verifies.
         out
     }
 
@@ -1429,9 +1435,16 @@ impl LocalClient {
                 return Some(sk.clone());
             }
         }
-        // Last resort: any held key at all (covers pre-rescan/test states
-        // where admin_key_state may be empty but a secret is registered).
-        held.values().next().cloned()
+        // Last resort ONLY when the admin-key state is empty (truly
+        // pre-bootstrap / fresh test harness with a registered secret but
+        // no rescanned state). Once the state is populated we never sign
+        // with a key it considers invalid (e.g. retired) — that would
+        // produce signatures honest peers reject and risks signing with a
+        // revoked/retired key.
+        if state.keys.is_empty() {
+            return held.values().next().cloned();
+        }
+        None
     }
 
     /// The admin verifying key for a held, currently-valid admin secret.
@@ -2949,7 +2962,8 @@ impl LocalClient {
                     hex::encode(grant_cid)
                 ))
             })?;
-        let grant = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw)
+        // Confirm the target really is a Grant block before revoking.
+        let _grant = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw)
             .ok_or_else(|| {
                 ApiError::Other(format!(
                     "block {} is not a Grant",
@@ -2967,45 +2981,20 @@ impl LocalClient {
 
         let rev_bytes = serde_ipld_dagcbor::to_vec(&revocation)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let rev_cid = memvault_core::cid_from_bytes(&rev_bytes);
-        let rev_cid_bytes = rev_cid.to_bytes();
 
-        // Tag with the target grant cid so audit UIs can list "every
-        // revocation for grant X" without scanning the full store. Also
-        // tag the bucket so per-bucket audit views stay cheap.
-        let grant_cid_hex = hex::encode(grant_cid);
-        let bucket_hex = grant
-            .bucket_scopes
-            .first()
-            .map(|b| hex::encode(b.0))
-            .unwrap_or_default();
-        let now_ns = memvault_core::wall_ns();
-        let meta = memvault_store::EnvelopeMeta {
-            author: self.effective_author(),
-            tags: vec![
-                ("kind".to_string(), "grant_revocation".to_string()),
-                ("revokes".to_string(), grant_cid_hex.clone()),
-                ("grant_revocation".to_string(), bucket_hex),
-            ],
-            wall_ns: now_ns,
-            causal: vec![],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: grant.bucket_scopes.first().map(|b| b.0.to_vec()),
-            ..Default::default()
-        };
-        self.store
-            .insert_envelope(&rev_cid_bytes, &rev_bytes, &meta)?;
+        // Publish as a sigchain block so the revocation propagates to peers
+        // via RBSR and fires the local watcher. Without this, a revoked
+        // grant kept conferring access on every node except the issuer.
+        let rev_cid_bytes = crate::sigchain::publish_grant_revocation(self, &revocation)?;
 
-        // Fast-path index used by `acl::check_bucket_access`. The
-        // payload doubles as the canonical revocation record so audit
-        // tools can render the reason without re-fetching the envelope.
+        // Fast-path index used by `acl::check_bucket_access` (read directly,
+        // uncached). The payload doubles as the canonical revocation record.
         self.store
             .record_revocation(grant_cid, &rev_bytes)
             .map_err(|e| ApiError::Other(format!("record_revocation: {e}")))?;
 
         tracing::info!(
-            grant = %grant_cid_hex,
+            grant = %hex::encode(grant_cid),
             revocation = %hex::encode(&rev_cid_bytes),
             reason,
             "bucket grant revoked"

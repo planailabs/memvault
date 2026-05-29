@@ -54,7 +54,7 @@ pub struct DeleteLinkQuery {
 
 /// POST /api/v1/links — create an edge between any two nodes.
 pub async fn create_link(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateLinkRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
@@ -68,6 +68,19 @@ pub async fn create_link(
             "Invalid target: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
         )
     })?;
+
+    // ACL: writing an edge mutates the source node's bucket, and reads the
+    // target — require Write on the source and at least Read on the target.
+    crate::api::auth::enforce_node_action(
+        &auth.claims,
+        &req.source,
+        memvault_auth::Action::Write,
+    )?;
+    crate::api::auth::enforce_node_action(
+        &auth.claims,
+        &req.target,
+        memvault_auth::Action::Read,
+    )?;
 
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
 

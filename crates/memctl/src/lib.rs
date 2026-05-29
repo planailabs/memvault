@@ -2295,6 +2295,33 @@ mod native {
         });
     }
 
+    /// Write a 32-byte secret atomically with 0600 perms (Unix), so it is
+    /// never momentarily world/group-readable (no create-then-chmod TOCTOU).
+    fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| anyhow::anyhow!("create secret {path:?}: {e}"))?;
+            f.write_all(bytes)
+                .map_err(|e| anyhow::anyhow!("write secret {path:?}: {e}"))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, bytes)
+                .map_err(|e| anyhow::anyhow!("write secret {path:?}: {e}"))?;
+        }
+        Ok(())
+    }
+
     fn read_admin_seed(path: &Path) -> Result<ed25519_dalek::SigningKey> {
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow::anyhow!("read admin key {path:?}: {e}"))?;
@@ -2320,10 +2347,9 @@ mod native {
                 let mut seed = [0u8; 32];
                 rand::thread_rng().fill_bytes(&mut seed);
                 let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
-                std::fs::write(&out, seed)
-                    .map_err(|e| anyhow::anyhow!("write {out:?}: {e}"))?;
+                write_secret_file(&out, &seed)?;
                 println!("admin pubkey: {}", hex::encode(sk.verifying_key().to_bytes()));
-                println!("seed written to {out:?} (keep it secret)");
+                println!("seed written to {out:?} (0600, keep it secret)");
             }
             AdminCommands::Pop { key } => {
                 let sk = read_admin_seed(&key)?;
