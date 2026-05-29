@@ -258,12 +258,11 @@ pub struct LocalClient {
     /// (tests, headless tooling); when `None`, `verify_envelope_authorship`
     /// reports `NoSidecar` for everything (fail-open).
     trust_state: std::sync::OnceLock<crate::sigchain::LiveTrustState>,
-    /// Cluster admin pubkey of record. Pinned out-of-band: written by
-    /// `memctl genesis` (for the admin) or by `memctl cluster-join`
-    /// (for peers, extracted from the join token). The daemon loads
-    /// the file `<data_dir>/identity/cluster_admin_genesis.cbor` at
-    /// startup and installs it here. `None` for legacy data dirs that
-    /// pre-date the pin file.
+    /// Cluster admin pubkey of record. Established by `memctl genesis` (for
+    /// the admin) or `memctl cluster-join` (for peers, extracted from the
+    /// join token), and persisted in the keystore under `genesis`. The
+    /// daemon loads it from the keystore at startup and installs it here.
+    /// `None` until a cluster is established.
     pinned_admin_genesis: std::sync::OnceLock<memvault_auth::AdminGenesis>,
     /// Admin signing secrets this node holds, keyed by pubkey. A node is
     /// usually the genesis admin (one key) but during a founder→cluster
@@ -521,6 +520,59 @@ impl LocalClient {
         self.keystore
             .fetch_add_u32(&crate::tokens::token_used_key(cid), 1)
             .unwrap_or(0)
+    }
+
+    /// One-time import of legacy loose identity files into the keystore, then
+    /// delete them. Identity now lives only in the keystore (admin keys,
+    /// pinned genesis) and the redb store (cluster_id); these files
+    /// (`identity/admin.key`, `identity/cluster_admin_genesis.cbor`, and the
+    /// root `cluster_id`) are imported once and removed. Idempotent: a node
+    /// already on the keystore has no files to import. Call after the keystore
+    /// + store are open (e.g. daemon init, memctl client creation).
+    pub fn migrate_legacy_identity_files(&self, identity_dir: &std::path::Path) {
+        // admin.key → keystore adminkey:<pubkey>
+        let admin_path = identity_dir.join("admin.key");
+        if let Ok(b) = std::fs::read(&admin_path) {
+            if b.len() >= 32 {
+                let mut s = [0u8; 32];
+                s.copy_from_slice(&b[..32]);
+                self.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&s));
+            }
+            let _ = std::fs::remove_file(&admin_path);
+            tracing::info!("migrated admin.key into keystore");
+        }
+
+        // cluster_admin_genesis.cbor → keystore `genesis`
+        let gen_path = identity_dir.join("cluster_admin_genesis.cbor");
+        if let Ok(b) = std::fs::read(&gen_path) {
+            match serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b) {
+                Ok(g) if g.verify_self_signature().is_ok() => {
+                    let _ = self.persist_pinned_admin_genesis_bytes(&b);
+                    self.set_pinned_admin_genesis(g);
+                }
+                _ => tracing::warn!("legacy cluster_admin_genesis.cbor invalid; not imported"),
+            }
+            let _ = std::fs::remove_file(&gen_path);
+            tracing::info!("migrated cluster_admin_genesis into keystore");
+        }
+
+        // Root cluster_id hex file → redb store (cluster_id is not a secret;
+        // it lives in the store, mirrored to the keystore at construction).
+        if let Some(data_dir) = identity_dir.parent() {
+            let cid_path = data_dir.join("cluster_id");
+            if let Ok(hex_str) = std::fs::read_to_string(&cid_path) {
+                if let Ok(bytes) = hex::decode(hex_str.trim()) {
+                    if bytes.len() == 32 && bytes.iter().any(|&x| x != 0) {
+                        let _ = self.store.set_local_cluster_id(&bytes);
+                        if self.keystore.get(b"clusterid").as_deref() != Some(bytes.as_slice()) {
+                            let _ = self.keystore.put(b"clusterid", &bytes);
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(&cid_path);
+                tracing::info!("migrated cluster_id file into store");
+            }
+        }
     }
 
     /// Replace the cluster admin-key validity state wholesale. Called by

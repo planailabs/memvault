@@ -658,6 +658,18 @@ mod native {
                 pid
             }
         };
+        // Bridge a legacy root `cluster_id` file into the store before
+        // construction, so the client is built with the right cluster_id.
+        // (migrate_legacy_identity_files deletes the file afterwards.)
+        if store.get_local_cluster_id().ok().flatten().is_none() {
+            if let Ok(hex_str) = std::fs::read_to_string(data_dir.join("cluster_id")) {
+                if let Ok(bytes) = hex::decode(hex_str.trim()) {
+                    if bytes.len() == 32 && bytes.iter().any(|&x| x != 0) {
+                        let _ = store.set_local_cluster_id(&bytes);
+                    }
+                }
+            }
+        }
         let cluster_id = store
             .get_local_cluster_id()
             .ok()
@@ -673,21 +685,12 @@ mod native {
         )
         .map_err(|e| anyhow::anyhow!("LocalClient::open: {e}"))?;
         // The keystore is opened by LocalClient itself (beside the
-        // blockstore). Run the one-off redb→keystore token migration here
-        // where redb is available.
+        // blockstore). Import + delete any legacy loose identity files, then
+        // run the one-off redb→keystore token migration.
+        client.migrate_legacy_identity_files(&data_dir.join("identity"));
         let _ = client.migrate_tokens_to_keystore();
-        // Load admin signing key (enables token issuance): prefer the
-        // keystore, migrating a legacy admin.key file into it on first use.
-        if client.load_admin_keys_from_keystore() == 0 {
-            let admin_key_path = data_dir.join("identity").join("admin.key");
-            if let Ok(key_bytes) = std::fs::read(&admin_key_path) {
-                if key_bytes.len() >= 32 {
-                    let mut seed = [0u8; 32];
-                    seed.copy_from_slice(&key_bytes[..32]);
-                    client.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&seed));
-                }
-            }
-        }
+        // Load admin signing key (enables token issuance) from the keystore.
+        client.load_admin_keys_from_keystore();
         // Load the node signing key (the libp2p host key, design A-1).
         // Needed by anything that mints sigchain blocks — including
         // `enroll_remote_agent` on the non-daemon CLI path. Silent if
@@ -702,10 +705,9 @@ mod native {
                 let _ = client.ensure_legacy_bucket_node_owner();
             }
         }
-        // Load the pinned AdminGenesis so `token issue` embeds it for
-        // joining peers, and so peers themselves can verify trust.
-        let pin_path = data_dir.join("identity").join("cluster_admin_genesis.cbor");
-        if let Ok(pin_bytes) = std::fs::read(&pin_path) {
+        // Load the pinned AdminGenesis from the keystore so `token issue`
+        // embeds it for joining peers, and so peers can verify trust.
+        if let Some(pin_bytes) = client.pinned_admin_genesis_bytes_from_keystore() {
             match serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&pin_bytes) {
                 Ok(g) => {
                     if g.verify_self_signature().is_ok() {
@@ -782,29 +784,36 @@ mod native {
             })
     }
 
-    /// Assemble the `JoinConfig` for the swarm:
-    /// - Reads the pending join token from
-    ///   `<data_dir>/identity/pending_join_token.txt` if present (the
-    ///   joining peer's redemption credential, written by `cluster-join`).
-    /// - Reads the admin signing key from `admin.key` if present (admin
-    ///   node serves incoming joins).
-    /// - Extracts the local ed25519 pubkey from the libp2p keypair so
-    ///   the request carries proof-of-key.
-    /// - Wires `on_join_success` to remove the pending-token file.
+    /// Assemble the `JoinConfig` for the swarm, reading all identity from the
+    /// keystore (no loose files):
+    /// - `pendingtoken`: the joining peer's redemption credential.
+    /// - first `adminkey:*`: the admin signing key (admin node serves joins).
+    /// - `genesis`: the pinned AdminGenesis (its pubkey rejects foreign
+    ///   NodeAttestations at sync ingress).
+    /// - `pendingadmit`: an opt-in co-admin key to present for admission.
+    /// `on_join_success` clears `pendingtoken` and, on a co-admin admission,
+    /// promotes `pendingadmit` to a held `adminkey:` (activated live).
     fn build_join_config(
         data_dir: &Path,
         cluster_id: &[u8],
         keypair: &libp2p::identity::Keypair,
     ) -> Result<memvault_swarm::JoinConfig> {
-        let pending_token_path = data_dir.join("identity").join("pending_join_token.txt");
-        let pending_token = std::fs::read_to_string(&pending_token_path)
-            .ok()
+        let identity_dir = data_dir.join("identity");
+        let keystore = memvault_api::keystore_open::open_token_keystore(&identity_dir)
+            .map_err(|e| anyhow::anyhow!("open keystore: {e}"))?;
+
+        let pending_token = keystore
+            .get(b"pendingtoken")
+            .and_then(|b| String::from_utf8(b).ok())
             .map(|s| s.trim().to_string())
             .filter(|s| s.starts_with("mvjoin1:"));
 
-        let admin_signing_key = std::fs::read(data_dir.join("identity").join("admin.key"))
-            .ok()
-            .filter(|b| b.len() >= 32)
+        let admin_signing_key = keystore
+            .keys_with_prefix(b"adminkey:")
+            .into_iter()
+            .next()
+            .and_then(|k| keystore.get(&k))
+            .filter(|b| b.len() == 32)
             .map(|b| {
                 let mut seed = [0u8; 32];
                 seed.copy_from_slice(&b[..32]);
@@ -813,13 +822,11 @@ mod native {
 
         // Pinned admin verifying key — sync uses it to reject foreign
         // NodeAttestations BEFORE storing them.
-        let pinned_admin_pubkey = std::fs::read(
-            data_dir.join("identity").join("cluster_admin_genesis.cbor"),
-        )
-        .ok()
-        .and_then(|b| serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok())
-        .filter(|g| g.verify_self_signature().is_ok())
-        .map(|g| g.admin_pubkey);
+        let pinned_admin_pubkey = keystore
+            .get(b"genesis")
+            .and_then(|b| serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok())
+            .filter(|g| g.verify_self_signature().is_ok())
+            .map(|g| g.admin_pubkey);
 
         // Hard-fail: the swarm-side node pubkey MUST match the libp2p
         // identity it's serving with. A zero pubkey would silently break
@@ -836,15 +843,12 @@ mod native {
             cluster_arr.copy_from_slice(cluster_id);
         }
 
-        // Opt-in co-admin join: if `cluster-join --admit-as-admin` stashed a
-        // key at identity/pending_admit_admin.key, present it for admission.
-        // `send_join_request` signs a fresh POP with it; the admin only mints
-        // an AdminKeyAdmission if the redeemed token has `admit_as_admin`.
-        let identity_dir = data_dir.join("identity");
-        let pending_admit_path = identity_dir.join("pending_admit_admin.key");
-        let admit_seed: Option<[u8; 32]> = std::fs::read(&pending_admit_path)
-            .ok()
-            .filter(|b| b.len() >= 32)
+        // Opt-in co-admin join: `cluster-join --admit-as-admin` stashed a key
+        // under `pendingadmit`. `send_join_request` signs a fresh POP with it;
+        // the admin only mints an AdminKeyAdmission if the token allows it.
+        let admit_seed: Option<[u8; 32]> = keystore
+            .get(b"pendingadmit")
+            .filter(|b| b.len() == 32)
             .map(|b| {
                 let mut seed = [0u8; 32];
                 seed.copy_from_slice(&b[..32]);
@@ -852,44 +856,30 @@ mod native {
             });
         let admit_admin_key = admit_seed.map(|s| ed25519_dalek::SigningKey::from_bytes(&s));
 
-        let pending_token_path_for_cb = pending_token_path.clone();
-        let identity_dir_cb = identity_dir.clone();
+        let ks_cb = std::sync::Arc::clone(&keystore);
         let on_join_success: std::sync::Arc<dyn Fn() + Send + Sync> =
             std::sync::Arc::new(move || {
-                let _ = std::fs::remove_file(&pending_token_path_for_cb);
-                // On a successful admission, persist the admitted admin secret
-                // into the keystore. The running client's admin-key rescan
-                // (triggered when the AdminKeyAdmission block lands) then
-                // activates it live — no restart. Only on success: a refused
-                // admission leaves the pending key untouched and unused.
+                let _ = ks_cb.delete(b"pendingtoken");
+                // On a successful admission, promote the staged admit key to a
+                // held admin key in the keystore. The running client's
+                // admin-key rescan (fired when the AdminKeyAdmission block
+                // lands) then activates it live — no restart. Only on success;
+                // a refused admission leaves `pendingadmit` untouched.
                 if let Some(seed) = admit_seed {
-                    let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
-                    let pubkey = sk.verifying_key().to_bytes();
-                    match memvault_api::keystore_open::open_token_keystore(&identity_dir_cb) {
-                        Ok(ks) => {
-                            let key = format!("adminkey:{}", hex::encode(pubkey));
-                            if let Err(e) = ks.put(key.as_bytes(), &seed) {
-                                tracing::warn!(error = %e, "could not store admitted admin key");
-                            } else {
-                                let _ = std::fs::remove_file(
-                                    identity_dir_cb.join("pending_admit_admin.key"),
-                                );
-                                tracing::info!(
-                                    "/join/1.0 admitted this node as co-admin; admin key activated"
-                                );
-                            }
-                        }
-                        Err(e) => tracing::warn!(error = %e, "open keystore to store admin key"),
+                    let pubkey =
+                        ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+                    let key = format!("adminkey:{}", hex::encode(pubkey));
+                    if let Err(e) = ks_cb.put(key.as_bytes(), &seed) {
+                        tracing::warn!(error = %e, "could not store admitted admin key");
+                    } else {
+                        let _ = ks_cb.delete(b"pendingadmit");
+                        tracing::info!(
+                            "/join/1.0 admitted this node as co-admin; admin key activated"
+                        );
                     }
                 }
-                tracing::info!("/join/1.0 success; cleared pending token file");
+                tracing::info!("/join/1.0 success; cleared pending token");
             });
-
-        // Share the token keystore so the libp2p admin join path enforces
-        // the same revocation + max_uses state as HTTP enrollment (tokens
-        // now live off redb). Best-effort: None falls back to redb.
-        let keystore =
-            memvault_api::keystore_open::open_token_keystore(&identity_dir).ok();
 
         Ok(memvault_swarm::JoinConfig {
             pending_token,
@@ -898,7 +888,7 @@ mod native {
             pinned_admin_pubkey,
             cluster_id: cluster_arr,
             admit_admin_key,
-            keystore,
+            keystore: Some(keystore),
             on_join_success: Some(on_join_success),
         })
     }
@@ -920,14 +910,10 @@ mod native {
             .set_local_peer_id(&peer_id_bytes)
             .map_err(|e| anyhow::anyhow!("PeerId reconciliation: {e}"))?;
 
+        // cluster_id is authoritative in the store (create_client* imported
+        // any legacy file before this spawn).
         let cluster_id = store
             .get_local_cluster_id()?
-            .or_else(|| {
-                let id_path = data_dir.join("cluster_id");
-                std::fs::read_to_string(&id_path)
-                    .ok()
-                    .and_then(|hex| hex::decode(hex.trim()).ok())
-            })
             .unwrap_or_else(|| vec![0u8; 32]);
 
         let sync_config = memvault_swarm::SyncConfig {
@@ -1147,44 +1133,24 @@ mod native {
                 std::fs::create_dir_all(&data_dir)?;
                 let cluster_id = ClusterId::random();
                 let id_hex = hex::encode(cluster_id.0);
-                let id_path = data_dir.join("cluster_id");
-                std::fs::write(&id_path, id_hex.as_bytes())?;
                 std::fs::create_dir_all(data_dir.join("identity"))?;
                 std::fs::create_dir_all(data_dir.join("trust"))?;
 
                 let store = make_store()?;
                 store.set_local_cluster_id(&cluster_id.0)?;
 
-                // Generate admin signing key (for token issuance).
-                let admin_key_path = data_dir.join("identity").join("admin.key");
-                if !admin_key_path.exists() {
-                    let mut seed = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
-                    write_secret_file(&admin_key_path, &seed)?;
-                }
-
-                // Write the AdminGenesis pin file — this is the cluster's
-                // root of trust for peers. Self-signed; the matching
-                // signing key just got persisted above.
-                let admin_key_bytes = std::fs::read(&admin_key_path)?;
-                if admin_key_bytes.len() >= 32 {
-                    let mut seed = [0u8; 32];
-                    seed.copy_from_slice(&admin_key_bytes[..32]);
-                    let admin_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
-                    let now_ns = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0);
-                    let genesis = memvault_auth::sign_admin_genesis(
-                        &admin_sk,
-                        cluster_id.clone(),
-                        now_ns,
-                    )?;
-                    let pin_path = data_dir
-                        .join("identity")
-                        .join("cluster_admin_genesis.cbor");
-                    std::fs::write(&pin_path, serde_ipld_dagcbor::to_vec(&genesis)?)?;
-                }
+                // Generate the admin signing key and self-sign the cluster's
+                // AdminGenesis (root of trust). Both are persisted into the
+                // keystore below via the client — no loose identity files.
+                let mut seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+                let admin_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let genesis =
+                    memvault_auth::sign_admin_genesis(&admin_sk, cluster_id.clone(), now_ns)?;
 
                 // Optionally bind an existing bucket to the cluster.
                 if let Some(ref bucket_hex) = bucket {
@@ -1205,20 +1171,19 @@ mod native {
                     println!("  Rebound {rebound} pre-existing bucket(s) to new cluster.");
                 }
 
-                // Open a client once so the identity constructs land in the
-                // keystore (admin key, genesis, cluster_id, peer_id) — the
-                // intended store. This makes the keystore-only `token issue`
-                // work immediately, with no daemon run in between, and no
-                // dependence on the loose identity-dir files.
-                let _ = create_client_with_data_dir(store, &data_dir)?;
+                // Persist identity into the keystore (the intended store) via
+                // a client: construction records peer_id + cluster_id; the
+                // setters persist the admin key + genesis. No loose files.
+                let client = create_client_with_data_dir(store, &data_dir)?;
+                client.set_admin_signing_key(admin_sk);
+                client.set_pinned_admin_genesis(genesis);
 
                 println!("Cluster genesis complete.");
                 println!("  Cluster ID:      {id_hex}");
                 println!("  Data dir:        {}", data_dir.display());
                 if let Some(key_path) = admin_key {
-                    println!("  Admin key:       {}", key_path.display());
+                    println!("  Admin key arg:   {} (ignored; key generated)", key_path.display());
                 }
-                println!("\nCluster ID written to {}", id_path.display());
             }
             Commands::Put {
                 text,
@@ -1948,23 +1913,18 @@ mod native {
                     .set_local_peer_id(&peer_id_bytes)
                     .map_err(|e| anyhow::anyhow!("PeerId reconciliation failed: {e}"))?;
 
-                // Read cluster_id from store or file
-                let cluster_id_bytes = store
-                    .get_local_cluster_id()?
-                    .or_else(|| {
-                        let id_path = data_dir.join("cluster_id");
-                        std::fs::read_to_string(&id_path)
-                            .ok()
-                            .and_then(|hex| hex::decode(hex.trim()).ok())
-                    })
-                    .unwrap_or_else(|| vec![0u8; 32]);
-
                 let event_bus_shared = std::sync::Arc::new(EventBus::new(256));
                 let client = create_client_with_bus(
                     store.clone(),
                     &data_dir,
                     std::sync::Arc::clone(&event_bus_shared),
                 )?;
+
+                // cluster_id is authoritative in the store after the client
+                // build (which imports any legacy cluster_id file).
+                let cluster_id_bytes = store
+                    .get_local_cluster_id()?
+                    .unwrap_or_else(|| vec![0u8; 32]);
 
                 // Rebuild derived state if blockstore version is outdated.
                 // Load or rebuild the full-text search index
@@ -2160,28 +2120,26 @@ mod native {
 
                 let store = make_store()?;
                 store.set_local_cluster_id(&cluster_id.0)?;
-
-                let id_path = data_dir.join("cluster_id");
-                std::fs::create_dir_all(&data_dir)?;
-                std::fs::write(&id_path, cluster_hex.as_bytes())?;
+                std::fs::create_dir_all(data_dir.join("identity"))?;
 
                 let rebound = store.bind_unbound_buckets(&cluster_id.0)?;
                 if rebound > 0 {
                     println!("Rebound {rebound} existing bucket(s) to cluster.");
                 }
 
-                std::fs::create_dir_all(data_dir.join("identity"))?;
-                let pin_path = data_dir.join("identity").join("cluster_admin_genesis.cbor");
-                std::fs::write(&pin_path, serde_ipld_dagcbor::to_vec(&genesis)?)?;
+                // Persist trust into the keystore (no loose files): construct
+                // a client (records peer_id + cluster_id), pin the genesis,
+                // and stash the pending token there for the swarm to redeem.
+                let client = create_client_with_data_dir(store, &data_dir)?;
+                client.set_pinned_admin_genesis(genesis.clone());
+                client
+                    .keystore()
+                    .put(b"pendingtoken", token.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("stash pending token: {e}"))?;
                 println!("  Admin pinned:  {}", hex::encode(genesis.admin_pubkey));
+                println!("  Token stashed in keystore (redeemed via /join/1.0).");
 
-                // Stash the token so the swarm can redeem it via /join/1.0
-                // on next daemon start. Removed after a successful Success.
-                let token_path = data_dir.join("identity").join("pending_join_token.txt");
-                std::fs::write(&token_path, &token)?;
-                println!("  Token stashed: {}", token_path.display());
-
-                // NOTE: do NOT mint a local admin.key here. Peers are not
+                // NOTE: do NOT mint a local admin key here. Peers are not
                 // admins — unless the operator asked for co-admin admission.
                 if admit_as_admin {
                     if !parsed.admit_as_admin {
@@ -2193,15 +2151,14 @@ mod native {
                     let mut seed = [0u8; 32];
                     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
                     let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
-                    let admit_path = data_dir.join("identity").join("pending_admit_admin.key");
-                    write_secret_file(&admit_path, &seed)?;
+                    client
+                        .keystore()
+                        .put(b"pendingadmit", &seed)
+                        .map_err(|e| anyhow::anyhow!("stash pending admit key: {e}"))?;
                     println!(
-                        "  Admin key staged: {} (pubkey {})",
-                        admit_path.display(),
+                        "  Admin key staged in keystore (pubkey {}); activated live on a \
+                         successful join.",
                         hex::encode(sk.verifying_key().to_bytes())
-                    );
-                    println!(
-                        "  On a successful join it is promoted to admin.key; restart to activate."
                     );
                 }
 

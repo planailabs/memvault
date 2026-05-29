@@ -69,8 +69,8 @@ pub struct JoinConfig {
     /// Admin signing key, set only on the admin node. When present, this
     /// node serves incoming `JoinRequest`s by minting a `NodeAttestation`.
     pub admin_signing_key: Option<ed25519_dalek::SigningKey>,
-    /// Cluster admin VERIFYING key, from the local pin file
-    /// (`cluster_admin_genesis.cbor`). Used by the sync receiver to
+    /// Cluster admin VERIFYING key, from the pinned `genesis` in the
+    /// keystore. Used by the sync receiver to
     /// signature-verify incoming `NodeAttestation` blocks BEFORE they
     /// land in the store — sync is otherwise a wide-open block ingress
     /// path and an unsigned-or-foreign-admin attestation would corrupt
