@@ -17,7 +17,8 @@ use crate::error::{ApiError, Result};
 use crate::local::LocalClient;
 use memvault_auth::jwt::NodeTrust;
 use memvault_auth::{
-    AdminGenesis, AgentAttestation, AgentRevocation, NodeAttestation, NodeRevocation,
+    AdminGenesis, AdminKeyAdmission, AdminKeyRetirement, AdminKeyState, AgentAttestation,
+    AgentRevocation, NodeAttestation, NodeRevocation,
 };
 use memvault_store::insert::EnvelopeMeta;
 
@@ -27,6 +28,8 @@ const LABEL_NODE_ATT: &str = "node_att";
 const LABEL_AGENT_ATT: &str = "agent_att";
 const LABEL_AGENT_REV: &str = "agent_rev";
 const LABEL_NODE_REV: &str = "node_rev";
+const LABEL_ADMIN_ADMISSION: &str = "admin_admission";
+const LABEL_ADMIN_RETIREMENT: &str = "admin_retirement";
 
 fn write_block(client: &LocalClient, label: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     write_block_with_extra_tags(client, label, bytes, Vec::new())
@@ -110,6 +113,164 @@ pub fn scan_admin_genesis(client: &LocalClient) -> Result<Vec<AdminGenesis>> {
         out.push(g);
     }
     Ok(out)
+}
+
+/// Persist an [`AdminKeyAdmission`] block (multi-admin: a new co-equal
+/// admin key admitted by an existing admin).
+pub fn publish_admin_admission(
+    client: &LocalClient,
+    admission: &AdminKeyAdmission,
+) -> Result<Vec<u8>> {
+    let bytes = serde_ipld_dagcbor::to_vec(admission)
+        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    write_block(client, LABEL_ADMIN_ADMISSION, &bytes)
+}
+
+/// Persist an [`AdminKeyRetirement`] block.
+pub fn publish_admin_retirement(
+    client: &LocalClient,
+    retirement: &AdminKeyRetirement,
+) -> Result<Vec<u8>> {
+    let bytes = serde_ipld_dagcbor::to_vec(retirement)
+        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    write_block(client, LABEL_ADMIN_RETIREMENT, &bytes)
+}
+
+/// Rebuild the cluster's [`AdminKeyState`] from the pinned anchor plus
+/// every admission/retirement envelope on the chain, and install it on
+/// the client.
+///
+/// **Security model.** This is the *only* path that mutates the admin-key
+/// set, and it always rebuilds from scratch in a deterministic order —
+/// never incrementally from block arrival order. That closes the
+/// reorder attack where a retirement observed before its target's
+/// admission would otherwise leave a retired key valid.
+///
+/// Ordering: events are sorted by `(timestamp, cid)` where `timestamp` is
+/// the envelope's own signed `admitted_at_ns` / `retired_at_ns` (so it's
+/// tamper-evident) and `cid` is a deterministic tiebreak. Each event is
+/// applied only if its signer was a cluster-valid admin *at that
+/// timestamp* per the state built so far — anchored at the pinned admin.
+/// A non-admin therefore cannot inject either envelope.
+///
+/// Invariants enforced while applying:
+/// - admission: `admitting_pubkey` valid at `admitted_at_ns`; POP and
+///   admitting signature verify; cluster matches.
+/// - retirement: `retiring_pubkey` valid at `retired_at_ns`; signature
+///   verifies; `retiring_pubkey != retired_pubkey`; and at least one
+///   *other* admin key remains valid at `retired_at_ns` (no admin
+///   lockout).
+pub fn rebuild_admin_key_state(
+    client: &LocalClient,
+    anchor: &ed25519_dalek::VerifyingKey,
+) -> Result<()> {
+    let cluster_id = client.cluster_id();
+    let mut state = AdminKeyState::new_with_bootstrap(anchor.to_bytes(), 0);
+
+    enum Event {
+        Admit(Box<AdminKeyAdmission>),
+        Retire(Box<AdminKeyRetirement>),
+    }
+
+    let mut events: Vec<(u64, Vec<u8>, Event)> = Vec::new();
+
+    for bytes in load_blocks_by_label(client, LABEL_ADMIN_ADMISSION)? {
+        let adm: AdminKeyAdmission = match serde_ipld_dagcbor::from_slice(&bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping corrupt admin_admission block");
+                continue;
+            }
+        };
+        if adm.cluster_id.0.as_slice() != cluster_id {
+            continue;
+        }
+        // Self-contained checks: admitting signature + incoming POP.
+        if adm.verify().is_err() {
+            tracing::warn!(
+                new = %hex::encode(adm.new_pubkey),
+                "skipping admin_admission: bad signature or POP"
+            );
+            continue;
+        }
+        let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+        events.push((adm.admitted_at_ns, cid, Event::Admit(Box::new(adm))));
+    }
+
+    for bytes in load_blocks_by_label(client, LABEL_ADMIN_RETIREMENT)? {
+        let ret: AdminKeyRetirement = match serde_ipld_dagcbor::from_slice(&bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping corrupt admin_retirement block");
+                continue;
+            }
+        };
+        if ret.cluster_id.0.as_slice() != cluster_id {
+            continue;
+        }
+        if ret.verify_retiring_signature().is_err() {
+            tracing::warn!(
+                retired = %hex::encode(ret.retired_pubkey),
+                "skipping admin_retirement: bad signature"
+            );
+            continue;
+        }
+        let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+        events.push((ret.retired_at_ns, cid, Event::Retire(Box::new(ret))));
+    }
+
+    // Deterministic total order: timestamp, then CID.
+    events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    for (ts, tie, ev) in events {
+        match ev {
+            Event::Admit(adm) => {
+                // Signer must be a cluster-valid admin at admission time.
+                if !state.is_key_valid_at(&adm.admitting_pubkey, ts) {
+                    tracing::warn!(
+                        admitting = %hex::encode(adm.admitting_pubkey),
+                        "skipping admin_admission: admitting key not a valid admin at admission time"
+                    );
+                    continue;
+                }
+                // `introduced_by` is an audit-only pointer; the tie value
+                // is the admission's CID bytes but reconstructing a typed
+                // Cid here would pull in the `cid` crate. Audit tooling can
+                // resolve the admission via its tag, so leave it None.
+                let _ = &tie;
+                state.apply_admission(&adm, None);
+            }
+            Event::Retire(ret) => {
+                if !state.is_key_valid_at(&ret.retiring_pubkey, ts) {
+                    tracing::warn!(
+                        retiring = %hex::encode(ret.retiring_pubkey),
+                        "skipping admin_retirement: retiring key not a valid admin at retirement time"
+                    );
+                    continue;
+                }
+                if ret.retiring_pubkey == ret.retired_pubkey {
+                    tracing::warn!("skipping admin_retirement: self-retirement is not allowed");
+                    continue;
+                }
+                // No-lockout: at least one OTHER key valid at retirement time.
+                let others_valid = state
+                    .valid_keys_at(ret.retired_at_ns)
+                    .into_iter()
+                    .any(|k| k != ret.retired_pubkey);
+                if !others_valid {
+                    tracing::warn!(
+                        retired = %hex::encode(ret.retired_pubkey),
+                        "skipping admin_retirement: would leave the cluster with no valid admin"
+                    );
+                    continue;
+                }
+                state.apply_retirement(&ret);
+            }
+        }
+    }
+
+    client.set_admin_key_state(state);
+    Ok(())
 }
 
 /// Persist a node `NodeAttestation` so it survives daemon restart and
@@ -372,7 +533,14 @@ fn rescan_into(
     admin_pubkey: Option<&ed25519_dalek::VerifyingKey>,
     state: &LiveTrustState,
 ) {
-    if let Ok(nodes) = scan_trusted_nodes(client, admin_pubkey) {
+    // Rebuild the multi-admin key set from the chain first (anchored at
+    // the pinned admin), so node attestations signed by any admitted
+    // admin verify. Then derive the live key set for the scans below.
+    if let Some(anchor) = admin_pubkey {
+        let _ = rebuild_admin_key_state(client, anchor);
+    }
+    let admin_keys = client.admin_verifying_keys();
+    if let Ok(nodes) = scan_trusted_nodes(client, &admin_keys) {
         if let Ok(mut w) = state.node_trust.write() {
             // Preserve in-memory-only PreGenesis entries (the local node's
             // self-trust seed before genesis). Persisted attestations
@@ -387,7 +555,7 @@ fn rescan_into(
         .read()
         .map(|m| m.clone())
         .unwrap_or_default();
-    if let Ok((agents, nodes)) = scan_revocations(client, admin_pubkey, &nt_snapshot) {
+    if let Ok((agents, nodes)) = scan_revocations(client, &admin_keys, &nt_snapshot) {
         if let Ok(mut w) = state.revoked_agents.write() {
             *w = agents;
         }
@@ -418,12 +586,15 @@ fn apply_sigchain_block(
                 tracing::warn!("sigchain watcher: bad NodeAttestation bytes");
                 return;
             };
-            // Verify against admin if we have one. Pre-genesis: nothing to
-            // verify against, so peer attestations are ignored — only the
-            // local self-trust seed (installed by bootstrap_cluster_trust) counts.
-            let Some(admin) = admin_pubkey else { return };
-            if att.verify_signature(admin).is_err() {
-                tracing::warn!("sigchain watcher: NodeAttestation signature invalid");
+            // Verify against any known cluster admin key. Pre-genesis:
+            // empty set, so peer attestations are ignored — only the local
+            // self-trust seed (installed by bootstrap_cluster_trust) counts.
+            let admin_keys = client.admin_verifying_keys();
+            if admin_keys.is_empty() {
+                return;
+            }
+            if !admin_keys.iter().any(|k| att.verify_signature(k).is_ok()) {
+                tracing::warn!("sigchain watcher: NodeAttestation verifies against no known admin");
                 return;
             }
             if att.member.0.len() != 32 {
@@ -481,8 +652,11 @@ fn apply_sigchain_block(
                 tracing::warn!("sigchain watcher: bad NodeRevocation bytes");
                 return;
             };
-            let Some(admin) = admin_pubkey else { return };
-            if rev.admin_pubkey != admin.to_bytes() {
+            // Accept if the embedded admin_pubkey is any known cluster admin
+            // and the signature verifies against it.
+            let admin_keys = client.admin_verifying_keys();
+            let known_admin = admin_keys.iter().any(|k| k.to_bytes() == rev.admin_pubkey);
+            if !known_admin {
                 return;
             }
             if rev.verify_signature().is_err() {
@@ -493,6 +667,18 @@ fn apply_sigchain_block(
             }
             // Every agent attested by this node is now transitively untrusted.
             refresh_trusted_agents(client, state);
+        }
+        LABEL_ADMIN_ADMISSION | LABEL_ADMIN_RETIREMENT => {
+            // Admin-key set changed. SECURITY: never apply incrementally
+            // from arrival order — a retirement could be observed before
+            // the admission that introduced its target. Always do a full
+            // sorted rescan anchored at the pinned admin, then refresh the
+            // dependent caches (node trust depends on the admin set).
+            if let Some(anchor) = admin_pubkey {
+                if rebuild_admin_key_state(client, anchor).is_ok() {
+                    rescan_into(client, admin_pubkey, state);
+                }
+            }
         }
         // AgentAttestation / EnvelopeAuthorship are looked up on demand by
         // the verifier — no live mutation needed.
@@ -638,13 +824,13 @@ fn load_blocks_by_label(
 /// entries are dropped — only the local self-trust seed counts.
 pub fn scan_trusted_nodes(
     client: &LocalClient,
-    admin_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+    admin_keys: &[ed25519_dalek::VerifyingKey],
 ) -> Result<HashMap<[u8; 32], NodeTrust>> {
     let mut out = HashMap::new();
-    let Some(pk) = admin_pubkey else {
+    if admin_keys.is_empty() {
         // Pre-genesis: no trust root, so no attestation can be verified.
         return Ok(out);
-    };
+    }
     for bytes in load_blocks_by_label(client, LABEL_NODE_ATT)? {
         let att: NodeAttestation = match serde_ipld_dagcbor::from_slice(&bytes) {
             Ok(a) => a,
@@ -653,11 +839,11 @@ pub fn scan_trusted_nodes(
                 continue;
             }
         };
-        if let Err(e) = att.verify_signature(pk) {
+        // Multi-admin: accept if ANY known cluster admin key verifies it.
+        if !admin_keys.iter().any(|k| att.verify_signature(k).is_ok()) {
             tracing::warn!(
-                error = %e,
                 member = %hex::encode(&att.member.0),
-                "skipping node attestation: signature does not verify against current admin"
+                "skipping node attestation: signature does not verify against any known admin"
             );
             continue;
         }
@@ -679,10 +865,12 @@ pub fn scan_trusted_nodes(
 /// signatures (the revocation must be signed by the same node that
 /// originally attested the agent).
 ///
-/// `admin_pubkey` (post-genesis only) verifies `NodeRevocation` signatures.
+/// `admin_keys` (post-genesis only) verifies `NodeRevocation` signatures —
+/// a revocation is accepted if its embedded `admin_pubkey` is one of the
+/// cluster's known admin keys and the signature verifies against it.
 pub fn scan_revocations(
     client: &LocalClient,
-    admin_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+    admin_keys: &[ed25519_dalek::VerifyingKey],
     node_trust: &HashMap<[u8; 32], NodeTrust>,
 ) -> Result<(HashSet<[u8; 32]>, HashSet<[u8; 32]>)> {
     let mut agents = HashSet::new();
@@ -715,7 +903,9 @@ pub fn scan_revocations(
         agents.insert(rev.agent_pubkey);
     }
 
-    if let Some(admin_pk) = admin_pubkey {
+    if !admin_keys.is_empty() {
+        let admin_key_bytes: HashSet<[u8; 32]> =
+            admin_keys.iter().map(|k| k.to_bytes()).collect();
         for bytes in load_blocks_by_label(client, LABEL_NODE_REV)? {
             let rev: NodeRevocation = match serde_ipld_dagcbor::from_slice(&bytes) {
                 Ok(r) => r,
@@ -724,12 +914,12 @@ pub fn scan_revocations(
                     continue;
                 }
             };
-            // Embedded admin_pubkey must match current admin AND signature
-            // must verify against it.
-            if rev.admin_pubkey != admin_pk.to_bytes() {
+            // Embedded admin_pubkey must be one of the cluster's known
+            // admin keys AND the signature must verify against it.
+            if !admin_key_bytes.contains(&rev.admin_pubkey) {
                 tracing::warn!(
                     node = %hex::encode(rev.node_pubkey),
-                    "skipping node revocation: admin_pubkey doesn't match current admin"
+                    "skipping node revocation: admin_pubkey is not a known cluster admin"
                 );
                 continue;
             }

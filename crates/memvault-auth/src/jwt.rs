@@ -165,7 +165,7 @@ pub enum NodeTrust {
 /// `exp` is always enforced.
 pub fn verify<FA, FN>(
     token: &str,
-    admin_pubkey: Option<&VerifyingKey>,
+    admin_keys: &[VerifyingKey],
     lookup_agent: FA,
     lookup_node: FN,
 ) -> Result<AgentTokenClaims>
@@ -259,14 +259,25 @@ where
     })?;
     match trust {
         NodeTrust::Attested(node_att) => {
-            let admin_pk = admin_pubkey.ok_or_else(|| {
-                AuthError::InvalidToken(
+            if admin_keys.is_empty() {
+                return Err(AuthError::InvalidToken(
                     "no admin pubkey configured but node has an admin-signed attestation".into(),
-                )
-            })?;
-            node_att
-                .verify_signature(admin_pk)
-                .map_err(|e| AuthError::InvalidToken(format!("node attestation: {e}")))?;
+                ));
+            }
+            // Multi-admin: the attestation is valid if ANY currently-known
+            // cluster admin key verifies it. Node attestations carry no
+            // issue timestamp, so we accept against the full admin set
+            // (availability over time-windowing — a retired admin's prior
+            // attestations stay valid, matching the grant model; compromise
+            // response is node revocation, not key retirement alone).
+            let ok = admin_keys
+                .iter()
+                .any(|k| node_att.verify_signature(k).is_ok());
+            if !ok {
+                return Err(AuthError::InvalidToken(
+                    "node attestation: no configured admin key verifies the signature".into(),
+                ));
+            }
             if node_att.member.0 != agent_att.node_pubkey.as_slice() {
                 return Err(AuthError::InvalidToken(
                     "node_pubkey mismatch between agent attestation and looked-up node attestation"
@@ -275,9 +286,9 @@ where
             }
         }
         NodeTrust::PreGenesis => {
-            if admin_pubkey.is_some() {
+            if !admin_keys.is_empty() {
                 return Err(AuthError::InvalidToken(
-                    "PreGenesis trust returned but admin_pubkey is configured — \
+                    "PreGenesis trust returned but admin keys are configured — \
                      lookup table is stale; re-issue node attestation post-genesis"
                         .into(),
                 ));
@@ -347,7 +358,7 @@ mod tests {
         let (tok, admin_pk, n_att, a_att) = build_token("read write", 300);
         let claims = verify(
             &tok,
-            Some(&admin_pk),
+            &[admin_pk],
             |_| Some(a_att.clone()),
             |_| Some(NodeTrust::Attested(n_att.clone())),
         )
@@ -374,7 +385,7 @@ mod tests {
         let tok = issue(&agent, "alice", "read", 300).unwrap();
         let claims = verify(
             &tok,
-            None,
+            &[],
             |_| Some(a_att.clone()),
             |_| Some(NodeTrust::PreGenesis),
         )
@@ -388,7 +399,7 @@ mod tests {
         assert!(
             verify(
                 &tok,
-                Some(&admin_pk),
+                &[admin_pk],
                 |_| Some(a_att.clone()),
                 |_| Some(NodeTrust::PreGenesis),
             )
@@ -402,7 +413,7 @@ mod tests {
         assert!(
             verify(
                 &tok,
-                None,
+                &[],
                 |_| Some(a_att.clone()),
                 |_| Some(NodeTrust::Attested(n_att.clone())),
             )
@@ -414,7 +425,7 @@ mod tests {
     fn rejects_unknown_agent() {
         let (tok, admin_pk, _, _) = build_token("read", 300);
         assert!(
-            verify(&tok, Some(&admin_pk), |_| None, |_| None).is_err()
+            verify(&tok, &[admin_pk], |_| None, |_| None).is_err()
         );
     }
 
@@ -422,7 +433,7 @@ mod tests {
     fn rejects_unknown_node() {
         let (tok, admin_pk, _, a_att) = build_token("read", 300);
         assert!(
-            verify(&tok, Some(&admin_pk), |_| Some(a_att.clone()), |_| None)
+            verify(&tok, &[admin_pk], |_| Some(a_att.clone()), |_| None)
                 .is_err()
         );
     }
@@ -434,7 +445,7 @@ mod tests {
         assert!(
             verify(
                 &tok,
-                Some(&other_admin.verifying_key()),
+                &[other_admin.verifying_key()],
                 |_| Some(a_att.clone()),
                 |_| Some(NodeTrust::Attested(n_att.clone())),
             )
@@ -453,7 +464,7 @@ mod tests {
         assert!(
             verify(
                 &tampered,
-                Some(&admin_pk),
+                &[admin_pk],
                 |_| Some(a_att.clone()),
                 |_| Some(NodeTrust::Attested(n_att.clone())),
             )
@@ -467,7 +478,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(2));
         let err = verify(
             &tok,
-            Some(&admin_pk),
+            &[admin_pk],
             |_| Some(a_att.clone()),
             |_| Some(NodeTrust::Attested(n_att.clone())),
         )

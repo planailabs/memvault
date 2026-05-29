@@ -739,7 +739,7 @@ async fn rebuild_retags_sigchain_blocks() {
     // (not just tagged garbage).
     let scanned_nodes = sigchain::scan_trusted_nodes(
         &client,
-        Some(&client.admin_signing_key().unwrap().verifying_key()),
+        &[client.admin_signing_key().unwrap().verifying_key()],
     )
     .expect("scan_trusted_nodes");
     assert!(

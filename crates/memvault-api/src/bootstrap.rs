@@ -168,7 +168,17 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
     // already loaded a real `NodeTrust::Attested(_)` for our pubkey
     // (i.e. admin previously attested us and it synced over), do NOT
     // clobber it.
-    let mut node_trust_map = sigchain::scan_trusted_nodes(client, admin_pubkey.as_ref())?;
+    // Seed the admin-key state from the pinned anchor, then rebuild it
+    // from any admission/retirement envelopes on the chain so the full
+    // multi-admin key set is available for verification. (The rescan is
+    // a no-op beyond the anchor until admin envelopes exist.)
+    if let Some(anchor) = admin_pubkey.as_ref() {
+        client.seed_admin_anchor(anchor.to_bytes());
+        sigchain::rebuild_admin_key_state(client, anchor)?;
+    }
+    let admin_keys = client.admin_verifying_keys();
+
+    let mut node_trust_map = sigchain::scan_trusted_nodes(client, &admin_keys)?;
     let local_is_pre_genesis = matches!(node_trust_entry, NodeTrust::PreGenesis);
     let scanned_has_local = node_trust_map.contains_key(&node_pubkey_bytes);
     if !(local_is_pre_genesis && scanned_has_local) {
@@ -177,7 +187,7 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
 
     // (Step 4) Revocations.
     let (revoked_agents_set, revoked_nodes_set) =
-        sigchain::scan_revocations(client, admin_pubkey.as_ref(), &node_trust_map)?;
+        sigchain::scan_revocations(client, &admin_keys, &node_trust_map)?;
 
     let node_trust = Arc::new(RwLock::new(node_trust_map));
     let revoked_agents = Arc::new(RwLock::new(revoked_agents_set));

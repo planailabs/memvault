@@ -422,6 +422,55 @@ impl LocalClient {
             .unwrap_or(false)
     }
 
+    /// Every admin verifying key the cluster has ever known (anchor +
+    /// admitted + rotated + retired), as parsed `VerifyingKey`s. Node
+    /// attestations / revocations are verified against this full set
+    /// (they carry no issue timestamp); the anchor sorts first.
+    /// Empty pre-genesis.
+    pub fn admin_verifying_keys(&self) -> Vec<ed25519_dalek::VerifyingKey> {
+        let state = match self.admin_key_state.read() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(state.keys.len());
+        if let Some(anchor) = state.anchor {
+            if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&anchor) {
+                out.push(vk);
+            }
+        }
+        for k in state.keys.keys() {
+            if Some(*k) == state.anchor {
+                continue;
+            }
+            if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(k) {
+                out.push(vk);
+            }
+        }
+        out
+    }
+
+    /// Ensure `anchor` is present in `admin_key_state` as the anchor admin
+    /// key, without requiring the secret. Used on peer nodes that pin the
+    /// admin pubkey at join but hold no admin secret, so verification has
+    /// a key set to work with before the full chain rescan runs.
+    pub fn seed_admin_anchor(&self, anchor: [u8; 32]) {
+        if let Ok(mut state) = self.admin_key_state.write() {
+            if state.anchor.is_none() {
+                *state = memvault_auth::AdminKeyState::new_with_bootstrap(anchor, 0);
+            } else if !state.keys.contains_key(&anchor) {
+                state.keys.insert(
+                    anchor,
+                    memvault_auth::KeyValidity {
+                        valid_from_ns: 0,
+                        valid_until_ns: u64::MAX,
+                        introduced_by: None,
+                    },
+                );
+            }
+        }
+        self.bump_admin_key_generation();
+    }
+
     /// Publish the live trust state on this client. Write-once.
     /// Subsequent reads via [`Self::verify_envelope_authorship`] consult it
     /// instead of returning `NoSidecar` by default.

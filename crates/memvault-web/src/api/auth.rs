@@ -97,9 +97,25 @@ async fn verify_bearer(
                 .map_err(|e| AuthRejection(format!("local client not available: {e}")))?,
         ),
     };
+    // Multi-admin: verify node attestations against the cluster's full
+    // admin key set, read live from the client so a freshly-admitted
+    // admin takes effect without a restart. Falls back to the pinned
+    // anchor (`state.admin_pubkey`) when no client is available (the
+    // test/headless lookup-hook path).
+    let admin_keys: Vec<ed25519_dalek::VerifyingKey> = match local_client_opt.as_ref() {
+        Some(client) => {
+            let live = client.admin_verifying_keys();
+            if live.is_empty() {
+                state.admin_pubkey.into_iter().collect()
+            } else {
+                live
+            }
+        }
+        None => state.admin_pubkey.into_iter().collect(),
+    };
     let claims = memvault_auth::jwt::verify(
         token,
-        state.admin_pubkey.as_ref(),
+        &admin_keys,
         |agent_pk| {
             // Reject revoked agents up front by returning None — same
             // effect as the post-verify revocation check below, but
