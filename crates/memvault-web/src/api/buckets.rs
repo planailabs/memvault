@@ -224,3 +224,65 @@ pub async fn archive_bucket(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitGrantRequest {
+    /// The DAG-CBOR-encoded, agent-signed `Grant`, hex-encoded. Built and
+    /// signed client-side by the issuer (path 2 — the daemon never holds
+    /// the issuer's key).
+    pub grant_cbor_hex: String,
+}
+
+/// POST /api/v1/buckets/{id}/grants — submit an externally-signed grant.
+///
+/// The daemon validates and stores; it does not sign. The submitter must
+/// be the grant's issuer (JWT `sub` == the grant's signer pubkey), the
+/// grant must scope this bucket, and the issuer must be authorised for it
+/// (admin / bucket owner agent / owning node / owner's attesting node).
+pub async fn submit_grant(
+    auth: RequireWrite,
+    State(_state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SubmitGrantRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let bucket_bytes =
+        hex::decode(&id).map_err(|_| ApiError::bad_request("invalid bucket id hex"))?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| ApiError::bad_request("bucket id must be 32 bytes"))?;
+
+    let grant_bytes = hex::decode(&req.grant_cbor_hex)
+        .map_err(|_| ApiError::bad_request("grant_cbor_hex is not hex"))?;
+    let grant: memvault_auth::Grant = serde_ipld_dagcbor::from_slice(&grant_bytes)
+        .map_err(|e| ApiError::bad_request(format!("grant decode: {e}")))?;
+
+    // The grant must scope exactly the bucket in the path.
+    if grant.bucket_scopes.as_slice() != [memvault_core::BucketId(bucket_arr)] {
+        return Err(ApiError::bad_request(
+            "grant bucket_scopes must be exactly this bucket",
+        ));
+    }
+    // The submitter must be the grant's issuer (no relaying others' grants).
+    let sub = hex::decode(&auth.claims.sub)
+        .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+    if sub.as_slice() != grant.admin_pubkey {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "submitter is not the grant issuer".into(),
+        });
+    }
+
+    let client = crate::ui::state::local_client()
+        .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
+    let cid = client.submit_signed_grant(&grant).map_err(|e| match e {
+        memvault_api::ApiError::Forbidden(m) => ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: m,
+        },
+        other => ApiError::bad_request(other.to_string()),
+    })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "grant_cid": hex::encode(cid) })),
+    ))
+}

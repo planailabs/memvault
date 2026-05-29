@@ -2976,6 +2976,64 @@ impl LocalClient {
         Ok(cid_bytes)
     }
 
+    /// Store a fully-formed, externally-signed grant (path 2: an agent or
+    /// owner signed it client-side, e.g. a remote agent whose key this
+    /// daemon never holds). The daemon validates and relays — it does NOT
+    /// sign. Checks: the signature is authentic for the embedded issuer;
+    /// the grant scopes exactly one bucket; and that issuer is authorised
+    /// to grant on it (admin / owner agent / attesting node / node owner).
+    /// Returns the stored grant CID.
+    pub fn submit_signed_grant(&self, grant: &memvault_auth::Grant) -> Result<Vec<u8>> {
+        if grant.is_legacy_unsigned() || grant.verify_admin_signature().is_err() {
+            return Err(ApiError::Forbidden("grant signature is not authentic".into()));
+        }
+        // Exactly one bucket scope, so authority is unambiguous.
+        let bucket_id = match grant.bucket_scopes.as_slice() {
+            [b] => b.clone(),
+            _ => {
+                return Err(ApiError::Other(
+                    "submitted grant must scope exactly one bucket".into(),
+                ));
+            }
+        };
+        let (owner_agent_pubkey, owner_node_pubkey) = match self.bucket_info_sync(&bucket_id) {
+            Ok(Some(info)) => (info.owner_agent_pubkey, info.owner_node_pubkey),
+            _ => (None, None),
+        };
+        if !self.grant_issuer_authorized(
+            &grant.admin_pubkey,
+            grant.not_before_ns,
+            owner_agent_pubkey.as_ref(),
+            owner_node_pubkey.as_ref(),
+        ) {
+            return Err(ApiError::Forbidden(
+                "grant issuer is not authorised for this bucket".into(),
+            ));
+        }
+
+        let grant_json = serde_ipld_dagcbor::to_vec(grant)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let cid_bytes = memvault_core::cid_from_bytes(&grant_json).to_bytes();
+        let meta = memvault_store::EnvelopeMeta {
+            author: self.effective_author(),
+            tags: vec![
+                ("grant".to_string(), hex::encode(bucket_id.0)),
+                ("kind".to_string(), "grant".to_string()),
+            ],
+            wall_ns: memvault_core::wall_ns(),
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: Some(bucket_id.0.to_vec()),
+            ..Default::default()
+        };
+        self.store.insert_envelope(&cid_bytes, &grant_json, &meta)?;
+        tracing::info!(
+            bucket = %bucket_id,
+            cid = %hex::encode(&cid_bytes),
+            "stored externally-signed bucket grant"
+        );
+        Ok(cid_bytes)
+    }
+
     /// List all grants scoped to a bucket.
     pub fn list_bucket_grants(
         &self,
@@ -3037,7 +3095,7 @@ impl LocalClient {
                 ))
             })?;
         // Confirm the target really is a Grant block before revoking.
-        let _grant = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw)
+        let grant = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw)
             .ok_or_else(|| {
                 ApiError::Other(format!(
                     "block {} is not a Grant",
@@ -3045,12 +3103,20 @@ impl LocalClient {
                 ))
             })?;
 
-        let admin_key = self.admin_signing_key().ok_or_else(|| {
-            ApiError::Other("no admin signing key — cannot revoke grants".into())
+        // Sign the revocation with whatever authority this node holds for
+        // the grant's bucket (admin / owner agent / node) — symmetric with
+        // issuance, so a non-admin owner/node can revoke its own grants.
+        let bucket_for_signer = grant
+            .bucket_scopes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| BucketId([0u8; 32]));
+        let (signer, _signer_pk) = self.pick_grant_signer(&bucket_for_signer).ok_or_else(|| {
+            ApiError::Other("no grant-revoking authority for this bucket".into())
         })?;
 
         let target_cid = memvault_core::cid_from_bytes(&raw);
-        let revocation = memvault_auth::sign_grant_revocation(&admin_key, target_cid, reason)
+        let revocation = memvault_auth::sign_grant_revocation(&signer, target_cid, reason)
             .map_err(|e| ApiError::Other(format!("sign grant revocation: {e}")))?;
 
         let rev_bytes = serde_ipld_dagcbor::to_vec(&revocation)

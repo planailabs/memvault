@@ -149,29 +149,41 @@ pub fn publish_grant_revocation(
     write_block(client, LABEL_GRANT_REVOCATION, &bytes)
 }
 
-/// Apply a single [`GrantRevocation`] to the local revocation index if it
-/// is signed by a currently-known cluster admin key. Returns true if
+/// Apply a single [`GrantRevocation`] to the local revocation index if
+/// its issuer is authorised to revoke the target grant. Returns true if
 /// recorded. Used by both the bootstrap scan and the live watcher.
-fn apply_grant_revocation(
-    client: &LocalClient,
-    admin_keys: &[ed25519_dalek::VerifyingKey],
-    bytes: &[u8],
-) -> bool {
+///
+/// Authority mirrors issuance: the revocation's issuer (embedded
+/// `admin_pubkey`) must be a cluster admin, OR the target grant's bucket
+/// owner agent / owning node / the owner's attesting node — resolved from
+/// the target grant's bucket. A non-authorised revocation is ignored.
+fn apply_grant_revocation(client: &LocalClient, bytes: &[u8]) -> bool {
     let Ok(rev) = serde_ipld_dagcbor::from_slice::<GrantRevocation>(bytes) else {
         return false;
     };
-    // The embedded admin_pubkey must be a known cluster admin and the
-    // signature must verify against it.
-    if !admin_keys.iter().any(|k| k.to_bytes() == rev.admin_pubkey) {
-        return false;
-    }
+    // Self-signature must be authentic for the embedded issuer pubkey.
     if rev.verify_signature().is_err() {
         return false;
     }
-    client
-        .store()
-        .record_revocation(&rev.grant_cid.to_bytes(), bytes)
-        .is_ok()
+    // Resolve the target grant's bucket owners to check revoker authority.
+    let grant_cid = rev.grant_cid.to_bytes();
+    let (owner_agent_pk, owner_node_pk) = match client.store().get_block(&grant_cid) {
+        Ok(Some(raw)) => memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw)
+            .and_then(|g| g.bucket_scopes.first().cloned())
+            .and_then(|b| client.bucket_info_sync(&b).ok().flatten())
+            .map(|i| (i.owner_agent_pubkey, i.owner_node_pubkey))
+            .unwrap_or((None, None)),
+        _ => (None, None),
+    };
+    if !client.grant_issuer_authorized(
+        &rev.admin_pubkey,
+        rev.revoked_at_ns,
+        owner_agent_pk.as_ref(),
+        owner_node_pk.as_ref(),
+    ) {
+        return false;
+    }
+    client.store().record_revocation(&grant_cid, bytes).is_ok()
 }
 
 /// Scan every persisted [`GrantRevocation`] block and apply the
@@ -186,7 +198,7 @@ pub fn scan_grant_revocations(
     }
     let mut applied = 0usize;
     for bytes in load_blocks_by_label(client, LABEL_GRANT_REVOCATION)? {
-        if apply_grant_revocation(client, admin_keys, &bytes) {
+        if apply_grant_revocation(client, &bytes) {
             applied += 1;
         }
     }
@@ -750,8 +762,7 @@ fn apply_sigchain_block(
             // to the revocation index if admin-signed; ACL's `is_revoked`
             // check reads that index directly (uncached), so the revoked
             // grant stops conferring access on the next check.
-            let admin_keys = client.admin_verifying_keys();
-            let _ = apply_grant_revocation(client, &admin_keys, &bytes);
+            let _ = apply_grant_revocation(client, &bytes);
         }
         LABEL_ADMIN_ADMISSION | LABEL_ADMIN_RETIREMENT => {
             // Admin-key set changed. SECURITY: never apply incrementally

@@ -117,6 +117,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/buckets/{id}",
             get(buckets::get_bucket).patch(buckets::rename_bucket),
         )
+        .route("/buckets/{id}/grants", post(buckets::submit_grant))
         .route("/buckets/{id}/attach", post(buckets::attach_bucket))
         .route("/buckets/{id}/archive", post(buckets::archive_bucket))
         // ── Auth (session token for web UI) ───────────────────────

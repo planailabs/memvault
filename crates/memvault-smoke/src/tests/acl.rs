@@ -1184,3 +1184,93 @@ async fn node_owned_bucket_grant_authority() {
         .expect_err("non-owning node grant must be denied");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
 }
+
+// ── Path 2: submit externally-signed grant ──────────────────────────
+
+fn build_signed_grant(
+    node: &TestNode,
+    bucket: &BucketId,
+    audience: GrantAudience,
+    actions: Vec<Action>,
+    signer_pk: [u8; 32],
+    signer: &SigningKey,
+    not_before_ns: u64,
+) -> Grant {
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let mut grant = Grant {
+        issuer: PeerId(node.client.peer_id().to_vec()),
+        issuing_cluster: node.cluster_id.clone(),
+        admin_pubkey: signer_pk,
+        audience,
+        scopes: vec![],
+        actions,
+        not_before_ns,
+        not_after_ns: u64::MAX,
+        parent: None,
+        nonce,
+        bucket_scopes: vec![bucket.clone()],
+        signature: [0u8; 64],
+    };
+    use ed25519_dalek::Signer;
+    let sb = grant.signing_bytes().expect("signing bytes");
+    grant.signature = signer.sign(&sb).to_bytes();
+    grant
+}
+
+/// A grant the owner signed client-side can be submitted (path 2) and then
+/// authorizes the grantee — the daemon stores it without signing.
+#[tokio::test]
+async fn submit_signed_grant_owner_accepted() {
+    let node = TestNode::new();
+    let (owner_sk, owner_pk, owner_id) =
+        setup_agent_keyed(&node, "submit-owner", Role::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "submit-grantee", Role::AgentHost).await;
+    let bucket = make_owned_bucket(&node, "submit-bucket", owner_id, owner_pk).await;
+
+    let grant = build_signed_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        owner_pk,
+        &owner_sk,
+        memvault_core::wall_ns(),
+    );
+    node.client
+        .submit_signed_grant(&grant)
+        .expect("owner-signed grant accepted on submit");
+
+    acl::check_bucket_access(&node.client, &grantee_pk, &bucket, Action::Read)
+        .expect("submitted owner grant authorizes the grantee");
+}
+
+/// Submitting a grant signed by a key with no authority over the bucket
+/// is rejected.
+#[tokio::test]
+async fn submit_signed_grant_unauthorized_rejected() {
+    let node = TestNode::new();
+    let (_owner_sk, owner_pk, owner_id) =
+        setup_agent_keyed(&node, "submit-owner2", Role::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "submit-grantee2", Role::AgentHost).await;
+    let bucket = make_owned_bucket(&node, "submit-bucket2", owner_id, owner_pk).await;
+
+    // A random key (not admin, owner, or attesting node).
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let stranger = SigningKey::from_bytes(&seed);
+    let grant = build_signed_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        stranger.verifying_key().to_bytes(),
+        &stranger,
+        memvault_core::wall_ns(),
+    );
+    let err = node
+        .client
+        .submit_signed_grant(&grant)
+        .expect_err("unauthorized issuer must be rejected on submit");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
