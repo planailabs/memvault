@@ -1110,3 +1110,77 @@ async fn node_signed_grant_on_unowned_bucket_denied() {
         .expect_err("node-signed grant on an unowned bucket must be denied");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
 }
+
+/// A node-owned bucket (e.g. the per-node legacy bucket) can be delegated
+/// by the owning node's key — no admin or agent owner needed. A different
+/// node's signature is rejected.
+#[tokio::test]
+async fn node_owned_bucket_grant_authority() {
+    let node = TestNode::new();
+    let (grantee_pk, _) = setup_agent(&node, "node-owned-grantee", Role::AgentHost).await;
+
+    let node_sk = node.client.node_signing_key().expect("node key").clone();
+    let node_pk = node_sk.verifying_key().to_bytes();
+
+    // A node-owned bucket (role Legacy, owner_node_pubkey = this node).
+    let bucket = BucketId([0x5a; 32]);
+    node.client
+        .create_bucket_with_id(
+            bucket.clone(),
+            "legacy",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Legacy,
+            Some(node_pk),
+        )
+        .expect("create node-owned bucket");
+
+    // Trust this node (production installs trust via bootstrap).
+    {
+        use memvault_auth::jwt::NodeTrust;
+        use std::collections::{HashMap, HashSet};
+        use std::sync::{Arc, RwLock};
+        let mut nt = HashMap::new();
+        nt.insert(node_pk, NodeTrust::PreGenesis);
+        node.client
+            .set_trust_state(memvault_api::sigchain::LiveTrustState {
+                node_trust: Arc::new(RwLock::new(nt)),
+                revoked_agents: Arc::new(RwLock::new(HashSet::new())),
+                revoked_nodes: Arc::new(RwLock::new(HashSet::new())),
+                trusted_agents: Arc::new(RwLock::new(HashSet::new())),
+                trusted_attestations: Arc::new(RwLock::new(HashMap::new())),
+            });
+    }
+
+    // Owning node signs a grant with its node key → accepted.
+    insert_raw_grant_at(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        node_pk,
+        Some(&node_sk),
+        memvault_core::wall_ns(),
+    );
+    acl::check_bucket_access(&node.client, &grantee_pk, &bucket, Action::Read)
+        .expect("node-owner grant must authorize the grantee");
+
+    // A different (non-owning) node's grant is denied.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let other_node = SigningKey::from_bytes(&seed);
+    let bucket2 = make_bucket(&node, "other-node-bucket").await; // no node owner
+    insert_raw_grant_at(
+        &node,
+        &bucket2,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        other_node.verifying_key().to_bytes(),
+        Some(&other_node),
+        memvault_core::wall_ns(),
+    );
+    let err = acl::check_bucket_access(&node.client, &grantee_pk, &bucket2, Action::Read)
+        .expect_err("non-owning node grant must be denied");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}

@@ -478,10 +478,21 @@ impl LocalClient {
         issuer_pubkey: &[u8; 32],
         at_ns: u64,
         owner_agent_pubkey: Option<&[u8; 32]>,
+        owner_node_pubkey: Option<&[u8; 32]>,
     ) -> bool {
         // 1. Admin authority.
         if self.is_admin_key_valid_at(issuer_pubkey, at_ns) {
             return true;
+        }
+        // 4. Node-owned bucket (e.g. the per-node legacy bucket): the
+        // owning node, still trusted and not revoked, may delegate.
+        if let Some(node_pk) = owner_node_pubkey {
+            if issuer_pubkey == node_pk
+                && self.is_node_trusted(node_pk)
+                && !self.is_node_revoked(node_pk)
+            {
+                return true;
+            }
         }
         let Some(owner_pk) = owner_agent_pubkey else {
             return false;
@@ -524,6 +535,80 @@ impl LocalClient {
         self.trust_state()
             .and_then(|s| s.node_trust.read().ok().map(|m| m.contains_key(pubkey)))
             .unwrap_or(false)
+    }
+
+    /// Pick a signing key this node may legitimately use to issue or
+    /// revoke grants on `bucket_id`, with the resulting signer pubkey.
+    /// Tries, in order: a held cluster admin key; the held owner-agent
+    /// key (when this node hosts the bucket owner); the node key for a
+    /// node-owned bucket; the node key when this node attested the bucket
+    /// owner (host-on-behalf). `None` if this node has no authority.
+    fn pick_grant_signer(
+        &self,
+        bucket_id: &BucketId,
+    ) -> Option<(ed25519_dalek::SigningKey, [u8; 32])> {
+        let now = memvault_core::wall_ns();
+        // 1. Admin.
+        if let Some(admin) = self.admin_signing_key_at_ns(now) {
+            let pk = admin.verifying_key().to_bytes();
+            return Some((admin, pk));
+        }
+        let info = self.bucket_info_sync(bucket_id).ok().flatten()?;
+        // 2. Held owner-agent identity (this node hosts the owner).
+        if let (Some(owner_pk), Some(id)) =
+            (info.owner_agent_pubkey, self.agent_identity.get())
+        {
+            if id.verifying_key.to_bytes() == owner_pk {
+                return Some((id.signing_key.clone(), owner_pk));
+            }
+        }
+        let node_sk = self.node_signing_key.get()?;
+        let node_pk = node_sk.verifying_key().to_bytes();
+        // 3. Node-owned bucket (e.g. the per-node legacy bucket).
+        if info.owner_node_pubkey == Some(node_pk) {
+            return Some((node_sk.clone(), node_pk));
+        }
+        // 4. Host-on-behalf: this node attested the owner agent.
+        if let Some(owner_pk) = info.owner_agent_pubkey {
+            if let Ok(Some(att)) = crate::sigchain::find_agent_attestation(self, &owner_pk) {
+                if att.node_pubkey == node_pk {
+                    return Some((node_sk.clone(), node_pk));
+                }
+            }
+        }
+        None
+    }
+
+    /// Stamp this node as the owner of its per-node legacy bucket, if a
+    /// legacy bucket exists and isn't already node-owned. The daemon calls
+    /// this once the node signing key is available (the legacy bucket is
+    /// created during rebuild, before the key is set), so the node can
+    /// then delegate access to its own legacy data with its node key.
+    pub fn ensure_legacy_bucket_node_owner(&self) -> Result<()> {
+        let Some(bucket) = self.find_legacy_bucket() else {
+            return Ok(());
+        };
+        let Some(node_sk) = self.node_signing_key.get() else {
+            return Ok(());
+        };
+        let node_pk = node_sk.verifying_key().to_bytes();
+        if let Ok(Some(info)) = self.bucket_info_sync(&bucket) {
+            if info.owner_node_pubkey == Some(node_pk) {
+                return Ok(()); // already stamped
+            }
+        }
+        // Re-emit the legacy bucket decl with owner_node_pubkey set. The
+        // decl is a deterministic, content-addressed block; re-emitting
+        // updates the bucket→decl pointer.
+        self.create_bucket_with_id(
+            bucket,
+            "legacy",
+            Some("auto-created for adoption of pre-bucket data"),
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Legacy,
+            Some(node_pk),
+        )
     }
 
     /// Re-issue, under the current cluster admin key, every grant on
@@ -1104,6 +1189,7 @@ impl LocalClient {
             description: description.map(|s| s.to_string()),
             owner_agent,
             owner_agent_pubkey,
+            owner_node_pubkey: None,
             default_visibility,
             default_classification,
             created_ns: now_ns,
@@ -1320,6 +1406,7 @@ impl LocalClient {
     /// `build_signed_envelope`, which now refuses to fall back to an
     /// unsigned envelope. See `resign_legacy_envelope` in rebuild.rs
     /// for how legacy data adopted into this bucket is re-signed.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_bucket_with_id(
         &self,
         bucket_id: BucketId,
@@ -1328,6 +1415,7 @@ impl LocalClient {
         default_visibility: Visibility,
         default_classification: memvault_core::classification::Classification,
         role: memvault_doc::BucketRole,
+        owner_node_pubkey: Option<[u8; 32]>,
     ) -> Result<()> {
         use memvault_doc::BucketDecl;
 
@@ -1338,6 +1426,7 @@ impl LocalClient {
             description: description.map(|s| s.to_string()),
             owner_agent: None,
             owner_agent_pubkey: None,
+            owner_node_pubkey,
             default_visibility,
             default_classification,
             created_ns: 0,
@@ -1625,6 +1714,7 @@ impl LocalClient {
             description: decl.description,
             owner_agent: decl.owner_agent,
             owner_agent_pubkey: decl.owner_agent_pubkey,
+            owner_node_pubkey: decl.owner_node_pubkey,
             cluster_id,
             is_attached: decl.private_to_peer.is_none(),
             default_visibility: decl.default_visibility,
@@ -2814,15 +2904,15 @@ impl LocalClient {
         ttl_secs: u64,
     ) -> Result<Vec<u8>> {
         let now_ns = memvault_core::wall_ns();
-        // Sign with a held admin key that is valid *now*. Recording its
-        // pubkey in the grant binds the signer cryptographically (the
-        // field is part of the signed payload) so ACL enforcement can
-        // verify both the signature and that this key was a cluster-valid
-        // admin at the grant's `not_before_ns`.
-        let admin_key = self.admin_signing_key_at_ns(now_ns).ok_or_else(|| {
-            ApiError::Other("no valid admin signing key — cannot issue grants".into())
+        // Pick the best signing authority this node holds for the bucket:
+        // a cluster admin key, the held owner-agent key, or the node key
+        // (for node-owned buckets or buckets owned by an agent this node
+        // attested). The signer pubkey is recorded in the grant and bound
+        // into its signature, so ACL enforcement can verify both the
+        // signature and the issuer's authority.
+        let (signer, admin_pubkey) = self.pick_grant_signer(bucket_id).ok_or_else(|| {
+            ApiError::Other("no grant-signing authority for this bucket".into())
         })?;
-        let admin_pubkey = admin_key.verifying_key().to_bytes();
 
         // `saturating_*` so callers can pass `u64::MAX` for "never expires"
         // without wrapping.
@@ -2857,7 +2947,7 @@ impl LocalClient {
             .signing_bytes()
             .map_err(|e| ApiError::Other(format!("grant signing failed: {e}")))?;
         use ed25519_dalek::Signer;
-        let sig = admin_key.sign(&signing_bytes);
+        let sig = signer.sign(&signing_bytes);
         grant.signature = sig.to_bytes();
 
         // Store as tagged block

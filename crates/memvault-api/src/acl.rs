@@ -50,14 +50,14 @@ pub fn check_bucket_access(
 
     // Resolve the bucket's owner pubkey once: it gates owner-bypass and
     // the owner/attesting-node grant authorities below.
-    let owner_agent_pubkey = match client.bucket_info_sync(bucket_id) {
+    let (owner_agent_pubkey, owner_node_pubkey) = match client.bucket_info_sync(bucket_id) {
         Ok(Some(bucket)) => {
             if bucket.owner_agent.as_ref() == Some(&attestation.agent_id) {
                 return Ok(());
             }
-            bucket.owner_agent_pubkey
+            (bucket.owner_agent_pubkey, bucket.owner_node_pubkey)
         }
-        _ => None,
+        _ => (None, None),
     };
 
     let now_ns = memvault_core::wall_ns();
@@ -97,6 +97,7 @@ pub fn check_bucket_access(
             &grant.admin_pubkey,
             grant.not_before_ns,
             owner_agent_pubkey.as_ref(),
+            owner_node_pubkey.as_ref(),
         ) {
             continue;
         }

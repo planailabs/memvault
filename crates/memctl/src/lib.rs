@@ -602,6 +602,9 @@ mod native {
         if data_dir.join("identity").join("libp2p.key").exists() {
             if let Ok(node_sk) = libp2p_node_signing_key(data_dir) {
                 client.set_node_signing_key(node_sk);
+                // Stamp node ownership of the per-node legacy bucket now
+                // that the node key is available (rebuild ran without it).
+                let _ = client.ensure_legacy_bucket_node_owner();
             }
         }
         // Load the pinned AdminGenesis so `token issue` embeds it for

@@ -28,12 +28,10 @@ pub use memvault_core::BLOCKSTORE_VERSION;
 /// On the first post-genesis rebuild, the peer-derived bucket is
 /// detected as stale and rewritten to the cluster-derived one.
 pub fn deterministic_legacy_id(client: &LocalClient) -> BucketId {
-    let cluster_id = client.cluster_id();
-    let seed = if cluster_id.iter().any(|&b| b != 0) {
-        cluster_id
-    } else {
-        client.peer_id()
-    };
+    // Always per-node: each node owns its own legacy bucket (seeded from
+    // its peer id), so it can delegate access to its own pre-bucket data
+    // without a cluster admin. There is no cluster-wide legacy bucket.
+    let seed = client.peer_id();
     let cid = memvault_core::cid_from_bytes(&[seed, b"::legacy"].concat());
     let mut id = [0u8; 32];
     id.copy_from_slice(&cid.to_bytes()[..32]);
@@ -132,6 +130,10 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                         memvault_core::Visibility::Internal,
                         memvault_core::classification::Classification::Internal,
                         memvault_doc::BucketRole::Legacy,
+                        // Node key isn't available during rebuild; the daemon
+                        // stamps owner_node_pubkey later via
+                        // ensure_legacy_bucket_node_owner.
+                        None,
                     )?;
                     // Bind to cluster if one exists.
                 if client.cluster_id().iter().any(|&b| b != 0) {

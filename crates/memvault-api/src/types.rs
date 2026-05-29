@@ -91,6 +91,10 @@ pub struct BucketInfo {
     /// ACL to resolve owner / attesting-node grant authority.
     #[serde(default)]
     pub owner_agent_pubkey: Option<[u8; 32]>,
+    /// Owning node's ed25519 pubkey for node-owned buckets (e.g. the
+    /// per-node legacy bucket).
+    #[serde(default)]
+    pub owner_node_pubkey: Option<[u8; 32]>,
     /// Which cluster this bucket is bound to (None if unbound/standalone).
     pub cluster_id: Option<ClusterId>,
     /// Whether this bucket is attached to the cluster (private_to_peer is None).

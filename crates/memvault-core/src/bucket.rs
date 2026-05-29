@@ -47,9 +47,15 @@ pub struct BucketDecl {
     pub owner_agent: Option<AgentId>,
     /// The owner agent's ed25519 pubkey, when known at creation. Lets ACL
     /// enforcement resolve owner/attesting-node grant authority without an
-    /// agent_id→pubkey scan. `None` for cluster-owned or legacy buckets.
+    /// agent_id→pubkey scan. `None` for cluster-owned or node-owned buckets.
     #[serde(default)]
     pub owner_agent_pubkey: Option<[u8; 32]>,
+    /// The owning **node**'s ed25519 pubkey, for buckets a node creates for
+    /// itself (e.g. the per-node legacy bucket) rather than on behalf of an
+    /// agent. Lets that node delegate access to the bucket with its node
+    /// key, no admin required. `None` for agent-owned / cluster buckets.
+    #[serde(default)]
+    pub owner_node_pubkey: Option<[u8; 32]>,
     pub default_visibility: Visibility,
     pub default_classification: Classification,
     pub created_ns: u64,
