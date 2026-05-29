@@ -31,6 +31,13 @@ pub struct JoinToken {
     /// before this field existed.
     #[serde(default)]
     pub admin_genesis: Option<AdminGenesis>,
+    /// Opt-in capability: when true, redeeming this token may also admit
+    /// the joiner's supplied admin key as a co-equal cluster admin (in
+    /// addition to minting the node attestation), provided the join
+    /// request carries a valid proof-of-possession. Default false — a
+    /// normal join confers no admin authority.
+    #[serde(default)]
+    pub admit_as_admin: bool,
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
@@ -47,6 +54,7 @@ struct TokenSigningPayload<'a> {
     nonce: &'a [u8; 16],
     label: &'a Option<String>,
     admin_genesis: &'a Option<AdminGenesis>,
+    admit_as_admin: bool,
 }
 
 impl JoinToken {
@@ -63,6 +71,7 @@ impl JoinToken {
             nonce: &self.nonce,
             label: &self.label,
             admin_genesis: &self.admin_genesis,
+            admit_as_admin: self.admit_as_admin,
         };
         crate::domain_sign(b"memvault/sig/join-token/v1", &payload)
     }

@@ -770,6 +770,7 @@ fn join_token_roundtrip_with_verify() {
         nonce: [42u8; 16],
         label: Some("test".into()),
         admin_genesis: None,
+        admit_as_admin: false,
         signature: [0u8; 64],
     };
 
@@ -901,4 +902,41 @@ fn envelope_v2_tampered_bucket_fails_verify() {
     // Tamper with the bucket_id
     envelope.bucket_id = Some(BucketId::random());
     assert!(envelope.verify(&vk).is_err());
+}
+
+/// The `admit_as_admin` capability flag is part of the token's signed
+/// payload, so an attacker can't flip it on a normal token to gain admin
+/// admission at join.
+#[test]
+fn join_token_admit_as_admin_is_signature_bound() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use memvault_auth::JoinToken;
+    use memvault_core::{ClusterId, PeerId};
+
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let vk = sk.verifying_key();
+    let mut token = JoinToken {
+        issuer: PeerId(vk.to_bytes().to_vec()),
+        cluster_id: ClusterId([1u8; 32]),
+        role: memvault_auth::Role::AgentHost,
+        initial_grants: vec![],
+        not_before_ns: 0,
+        not_after_ns: u64::MAX,
+        max_uses: 1,
+        nonce: [3u8; 16],
+        label: None,
+        admin_genesis: None,
+        admit_as_admin: true,
+        signature: [0u8; 64],
+    };
+    token.signature = sk.sign(&token.signing_bytes().unwrap()).to_bytes();
+    token.verify_signature(&vk).expect("admit-as-admin token verifies");
+
+    // Flipping the flag must invalidate the signature.
+    let mut tampered = token.clone();
+    tampered.admit_as_admin = false;
+    assert!(
+        tampered.verify_signature(&vk).is_err(),
+        "flipping admit_as_admin must break the signature"
+    );
 }

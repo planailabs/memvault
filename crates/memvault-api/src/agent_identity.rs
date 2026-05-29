@@ -463,6 +463,7 @@ pub fn issue_join_token(
         nonce,
         label,
         admin_genesis,
+        admit_as_admin: false,
         signature: [0u8; 64], // placeholder
     };
 

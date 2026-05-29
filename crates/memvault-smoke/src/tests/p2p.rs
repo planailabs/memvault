@@ -314,6 +314,9 @@ async fn join_request_response() {
         requested_ttl: Some(3600),
         agent_id: Some("test-agent".to_string()),
         public_key: Some(vec![0u8; 32]),
+        admin_pubkey: None,
+        admin_pop: None,
+        admin_pop_not_after_ns: None,
     };
     swarm_a.behaviour_mut().join.send_request(&peer_b, request);
 
@@ -351,6 +354,7 @@ async fn join_request_response() {
                                     attestation_block: b"welcome".to_vec(),
                                     enrollment_block: Some(b"enrolled".to_vec()),
                                     bootstrap_blocks: vec![],
+                                    admission_block: None,
                                 },
                             };
                             swarm_b.behaviour_mut().join.send_response(channel, response).unwrap();

@@ -20,6 +20,18 @@ pub struct JoinRequest {
     /// Agent's Ed25519 public key (32 bytes) for enrollment.
     #[serde(default)]
     pub public_key: Option<Vec<u8>>,
+    /// Optional admin-admission request: the joiner's admin pubkey to be
+    /// admitted as a co-equal cluster admin. Honoured only when the
+    /// redeemed token has `admit_as_admin = true` and `admin_pop` verifies.
+    #[serde(default)]
+    pub admin_pubkey: Option<Vec<u8>>,
+    /// Proof-of-possession over (cluster, admin_pubkey, pop_not_after_ns),
+    /// signed by `admin_pubkey`. 64 bytes.
+    #[serde(default)]
+    pub admin_pop: Option<Vec<u8>>,
+    /// Expiry the joiner bound into `admin_pop`.
+    #[serde(default)]
+    pub admin_pop_not_after_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +59,11 @@ pub enum JoinResult {
         /// block, so a malicious admin can't inject arbitrary blocks.
         #[serde(default)]
         bootstrap_blocks: Vec<Vec<u8>>,
+        /// The minted `AdminKeyAdmission` block (CBOR), present only when
+        /// the token allowed admin admission and the request carried a
+        /// valid POP. The joiner stores it; it also propagates via sync.
+        #[serde(default)]
+        admission_block: Option<Vec<u8>>,
     },
     Refuse {
         reason: JoinRefuseReason,

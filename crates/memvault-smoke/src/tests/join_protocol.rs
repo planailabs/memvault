@@ -64,6 +64,7 @@ fn issue_token(
         nonce: random_seed()[..16].try_into().unwrap(),
         label: Some("smoke-test".into()),
         admin_genesis: Some(genesis.clone()),
+        admit_as_admin: false,
         signature: [0u8; 64],
     };
     let bytes = token.signing_bytes().expect("signing bytes");
@@ -154,6 +155,7 @@ async fn join_protocol_promotes_peer_to_attested() {
         admin_signing_key: Some(admin_sk.clone()),
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
     let peer_join = JoinConfig {
@@ -162,6 +164,7 @@ async fn join_protocol_promotes_peer_to_attested() {
         admin_signing_key: None,
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
 
@@ -372,6 +375,7 @@ async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
         admin_signing_key: Some(admin_sk.clone()),
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
     // Peer announces its LIBP2P pubkey in the JoinRequest — that's what
@@ -382,6 +386,7 @@ async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
         admin_signing_key: None,
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
 
@@ -546,6 +551,7 @@ async fn agent_attestation_syncs_with_correct_tag() {
         admin_signing_key: Some(admin_sk.clone()),
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
     // Peer must complete /join/1.0 first — otherwise admin's
@@ -567,6 +573,7 @@ async fn agent_attestation_syncs_with_correct_tag() {
         admin_signing_key: None,
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
 
@@ -840,6 +847,7 @@ async fn join_bundles_admin_node_attestation() {
         admin_signing_key: Some(admin_sk.clone()),
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
     let peer_join = JoinConfig {
@@ -848,6 +856,7 @@ async fn join_bundles_admin_node_attestation() {
         admin_signing_key: None,
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
 
@@ -985,6 +994,7 @@ async fn join_consumes_token_once_and_refuses_replay() {
         admin_signing_key: Some(admin_sk.clone()),
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
     let peer_join = JoinConfig {
@@ -993,6 +1003,7 @@ async fn join_consumes_token_once_and_refuses_replay() {
         admin_signing_key: None,
         pinned_admin_pubkey: Some(admin_pubkey),
         cluster_id: cluster_id.0,
+        admit_admin_key: None,
         on_join_success: None,
     };
 

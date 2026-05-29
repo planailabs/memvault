@@ -78,6 +78,12 @@ pub struct JoinConfig {
     pub pinned_admin_pubkey: Option<[u8; 32]>,
     /// Cluster ID — bound into NodeAttestations we mint as admin.
     pub cluster_id: [u8; 32],
+    /// Optional admin key this node wants admitted as a co-equal cluster
+    /// admin when it joins. When set (and the redeemed token allows it),
+    /// the `JoinRequest` carries this key's pubkey + a fresh POP, and a
+    /// successful join returns + stores the `AdminKeyAdmission`. `None`
+    /// for a normal (non-admin) join.
+    pub admit_admin_key: Option<ed25519_dalek::SigningKey>,
     /// Called once after a successful join. Callers typically use this to
     /// delete the pending-token file on disk so we don't try to redeem it
     /// again on the next restart.
@@ -125,7 +131,7 @@ pub async fn run_sync_loop(
                         // this peer. Only admin will reply Success — other
                         // peers respond NotAdminPeer and we keep waiting.
                         if let Some(token) = &join_config.pending_token {
-                            send_join_request(swarm, peer_id, token, join_config.node_pubkey);
+                            send_join_request(swarm, peer_id, token, &join_config);
                         }
                     }
 
@@ -333,7 +339,7 @@ pub async fn run_sync_loop(
                             "retrying /join/1.0 (still pending)"
                         );
                         for peer_id in peers {
-                            send_join_request(swarm, peer_id, &token, join_config.node_pubkey);
+                            send_join_request(swarm, peer_id, &token, &join_config);
                         }
                     }
                 }
@@ -1109,15 +1115,38 @@ fn send_join_request(
     swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
     peer_id: libp2p::PeerId,
     token: &str,
-    node_pubkey: [u8; 32],
+    join_config: &JoinConfig,
 ) {
+    // If this node wants to be admitted as an admin, attach its admin
+    // pubkey + a fresh POP (valid for 1h). The admin only honours it if
+    // the token allows it.
+    let (admin_pubkey, admin_pop, admin_pop_not_after_ns) = match &join_config.admit_admin_key {
+        Some(sk) => {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let pop_not_after = now_ns.saturating_add(3600 * 1_000_000_000);
+            let cluster = memvault_core::ClusterId(join_config.cluster_id);
+            let pop = memvault_auth::sign_admin_pop(sk, &cluster, pop_not_after);
+            (
+                Some(sk.verifying_key().to_bytes().to_vec()),
+                Some(pop.to_vec()),
+                Some(pop_not_after),
+            )
+        }
+        None => (None, None, None),
+    };
     let req = JoinRequest {
         version: 1,
         token_block: token.as_bytes().to_vec(),
-        peer_id: node_pubkey.to_vec(),
+        peer_id: join_config.node_pubkey.to_vec(),
         requested_ttl: None,
         agent_id: None,
         public_key: None,
+        admin_pubkey,
+        admin_pop,
+        admin_pop_not_after_ns,
     };
     let _ = swarm.behaviour_mut().join.send_request(&peer_id, req);
     tracing::debug!(%peer_id, "sent /join/1.0 request");
@@ -1291,14 +1320,70 @@ fn build_join_response(
     // arbitrary blocks here.
     let bootstrap_blocks = gather_bootstrap_blocks(store);
 
+    // Optional admin admission: only if the token explicitly allows it AND
+    // the request carries a valid proof-of-possession for the admin key it
+    // wants admitted. The admission is signed by THIS admin key, published
+    // as a sigchain block (so it propagates), and returned to the joiner.
+    let admission_block = mint_join_admission(store, admin_sk, &token, request, now_ns);
+
     JoinResponse {
         version: 1,
         result: JoinResult::Success {
             attestation_block: att_bytes,
             enrollment_block: None,
             bootstrap_blocks,
+            admission_block,
         },
     }
+}
+
+/// Mint + persist an `AdminKeyAdmission` for a join request, when the
+/// token grants admit-as-admin and the request's POP verifies. Returns
+/// the admission block bytes, or `None` if not requested / not valid.
+fn mint_join_admission(
+    store: &MemvaultStore,
+    admin_sk: &ed25519_dalek::SigningKey,
+    token: &memvault_auth::JoinToken,
+    request: &JoinRequest,
+    now_ns: u64,
+) -> Option<Vec<u8>> {
+    if !token.admit_as_admin {
+        return None;
+    }
+    let new_pk: [u8; 32] = request.admin_pubkey.as_deref()?.try_into().ok()?;
+    let pop: [u8; 64] = request.admin_pop.as_deref()?.try_into().ok()?;
+    let pop_not_after_ns = request.admin_pop_not_after_ns?;
+    let cluster = memvault_core::ClusterId(token.cluster_id.0);
+    // POP must verify and not have expired.
+    if memvault_auth::verify_admin_pop(&cluster, &new_pk, pop_not_after_ns, &pop).is_err()
+        || now_ns > pop_not_after_ns
+    {
+        tracing::warn!("join admission: POP invalid or expired; minting node attestation only");
+        return None;
+    }
+    let admission = memvault_auth::sign_admin_admission(
+        admin_sk,
+        new_pk,
+        cluster,
+        now_ns,
+        now_ns,
+        pop_not_after_ns,
+        None,
+        pop,
+    )
+    .ok()?;
+    let bytes = serde_ipld_dagcbor::to_vec(&admission).ok()?;
+    let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+    let meta = memvault_store::EnvelopeMeta {
+        author: admin_sk.verifying_key().to_bytes().to_vec(),
+        tags: vec![("sigchain".to_string(), "admin_admission".to_string())],
+        wall_ns: now_ns,
+        cluster_id: Some(token.cluster_id.0.to_vec()),
+        ..Default::default()
+    };
+    let _ = store.insert_envelope(&cid, &bytes, &meta);
+    tracing::info!(new_admin = %hex::encode(new_pk), "admitted admin via /join/1.0");
+    Some(bytes)
 }
 
 /// Collect the sigchain blocks a joining peer needs to verify cluster
@@ -1360,8 +1445,25 @@ fn handle_join_response(
         JoinResult::Success {
             attestation_block,
             bootstrap_blocks,
+            admission_block,
             ..
         } => {
+            // If admin admitted our admin key, persist the admission block
+            // (vetted like any synced sigchain block — verifies the
+            // admitting signature + our POP). It also propagates via sync.
+            if let Some(adm) = &admission_block {
+                let adm_cid = memvault_core::cid_from_bytes(adm).to_bytes();
+                match vet_sync_block(adm, join_config, None) {
+                    SyncDisposition::AsSigchain(meta) => {
+                        if let Err(e) = store.insert_envelope(&adm_cid, adm, &meta) {
+                            tracing::warn!(%peer, %e, "failed to insert admission block");
+                        } else {
+                            tracing::info!(%peer, "stored admin admission from /join/1.0");
+                        }
+                    }
+                    _ => tracing::warn!(%peer, "join admission block failed vetting"),
+                }
+            }
             // Bootstrap bundle first: each block (admin's
             // NodeAttestation, AdminGenesis, etc.) goes through
             // vet_sync_block for signature verification and proper

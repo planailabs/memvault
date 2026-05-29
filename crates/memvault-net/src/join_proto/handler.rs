@@ -31,6 +31,7 @@ pub fn build_join_success(
             attestation_block,
             enrollment_block,
             bootstrap_blocks,
+            admission_block: None,
         },
     }
 }

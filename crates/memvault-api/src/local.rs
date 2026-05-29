@@ -2791,6 +2791,38 @@ impl LocalClient {
         Ok(entities)
     }
 
+    /// Issue a join token carrying the opt-in **admit-as-admin**
+    /// capability: redeeming it may also admit the joiner's supplied admin
+    /// key as a co-equal cluster admin (if the join request includes a
+    /// valid POP), in addition to the node attestation. Normal
+    /// `issue_token` tokens never confer admin authority.
+    pub async fn issue_admin_admit_token(
+        &self,
+        role: Role,
+        ttl_secs: u64,
+        max_uses: u32,
+        label: Option<String>,
+    ) -> Result<String> {
+        let now_ns = memvault_core::wall_ns();
+        let admin_key = self.admin_signing_key_at_ns(now_ns).ok_or_else(|| {
+            ApiError::Other("no valid admin signing key — cannot issue tokens".into())
+        })?;
+        let peer_id = memvault_core::PeerId(self.peer_id.clone());
+        let cluster_id = memvault_core::ClusterId(self.cluster_id_arr()?);
+        crate::tokens::issue_token(
+            &peer_id,
+            &cluster_id,
+            &admin_key,
+            role,
+            ttl_secs,
+            max_uses,
+            label,
+            self.pinned_admin_genesis().cloned(),
+            true,
+            &self.store,
+        )
+    }
+
     // ── Bucket grants (ACL) ──────────────────────────────────────────
 
     /// Issue a grant scoped to a bucket.  The grant is signed by the admin
@@ -3848,6 +3880,7 @@ impl MemvaultClient for LocalClient {
             max_uses,
             label,
             self.pinned_admin_genesis().cloned(),
+            false,
             &self.store,
         )
     }

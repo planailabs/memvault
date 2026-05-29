@@ -20,6 +20,7 @@ pub fn issue_token(
     max_uses: u32,
     label: Option<String>,
     admin_genesis: Option<memvault_auth::AdminGenesis>,
+    admit_as_admin: bool,
     store: &MemvaultStore,
 ) -> Result<String> {
     let now_ns = memvault_core::time::wall_ns();
@@ -38,6 +39,7 @@ pub fn issue_token(
         nonce,
         label: label.clone(),
         admin_genesis,
+        admit_as_admin,
         signature: [0u8; 64],
     };
 

@@ -743,6 +743,9 @@ mod native {
             admin_signing_key,
             pinned_admin_pubkey,
             cluster_id: cluster_arr,
+            // Admin admission at join is opt-in and not wired into the
+            // default CLI join path; callers that want it set this field.
+            admit_admin_key: None,
             on_join_success: Some(on_join_success),
         })
     }
