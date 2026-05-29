@@ -52,13 +52,19 @@ impl MemvaultServer {
         }
     }
 
-    /// Resolve a per-call bucket: explicit override if provided, else the
-    /// startup-resolved agent bucket.
-    fn resolve_bucket(&self, explicit: Option<&str>) -> Result<Option<BucketId>> {
+    /// Resolve a per-call bucket for **write** operations: explicit override
+    /// if provided, else the startup-resolved agent bucket. Errors when
+    /// neither is available — every write must target a specific bucket, so
+    /// failing here keeps the bad request from reaching the daemon.
+    fn resolve_bucket(&self, explicit: Option<&str>) -> Result<BucketId> {
         if let Some(s) = explicit.filter(|s| !s.is_empty()) {
-            return BucketId::from_hex(s).map(Some).map_err(Into::into);
+            return BucketId::from_hex(s).map_err(Into::into);
         }
-        Ok(self.agent_bucket.clone())
+        self.agent_bucket.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no bucket available — pass `bucket` in the tool call or start with --agent-id"
+            )
+        })
     }
 
     /// Resolve bucket for query-style operations. None is fine — reads
@@ -74,11 +80,7 @@ impl MemvaultServer {
     /// either an explicit bucket from the tool params or the startup-resolved
     /// agent bucket. Errors when neither is available.
     fn vfs_bucket(&self, explicit: Option<&str>) -> Result<BucketId> {
-        self.resolve_bucket(explicit)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "no bucket available — pass `bucket` in the tool call or start with --agent-id"
-            )
-        })
+        self.resolve_bucket(explicit)
     }
 }
 
@@ -133,7 +135,7 @@ impl MemvaultServer {
             tags,
             vis,
             params.vfs_path.as_deref(),
-            bucket.as_ref(),
+            Some(&bucket),
         )
         .await
         {
@@ -283,7 +285,7 @@ impl MemvaultServer {
             tags,
             visibility,
             params.vfs_path.as_deref(),
-            bucket.as_ref(),
+            Some(&bucket),
         )
         .await
         {
@@ -436,17 +438,15 @@ impl MemvaultServer {
             props: props_map,
             edges_out: vec![],
         };
-        match self.client.add_entity(entity, vis, bucket.as_ref()).await {
+        match self.client.add_entity(entity, vis, Some(&bucket)).await {
             Ok(id) => {
                 let node_id = format!("entity:{}", hex::encode(id.0));
                 let mut result =
                     serde_json::json!({ "node_id": node_id, "status": "created" });
                 if let Some(vfs_path) = &params.vfs_path {
-                    let bid = bucket
-                        .clone()
-                        .unwrap_or_else(|| BucketId([0u8; 32]));
                     if let Err(e) =
-                        api_vfs::link_node_at_path(&*self.client, &bid, vfs_path, &node_id).await
+                        api_vfs::link_node_at_path(&*self.client, &bucket, vfs_path, &node_id)
+                            .await
                     {
                         result["vfs_error"] = serde_json::json!(e.to_string());
                     } else {

@@ -178,6 +178,19 @@ pub trait MemvaultClient: Send + Sync {
     /// Used by per-agent MCP servers as the default bucket for writes.
     async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId>;
 
+    /// Find or create the agent bucket keyed by the agent's ed25519 pubkey.
+    /// The bucket id is `deterministic_agent_bucket_id(cluster_id, pubkey)` —
+    /// cryptographically unique. `name_hint` is only used as a display
+    /// label on the BucketDecl. Prefer this over `ensure_agent_bucket`
+    /// when the caller already holds the pubkey (e.g. an HTTP handler
+    /// resolving it from a verified JWT) — it skips the name → sigchain
+    /// attestation lookup that the name-based path performs.
+    async fn ensure_agent_bucket_for_pubkey(
+        &self,
+        agent_pubkey: &[u8],
+        name_hint: &str,
+    ) -> Result<BucketId>;
+
     /// List capability grants scoped to a bucket.
     async fn bucket_grants_list(&self, bucket_id: &BucketId) -> Result<Vec<GrantInfo>>;
 

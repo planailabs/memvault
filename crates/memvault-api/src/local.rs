@@ -3591,4 +3591,12 @@ impl MemvaultClient for LocalClient {
         let aid = memvault_core::AgentId(agent_id.to_string());
         self.ensure_agent_bucket_for(&aid).await
     }
+
+    async fn ensure_agent_bucket_for_pubkey(
+        &self,
+        agent_pubkey: &[u8],
+        name_hint: &str,
+    ) -> Result<BucketId> {
+        LocalClient::ensure_agent_bucket_for_pubkey(self, agent_pubkey, name_hint).await
+    }
 }

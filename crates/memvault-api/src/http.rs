@@ -147,17 +147,21 @@ impl MemvaultClient for HttpApiClient {
         doc: Document,
         tags: Vec<(String, String)>,
         vis: Visibility,
-        _bucket: Option<&BucketId>,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
+        let mut body = serde_json::json!({
+            "body": doc.body,
+            "frontmatter": doc.frontmatter,
+            "tags": tags,
+            "visibility": format!("{vis:?}").to_lowercase(),
+        });
+        if let Some(b) = bucket {
+            body["bucket"] = serde_json::Value::String(hex::encode(b.0));
+        }
         let resp: serde_json::Value = self
             .client
             .post(self.url("/docs"))
-            .json(&serde_json::json!({
-                "body": doc.body,
-                "frontmatter": doc.frontmatter,
-                "tags": tags,
-                "visibility": format!("{vis:?}").to_lowercase(),
-            }))
+            .json(&body)
             .send()
             .await
             .map_err(map_reqwest)?
@@ -278,7 +282,7 @@ impl MemvaultClient for HttpApiClient {
         mime_type: &str,
         _tags: Vec<(String, String)>,
         _visibility: &str,
-        _bucket: Option<&BucketId>,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
         let fname = filename.unwrap_or("unnamed");
         let part = reqwest::multipart::Part::bytes(data.to_vec())
@@ -286,9 +290,13 @@ impl MemvaultClient for HttpApiClient {
             .mime_str(mime_type)
             .map_err(|e| ApiError::Other(e.to_string()))?;
         let form = reqwest::multipart::Form::new().part("file", part);
+        let mut url = self.url("/files");
+        if let Some(b) = bucket {
+            url.push_str(&format!("?bucket={}", hex::encode(b.0)));
+        }
         let resp: serde_json::Value = self
             .client
-            .post(self.url("/files"))
+            .post(&url)
             .multipart(form)
             .send()
             .await
@@ -366,16 +374,20 @@ impl MemvaultClient for HttpApiClient {
         &self,
         entity: Entity,
         vis: Visibility,
-        _bucket: Option<&BucketId>,
+        bucket: Option<&BucketId>,
     ) -> Result<EntityId> {
+        let mut body = serde_json::json!({
+            "kind": entity.kind,
+            "props": entity.props,
+            "visibility": format!("{vis:?}").to_lowercase(),
+        });
+        if let Some(b) = bucket {
+            body["bucket"] = serde_json::Value::String(hex::encode(b.0));
+        }
         let resp: serde_json::Value = self
             .client
             .post(self.url("/entities"))
-            .json(&serde_json::json!({
-                "kind": entity.kind,
-                "props": entity.props,
-                "visibility": format!("{vis:?}").to_lowercase(),
-            }))
+            .json(&body)
             .send()
             .await
             .map_err(map_reqwest)?
@@ -1027,5 +1039,22 @@ impl MemvaultClient for HttpApiClient {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(BucketId(arr))
+    }
+
+    async fn ensure_agent_bucket_for_pubkey(
+        &self,
+        _agent_pubkey: &[u8],
+        _name_hint: &str,
+    ) -> Result<BucketId> {
+        // The pubkey-keyed lookup is the server's job — it already has the
+        // verified pubkey in `claims.sub`. HTTP callers should use
+        // `ensure_agent_bucket(agent_id)` and let the server pick up the
+        // pubkey from their JWT.
+        Err(ApiError::Other(
+            "ensure_agent_bucket_for_pubkey is server-side only; HTTP clients should call \
+             ensure_agent_bucket(agent_id) and the server will derive the bucket from the \
+             verified JWT pubkey"
+                .into(),
+        ))
     }
 }

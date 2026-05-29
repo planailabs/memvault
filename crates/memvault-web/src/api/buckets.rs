@@ -159,13 +159,20 @@ pub struct EnsureAgentBucketResponse {
 }
 
 pub async fn ensure_agent_bucket(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<EnsureAgentBucketRequest>,
 ) -> Result<Json<EnsureAgentBucketResponse>, StatusCode> {
+    // The bucket id is keyed by the agent's pubkey. Use claims.sub (the
+    // verified ed25519 pubkey hex) instead of trusting req.agent_id for
+    // identity — the name is only a display hint on the BucketDecl.
+    let pubkey = hex::decode(&auth.claims.sub).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if pubkey.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let bucket_id = state
         .client
-        .ensure_agent_bucket(&req.agent_id)
+        .ensure_agent_bucket_for_pubkey(&pubkey, &req.agent_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(EnsureAgentBucketResponse {
