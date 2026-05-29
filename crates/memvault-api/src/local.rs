@@ -2297,6 +2297,108 @@ impl LocalClient {
         Ok(grants)
     }
 
+    /// Revoke a previously-issued bucket grant.
+    ///
+    /// Signs a [`memvault_auth::GrantRevocation`] under the cluster
+    /// admin key (same key that originally signed the target grant) and
+    /// records the revocation in two places:
+    ///   * the audit `REVOCATIONS` table — so
+    ///     [`crate::acl::check_bucket_access`] can skip revoked grants
+    ///     with a cheap `is_revoked` lookup,
+    ///   * a tagged sigchain envelope (`kind=grant_revocation`,
+    ///     `revokes=<grant_cid_hex>`) — so the revocation is auditable
+    ///     and replicates across peers like any other block.
+    ///
+    /// The target CID must refer to an existing bucket grant in this
+    /// node's store; passing an unknown or non-grant CID returns
+    /// `ApiError::Other`.
+    ///
+    /// Authority: admin-only. Bucket-owner-initiated revocation would
+    /// require a second `GrantRevocation` variant signed by the owner
+    /// agent's key + a verifier path that looks up the bucket's
+    /// `owner_agent` — not implemented yet.
+    pub async fn revoke_bucket_grant(
+        &self,
+        grant_cid: &[u8],
+        reason: &str,
+    ) -> Result<Vec<u8>> {
+        // Confirm the target actually IS a grant block in this store —
+        // catches typos and prevents accidentally poisoning the
+        // revocation table with an unrelated CID.
+        let raw = self
+            .store
+            .get_block(grant_cid)
+            .map_err(|e| ApiError::Other(format!("lookup grant: {e}")))?
+            .ok_or_else(|| {
+                ApiError::Other(format!(
+                    "no block found for grant cid {}",
+                    hex::encode(grant_cid)
+                ))
+            })?;
+        let grant = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw)
+            .ok_or_else(|| {
+                ApiError::Other(format!(
+                    "block {} is not a Grant",
+                    hex::encode(grant_cid)
+                ))
+            })?;
+
+        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
+            ApiError::Other("no admin signing key — cannot revoke grants".into())
+        })?;
+
+        let target_cid = memvault_core::cid_from_bytes(&raw);
+        let revocation = memvault_auth::sign_grant_revocation(admin_key, target_cid, reason)
+            .map_err(|e| ApiError::Other(format!("sign grant revocation: {e}")))?;
+
+        let rev_bytes = serde_ipld_dagcbor::to_vec(&revocation)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let rev_cid = memvault_core::cid_from_bytes(&rev_bytes);
+        let rev_cid_bytes = rev_cid.to_bytes();
+
+        // Tag with the target grant cid so audit UIs can list "every
+        // revocation for grant X" without scanning the full store. Also
+        // tag the bucket so per-bucket audit views stay cheap.
+        let grant_cid_hex = hex::encode(grant_cid);
+        let bucket_hex = grant
+            .bucket_scopes
+            .first()
+            .map(|b| hex::encode(b.0))
+            .unwrap_or_default();
+        let now_ns = memvault_core::wall_ns();
+        let meta = memvault_store::EnvelopeMeta {
+            author: self.effective_author(),
+            tags: vec![
+                ("kind".to_string(), "grant_revocation".to_string()),
+                ("revokes".to_string(), grant_cid_hex.clone()),
+                ("grant_revocation".to_string(), bucket_hex),
+            ],
+            wall_ns: now_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            bucket_id: grant.bucket_scopes.first().map(|b| b.0.to_vec()),
+            ..Default::default()
+        };
+        self.store
+            .insert_envelope(&rev_cid_bytes, &rev_bytes, &meta)?;
+
+        // Fast-path index used by `acl::check_bucket_access`. The
+        // payload doubles as the canonical revocation record so audit
+        // tools can render the reason without re-fetching the envelope.
+        self.store
+            .record_revocation(grant_cid, &rev_bytes)
+            .map_err(|e| ApiError::Other(format!("record_revocation: {e}")))?;
+
+        tracing::info!(
+            grant = %grant_cid_hex,
+            revocation = %hex::encode(&rev_cid_bytes),
+            reason,
+            "bucket grant revoked"
+        );
+        Ok(rev_cid_bytes)
+    }
+
     pub async fn adopt_doc_into_bucket(
         &self,
         doc_id: &DocId,

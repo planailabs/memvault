@@ -56,8 +56,14 @@ pub fn check_bucket_access(
 
     let now_ns = memvault_core::wall_ns();
     let grants = client.list_bucket_grants(bucket_id)?;
-    for (_cid, grant) in grants {
+    for (cid, grant) in grants {
         if grant.not_after_ns <= now_ns {
+            continue;
+        }
+        // Per-grant revocation (see `LocalClient::revoke_bucket_grant`).
+        // Revoked grants stay on the chain for audit but stop conferring
+        // access immediately.
+        if client.store().is_revoked(&cid).unwrap_or(false) {
             continue;
         }
         if !grant.actions.contains(&action) {

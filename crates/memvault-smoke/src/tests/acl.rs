@@ -235,6 +235,133 @@ async fn bucket_create_as_sets_owner_and_grants_access() {
         .expect("creator Write");
 }
 
+/// `revoke_bucket_grant` must take effect immediately — the same
+/// `check_bucket_access` call that succeeded under the live grant
+/// returns Forbidden once the revocation lands.
+#[tokio::test]
+async fn revoked_grant_denied() {
+    let node = TestNode::new();
+    let (agent_pk, agent_id) = setup_agent(&node, "revoke-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "revoke-bucket").await;
+
+    let grant_cid = node
+        .client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::Agent(agent_id.clone()),
+            vec![Action::Read, Action::Write],
+            u64::MAX,
+        )
+        .await
+        .expect("issue grant");
+
+    // Before revocation: access works.
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("Read under live grant");
+
+    let rev_cid = node
+        .client
+        .revoke_bucket_grant(&grant_cid, "key rotation")
+        .await
+        .expect("revoke grant");
+    assert_ne!(
+        rev_cid, grant_cid,
+        "revocation must be its own block, not overwrite the grant"
+    );
+
+    // The original grant block stays on the chain (audit), but ACL
+    // checks now treat it as if it didn't exist.
+    let grants = node.client.list_bucket_grants(&bucket).expect("list");
+    assert_eq!(grants.len(), 1, "grant block preserved for audit");
+    assert!(
+        node.client.store().is_revoked(&grant_cid).unwrap(),
+        "revocation table must mark the target grant"
+    );
+
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect_err("Read must fail after revocation");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect_err("Write must fail after revocation");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+/// Revoking grant A must not affect a separate grant B on the same
+/// bucket. Catches an over-broad `is_revoked` check that keyed on
+/// bucket id or audience instead of the specific grant CID.
+#[tokio::test]
+async fn revocation_is_grant_specific() {
+    let node = TestNode::new();
+    let (agent_pk, agent_id) = setup_agent(&node, "two-grant-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "two-grant-bucket").await;
+
+    // Two grants, same audience, same actions — only the first is revoked.
+    let grant_a = node
+        .client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::Agent(agent_id.clone()),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("grant A");
+    let grant_b = node
+        .client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::Agent(agent_id),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("grant B");
+    assert_ne!(grant_a, grant_b, "issued grants must have distinct CIDs");
+
+    node.client
+        .revoke_bucket_grant(&grant_a, "superseded")
+        .await
+        .expect("revoke A");
+
+    // Read still works — grant B is untouched.
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("Read still allowed via surviving grant B");
+}
+
+/// Revoking a CID that isn't a grant block must fail loudly rather than
+/// silently poisoning the revocation table — guards against typos in
+/// admin tooling.
+#[tokio::test]
+async fn revoke_rejects_non_grant_cid() {
+    let node = TestNode::new();
+    let bucket = make_bucket(&node, "bogus-cid-bucket").await;
+
+    let mut bogus = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bogus);
+
+    let err = node
+        .client
+        .revoke_bucket_grant(&bogus, "typo")
+        .await
+        .expect_err("unknown cid must fail");
+    assert!(matches!(err, memvault_api::ApiError::Other(_)));
+
+    // And revoking the bucket-decl CID — a real block, but not a grant
+    // — must also fail.
+    let decl_cid = node
+        .client
+        .store()
+        .get_bucket(&bucket.0)
+        .expect("bucket decl cid lookup")
+        .expect("bucket decl exists");
+    let err = node
+        .client
+        .revoke_bucket_grant(&decl_cid, "wrong target")
+        .await
+        .expect_err("non-grant block must fail");
+    assert!(matches!(err, memvault_api::ApiError::Other(_)));
+}
+
 #[tokio::test]
 async fn expired_grant_denied() {
     let node = TestNode::new();
