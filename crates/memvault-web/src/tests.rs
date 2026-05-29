@@ -418,6 +418,12 @@ impl MemvaultClient for MockClient {
     async fn share_outbox(&self) -> memvault_api::Result<Vec<Vec<u8>>> {
         Ok(vec![])
     }
+    async fn share_get_proposal(
+        &self,
+        _proposal_cid: &[u8],
+    ) -> memvault_api::Result<Option<memvault_api::ShareProposalInfo>> {
+        Ok(None)
+    }
     async fn share_decide(
         &self,
         _cid: &[u8],
@@ -425,6 +431,12 @@ impl MemvaultClient for MockClient {
         _reason: Option<&str>,
     ) -> memvault_api::Result<()> {
         Ok(())
+    }
+    async fn bucket_grants_list(
+        &self,
+        _bucket_id: &memvault_core::BucketId,
+    ) -> memvault_api::Result<Vec<memvault_api::GrantInfo>> {
+        Ok(vec![])
     }
 
     async fn legacy_bucket_id(&self) -> memvault_api::Result<memvault_core::BucketId> {

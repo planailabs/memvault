@@ -111,3 +111,38 @@ pub struct NodeStatus {
     pub peer_count: u32,
     pub uptime_secs: u64,
 }
+
+/// Summary of a capability grant visible to a caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantInfo {
+    /// Hex-encoded grant envelope CID.
+    pub cid: Vec<u8>,
+    /// Bucket the grant is scoped to (the one the caller asked about).
+    pub bucket_id: BucketId,
+    /// Issuer peer of the grant.
+    pub issuer: memvault_core::PeerId,
+    /// Issuing cluster.
+    pub issuing_cluster: ClusterId,
+    /// Who the grant is addressed to.
+    pub audience: memvault_auth::GrantAudience,
+    /// Granted actions.
+    pub actions: Vec<memvault_auth::Action>,
+    pub not_before_ns: u64,
+    pub not_after_ns: u64,
+}
+
+/// Summary of a cross-cluster share proposal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareProposalInfo {
+    /// Hex-encoded proposal envelope CID.
+    pub cid: Vec<u8>,
+    pub proposal_id: [u8; 16],
+    pub from_cluster: ClusterId,
+    pub from_bucket: BucketId,
+    pub from_admin: memvault_core::PeerId,
+    pub to_cluster: ClusterId,
+    pub to_recipient: memvault_auth::ShareRecipient,
+    pub proposed_actions: Vec<memvault_auth::Action>,
+    pub purpose: String,
+    pub not_after_ns: u64,
+}

@@ -16,7 +16,9 @@ use memvault_store::{EnvelopeMeta, MemvaultStore};
 use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
 use crate::subscription::{EventBus, MemvaultEvent};
-use crate::types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
+use crate::types::{
+    DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, TokenStatus, TraversalHit,
+};
 
 /// Generate sync + async variants of a method from a single body.
 /// The body uses helper macros that the outer macro defines differently:
@@ -3389,6 +3391,23 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
+    async fn bucket_grants_list(&self, bucket_id: &BucketId) -> Result<Vec<GrantInfo>> {
+        let grants = LocalClient::list_bucket_grants(self, bucket_id)?;
+        Ok(grants
+            .into_iter()
+            .map(|(cid, g)| GrantInfo {
+                cid,
+                bucket_id: bucket_id.clone(),
+                issuer: g.issuer,
+                issuing_cluster: g.issuing_cluster,
+                audience: g.audience,
+                actions: g.actions,
+                not_before_ns: g.not_before_ns,
+                not_after_ns: g.not_after_ns,
+            })
+            .collect())
+    }
+
     // -- Sharing --
 
     async fn share_inbox(&self) -> Result<Vec<Vec<u8>>> {
@@ -3399,6 +3418,36 @@ impl MemvaultClient for LocalClient {
         // Outbox lists proposals this cluster sent — reuse the same list method
         // with the local cluster as the "from" cluster.
         Ok(self.store.list_share_inbox(&self.cluster_id)?)
+    }
+
+    async fn share_get_proposal(&self, proposal_cid: &[u8]) -> Result<Option<ShareProposalInfo>> {
+        let Some(block) = self.store.get_block(proposal_cid)? else {
+            return Ok(None);
+        };
+        let proposal = if let Some(p) =
+            memvault_store::deserialize_block_as::<memvault_auth::ShareProposal>(&block)
+        {
+            p
+        } else if let Some(signed) = memvault_store::deserialize_block_as::<
+            memvault_core::Signed<memvault_auth::ShareProposal>,
+        >(&block)
+        {
+            signed.payload
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(ShareProposalInfo {
+            cid: proposal_cid.to_vec(),
+            proposal_id: proposal.proposal_id,
+            from_cluster: proposal.from_cluster,
+            from_bucket: proposal.from_bucket,
+            from_admin: proposal.from_admin,
+            to_cluster: proposal.to_cluster,
+            to_recipient: proposal.to_recipient,
+            proposed_actions: proposal.proposed_actions,
+            purpose: proposal.purpose,
+            not_after_ns: proposal.not_after_ns,
+        }))
     }
 
     async fn share_decide(

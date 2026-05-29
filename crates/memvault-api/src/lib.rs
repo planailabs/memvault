@@ -31,7 +31,10 @@ pub use error::{ApiError, Result};
 pub use http::HttpApiClient;
 pub use local::LocalClient;
 pub use subscription::{EventBus, MemvaultEvent};
-pub use types::{DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View};
+pub use types::{
+    DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, TokenStatus, TraversalHit,
+    View,
+};
 
 /// Shared CLI arguments for connecting to a memvault instance.
 /// Embed in your CLI struct with `#[command(flatten)]`.

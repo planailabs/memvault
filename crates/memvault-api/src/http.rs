@@ -14,7 +14,8 @@ use crate::agent_identity::AgentIdentity;
 use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
 use crate::types::{
-    BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit, View,
+    BucketInfo, DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, TokenStatus,
+    TraversalHit, View,
 };
 
 /// JWT TTL for auto-issued tokens. 1h is plenty for typical CLI/MCP sessions
@@ -872,6 +873,21 @@ impl MemvaultClient for HttpApiClient {
             .error_for_status()
             .map_err(map_reqwest)?;
         Ok(())
+    }
+
+    async fn bucket_grants_list(&self, _bucket_id: &BucketId) -> Result<Vec<GrantInfo>> {
+        Err(ApiError::Other(
+            "bucket_grants_list is not available over HTTP".into(),
+        ))
+    }
+
+    async fn share_get_proposal(
+        &self,
+        _proposal_cid: &[u8],
+    ) -> Result<Option<ShareProposalInfo>> {
+        Err(ApiError::Other(
+            "share_get_proposal is not available over HTTP".into(),
+        ))
     }
 
     async fn share_inbox(&self) -> Result<Vec<Vec<u8>>> {

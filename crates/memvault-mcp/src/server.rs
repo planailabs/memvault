@@ -862,6 +862,134 @@ impl MemvaultServer {
         }
     }
 
+    #[tool(
+        name = "memvault_bucket_grants_list",
+        description = "List capability grants for one bucket (when `bucket` is set) or aggregated across every bucket the agent can see. Read-only."
+    )]
+    async fn bucket_grants_list(
+        &self,
+        Parameters(params): Parameters<BucketGrantsListParams>,
+    ) -> String {
+        let buckets: Vec<BucketId> = match params.bucket.as_deref().filter(|s| !s.is_empty()) {
+            Some(hex) => match BucketId::from_hex(hex) {
+                Ok(b) => vec![b],
+                Err(e) => return format!("error: {e}"),
+            },
+            None => match self.client.bucket_list().await {
+                Ok(list) => list.into_iter().map(|b| b.id).collect(),
+                Err(e) => return format!("error: {e}"),
+            },
+        };
+
+        let mut all = Vec::new();
+        for bid in &buckets {
+            match self.client.bucket_grants_list(bid).await {
+                Ok(grants) => {
+                    for g in grants {
+                        all.push(serde_json::json!({
+                            "cid": hex::encode(&g.cid),
+                            "bucket_id": hex::encode(g.bucket_id.0),
+                            "issuer": hex::encode(&g.issuer.0),
+                            "issuing_cluster": hex::encode(g.issuing_cluster.0),
+                            "audience": g.audience,
+                            "actions": g.actions,
+                            "not_before_ns": g.not_before_ns,
+                            "not_after_ns": g.not_after_ns,
+                        }));
+                    }
+                }
+                Err(e) => return format!("error: {e}"),
+            }
+        }
+        serde_json::json!({ "grants": all }).to_string()
+    }
+
+    // ── Sharing ────────────────────────────────────────────────────
+
+    #[tool(
+        name = "memvault_share_inbox",
+        description = "List cross-cluster share proposals received by this cluster. Returns hex CIDs; call memvault_share_decide for proposal contents."
+    )]
+    async fn share_inbox(&self, Parameters(_params): Parameters<ShareInboxParams>) -> String {
+        match self.client.share_inbox().await {
+            Ok(cids) => serde_json::json!({
+                "proposals": cids.iter().map(hex::encode).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_share_outbox",
+        description = "List cross-cluster share proposals sent by this cluster. Returns hex CIDs."
+    )]
+    async fn share_outbox(&self, Parameters(_params): Parameters<ShareOutboxParams>) -> String {
+        match self.client.share_outbox().await {
+            Ok(cids) => serde_json::json!({
+                "proposals": cids.iter().map(hex::encode).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_share_decide",
+        description = "Approve or reject a cross-cluster share proposal. Two-step: call first with `confirm: false` (default) to preview the proposal contents, then call again with `confirm: true` to commit the decision."
+    )]
+    async fn share_decide(&self, Parameters(params): Parameters<ShareDecideParams>) -> String {
+        let cid = match hex::decode(&params.proposal_cid) {
+            Ok(c) => c,
+            Err(e) => return format!("error: invalid hex cid: {e}"),
+        };
+
+        let preview = match self.client.share_get_proposal(&cid).await {
+            Ok(Some(p)) => serde_json::json!({
+                "cid": hex::encode(&p.cid),
+                "proposal_id": hex::encode(p.proposal_id),
+                "from_cluster": hex::encode(p.from_cluster.0),
+                "from_bucket": hex::encode(p.from_bucket.0),
+                "from_admin": hex::encode(&p.from_admin.0),
+                "to_cluster": hex::encode(p.to_cluster.0),
+                "to_recipient": p.to_recipient,
+                "proposed_actions": p.proposed_actions,
+                "purpose": p.purpose,
+                "not_after_ns": p.not_after_ns,
+            }),
+            Ok(None) => serde_json::json!({
+                "cid": params.proposal_cid,
+                "note": "proposal contents not available locally",
+            }),
+            Err(e) => return format!("error: {e}"),
+        };
+
+        if !params.confirm {
+            return serde_json::json!({
+                "status": "preview",
+                "proposal": preview,
+                "intended_decision": if params.approve { "approve" } else { "reject" },
+                "reason": params.reason,
+                "next": "call again with confirm=true to commit",
+            })
+            .to_string();
+        }
+
+        match self
+            .client
+            .share_decide(&cid, params.approve, params.reason.as_deref())
+            .await
+        {
+            Ok(()) => serde_json::json!({
+                "status": if params.approve { "approved" } else { "rejected" },
+                "proposal": preview,
+                "reason": params.reason,
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
     // ── Audit ──────────────────────────────────────────────────────
 
     #[tool(

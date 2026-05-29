@@ -347,6 +347,35 @@ pub struct BucketArchiveParams {
     pub reason: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct BucketGrantsListParams {
+    /// Optional hex-encoded bucket ID. When omitted, aggregates across every
+    /// bucket the agent can currently list.
+    #[serde(default)]
+    pub bucket: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ShareInboxParams {}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ShareOutboxParams {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ShareDecideParams {
+    /// Hex-encoded share proposal CID.
+    pub proposal_cid: String,
+    /// `true` to approve, `false` to reject.
+    pub approve: bool,
+    /// Optional reason (typically provided when rejecting).
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Must be set to `true` on the second call to actually commit the decision.
+    /// First call (default `false`) returns the proposal preview without writing.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
 // -- memvault_get_entity --
 
 #[derive(Deserialize, JsonSchema)]

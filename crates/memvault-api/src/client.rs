@@ -8,7 +8,10 @@ use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 
 use crate::error::Result;
-use crate::types::{BucketInfo, DocSummary, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
+use crate::types::{
+    BucketInfo, DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, TokenStatus,
+    TraversalHit,
+};
 
 /// The complete memvault API surface.
 ///
@@ -175,6 +178,9 @@ pub trait MemvaultClient: Send + Sync {
     /// Used by per-agent MCP servers as the default bucket for writes.
     async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId>;
 
+    /// List capability grants scoped to a bucket.
+    async fn bucket_grants_list(&self, bucket_id: &BucketId) -> Result<Vec<GrantInfo>>;
+
     // -- Sharing --
 
     /// List share proposals received by this cluster.
@@ -182,6 +188,9 @@ pub trait MemvaultClient: Send + Sync {
 
     /// List share proposals sent by this cluster.
     async fn share_outbox(&self) -> Result<Vec<Vec<u8>>>;
+
+    /// Fetch the contents of a share proposal by CID.
+    async fn share_get_proposal(&self, proposal_cid: &[u8]) -> Result<Option<ShareProposalInfo>>;
 
     /// Decide a share proposal (approve or reject).
     async fn share_decide(
