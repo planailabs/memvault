@@ -305,6 +305,11 @@ pub struct LocalClient {
     /// process (memctl) can issue/list/revoke tokens against the same file
     /// while the daemon holds the blockstore.
     keystore: std::sync::Arc<memvault_keystore::KeyStore>,
+    /// Optional live keystore watcher (filesystem-backed). When installed via
+    /// `start_keystore_watch`, cross-process writes (e.g. a co-admin key
+    /// admitted by another process) are applied to this client live. Held
+    /// here so it lives as long as the client.
+    keystore_watch: std::sync::OnceLock<memvault_keystore::WatchHandle>,
     start_time: std::time::Instant,
 }
 
@@ -367,6 +372,7 @@ impl LocalClient {
             agent_identity: std::sync::OnceLock::new(),
             agent_attestation_cid_cache: std::sync::OnceLock::new(),
             keystore,
+            keystore_watch: std::sync::OnceLock::new(),
             start_time: std::time::Instant::now(),
         };
 
@@ -520,6 +526,32 @@ impl LocalClient {
         self.keystore
             .fetch_add_u32(&crate::tokens::token_used_key(cid), 1)
             .unwrap_or(0)
+    }
+
+    /// Start a live filesystem watch on the keystore so changes made by other
+    /// processes are applied to this running client. Currently: when an
+    /// `adminkey:` entry appears/changes (e.g. a co-admin key admitted by a
+    /// separate `memctl` or by the swarm thread), reload held admin secrets so
+    /// the node can sign as that admin without a restart. Idempotent; the
+    /// watcher lives as long as the client.
+    pub fn start_keystore_watch(self: &std::sync::Arc<Self>) {
+        if self.keystore_watch.get().is_some() {
+            return;
+        }
+        let weak = std::sync::Arc::downgrade(self);
+        match self.keystore.watch(move |changed| {
+            if changed.iter().any(|k| k.starts_with(b"adminkey:")) {
+                if let Some(c) = weak.upgrade() {
+                    let n = c.load_admin_keys_from_keystore();
+                    tracing::info!(count = n, "reloaded admin keys after keystore change");
+                }
+            }
+        }) {
+            Ok(h) => {
+                let _ = self.keystore_watch.set(h);
+            }
+            Err(e) => tracing::warn!(error = %e, "could not start keystore watch"),
+        }
     }
 
     /// One-time import of legacy loose identity files into the keystore, then

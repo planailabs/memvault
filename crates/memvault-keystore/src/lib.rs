@@ -69,6 +69,8 @@ pub enum KeyStoreError {
     BadHeader,
     #[error("seal/unseal failed: {0}")]
     Cipher(String),
+    #[error("watch: {0}")]
+    Watch(String),
 }
 
 pub type Result<T> = std::result::Result<T, KeyStoreError>;
@@ -800,6 +802,76 @@ impl KeyStore {
         let _ = FileExt::unlock(&self.lock_file);
         res
     }
+
+    /// Snapshot of the in-memory map (plaintext). Used by the watcher to diff.
+    fn snapshot(&self) -> HashMap<Vec<u8>, Vec<u8>> {
+        self.map.read().map(|m| m.clone()).unwrap_or_default()
+    }
+
+    /// Watch for changes — **including writes from other processes** — and
+    /// invoke `callback` with the keys whose values appeared, changed, or
+    /// were removed since the previous notification. Backed by a filesystem
+    /// watcher on the keystore's directory, so cross-process appends and
+    /// compaction are delivered live (the in-memory map is refreshed before
+    /// each callback). The returned [`WatchHandle`] stops watching on drop.
+    ///
+    /// The diff is computed against the watcher's own bookmark, so repeated
+    /// or unrelated filesystem events that change nothing fire no callback.
+    pub fn watch(
+        self: &std::sync::Arc<Self>,
+        callback: impl Fn(&[Vec<u8>]) + Send + 'static,
+    ) -> Result<WatchHandle> {
+        use notify::{Event, RecursiveMode, Watcher};
+
+        let dir = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let ks = std::sync::Arc::clone(self);
+        let mut last = ks.snapshot();
+
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            if res.is_err() {
+                return;
+            }
+            // Refresh the in-memory map from disk, then diff against our
+            // bookmark. Cheap + a no-op for events that changed nothing.
+            if ks.refresh_if_changed().is_err() {
+                return;
+            }
+            let cur = ks.snapshot();
+            let mut changed: Vec<Vec<u8>> = Vec::new();
+            for (k, v) in &cur {
+                if last.get(k) != Some(v) {
+                    changed.push(k.clone());
+                }
+            }
+            for k in last.keys() {
+                if !cur.contains_key(k) {
+                    changed.push(k.clone());
+                }
+            }
+            last = cur;
+            if !changed.is_empty() {
+                callback(&changed);
+            }
+        })
+        .map_err(|e| KeyStoreError::Watch(e.to_string()))?;
+
+        // Watch the directory (not the file): survives compaction's rename.
+        watcher
+            .watch(&dir, RecursiveMode::NonRecursive)
+            .map_err(|e| KeyStoreError::Watch(e.to_string()))?;
+
+        Ok(WatchHandle { _watcher: watcher })
+    }
+}
+
+/// Keeps a [`KeyStore::watch`] subscription alive; dropping it stops the
+/// watcher (and its background thread).
+pub struct WatchHandle {
+    _watcher: notify::RecommendedWatcher,
 }
 
 #[cfg(test)]
@@ -1074,6 +1146,45 @@ mod tests {
         // b can still append after the other process compacted.
         b.put(b"after", b"ok").unwrap();
         assert_eq!(a.get(b"after").as_deref(), Some(&b"ok"[..]));
+    }
+
+    #[test]
+    fn watch_fires_on_cross_handle_write() {
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ks.mvks");
+        let a = std::sync::Arc::new(KeyStore::open(&path).unwrap());
+        let b = KeyStore::open(&path).unwrap(); // stands in for another process
+
+        let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>();
+        let _handle = a
+            .watch(move |changed| {
+                let _ = tx.send(changed.to_vec());
+            })
+            .unwrap();
+
+        // Write through the OTHER handle; the watcher on `a` should observe it.
+        b.put(b"adminkey:1", b"seed").unwrap();
+
+        // Collect notifications until we see our key (filesystem events have
+        // some latency and may arrive in batches).
+        let mut saw = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(changed) => {
+                    if changed.iter().any(|k| k == b"adminkey:1") {
+                        saw = true;
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(saw, "watcher did not observe the cross-handle write");
+        // And the watcher refreshed a's in-memory map.
+        assert_eq!(a.get(b"adminkey:1").as_deref(), Some(&b"seed"[..]));
     }
 
     #[test]
