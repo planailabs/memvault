@@ -288,8 +288,8 @@ mod native {
             /// Hex-encoded peer ed25519 pubkey (32 bytes / 64 hex chars).
             peer_pubkey: String,
             /// Role to grant the peer (default: agent-host).
-            #[arg(long, default_value = "agent-host")]
-            role: String,
+            #[arg(long, value_enum, default_value = "agent-host")]
+            role: RoleArg,
         },
         /// Agent operations (enroll / list / show)
         ///
@@ -370,8 +370,8 @@ mod native {
         /// Issue a join token
         Issue {
             /// Role for the token recipient
-            #[arg(long, default_value = "agent-host")]
-            role: String,
+            #[arg(long, value_enum, default_value = "agent-host")]
+            role: RoleArg,
             /// TTL in seconds
             #[arg(long, default_value = "3600")]
             ttl: u64,
@@ -558,6 +558,40 @@ mod native {
             /// Agent identifier
             agent_id: String,
         },
+    }
+
+    /// Cluster role, as a validated CLI value (`admin`, `agent-host`,
+    /// `auditor`, `service`). A thin clap wrapper over [`memvault_auth::Role`]
+    /// (a foreign type we can't derive `ValueEnum` on) — gives `--help`
+    /// listing, shell completion, and rejects typos instead of silently
+    /// defaulting to agent-host.
+    #[derive(Copy, Clone, Debug, clap::ValueEnum)]
+    pub enum RoleArg {
+        Admin,
+        AgentHost,
+        Auditor,
+        Service,
+    }
+
+    impl From<RoleArg> for memvault_auth::Role {
+        fn from(r: RoleArg) -> Self {
+            match r {
+                RoleArg::Admin => Self::Admin,
+                RoleArg::AgentHost => Self::AgentHost,
+                RoleArg::Auditor => Self::Auditor,
+                RoleArg::Service => Self::Service,
+            }
+        }
+    }
+
+    impl std::fmt::Display for RoleArg {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // Render the canonical kebab name (admin / agent-host / …).
+            match clap::ValueEnum::to_possible_value(self) {
+                Some(v) => f.write_str(v.get_name()),
+                None => Ok(()),
+            }
+        }
     }
 
     fn default_data_dir() -> PathBuf {
@@ -1215,12 +1249,7 @@ mod native {
                 max_uses,
                 label,
             }) => {
-                let role = match role.as_str() {
-                    "admin" => Role::Admin,
-                    "auditor" => Role::Auditor,
-                    "service" => Role::Service,
-                    _ => Role::AgentHost,
-                };
+                let role: Role = role.into();
                 // Keystore-only: never opens redb, so this works while the
                 // daemon holds the blockstore. Identity (admin key, peer_id,
                 // cluster_id, genesis) is read from the keystore, populated by
@@ -2096,13 +2125,7 @@ mod native {
                 let pk_arr: [u8; 32] = pk_bytes
                     .try_into()
                     .map_err(|_| anyhow::anyhow!("peer_pubkey must be 32 bytes"))?;
-                let role_enum = match role.as_str() {
-                    "admin" => memvault_auth::Role::Admin,
-                    "agent-host" | "agenthost" | "host" => memvault_auth::Role::AgentHost,
-                    "auditor" => memvault_auth::Role::Auditor,
-                    "service" => memvault_auth::Role::Service,
-                    other => anyhow::bail!("unknown role: {other}"),
-                };
+                let role_enum: memvault_auth::Role = role.into();
                 let store = make_store()?;
                 let client = create_client(store)?;
                 let cid = client
