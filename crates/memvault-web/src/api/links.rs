@@ -91,7 +91,7 @@ pub async fn create_link(
 
 /// GET /api/v1/links?node=entity:<hex> — list all edges touching a node.
 pub async fn list_links(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<LinksQuery>,
 ) -> Result<Json<Vec<LinkResponse>>, ApiError> {
@@ -100,6 +100,7 @@ pub async fn list_links(
             "Invalid node: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
         )
     })?;
+    crate::api::auth::enforce_node_action(&auth.claims, &params.node, memvault_auth::Action::Read)?;
 
     let edges = state.client.edges_of(&node).await?;
 
@@ -126,7 +127,7 @@ pub struct ListNodesQuery {
 
 /// GET /api/v1/nodes/:node_id — get any node by type:hex ID.
 pub async fn get_node(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -136,6 +137,7 @@ pub async fn get_node(
             "Invalid node ID — expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
         )
     })?;
+    crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Read)?;
 
     match node_ref {
         NodeRef::Entity(eid) => {
@@ -187,12 +189,13 @@ pub async fn get_node(
 
 /// GET /api/v1/nodes — list all nodes, optionally filtered by view.
 pub async fn list_nodes(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListNodesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = params.limit.unwrap_or(100);
     let items = state.client.list_all(params.view.as_deref(), limit).await?;
+    let items = crate::api::auth::filter_readable(&auth.claims, items, |(id, _, _, _)| id.clone())?;
     Ok(Json(serde_json::json!({
         "count": items.len(),
         "nodes": items.iter().map(|(id, nt, label, tags)| serde_json::json!({
@@ -206,10 +209,11 @@ pub async fn list_nodes(
 
 /// DELETE /api/v1/nodes/:node_id — retract (soft-delete) any node.
 pub async fn retract_node(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Write)?;
     state
         .client
         .retract_node(&node_id, "retracted via API")
@@ -221,7 +225,7 @@ pub async fn retract_node(
 /// DELETE /api/v1/links/:edge_id?source=entity:<hex> — remove an edge by ID.
 /// The source parameter is required because edges are indexed by source.
 pub async fn delete_link(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(edge_id_str): Path<String>,
     Query(params): Query<DeleteLinkQuery>,
@@ -239,6 +243,7 @@ pub async fn delete_link(
             "Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
         )
     })?;
+    crate::api::auth::enforce_node_action(&auth.claims, &params.source, memvault_auth::Action::Write)?;
 
     state.client.remove_link_from(&source, &edge_id).await?;
 

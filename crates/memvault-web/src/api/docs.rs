@@ -70,7 +70,7 @@ pub struct TextOpRequest {
 
 /// GET /api/v1/docs
 pub async fn list_docs(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListDocsQuery>,
 ) -> Result<Json<Vec<DocSummaryResponse>>, ApiError> {
@@ -89,6 +89,10 @@ pub async fn list_docs(
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
     });
+
+    if let Some(bid) = &bucket_id {
+        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Read)?;
+    }
 
     let docs = state
         .client
@@ -112,7 +116,7 @@ pub async fn list_docs(
 
 /// POST /api/v1/docs
 pub async fn create_doc(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateDocRequest>,
 ) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
@@ -127,6 +131,10 @@ pub async fn create_doc(
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
     });
+
+    if let Some(bid) = &bucket_id {
+        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
+    }
 
     let result = memvault_api::docs::create_doc(
         state.client.as_ref(),
@@ -155,11 +163,12 @@ pub async fn create_doc(
 
 /// GET /api/v1/docs/:id
 pub async fn get_doc(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<DocResponse>, ApiError> {
     let doc_id = parse_doc_id(&id)?;
+    crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Read)?;
 
     let doc = state
         .client
@@ -181,12 +190,13 @@ pub async fn get_doc(
 
 /// PUT /api/v1/docs/:id
 pub async fn update_doc(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateDocRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let doc_id = parse_doc_id(&id)?;
+    crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
 
     let ops: Vec<memvault_doc::TextOp> = req
         .ops
@@ -212,11 +222,12 @@ pub async fn update_doc(
 
 /// DELETE /api/v1/docs/:id
 pub async fn delete_doc(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let doc_id = parse_doc_id(&id)?;
+    crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
     let cid_bytes = doc_id.0.to_vec();
     let cid = state.client.retract(&cid_bytes, "deleted via API").await?;
     tracing::info!(id = %id, "API: doc deleted");
@@ -225,11 +236,12 @@ pub async fn delete_doc(
 
 /// GET /api/v1/docs/:id/history
 pub async fn doc_history(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let doc_id = parse_doc_id(&id)?;
+    crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Read)?;
     let records = state.client.history_of(&doc_id).await?;
 
     let results: Vec<serde_json::Value> = records

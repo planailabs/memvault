@@ -58,7 +58,7 @@ pub struct UpdateEntityRequest {
 
 /// POST /api/v1/entities
 pub async fn create_entity(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateEntityRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
@@ -79,6 +79,9 @@ pub async fn create_entity(
         a.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(a))
     });
+    if let Some(bid) = &bucket_id {
+        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
+    }
     let id = state
         .client
         .add_entity(entity, vis, bucket_id.as_ref())
@@ -107,11 +110,12 @@ pub async fn create_entity(
 
 /// GET /api/v1/entities/:id
 pub async fn get_entity(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<EntityResponse>, ApiError> {
     let entity_id = parse_entity_id(&id)?;
+    crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Read)?;
     let entity = state
         .client
         .get_entity(&entity_id)
@@ -140,11 +144,12 @@ pub async fn get_entity(
 
 /// DELETE /api/v1/entities/:id
 pub async fn delete_entity(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let entity_id = parse_entity_id(&id)?;
+    crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Write)?;
     // Retract entity by its ID bytes
     let cid = state
         .client

@@ -238,3 +238,139 @@ macro_rules! scoped_extractor {
 scoped_extractor!(RequireRead, "read");
 scoped_extractor!(RequireWrite, "write");
 scoped_extractor!(RequireAdmin, "admin");
+
+/// Enforce bucket-level ACL for an authenticated caller. Wraps
+/// [`memvault_api::acl::check_bucket_access`] in the daemon's
+/// `LocalClient` and surfaces denials as `ApiError::forbidden`.
+///
+/// The JWT must already be verified (i.e. you have `claims` from one of
+/// the `Require*` extractors). The pubkey is taken from `claims.sub` —
+/// the authoritative identity — not from any request-body field.
+pub fn enforce_bucket_action(
+    claims: &AgentTokenClaims,
+    bucket_id: &memvault_core::BucketId,
+    action: memvault_auth::Action,
+) -> Result<(), crate::error::ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
+    let pubkey = hex::decode(&claims.sub)
+        .map_err(|e| crate::error::ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+    memvault_api::acl::check_bucket_access(&client, &pubkey, bucket_id, action)
+        .map_err(|e| match e {
+            memvault_api::ApiError::Forbidden(msg) => crate::error::ApiError {
+                status: axum::http::StatusCode::FORBIDDEN,
+                message: msg,
+            },
+            other => crate::error::ApiError::internal(other.to_string()),
+        })
+}
+
+/// Same as [`enforce_bucket_action`] but resolves the target bucket from
+/// a document id. No-ops (returns `Ok`) when the doc is pre-bucket /
+/// unscoped — the lower-level read will then succeed or 404 on its own
+/// terms; we don't gate legacy data behind ACLs.
+pub fn enforce_doc_action(
+    claims: &AgentTokenClaims,
+    doc_id: &memvault_core::DocId,
+    action: memvault_auth::Action,
+) -> Result<(), crate::error::ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
+    let Some(bid) = client.bucket_for_doc(doc_id) else {
+        return Ok(());
+    };
+    enforce_bucket_action(claims, &bid, action)
+}
+
+/// Same as [`enforce_bucket_action`] but resolves the target bucket from
+/// an entity id.
+pub fn enforce_entity_action(
+    claims: &AgentTokenClaims,
+    entity_id: &memvault_core::EntityId,
+    action: memvault_auth::Action,
+) -> Result<(), crate::error::ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
+    let Some(bid) = client.bucket_for_entity(entity_id) else {
+        return Ok(());
+    };
+    enforce_bucket_action(claims, &bid, action)
+}
+
+/// Same as [`enforce_bucket_action`] but resolves the target bucket from
+/// a file manifest CID.
+pub fn enforce_file_action(
+    claims: &AgentTokenClaims,
+    manifest_cid: &[u8],
+    action: memvault_auth::Action,
+) -> Result<(), crate::error::ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
+    let Some(bid) = client.bucket_for_file(manifest_cid) else {
+        return Ok(());
+    };
+    enforce_bucket_action(claims, &bid, action)
+}
+
+/// Same as [`enforce_bucket_action`] but resolves the target bucket from
+/// any node id string (`doc:<hex>`, `entity:<hex>`, `file:<hex>`,
+/// `attachment:<hex>`).
+pub fn enforce_node_action(
+    claims: &AgentTokenClaims,
+    node_id: &str,
+    action: memvault_auth::Action,
+) -> Result<(), crate::error::ApiError> {
+    let client = crate::ui::state::local_client()
+        .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
+    let Some(bid) = client.bucket_for_node_id(node_id) else {
+        return Ok(());
+    };
+    enforce_bucket_action(claims, &bid, action)
+}
+
+/// Drop items the caller cannot Read. Result-listing endpoints
+/// (`search`, `list_nodes`, `view_members`) call this to filter out
+/// hits from buckets the caller has no Read grant on.
+///
+/// `key` extracts the node id string from each item; items that don't
+/// map to a bucket (legacy / pre-bucket / unknown id format) pass
+/// through. Per-bucket decisions are cached for the duration of the
+/// call so a hit list with 100 docs in 3 buckets only runs 3 grant
+/// scans.
+pub fn filter_readable<T, F>(
+    claims: &AgentTokenClaims,
+    items: Vec<T>,
+    key: F,
+) -> Result<Vec<T>, crate::error::ApiError>
+where
+    F: Fn(&T) -> String,
+{
+    use std::collections::HashMap;
+    let client = crate::ui::state::local_client()
+        .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
+    let pubkey = hex::decode(&claims.sub)
+        .map_err(|e| crate::error::ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+
+    let mut cache: HashMap<[u8; 32], bool> = HashMap::new();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let node_id = key(&item);
+        let Some(bid) = client.bucket_for_node_id(&node_id) else {
+            out.push(item);
+            continue;
+        };
+        let allowed = *cache.entry(bid.0).or_insert_with(|| {
+            memvault_api::acl::check_bucket_access(
+                &client,
+                &pubkey,
+                &bid,
+                memvault_auth::Action::Read,
+            )
+            .is_ok()
+        });
+        if allowed {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}

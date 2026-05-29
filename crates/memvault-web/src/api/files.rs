@@ -23,11 +23,14 @@ pub struct FileListItem {
 
 /// POST /api/v1/docs/:id/files — upload file (multipart)
 pub async fn upload_doc_file(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    if let Ok(doc_id) = super::docs::parse_doc_id(&id) {
+        crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
+    }
     let field = multipart
         .next_field()
         .await
@@ -81,7 +84,7 @@ pub struct UploadQuery {
 }
 
 pub async fn upload_file(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Query(query): Query<UploadQuery>,
     mut multipart: Multipart,
@@ -111,6 +114,9 @@ pub async fn upload_file(
         a.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(a))
     });
+    if let Some(bid) = &bucket_id {
+        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
+    }
     let (_cid, node_id) = memvault_api::files::upload_file(
         state.client.as_ref(),
         &data,
@@ -135,11 +141,12 @@ pub async fn upload_file(
 
 /// GET /api/v1/files/:cid — download file by CID
 pub async fn download_file(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
 
     let data = state.client.read_file(&cid).await?;
 
@@ -151,11 +158,12 @@ pub async fn download_file(
 
 /// GET /api/v1/files/:cid/manifest — get file manifest metadata
 pub async fn file_manifest(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
 
     match state.client.get_file_manifest(&cid).await? {
         Some(data) => Ok((

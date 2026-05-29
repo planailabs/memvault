@@ -7,6 +7,7 @@ pub mod harness;
 
 #[cfg(test)]
 mod tests {
+    pub mod acl;
     pub mod agent_enrollment;
     pub mod basic;
     pub mod block_sync_divergence;

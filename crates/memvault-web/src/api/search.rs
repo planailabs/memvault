@@ -25,7 +25,7 @@ pub struct SearchHitResponse {
 
 /// GET /api/v1/search
 pub async fn search(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchHitResponse>>, ApiError> {
@@ -41,5 +41,9 @@ pub async fn search(
         })
         .collect();
 
-    Ok(Json(results))
+    let filtered = crate::api::auth::filter_readable(&auth.claims, results, |r| {
+        format!("doc:{}", r.doc_id)
+    })?;
+
+    Ok(Json(filtered))
 }

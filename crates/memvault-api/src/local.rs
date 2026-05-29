@@ -948,6 +948,21 @@ impl LocalClient {
         ))
     }
 
+    /// Synchronous lookup of a bucket's info by id. Mirrors the async
+    /// `bucket_get` trait method but avoids the executor — used by
+    /// callers that already hold a `LocalClient` reference inside a
+    /// sync context (e.g. ACL checks).
+    pub fn bucket_info_sync(
+        &self,
+        id: &BucketId,
+    ) -> Result<Option<crate::types::BucketInfo>> {
+        let decl_cid = match self.store.get_bucket(&id.0)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        self.build_bucket_info(&id.0, &decl_cid)
+    }
+
     /// Build a BucketInfo from a bucket_id and its decl CID.
     fn build_bucket_info(
         &self,
@@ -1919,6 +1934,41 @@ impl LocalClient {
         self.inferred_node_bucket(node)
     }
 
+    /// Resolve the bucket a document currently lives in by walking its
+    /// envelope history. `None` means either the doc doesn't exist or it
+    /// is pre-bucket / unscoped legacy data — callers (e.g. the ACL
+    /// layer) should treat that as "no enforcement target" and let the
+    /// downstream lookup decide.
+    pub fn bucket_for_doc(&self, id: &DocId) -> Option<BucketId> {
+        let bytes = self.inferred_doc_bucket(id)?;
+        let arr: [u8; 32] = bytes.try_into().ok()?;
+        Some(BucketId(arr))
+    }
+
+    /// Resolve the bucket an entity lives in. See [`Self::bucket_for_doc`]
+    /// for the `None` semantics.
+    pub fn bucket_for_entity(&self, id: &EntityId) -> Option<BucketId> {
+        let bytes = self.inferred_entity_bucket(id)?;
+        let arr: [u8; 32] = bytes.try_into().ok()?;
+        Some(BucketId(arr))
+    }
+
+    /// Resolve the bucket a file attachment lives in (keyed by its
+    /// manifest CID).
+    pub fn bucket_for_file(&self, manifest_cid: &[u8]) -> Option<BucketId> {
+        let bytes = self.inferred_attachment_bucket(manifest_cid)?;
+        let arr: [u8; 32] = bytes.try_into().ok()?;
+        Some(BucketId(arr))
+    }
+
+    /// Resolve the bucket for any node id string (`doc:<hex>`,
+    /// `entity:<hex>`, `file:<hex>`, `attachment:<hex>`).
+    pub fn bucket_for_node_id(&self, node_id: &str) -> Option<BucketId> {
+        let bytes = self.inferred_bucket_for_node_id(node_id)?;
+        let arr: [u8; 32] = bytes.try_into().ok()?;
+        Some(BucketId(arr))
+    }
+
     /// Find the most recent op CID for a document (its "head").
     pub fn latest_doc_head_cid(&self, doc_id: &DocId) -> Option<Vec<u8>> {
         let label: String = doc_id.0.iter().map(|b| format!("{b:02x}")).collect();
@@ -2138,7 +2188,10 @@ impl LocalClient {
         })?;
 
         let now_ns = memvault_core::wall_ns();
-        let not_after_ns = now_ns + ttl_secs * 1_000_000_000;
+        // `saturating_*` so callers can pass `u64::MAX` for "never expires"
+        // without wrapping.
+        let ttl_ns = ttl_secs.saturating_mul(1_000_000_000);
+        let not_after_ns = now_ns.saturating_add(ttl_ns);
         let mut nonce = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
 
