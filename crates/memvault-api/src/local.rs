@@ -299,6 +299,11 @@ pub struct LocalClient {
     /// without a sigchain scan per write. Empty until that runs;
     /// envelope readers fall back to author-pubkey lookup when absent.
     agent_attestation_cid_cache: std::sync::OnceLock<Vec<u8>>,
+    /// Optional lock-free, redb-bypassing store for tokens + key material
+    /// (see `memvault-keystore`). Installed by the daemon/memctl via
+    /// `set_keystore`; `None` in tests and headless tooling that don't
+    /// need cross-process token issuance or at-rest key encryption.
+    keystore: std::sync::OnceLock<std::sync::Arc<memvault_keystore::KeyStore>>,
     start_time: std::time::Instant,
 }
 
@@ -327,6 +332,7 @@ impl LocalClient {
             pinned_admin_genesis: std::sync::OnceLock::new(),
             agent_identity: std::sync::OnceLock::new(),
             agent_attestation_cid_cache: std::sync::OnceLock::new(),
+            keystore: std::sync::OnceLock::new(),
             start_time: std::time::Instant::now(),
         };
 
@@ -389,6 +395,140 @@ impl LocalClient {
             }
         }
         self.bump_admin_key_generation();
+        // Persist the secret to the keystore (encrypted at rest if a cipher
+        // is configured) so it survives restart without a plaintext file.
+        // Best-effort: in-memory install above is what callers rely on.
+        if let Err(e) = self.persist_admin_signing_key(&pubkey) {
+            tracing::warn!(error = %e, "could not persist admin key to keystore");
+        }
+    }
+
+    /// Install the redb-bypassing keystore (tokens + key material). Write-once.
+    pub fn set_keystore(&self, ks: std::sync::Arc<memvault_keystore::KeyStore>) {
+        let _ = self.keystore.set(ks);
+    }
+
+    /// Open (or create) a plaintext keystore at `path` and install it.
+    /// Encapsulates the `memvault-keystore` dependency so callers (the
+    /// daemon, memctl) don't take it directly. At-rest encryption is a
+    /// separate opt-in entry point.
+    pub fn open_keystore_at(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let ks = memvault_keystore::KeyStore::open(path)
+            .map_err(|e| ApiError::Other(format!("open keystore: {e}")))?;
+        self.set_keystore(std::sync::Arc::new(ks));
+        Ok(())
+    }
+
+    /// Open (or create) a keystore whose record values are AEAD-encrypted at
+    /// rest with a passphrase-derived key (XChaCha20-Poly1305 + Argon2id).
+    /// A 16-byte salt is generated once and kept in `<path>.salt`.
+    pub fn open_encrypted_keystore_at(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        passphrase: &[u8],
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let salt_path = {
+            let mut s = path.as_os_str().to_os_string();
+            s.push(".salt");
+            std::path::PathBuf::from(s)
+        };
+        let salt: [u8; 16] = match std::fs::read(&salt_path) {
+            Ok(b) if b.len() == 16 => b.try_into().unwrap(),
+            _ => {
+                let mut s = [0u8; 16];
+                use rand::RngCore;
+                rand::thread_rng().fill_bytes(&mut s);
+                if let Some(parent) = salt_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&salt_path, s)
+                    .map_err(|e| ApiError::Other(format!("write keystore salt: {e}")))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &salt_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                s
+            }
+        };
+        let key = memvault_keystore::derive_key(passphrase, &salt)
+            .map_err(|e| ApiError::Other(format!("derive keystore key: {e}")))?;
+        let ks = memvault_keystore::KeyStore::open_with_cipher(
+            path,
+            memvault_keystore::Cipher::aead(key),
+        )
+        .map_err(|e| ApiError::Other(format!("open encrypted keystore: {e}")))?;
+        self.set_keystore(std::sync::Arc::new(ks));
+        Ok(())
+    }
+
+    /// The installed keystore, if any. `None` in tests/headless tooling.
+    pub fn keystore(&self) -> Option<&std::sync::Arc<memvault_keystore::KeyStore>> {
+        self.keystore.get()
+    }
+
+    /// Persist a held admin signing secret to the keystore under
+    /// `adminkey:<pubkey-hex>`. No-op when no keystore is installed.
+    fn persist_admin_signing_key(&self, pubkey: &[u8; 32]) -> Result<()> {
+        let Some(ks) = self.keystore.get() else {
+            return Ok(());
+        };
+        let seed = {
+            let held = self
+                .held_admin_keys
+                .read()
+                .map_err(|_| ApiError::Other("held_admin_keys lock poisoned".into()))?;
+            match held.get(pubkey) {
+                Some(k) => k.to_bytes(),
+                None => return Ok(()),
+            }
+        };
+        let key = format!("adminkey:{}", hex::encode(pubkey));
+        ks.put(key.as_bytes(), &seed)
+            .map_err(|e| ApiError::Other(format!("keystore put admin key: {e}")))?;
+        Ok(())
+    }
+
+    /// Load every admin signing secret persisted in the keystore and install
+    /// it in memory. Returns the count loaded. Called by the daemon at
+    /// startup before the chain rescan. No-op without a keystore.
+    pub fn load_admin_keys_from_keystore(&self) -> usize {
+        let Some(ks) = self.keystore.get() else {
+            return 0;
+        };
+        let mut n = 0;
+        for k in ks.keys_with_prefix(b"adminkey:") {
+            if let Some(seed) = ks.get(&k) {
+                if seed.len() == 32 {
+                    let mut s = [0u8; 32];
+                    s.copy_from_slice(&seed);
+                    // set_admin_signing_key re-persists (idempotent put) and
+                    // installs in memory + seeds the key state.
+                    self.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&s));
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Persist the pinned cluster `AdminGenesis` (CBOR bytes) to the keystore
+    /// under `genesis`. No-op without a keystore.
+    pub fn persist_pinned_admin_genesis_bytes(&self, cbor: &[u8]) -> Result<()> {
+        let Some(ks) = self.keystore.get() else {
+            return Ok(());
+        };
+        ks.put(b"genesis", cbor)
+            .map_err(|e| ApiError::Other(format!("keystore put genesis: {e}")))
+    }
+
+    /// The pinned `AdminGenesis` CBOR bytes from the keystore, if present.
+    pub fn pinned_admin_genesis_bytes_from_keystore(&self) -> Option<Vec<u8>> {
+        self.keystore.get().and_then(|ks| ks.get(b"genesis"))
     }
 
     /// Replace the cluster admin-key validity state wholesale. Called by

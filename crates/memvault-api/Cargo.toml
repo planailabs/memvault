@@ -12,6 +12,7 @@ otel = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
 memvault-core = { path = "../memvault-core" }
 memvault-auth = { path = "../memvault-auth" }
 memvault-store = { path = "../memvault-store" }
+memvault-keystore = { path = "../memvault-keystore" }
 memvault-doc = { path = "../memvault-doc" }
 memvault-attach = { path = "../memvault-attach" }
 memvault-extract = { path = "../memvault-extract" }
