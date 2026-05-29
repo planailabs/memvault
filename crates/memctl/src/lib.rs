@@ -988,13 +988,28 @@ mod native {
                 let store = make_store()?;
                 store.set_local_cluster_id(&cluster_id.0)?;
 
-                // Generate admin signing key (for token issuance)
+                // Generate admin signing key (for token issuance). If a
+                // founder key from a pre-genesis boot exists, PROMOTE it to
+                // cluster admin instead of minting a fresh key — that way
+                // grants the founder signed before genesis stay valid (the
+                // anchor pubkey is unchanged).
                 let admin_key_path = data_dir.join("identity").join("admin.key");
+                let founder_path = data_dir.join("identity").join("founder_admin.key");
                 if !admin_key_path.exists() {
                     std::fs::create_dir_all(admin_key_path.parent().unwrap())?;
-                    let mut seed = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
-                    std::fs::write(&admin_key_path, &seed)?;
+                    if founder_path.exists() {
+                        std::fs::copy(&founder_path, &admin_key_path)?;
+                        // The founder flag no longer applies — this key is
+                        // now the cluster's genesis admin.
+                        let _ = std::fs::remove_file(
+                            data_dir.join("identity").join("founder.flag"),
+                        );
+                        println!("  Promoted founder key to cluster admin.");
+                    } else {
+                        let mut seed = [0u8; 32];
+                        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+                        std::fs::write(&admin_key_path, &seed)?;
+                    }
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;

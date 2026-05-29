@@ -721,3 +721,38 @@ async fn cannot_retire_last_admin() {
         .expect_err("retiring the only admin must fail");
     assert!(matches!(err, memvault_api::ApiError::Other(_)));
 }
+
+/// A grant signed by a registered local founder key is accepted on this
+/// node (founder keys are trusted locally for pre-genesis private
+/// buckets), even though the key is not in the cluster admin chain.
+#[tokio::test]
+async fn founder_key_grant_accepted_locally() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "founder-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "founder-bucket").await;
+
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let founder = SigningKey::from_bytes(&seed);
+    let founder_pk = founder.verifying_key().to_bytes();
+
+    // Before registration: a founder-signed grant is rejected (the key is
+    // not a cluster admin).
+    insert_raw_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        founder_pk,
+        Some(&founder),
+    );
+    assert!(
+        acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read).is_err(),
+        "unregistered founder key must be rejected"
+    );
+
+    // After registration: accepted locally.
+    node.client.register_founder_key(founder_pk);
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("registered founder key grant accepted locally");
+}
