@@ -55,7 +55,7 @@ impl GrantRevocation {
             reason: &self.reason,
             revoked_at_ns: self.revoked_at_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/grant-revocation/v1", &payload)
     }
 
     /// Verify the revocation signature against the embedded admin pubkey.

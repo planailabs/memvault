@@ -1,5 +1,25 @@
 pub mod admin_genesis;
 pub mod admin_keys;
+/// Domain-separated signing-bytes helper.
+///
+/// Prepends a per-type, versioned domain tag to the canonical DAG-CBOR
+/// encoding of a signing payload, so a signature over one envelope type
+/// can never verify as another (cross-type transplant / CBOR shape
+/// confusion). Every `signing_bytes()` in this crate funnels through this
+/// with its own `DOMAIN` constant. NB: this is a hard format — signatures
+/// produced before domain separation will not verify (intentional; not a
+/// dual-verify migration).
+pub(crate) fn domain_sign<T: serde::Serialize>(
+    domain: &[u8],
+    payload: &T,
+) -> error::Result<Vec<u8>> {
+    let body = serde_ipld_dagcbor::to_vec(payload)
+        .map_err(|e| error::AuthError::Codec(e.to_string()))?;
+    let mut out = Vec::with_capacity(domain.len() + body.len());
+    out.extend_from_slice(domain);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
 pub mod agent_attestation;
 pub mod sigchain_shape;
 pub mod agent_revocation;

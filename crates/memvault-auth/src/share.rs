@@ -100,7 +100,7 @@ impl ShareProposal {
             purpose: &self.purpose,
             not_after_ns: self.not_after_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/share-proposal/v1", &payload)
     }
 
     pub fn verify_signature(&self, admin_key: &VerifyingKey) -> Result<()> {
@@ -137,7 +137,7 @@ impl ShareReply {
             decision: &self.decision,
             decided_at_ns: self.decided_at_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/share-reply/v1", &payload)
     }
 
     pub fn verify_signature(&self, key: &VerifyingKey) -> Result<()> {
@@ -177,7 +177,7 @@ impl BucketTrust {
             from_proposal: &self.from_proposal,
             from_reply: &self.from_reply,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/bucket-trust/v1", &payload)
     }
 
     pub fn verify_signature(&self, key: &VerifyingKey) -> Result<()> {

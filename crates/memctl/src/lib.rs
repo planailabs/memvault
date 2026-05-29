@@ -192,9 +192,6 @@ mod native {
         /// Multi-admin key management
         #[command(subcommand)]
         Admin(AdminCommands),
-        /// Bucket grant migration (legacy → admin-signed)
-        #[command(subcommand)]
-        Grants(GrantsCommands),
         /// Show node status
         Status,
         /// Add an entity to the knowledge graph
@@ -485,9 +482,14 @@ mod native {
             /// Path to the admin key seed file (from `gen-key`).
             #[arg(long)]
             key: PathBuf,
+            /// POP validity, in seconds from now. The admitting admin must
+            /// issue the admission before this elapses.
+            #[arg(long, default_value = "86400")]
+            ttl: u64,
         },
-        /// Admit a new admin key. Provide its pubkey (hex) and POP (hex),
-        /// produced by the incoming operator via `gen-key` + `pop`.
+        /// Admit a new admin key. Provide its pubkey (hex), POP (hex), and
+        /// the POP expiry, produced by the incoming operator via
+        /// `gen-key` + `pop`.
         Admit {
             /// New admin verifying key (64 hex chars).
             #[arg(long)]
@@ -495,6 +497,9 @@ mod native {
             /// Proof-of-possession (128 hex chars) from the incoming admin.
             #[arg(long)]
             pop: String,
+            /// POP expiry in unix-ns, as printed by `memctl admin pop`.
+            #[arg(long)]
+            pop_not_after_ns: u64,
         },
         /// Retire an admin key (hex pubkey). Cannot retire the last admin.
         Retire {
@@ -507,17 +512,6 @@ mod native {
         },
         /// List the cluster's admin keys and their validity windows.
         List,
-    }
-
-    /// Bucket-grant migration subcommands.
-    #[derive(Subcommand, Debug)]
-    pub enum GrantsCommands {
-        /// Report how many legacy (unsigned) grants exist. Run before
-        /// enabling strict grant verification.
-        Check,
-        /// Re-issue every legacy grant under the current admin signature,
-        /// revoking the legacy original. Requires a held admin key.
-        Reissue,
     }
 
     fn default_data_dir() -> PathBuf {
@@ -624,12 +618,6 @@ mod native {
                 }
                 Err(e) => tracing::warn!(error = %e, "decode pinned admin_genesis"),
             }
-        }
-        // Honour the strict-grant-verify override (migration window only).
-        // Default stays true (secure).
-        if let Ok(v) = std::env::var("MEMVAULT_STRICT_GRANT_VERIFY") {
-            let on = !matches!(v.trim(), "0" | "false" | "no" | "off");
-            client.set_strict_grant_verify(on);
         }
         // Rebuild the multi-admin key set from the chain so admitted admins
         // (and retirements) are known to this short-lived CLI client, not
@@ -1214,25 +1202,6 @@ mod native {
             }
             Commands::Admin(sub) => {
                 run_admin(sub, make_store()?).await?;
-            }
-            Commands::Grants(sub) => {
-                let client = create_client(make_store()?)?;
-                match sub {
-                    GrantsCommands::Check => {
-                        let n = client.count_legacy_grants()?;
-                        println!("legacy (unsigned) grants: {n}");
-                        if n > 0 {
-                            println!(
-                                "run `memctl grants reissue` (with the admin key) before \
-                                 enabling strict grant verification"
-                            );
-                        }
-                    }
-                    GrantsCommands::Reissue => {
-                        let (scanned, reissued) = client.migrate_legacy_grants().await?;
-                        println!("legacy grants scanned: {scanned}, reissued: {reissued}");
-                    }
-                }
             }
             Commands::Rotations => {
                 let store = make_store()?;
@@ -2351,7 +2320,7 @@ mod native {
                 println!("admin pubkey: {}", hex::encode(sk.verifying_key().to_bytes()));
                 println!("seed written to {out:?} (0600, keep it secret)");
             }
-            AdminCommands::Pop { key } => {
+            AdminCommands::Pop { key, ttl } => {
                 let sk = read_admin_seed(&key)?;
                 let cluster_bytes = store
                     .get_local_cluster_id()
@@ -2362,11 +2331,18 @@ mod native {
                     &hex::encode(&cluster_bytes),
                     "cluster_id",
                 )?);
-                let pop = memvault_auth::sign_admin_pop(&sk, &cluster);
-                println!("pubkey: {}", hex::encode(sk.verifying_key().to_bytes()));
-                println!("pop:    {}", hex::encode(pop));
+                let pop_not_after_ns = memvault_core::wall_ns()
+                    .saturating_add(ttl.saturating_mul(1_000_000_000));
+                let pop = memvault_auth::sign_admin_pop(&sk, &cluster, pop_not_after_ns);
+                println!("pubkey:           {}", hex::encode(sk.verifying_key().to_bytes()));
+                println!("pop:              {}", hex::encode(pop));
+                println!("pop_not_after_ns: {pop_not_after_ns}");
             }
-            AdminCommands::Admit { new_pubkey, pop } => {
+            AdminCommands::Admit {
+                new_pubkey,
+                pop,
+                pop_not_after_ns,
+            } => {
                 let new_pk = parse_hex32(&new_pubkey, "new_pubkey")?;
                 let pop_bytes = hex::decode(&pop)
                     .map_err(|e| anyhow::anyhow!("pop not hex: {e}"))?;
@@ -2375,7 +2351,9 @@ mod native {
                     .try_into()
                     .map_err(|_| anyhow::anyhow!("pop must be 64 bytes (128 hex chars)"))?;
                 let client = create_client(store)?;
-                let cid = client.admit_admin_key(new_pk, pop_arr, None).await?;
+                let cid = client
+                    .admit_admin_key(new_pk, pop_arr, pop_not_after_ns, None)
+                    .await?;
                 println!("admin admitted (admission cid: {})", hex::encode(cid));
             }
             AdminCommands::Retire { pubkey, reason } => {

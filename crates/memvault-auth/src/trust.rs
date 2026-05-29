@@ -33,7 +33,7 @@ impl ClusterTrust {
             federated_since_ns: self.federated_since_ns,
             not_after_ns: self.not_after_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/cluster-trust/v1", &payload)
     }
 
     /// Verify the trust record signature.

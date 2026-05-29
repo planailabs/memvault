@@ -63,7 +63,7 @@ impl AgentAttestation {
             role: &self.role,
             not_after_ns: self.not_after_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/agent-attestation/v1", &payload)
     }
 
     /// Verify the signature against the claimed `node_pubkey`. The caller is

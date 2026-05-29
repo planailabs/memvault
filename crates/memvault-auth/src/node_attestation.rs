@@ -48,7 +48,7 @@ impl NodeAttestation {
             not_after_ns: self.not_after_ns,
             issued_via: &self.issued_via,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/node-attestation/v1", &payload)
     }
 
     /// Verify the attestation signature against the given admin key.

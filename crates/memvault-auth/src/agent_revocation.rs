@@ -50,7 +50,7 @@ impl AgentRevocation {
             reason: &self.reason,
             revoked_at_ns: self.revoked_at_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/agent-revocation/v1", &payload)
     }
 
     /// Verify the revocation signature against the issuing node's pubkey.
@@ -119,7 +119,7 @@ impl NodeRevocation {
             reason: &self.reason,
             revoked_at_ns: self.revoked_at_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/node-revocation/v1", &payload)
     }
 
     /// Verify the revocation signature against the embedded admin pubkey.

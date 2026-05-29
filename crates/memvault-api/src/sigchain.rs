@@ -290,6 +290,15 @@ pub fn rebuild_admin_key_state(
                     );
                     continue;
                 }
+                // The incoming admin's POP must not have expired by the time
+                // the admission was issued — bounds replay of a captured POP.
+                if adm.admitted_at_ns > adm.pop_not_after_ns {
+                    tracing::warn!(
+                        new = %hex::encode(adm.new_pubkey),
+                        "skipping admin_admission: POP expired before admission"
+                    );
+                    continue;
+                }
                 // `introduced_by` is an audit-only pointer; the tie value
                 // is the admission's CID bytes but reconstructing a typed
                 // Cid here would pull in the `cid` crate. Audit tooling can
@@ -685,6 +694,17 @@ fn apply_sigchain_block(
                 tracing::warn!("sigchain watcher: AgentRevocation signature invalid");
                 return;
             }
+            // The revoker must be the agent's attesting node (not just any
+            // trusted node).
+            if let Ok(Some(att)) = find_agent_attestation(client, &rev.agent_pubkey) {
+                if att.node_pubkey != rev.node_pubkey {
+                    tracing::warn!(
+                        agent = %hex::encode(rev.agent_pubkey),
+                        "sigchain watcher: AgentRevocation revoker is not the attesting node"
+                    );
+                    return;
+                }
+            }
             if let Ok(mut w) = state.revoked_agents.write() {
                 w.insert(rev.agent_pubkey);
             }
@@ -964,6 +984,20 @@ pub fn scan_revocations(
                 "skipping agent revocation: bad signature"
             );
             continue;
+        }
+        // The revoker must be the node that attested the agent — a trusted
+        // node cannot revoke another node's agents. If the agent has an
+        // on-chain attestation, require rev.node_pubkey to match it.
+        if let Ok(Some(att)) = find_agent_attestation(client, &rev.agent_pubkey) {
+            if att.node_pubkey != rev.node_pubkey {
+                tracing::warn!(
+                    agent = %hex::encode(rev.agent_pubkey),
+                    revoker = %hex::encode(rev.node_pubkey),
+                    attester = %hex::encode(att.node_pubkey),
+                    "skipping agent revocation: revoker is not the attesting node"
+                );
+                continue;
+            }
         }
         agents.insert(rev.agent_pubkey);
     }

@@ -162,6 +162,8 @@ pub struct AdmitAdminRequest {
     /// Proof-of-possession (128 hex chars), produced offline by the
     /// incoming admin via `memctl admin pop`.
     pub pop: String,
+    /// POP expiry (ns) the incoming admin bound into the POP.
+    pub pop_not_after_ns: u64,
     /// Optional validity start (ns). Defaults to now.
     #[serde(default)]
     pub valid_from_ns: Option<u64>,
@@ -206,7 +208,7 @@ pub async fn admit_admin_key(
         .try_into()
         .map_err(|_| ApiError::bad_request("pop must be 64 bytes"))?;
     let cid = client
-        .admit_admin_key(new_pk, pop, req.valid_from_ns)
+        .admit_admin_key(new_pk, pop, req.pop_not_after_ns, req.valid_from_ns)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok((

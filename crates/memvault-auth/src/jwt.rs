@@ -89,6 +89,13 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 /// Issue a JWT signed by `signing_key` (the agent's private key).
 ///
 /// The verifier will look up the agent's [`AgentAttestation`] from its
@@ -248,6 +255,14 @@ where
         .verify_signature()
         .map_err(|e| AuthError::InvalidToken(format!("agent attestation: {e}")))?;
 
+    // Enforce attestation expiry at request time. A time-boxed agent
+    // attestation must stop authorizing once it lapses (daemon-managed
+    // identities use not_after_ns = u64::MAX, so they are unaffected).
+    let now = now_ns();
+    agent_att
+        .verify_not_expired(now)
+        .map_err(|e| AuthError::InvalidToken(format!("agent attestation: {e}")))?;
+
     // Look up the node's trust record. The lookup table is the source of truth
     // for which node_pubkeys are trusted in this cluster (or in pre-genesis,
     // which nodes are trusted as local seeds).
@@ -284,6 +299,10 @@ where
                         .into(),
                 ));
             }
+            // Enforce node attestation expiry at request time.
+            node_att
+                .verify_not_expired(now)
+                .map_err(|e| AuthError::InvalidToken(format!("node attestation: {e}")))?;
         }
         NodeTrust::PreGenesis => {
             if !admin_keys.is_empty() {
@@ -351,6 +370,64 @@ mod tests {
         .unwrap();
         let tok = issue(&agent, "alice", scope, ttl).unwrap();
         (tok, admin.verifying_key(), n_att, a_att)
+    }
+
+    #[test]
+    fn rejects_expired_agent_attestation() {
+        let admin = make_key();
+        let node = make_key();
+        let agent = make_key();
+        let n_att = node_att(&admin, &node);
+        // Agent attestation that expired long ago (not_after_ns = 1).
+        let a_att = sign_agent_attestation(
+            &node,
+            AgentId("alice".into()),
+            agent.verifying_key().to_bytes(),
+            Role::AgentHost,
+            1,
+        )
+        .unwrap();
+        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let err = verify(
+            &tok,
+            &[admin.verifying_key()],
+            |_| Some(a_att.clone()),
+            |_| Some(NodeTrust::Attested(n_att.clone())),
+        );
+        assert!(err.is_err(), "expired agent attestation must be rejected");
+    }
+
+    #[test]
+    fn rejects_expired_node_attestation() {
+        let admin = make_key();
+        let node = make_key();
+        let agent = make_key();
+        // Node attestation expired (not_after_ns = 1).
+        let mut n_att = NodeAttestation {
+            cluster_id: ClusterId([7u8; 32]),
+            member: PeerId(node.verifying_key().to_bytes().to_vec()),
+            role: Role::AgentHost,
+            not_after_ns: 1,
+            issued_via: AttestationOrigin::Direct,
+            signature: [0u8; 64],
+        };
+        n_att.signature = admin.sign(&n_att.signing_bytes().unwrap()).to_bytes();
+        let a_att = sign_agent_attestation(
+            &node,
+            AgentId("alice".into()),
+            agent.verifying_key().to_bytes(),
+            Role::AgentHost,
+            u64::MAX,
+        )
+        .unwrap();
+        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let err = verify(
+            &tok,
+            &[admin.verifying_key()],
+            |_| Some(a_att.clone()),
+            |_| Some(NodeTrust::Attested(n_att.clone())),
+        );
+        assert!(err.is_err(), "expired node attestation must be rejected");
     }
 
     #[test]

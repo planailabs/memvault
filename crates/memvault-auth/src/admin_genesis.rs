@@ -52,7 +52,7 @@ impl AdminGenesis {
             admin_pubkey: &self.admin_pubkey,
             created_ns: self.created_ns,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/admin-genesis/v1", &payload)
     }
 
     /// Verify the self-signature: signature must verify against the

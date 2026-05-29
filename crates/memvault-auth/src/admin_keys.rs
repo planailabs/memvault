@@ -44,26 +44,50 @@ const POP_DOMAIN: &[u8] = b"memvault/admin-key-pop/v1";
 /// an admin of `cluster_id`. Generated offline by the incoming operator;
 /// shared out-of-band with an existing admin who then issues the
 /// [`AdminKeyAdmission`].
-pub fn admin_pop_signing_bytes(cluster_id: &ClusterId, new_pubkey: &[u8; 32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(POP_DOMAIN.len() + 32 + 32);
+/// `pop_not_after_ns` is bound into the POP and the admission so a
+/// captured POP cannot be reused indefinitely: the admitting admin must
+/// issue the admission (and the rescan must accept it) before this
+/// deadline, which the incoming operator chooses when generating the POP.
+pub fn admin_pop_signing_bytes(
+    cluster_id: &ClusterId,
+    new_pubkey: &[u8; 32],
+    pop_not_after_ns: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(POP_DOMAIN.len() + 32 + 32 + 8);
     out.extend_from_slice(POP_DOMAIN);
     out.extend_from_slice(&cluster_id.0);
     out.extend_from_slice(new_pubkey);
+    out.extend_from_slice(&pop_not_after_ns.to_be_bytes());
     out
 }
 
 /// Produce a proof-of-possession signature with the incoming admin's
-/// key. The operator runs this offline and hands the resulting 64 bytes
-/// (plus their pubkey) to an existing admin.
-pub fn sign_admin_pop(new_key: &SigningKey, cluster_id: &ClusterId) -> [u8; 64] {
-    let bytes = admin_pop_signing_bytes(cluster_id, &new_key.verifying_key().to_bytes());
+/// key, valid until `pop_not_after_ns`. The operator runs this offline
+/// and hands the resulting 64 bytes (plus their pubkey and the expiry)
+/// to an existing admin.
+pub fn sign_admin_pop(
+    new_key: &SigningKey,
+    cluster_id: &ClusterId,
+    pop_not_after_ns: u64,
+) -> [u8; 64] {
+    let bytes = admin_pop_signing_bytes(
+        cluster_id,
+        &new_key.verifying_key().to_bytes(),
+        pop_not_after_ns,
+    );
     new_key.sign(&bytes).to_bytes()
 }
 
-/// Verify a proof-of-possession signature against the claimed new pubkey.
-pub fn verify_admin_pop(cluster_id: &ClusterId, new_pubkey: &[u8; 32], pop: &[u8; 64]) -> Result<()> {
+/// Verify a proof-of-possession signature against the claimed new pubkey
+/// and expiry.
+pub fn verify_admin_pop(
+    cluster_id: &ClusterId,
+    new_pubkey: &[u8; 32],
+    pop_not_after_ns: u64,
+    pop: &[u8; 64],
+) -> Result<()> {
     let key = VerifyingKey::from_bytes(new_pubkey).map_err(|_| AuthError::SignatureInvalid)?;
-    let bytes = admin_pop_signing_bytes(cluster_id, new_pubkey);
+    let bytes = admin_pop_signing_bytes(cluster_id, new_pubkey, pop_not_after_ns);
     let sig = Signature::from_bytes(pop);
     key.verify(&bytes, &sig)
         .map_err(|_| AuthError::SignatureInvalid)
@@ -85,6 +109,10 @@ pub struct AdminKeyAdmission {
     /// When the admission was issued — used for deterministic chain
     /// ordering during rescan and for signer-validity checks.
     pub admitted_at_ns: u64,
+    /// POP expiry chosen by the incoming admin; the admission is only
+    /// valid if `admitted_at_ns <= pop_not_after_ns`. Bounds replay of a
+    /// captured POP.
+    pub pop_not_after_ns: u64,
     /// CID of the admin envelope the issuer believed was current, for
     /// audit and tie-breaking. Not hard-required (it may not have synced
     /// yet); ordering security comes from the sorted-rescan +
@@ -105,6 +133,7 @@ struct AdmissionSigningPayload<'a> {
     cluster_id: &'a ClusterId,
     valid_from_ns: u64,
     admitted_at_ns: u64,
+    pop_not_after_ns: u64,
     parent: &'a Option<Cid>,
     /// Slice view of the 64-byte POP — `[u8; 64]` has no `Serialize`
     /// impl, but a slice does, and it canonicalises identically.
@@ -119,10 +148,11 @@ impl AdminKeyAdmission {
             cluster_id: &self.cluster_id,
             valid_from_ns: self.valid_from_ns,
             admitted_at_ns: self.admitted_at_ns,
+            pop_not_after_ns: self.pop_not_after_ns,
             parent: &self.parent,
             pop: &self.pop[..],
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/admin-admission/v1", &payload)
     }
 
     /// Verify the admitting admin's signature. Does NOT check that
@@ -139,11 +169,17 @@ impl AdminKeyAdmission {
 
     /// Verify the incoming admin's proof of possession.
     pub fn verify_pop(&self) -> Result<()> {
-        verify_admin_pop(&self.cluster_id, &self.new_pubkey, &self.pop)
+        verify_admin_pop(
+            &self.cluster_id,
+            &self.new_pubkey,
+            self.pop_not_after_ns,
+            &self.pop,
+        )
     }
 
     /// Verify both the admitting signature and the POP. Caller still must
-    /// confirm `admitting_pubkey` was admin-valid at `admitted_at_ns`.
+    /// confirm `admitting_pubkey` was admin-valid at `admitted_at_ns` and
+    /// that `admitted_at_ns <= pop_not_after_ns` (POP not expired).
     pub fn verify(&self) -> Result<()> {
         self.verify_admitting_signature()?;
         self.verify_pop()
@@ -158,6 +194,7 @@ pub fn sign_admin_admission(
     cluster_id: ClusterId,
     valid_from_ns: u64,
     admitted_at_ns: u64,
+    pop_not_after_ns: u64,
     parent: Option<Cid>,
     pop: [u8; 64],
 ) -> Result<AdminKeyAdmission> {
@@ -167,6 +204,7 @@ pub fn sign_admin_admission(
         cluster_id,
         valid_from_ns,
         admitted_at_ns,
+        pop_not_after_ns,
         parent,
         pop,
         signature: [0u8; 64],
@@ -216,7 +254,7 @@ impl AdminKeyRetirement {
             reason: &self.reason,
             parent: &self.parent,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/admin-retirement/v1", &payload)
     }
 
     /// Verify the retiring admin's signature. Caller must separately
@@ -275,16 +313,25 @@ mod tests {
     fn pop_roundtrip() {
         let new = make_key();
         let cid = cluster();
-        let pop = sign_admin_pop(&new, &cid);
-        verify_admin_pop(&cid, &new.verifying_key().to_bytes(), &pop).unwrap();
+        let pop = sign_admin_pop(&new, &cid, u64::MAX);
+        verify_admin_pop(&cid, &new.verifying_key().to_bytes(), u64::MAX, &pop).unwrap();
     }
 
     #[test]
     fn pop_rejects_wrong_cluster() {
         let new = make_key();
-        let pop = sign_admin_pop(&new, &cluster());
+        let pop = sign_admin_pop(&new, &cluster(), u64::MAX);
         let other = ClusterId([9u8; 32]);
-        assert!(verify_admin_pop(&other, &new.verifying_key().to_bytes(), &pop).is_err());
+        assert!(verify_admin_pop(&other, &new.verifying_key().to_bytes(), u64::MAX, &pop).is_err());
+    }
+
+    #[test]
+    fn pop_rejects_wrong_expiry() {
+        let new = make_key();
+        let cid = cluster();
+        let pop = sign_admin_pop(&new, &cid, 1000);
+        // POP bound to expiry 1000 must not verify under a different expiry.
+        assert!(verify_admin_pop(&cid, &new.verifying_key().to_bytes(), 2000, &pop).is_err());
     }
 
     #[test]
@@ -292,13 +339,14 @@ mod tests {
         let admin = make_key();
         let new = make_key();
         let cid = cluster();
-        let pop = sign_admin_pop(&new, &cid);
+        let pop = sign_admin_pop(&new, &cid, u64::MAX);
         let adm = sign_admin_admission(
             &admin,
             new.verifying_key().to_bytes(),
             cid,
             100,
             100,
+            u64::MAX,
             None,
             pop,
         )
@@ -309,19 +357,43 @@ mod tests {
     }
 
     #[test]
+    fn signing_bytes_are_domain_separated() {
+        let admin = make_key();
+        let cid = cluster();
+        let pop = sign_admin_pop(&make_key(), &cid, u64::MAX);
+        let adm =
+            sign_admin_admission(&admin, [1u8; 32], cid.clone(), 1, 1, u64::MAX, None, pop)
+                .unwrap();
+        let ret = sign_admin_retirement(&admin, [1u8; 32], cid, 1, "x", None).unwrap();
+        // Each type's signed bytes start with its own domain tag, so a
+        // signature over one can never verify as the other.
+        assert!(
+            adm.signing_bytes()
+                .unwrap()
+                .starts_with(b"memvault/sig/admin-admission/v1")
+        );
+        assert!(
+            ret.signing_bytes()
+                .unwrap()
+                .starts_with(b"memvault/sig/admin-retirement/v1")
+        );
+    }
+
+    #[test]
     fn admission_rejects_forged_pop() {
         let admin = make_key();
         let new = make_key();
         let imposter = make_key();
         let cid = cluster();
         // POP signed by a DIFFERENT key than new_pubkey.
-        let bad_pop = sign_admin_pop(&imposter, &cid);
+        let bad_pop = sign_admin_pop(&imposter, &cid, u64::MAX);
         let adm = sign_admin_admission(
             &admin,
             new.verifying_key().to_bytes(),
             cid,
             100,
             100,
+            u64::MAX,
             None,
             bad_pop,
         )
@@ -337,13 +409,14 @@ mod tests {
         let admin = make_key();
         let new = make_key();
         let cid = cluster();
-        let pop = sign_admin_pop(&new, &cid);
+        let pop = sign_admin_pop(&new, &cid, u64::MAX);
         let mut adm = sign_admin_admission(
             &admin,
             new.verifying_key().to_bytes(),
             cid,
             100,
             100,
+            u64::MAX,
             None,
             pop,
         )

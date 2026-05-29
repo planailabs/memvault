@@ -79,15 +79,20 @@ impl AdminKeyState {
     /// repeat admission keeps the earliest `valid_from_ns` so an attacker
     /// cannot push a key's validity *later* by re-admitting it.
     pub fn apply_admission(&mut self, admission: &AdminKeyAdmission, admission_cid: Option<Cid>) {
+        // A key cannot be valid before it was admitted: clamp `valid_from`
+        // up to `admitted_at_ns`. This blocks retroactive backdating of a
+        // key's validity window (e.g. valid_from = 0) to forge historical
+        // authorization on a tamper-evident chain.
+        let effective_from = admission.valid_from_ns.max(admission.admitted_at_ns);
         self.keys
             .entry(admission.new_pubkey)
             .and_modify(|e| {
-                if admission.valid_from_ns < e.valid_from_ns {
-                    e.valid_from_ns = admission.valid_from_ns;
+                if effective_from < e.valid_from_ns {
+                    e.valid_from_ns = effective_from;
                 }
             })
             .or_insert(KeyValidity {
-                valid_from_ns: admission.valid_from_ns,
+                valid_from_ns: effective_from,
                 valid_until_ns: u64::MAX,
                 introduced_by: admission_cid,
             });

@@ -41,7 +41,7 @@ impl AdminKeyRotation {
             overlap_until_ns: self.overlap_until_ns,
             rotation_id: &self.rotation_id,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/admin-key-rotation/v1", &payload)
     }
 
     /// Verify both signatures (old key and new key must both sign the rotation).
@@ -102,7 +102,7 @@ impl AgentKeyRotation {
             overlap_until_ns: self.overlap_until_ns,
             rotation_id: &self.rotation_id,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/agent-key-rotation/v1", &payload)
     }
 
     /// Verify both signatures.
@@ -149,7 +149,7 @@ impl RotationAborted {
             aborted_at_ns: self.aborted_at_ns,
             reason: &self.reason,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/rotation-aborted/v1", &payload)
     }
 
     /// Verify the abort signature.

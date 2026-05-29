@@ -209,13 +209,14 @@ mod tests {
         let admin = make_key();
         let new = make_key();
         let cluster = ClusterId([1u8; 32]);
-        let pop = sign_admin_pop(&new, &cluster);
+        let pop = sign_admin_pop(&new, &cluster, u64::MAX);
         let adm = sign_admin_admission(
             &admin,
             new.verifying_key().to_bytes(),
             cluster,
             10,
             10,
+            u64::MAX,
             None,
             pop,
         )

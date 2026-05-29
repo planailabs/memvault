@@ -64,7 +64,7 @@ impl JoinToken {
             label: &self.label,
             admin_genesis: &self.admin_genesis,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/join-token/v1", &payload)
     }
 
     /// Verify the token signature against the issuer's key.
@@ -116,7 +116,7 @@ impl TokenConsumption {
             consumed_at_ns: self.consumed_at_ns,
             issued_attestation: &self.issued_attestation,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/token-consumption/v1", &payload)
     }
 
     /// Verify the consumption record signature.

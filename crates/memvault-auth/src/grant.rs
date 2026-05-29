@@ -41,8 +41,8 @@ pub struct Grant {
     ///
     /// Legacy grants written before this field existed deserialize with
     /// `[0u8; 32]` via `#[serde(default)]`; they cannot be retro-signed
-    /// (the field is part of the signed payload) and are treated per the
-    /// daemon's `strict_grant_verify` policy.
+    /// (the field is part of the signed payload) and are always rejected
+    /// by ACL enforcement — reissue them under an admin key.
     #[serde(default)]
     pub admin_pubkey: [u8; 32],
     pub audience: GrantAudience,
@@ -91,7 +91,7 @@ impl Grant {
             nonce: &self.nonce,
             bucket_scopes: &self.bucket_scopes,
         };
-        serde_ipld_dagcbor::to_vec(&payload).map_err(|e| AuthError::Codec(e.to_string()))
+        crate::domain_sign(b"memvault/sig/grant/v1", &payload)
     }
 
     /// Check whether this grant covers a specific bucket.
@@ -112,8 +112,7 @@ impl Grant {
     /// True if this grant predates the `admin_pubkey` field (i.e. it was
     /// signed under the old payload shape and carries the all-zero
     /// default). Such grants cannot be signature-verified under the new
-    /// scheme and are governed by the daemon's `strict_grant_verify`
-    /// policy.
+    /// scheme and are always rejected by ACL enforcement.
     pub fn is_legacy_unsigned(&self) -> bool {
         self.admin_pubkey == [0u8; 32]
     }

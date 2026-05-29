@@ -281,13 +281,6 @@ pub struct LocalClient {
     /// Read by the ACL grant-signature cache to detect staleness — a
     /// cache entry computed under an older generation must be recomputed.
     admin_key_generation: std::sync::atomic::AtomicU64,
-    /// When true (default), bucket grants must carry a valid admin
-    /// signature issued by a key that was a cluster-valid admin at the
-    /// grant's `not_before_ns`. Legacy grants (no `admin_pubkey`) are
-    /// denied. Set false only for a controlled migration window — it
-    /// tolerates legacy unsigned grants, which a peer could forge via
-    /// sync, so it is a deliberate temporary loosening.
-    strict_grant_verify: std::sync::atomic::AtomicBool,
     /// Cache of grant-signature verdicts keyed by grant CID. Value is
     /// `(admin_key_generation_at_compute, verdict)`; a generation mismatch
     /// forces recompute (admin set changed). Grants are immutable, so a
@@ -337,7 +330,6 @@ impl LocalClient {
             held_admin_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
             admin_key_state: std::sync::RwLock::new(memvault_auth::AdminKeyState::default()),
             admin_key_generation: std::sync::atomic::AtomicU64::new(0),
-            strict_grant_verify: std::sync::atomic::AtomicBool::new(true),
             grant_sig_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
             local_founder_keys: std::sync::RwLock::new(std::collections::HashSet::new()),
             node_signing_key: std::sync::OnceLock::new(),
@@ -444,23 +436,6 @@ impl LocalClient {
         }
     }
 
-    /// Whether strict grant-signature verification is enabled (default
-    /// true). See the field docs on `strict_grant_verify`.
-    pub fn strict_grant_verify(&self) -> bool {
-        self.strict_grant_verify
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// Toggle strict grant-signature verification. Intended for a
-    /// controlled migration window only.
-    pub fn set_strict_grant_verify(&self, strict: bool) {
-        self.strict_grant_verify
-            .store(strict, std::sync::atomic::Ordering::Release);
-        if let Ok(mut c) = self.grant_sig_cache.write() {
-            c.clear();
-        }
-    }
-
     /// Decide whether a bucket grant's signature is acceptable, with
     /// per-CID caching keyed on the admin-key generation.
     ///
@@ -470,8 +445,9 @@ impl LocalClient {
     /// - that key was a cluster-valid admin at the grant's
     ///   `not_before_ns`.
     ///
-    /// Legacy grants (no `admin_pubkey`) are accepted only when strict
-    /// verification is off. `grant_cid` must be the grant block's CID.
+    /// Legacy grants (no `admin_pubkey`) are always rejected — there is no
+    /// migration/tolerance mode; reissue them under an admin key.
+    /// `grant_cid` must be the grant block's CID.
     pub fn grant_signature_valid(
         &self,
         grant_cid: &[u8],
@@ -487,8 +463,8 @@ impl LocalClient {
         }
 
         let verdict = if grant.is_legacy_unsigned() {
-            // No signer recorded — only honoured during a migration window.
-            !self.strict_grant_verify()
+            // No signer recorded — never honoured.
+            false
         } else {
             grant.verify_admin_signature().is_ok()
                 && self.is_admin_key_valid_at(&grant.admin_pubkey, grant.not_before_ns)
@@ -576,72 +552,6 @@ impl LocalClient {
             tracing::info!(bucket = %bucket, reissued, "reissued founder grants under cluster admin");
         }
         Ok(reissued)
-    }
-
-    /// Count non-revoked legacy (unsigned, pre-`admin_pubkey`) grants
-    /// across all buckets. Operators run this before enabling strict
-    /// verification to see how many grants need migrating.
-    pub fn count_legacy_grants(&self) -> Result<usize> {
-        let buckets = self.store.list_buckets()?;
-        let mut count = 0usize;
-        for (bid_bytes, _decl) in buckets {
-            let Ok(arr) = <[u8; 32]>::try_from(bid_bytes) else {
-                continue;
-            };
-            let bucket = memvault_core::BucketId(arr);
-            for (cid, grant) in self.list_bucket_grants(&bucket)? {
-                if grant.is_legacy_unsigned() && !self.store.is_revoked(&cid).unwrap_or(false) {
-                    count += 1;
-                }
-            }
-        }
-        Ok(count)
-    }
-
-    /// Migrate every non-revoked legacy grant across all buckets: re-issue
-    /// an equivalent grant signed by the current cluster admin key, then
-    /// revoke the legacy one. After this, strict verification can be
-    /// enabled without losing access. Returns `(scanned, reissued)`.
-    ///
-    /// Requires a held, currently-valid admin key.
-    pub async fn migrate_legacy_grants(&self) -> Result<(usize, usize)> {
-        let now_ns = memvault_core::wall_ns();
-        if self.admin_signing_key_at_ns(now_ns).is_none() {
-            return Err(ApiError::Other(
-                "no valid admin signing key — cannot migrate legacy grants".into(),
-            ));
-        }
-        let buckets = self.store.list_buckets()?;
-        let mut scanned = 0usize;
-        let mut reissued = 0usize;
-        for (bid_bytes, _decl) in buckets {
-            let Ok(arr) = <[u8; 32]>::try_from(bid_bytes) else {
-                continue;
-            };
-            let bucket = memvault_core::BucketId(arr);
-            for (cid, grant) in self.list_bucket_grants(&bucket)? {
-                if !grant.is_legacy_unsigned() || self.store.is_revoked(&cid).unwrap_or(false) {
-                    continue;
-                }
-                scanned += 1;
-                let ttl_secs = grant.not_after_ns.saturating_sub(now_ns) / 1_000_000_000;
-                self.issue_bucket_grant(
-                    &bucket,
-                    grant.audience.clone(),
-                    grant.actions.clone(),
-                    ttl_secs,
-                )
-                .await?;
-                self.revoke_bucket_grant(
-                    &cid,
-                    "migrated: legacy grant reissued under admin signature",
-                )
-                .await?;
-                reissued += 1;
-            }
-        }
-        tracing::info!(scanned, reissued, "legacy grant migration complete");
-        Ok((scanned, reissued))
     }
 
     /// True if `pubkey` was a cluster-valid admin at `time_ns`, OR is a
@@ -779,11 +689,14 @@ impl LocalClient {
     /// [`memvault_auth::sign_admin_pop`]). The admission is published to
     /// the sigchain and the local admin-key state is rebuilt immediately.
     ///
-    /// `valid_from_ns` defaults to now when `None`.
+    /// `valid_from_ns` defaults to now when `None`. `pop_not_after_ns` is
+    /// the expiry the incoming admin bound into their POP; the admission
+    /// is rejected at rebuild if it was issued after that.
     pub async fn admit_admin_key(
         &self,
         new_pubkey: [u8; 32],
         pop: [u8; 64],
+        pop_not_after_ns: u64,
         valid_from_ns: Option<u64>,
     ) -> Result<Vec<u8>> {
         let now_ns = memvault_core::wall_ns();
@@ -792,9 +705,13 @@ impl LocalClient {
         })?;
         let cluster = memvault_core::ClusterId(self.cluster_id_arr()?);
 
-        // Verify the POP before publishing — fail fast on a bad handoff.
-        memvault_auth::verify_admin_pop(&cluster, &new_pubkey, &pop)
+        // Verify the POP (and that it hasn't expired) before publishing —
+        // fail fast on a bad/stale handoff.
+        memvault_auth::verify_admin_pop(&cluster, &new_pubkey, pop_not_after_ns, &pop)
             .map_err(|e| ApiError::Other(format!("admin POP invalid: {e}")))?;
+        if now_ns > pop_not_after_ns {
+            return Err(ApiError::Other("admin POP has expired".into()));
+        }
 
         let admission = memvault_auth::sign_admin_admission(
             &admitting,
@@ -802,6 +719,7 @@ impl LocalClient {
             cluster,
             valid_from_ns.unwrap_or(now_ns),
             now_ns,
+            pop_not_after_ns,
             None,
             pop,
         )
@@ -902,10 +820,12 @@ impl LocalClient {
             return Err(ApiError::Other("rotation target equals current key".into()));
         }
 
-        // Admit the new key (we hold it, so generate its POP locally).
-        let pop = memvault_auth::sign_admin_pop(&new_signing_key, &cluster);
+        // Admit the new key (we hold it, so generate its POP locally). The
+        // POP is consumed immediately, so its expiry is now (admitted at
+        // the same instant — passes the `admitted_at <= pop_not_after` check).
+        let pop = memvault_auth::sign_admin_pop(&new_signing_key, &cluster, now_ns);
         let adm = memvault_auth::sign_admin_admission(
-            &old, new_pubkey, cluster.clone(), now_ns, now_ns, None, pop,
+            &old, new_pubkey, cluster.clone(), now_ns, now_ns, now_ns, None, pop,
         )
         .map_err(|e| ApiError::Other(format!("sign rotation admission: {e}")))?;
         let cid = crate::sigchain::publish_admin_admission(self, &adm)?;

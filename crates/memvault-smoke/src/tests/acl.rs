@@ -491,11 +491,11 @@ fn insert_raw_grant_at(
     cid.to_bytes()
 }
 
-/// A grant predating the `admin_pubkey` field (all-zero) must be denied
-/// under strict verification (the default) — otherwise a peer could
+/// A grant predating the `admin_pubkey` field (all-zero) is always
+/// denied — there is no tolerance/migration mode; a peer could otherwise
 /// forge access by simply omitting the signer.
 #[tokio::test]
-async fn legacy_unsigned_grant_denied_when_strict() {
+async fn legacy_unsigned_grant_always_denied() {
     let node = TestNode::new();
     let (agent_pk, _) = setup_agent(&node, "legacy-agent", Role::AgentHost).await;
     let bucket = make_bucket(&node, "legacy-bucket").await;
@@ -509,15 +509,9 @@ async fn legacy_unsigned_grant_denied_when_strict() {
         None,      // legacy: no signature
     );
 
-    assert!(node.client.strict_grant_verify(), "strict is the default");
     let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
-        .expect_err("legacy unsigned grant must be denied under strict");
+        .expect_err("legacy unsigned grant must always be denied");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
-
-    // Migration window: with strict off, the legacy grant is honoured.
-    node.client.set_strict_grant_verify(false);
-    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
-        .expect("legacy grant honoured when strict verification is disabled");
 }
 
 /// A grant whose signature verifies against its embedded `admin_pubkey`,
@@ -617,27 +611,29 @@ async fn admitted_admin_grant_accepted() {
     let (agent_pk, _) = setup_agent(&node, "admit-agent", Role::AgentHost).await;
     let bucket = make_bucket(&node, "admit-bucket").await;
 
-    // New operator generates their key + POP offline.
+    // New operator generates their key + POP offline (POP never expires).
     let mut seed = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
     let admin2 = SigningKey::from_bytes(&seed);
-    let pop = memvault_auth::sign_admin_pop(&admin2, &node.cluster_id);
+    let pop = memvault_auth::sign_admin_pop(&admin2, &node.cluster_id, u64::MAX);
 
-    // Anchor admits admin2, valid from epoch so a not_before=1 grant lands
-    // inside its window.
+    // Anchor admits admin2 (valid from now; backdating is clamped away).
     node.client
-        .admit_admin_key(admin2.verifying_key().to_bytes(), pop, Some(0))
+        .admit_admin_key(admin2.verifying_key().to_bytes(), pop, u64::MAX, None)
         .await
         .expect("admit admin2");
 
-    // A grant signed by admin2 must now be accepted.
-    insert_raw_grant(
+    // A grant signed by admin2, issued now (within admin2's window), is
+    // accepted.
+    let not_before = memvault_core::wall_ns();
+    insert_raw_grant_at(
         &node,
         &bucket,
         GrantAudience::Peer(PeerId(agent_pk.to_vec())),
         vec![Action::Read],
         admin2.verifying_key().to_bytes(),
         Some(&admin2),
+        not_before,
     );
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
         .expect("grant signed by admitted admin must be accepted");
@@ -655,13 +651,14 @@ async fn retired_admin_past_grant_survives_new_rejected() {
     rand::thread_rng().fill_bytes(&mut seed);
     let admin2 = SigningKey::from_bytes(&seed);
     let admin2_pk = admin2.verifying_key().to_bytes();
-    let pop = memvault_auth::sign_admin_pop(&admin2, &node.cluster_id);
+    let pop = memvault_auth::sign_admin_pop(&admin2, &node.cluster_id, u64::MAX);
     node.client
-        .admit_admin_key(admin2_pk, pop, Some(0))
+        .admit_admin_key(admin2_pk, pop, u64::MAX, None)
         .await
         .expect("admit admin2");
 
-    // Grant issued while admin2 is valid (not_before = 1).
+    // Grant issued now, while admin2 is valid (not_before within its window).
+    let pre_retire_nb = memvault_core::wall_ns();
     insert_raw_grant_at(
         &node,
         &bucket,
@@ -669,7 +666,7 @@ async fn retired_admin_past_grant_survives_new_rejected() {
         vec![Action::Read],
         admin2_pk,
         Some(&admin2),
-        1,
+        pre_retire_nb,
     );
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
         .expect("pre-retirement grant valid");
@@ -755,38 +752,6 @@ async fn founder_key_grant_accepted_locally() {
     node.client.register_founder_key(founder_pk);
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
         .expect("registered founder key grant accepted locally");
-}
-
-/// migrate_legacy_grants re-issues a legacy (unsigned) grant under the
-/// admin key so access works under strict verification, and revokes the
-/// legacy original.
-#[tokio::test]
-async fn migrate_legacy_grants_reissues_under_admin() {
-    let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "migrate-agent", Role::AgentHost).await;
-    let bucket = make_bucket(&node, "migrate-bucket").await;
-
-    // A legacy unsigned grant (as written before the admin_pubkey field).
-    insert_raw_grant(
-        &node,
-        &bucket,
-        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
-        vec![Action::Read],
-        [0u8; 32],
-        None,
-    );
-    assert_eq!(node.client.count_legacy_grants().unwrap(), 1);
-    // Denied under strict (the default).
-    assert!(acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read).is_err());
-
-    // Migrate: reissue under the admin key, revoke the legacy original.
-    let (scanned, reissued) = node.client.migrate_legacy_grants().await.expect("migrate");
-    assert_eq!((scanned, reissued), (1, 1));
-    assert_eq!(node.client.count_legacy_grants().unwrap(), 0);
-
-    // Access now works under strict verification.
-    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
-        .expect("reissued admin-signed grant grants access under strict");
 }
 
 /// A grant whose signed `bucket_scopes` is bucket A must NOT authorize
@@ -928,4 +893,80 @@ async fn synced_grant_revocation_applies_on_scan() {
     let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
         .expect_err("revoked after scan");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+/// An agent revocation is honoured only when signed by the node that
+/// attested the agent — a different (even trusted) node cannot revoke
+/// another node's agents.
+#[tokio::test]
+async fn agent_revocation_must_come_from_attesting_node() {
+    use std::collections::HashMap;
+    use memvault_auth::jwt::NodeTrust;
+
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "rev-bind-agent", Role::AgentHost).await;
+
+    // The agent was attested by this node's node key (the attester).
+    let attester_pk = node
+        .client
+        .node_signing_key()
+        .expect("node key")
+        .verifying_key()
+        .to_bytes();
+
+    // A foreign node (not the attester) tries to revoke the agent.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let foreign = SigningKey::from_bytes(&seed);
+    let foreign_pk = foreign.verifying_key().to_bytes();
+    let rev = memvault_auth::sign_agent_revocation(&foreign, agent_pk, "malicious")
+        .expect("sign foreign revocation");
+    memvault_api::sigchain::publish_agent_revocation(&node.client, &rev)
+        .expect("publish");
+
+    // Trust map with BOTH nodes trusted.
+    let mut node_trust: HashMap<[u8; 32], NodeTrust> = HashMap::new();
+    node_trust.insert(foreign_pk, NodeTrust::PreGenesis);
+    node_trust.insert(attester_pk, NodeTrust::PreGenesis);
+    let admin_keys = node.client.admin_verifying_keys();
+
+    let (revoked, _) =
+        memvault_api::sigchain::scan_revocations(&node.client, &admin_keys, &node_trust)
+            .expect("scan");
+    assert!(
+        !revoked.contains(&agent_pk),
+        "foreign (non-attesting) node must not be able to revoke the agent"
+    );
+
+    // The attesting node CAN revoke it.
+    let node_sk = node.client.node_signing_key().expect("node key").clone();
+    let rev2 = memvault_auth::sign_agent_revocation(&node_sk, agent_pk, "legitimate")
+        .expect("sign attester revocation");
+    memvault_api::sigchain::publish_agent_revocation(&node.client, &rev2)
+        .expect("publish2");
+    let (revoked2, _) =
+        memvault_api::sigchain::scan_revocations(&node.client, &admin_keys, &node_trust)
+            .expect("scan2");
+    assert!(
+        revoked2.contains(&agent_pk),
+        "the attesting node's revocation must be honoured"
+    );
+}
+
+/// admit_admin_key rejects a POP whose bound expiry has already passed —
+/// a captured POP cannot be replayed indefinitely.
+#[tokio::test]
+async fn admit_rejects_expired_pop() {
+    let node = TestNode::new();
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let admin2 = SigningKey::from_bytes(&seed);
+    // POP bound to an expiry in the distant past.
+    let pop = memvault_auth::sign_admin_pop(&admin2, &node.cluster_id, 1);
+    let err = node
+        .client
+        .admit_admin_key(admin2.verifying_key().to_bytes(), pop, 1, None)
+        .await
+        .expect_err("expired POP must be rejected");
+    assert!(matches!(err, memvault_api::ApiError::Other(_)));
 }
