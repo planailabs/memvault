@@ -184,8 +184,6 @@ mod native {
             #[arg(long)]
             gzip: bool,
         },
-        /// Set cluster_id on envelopes that have null/missing cluster_id
-        FixClusterId,
         /// Renew attestation
         RenewAttestation {
             /// Target peer ID (hex)
@@ -1037,7 +1035,7 @@ mod native {
             }
         }
 
-        // For commands that need direct store access (RepairIndex, FixClusterId, etc.),
+        // For commands that need direct store access (RepairIndex, etc.),
         // use the db path from client_args or fall back to data_dir.
         let make_store = || -> Result<Arc<MemvaultStore>> {
             if let Some(ref db_path) = client_args.db {
@@ -1613,54 +1611,6 @@ mod native {
             Commands::RenewAttestation { peer_id } => {
                 println!(
                     "Attestation renewal for {peer_id}: not yet implemented in standalone mode"
-                );
-            }
-            Commands::FixClusterId => {
-                let id_path = data_dir.join("cluster_id");
-                let id_hex = std::fs::read_to_string(&id_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Cannot read {}: {e}. Run 'genesis' first.",
-                        id_path.display()
-                    )
-                })?;
-                let cluster_bytes = hex::decode(id_hex.trim())
-                    .map_err(|e| anyhow::anyhow!("Invalid cluster_id hex: {e}"))?;
-                println!("Cluster ID: {}", hex::encode(&cluster_bytes));
-
-                let store = make_store()?;
-                let blocks = store.iter_blocks()?;
-                let mut patched = 0usize;
-                let mut skipped = 0usize;
-
-                for (cid, data) in &blocks {
-                    let val: serde_json::Value = match serde_json::from_slice(data) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            skipped += 1;
-                            continue;
-                        }
-                    };
-                    let is_envelope = val.get("wall_ns").is_some() || val.get("author").is_some();
-                    if !is_envelope {
-                        skipped += 1;
-                        continue;
-                    }
-                    let needs_fix = match val.get("cluster_id") {
-                        None => true,
-                        Some(serde_json::Value::Null) => true,
-                        Some(serde_json::Value::Array(arr)) if arr.is_empty() => true,
-                        _ => false,
-                    };
-                    if !needs_fix {
-                        continue;
-                    }
-                    let wall_ns: u64 = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-                    store.index_cluster_origin(cid, &cluster_bytes, wall_ns)?;
-                    patched += 1;
-                }
-
-                println!(
-                    "Indexed {patched} envelopes into CLUSTER_ORIGIN ({skipped} non-envelope blocks skipped)."
                 );
             }
             Commands::Export {
