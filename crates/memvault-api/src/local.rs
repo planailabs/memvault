@@ -286,15 +286,6 @@ pub struct LocalClient {
     /// forces recompute (admin set changed). Grants are immutable, so a
     /// same-generation hit is always correct.
     grant_sig_cache: std::sync::RwLock<std::collections::HashMap<Vec<u8>, (u64, bool)>>,
-    /// Local-only "founder" admin pubkeys. A node that boots before any
-    /// genesis/join mints a founder key so it can sign grants on its own
-    /// private (`private_to_peer`) buckets. These keys are NEVER on the
-    /// cluster chain — they're trusted only by THIS node, for verifying
-    /// grants it signed pre-genesis. Kept separate from `admin_key_state`
-    /// so the chain rebuild (which replaces that state wholesale) can't
-    /// drop them. Safe: the buckets they authorise are local-only, and no
-    /// other node trusts these keys.
-    local_founder_keys: std::sync::RwLock<std::collections::HashSet<[u8; 32]>>,
     /// Optional node signing key — the daemon's libp2p ed25519 private key,
     /// used to sign agent attestations and agent revocations. Distinct from
     /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
@@ -331,7 +322,6 @@ impl LocalClient {
             admin_key_state: std::sync::RwLock::new(memvault_auth::AdminKeyState::default()),
             admin_key_generation: std::sync::atomic::AtomicU64::new(0),
             grant_sig_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
-            local_founder_keys: std::sync::RwLock::new(std::collections::HashSet::new()),
             node_signing_key: std::sync::OnceLock::new(),
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
@@ -611,109 +601,12 @@ impl LocalClient {
         )
     }
 
-    /// Re-issue, under the current cluster admin key, every grant on
-    /// `bucket` that was signed by a local founder key. Used when a
-    /// pre-genesis private bucket becomes cluster-visible (shared/attached)
-    /// so its grants verify on *other* nodes, which don't trust this
-    /// node's founder key. Each founder grant is re-emitted with the same
-    /// audience/actions/expiry and the old one revoked.
-    ///
-    /// Requires this node to hold a currently-valid cluster admin key that
-    /// is NOT itself a founder key. Returns the number of grants reissued.
-    pub async fn reissue_founder_grants_for_bucket(
-        &self,
-        bucket: &memvault_core::BucketId,
-    ) -> Result<usize> {
-        let now_ns = memvault_core::wall_ns();
-        // Must hold a real (non-founder) admin key valid now.
-        let have_cluster_admin = {
-            let held = self
-                .held_admin_keys
-                .read()
-                .map_err(|_| ApiError::Other("held_admin_keys poisoned".into()))?;
-            let founders = self
-                .local_founder_keys
-                .read()
-                .map_err(|_| ApiError::Other("local_founder_keys poisoned".into()))?;
-            held.keys().any(|pk| {
-                !founders.contains(pk)
-                    && self
-                        .admin_key_state
-                        .read()
-                        .map(|s| s.is_key_valid_at(pk, now_ns))
-                        .unwrap_or(false)
-            })
-        };
-        if !have_cluster_admin {
-            return Err(ApiError::Other(
-                "no held cluster admin key — cannot reissue founder grants".into(),
-            ));
-        }
-
-        let founders: std::collections::HashSet<[u8; 32]> = self
-            .local_founder_keys
-            .read()
-            .map(|s| s.clone())
-            .unwrap_or_default();
-
-        let grants = self.list_bucket_grants(bucket)?;
-        let mut reissued = 0usize;
-        for (cid, grant) in grants {
-            if grant.is_legacy_unsigned() || !founders.contains(&grant.admin_pubkey) {
-                continue;
-            }
-            // Only launder grants that actually carry a valid founder
-            // signature — never re-sign an unverified block (which a peer
-            // could have injected with a founder pubkey it doesn't hold)
-            // under the cluster admin key.
-            if grant.verify_admin_signature().is_err() {
-                continue;
-            }
-            if !grant.covers_bucket(bucket) {
-                continue;
-            }
-            if self.store.is_revoked(&cid).unwrap_or(false) {
-                continue;
-            }
-            // Re-issue with the same shape under the current admin key.
-            let ttl_secs = grant.not_after_ns.saturating_sub(now_ns) / 1_000_000_000;
-            self.issue_bucket_grant(bucket, grant.audience.clone(), grant.actions.clone(), ttl_secs)
-                .await?;
-            self.revoke_bucket_grant(&cid, "reissued under cluster admin (founder→cluster)")
-                .await?;
-            reissued += 1;
-        }
-        if reissued > 0 {
-            tracing::info!(bucket = %bucket, reissued, "reissued founder grants under cluster admin");
-        }
-        Ok(reissued)
-    }
-
-    /// True if `pubkey` was a cluster-valid admin at `time_ns`, OR is a
-    /// local founder key (trusted by this node for any time, for its own
-    /// pre-genesis private buckets — never cluster-wide).
+    /// True if `pubkey` was a cluster-valid admin at `time_ns`.
     pub fn is_admin_key_valid_at(&self, pubkey: &[u8; 32], time_ns: u64) -> bool {
-        if self
-            .local_founder_keys
-            .read()
-            .map(|s| s.contains(pubkey))
-            .unwrap_or(false)
-        {
-            return true;
-        }
         self.admin_key_state
             .read()
             .map(|s| s.is_key_valid_at(pubkey, time_ns))
             .unwrap_or(false)
-    }
-
-    /// Register a local founder admin pubkey (see `local_founder_keys`).
-    /// Idempotent.
-    pub fn register_founder_key(&self, pubkey: [u8; 32]) {
-        if let Ok(mut s) = self.local_founder_keys.write() {
-            s.insert(pubkey);
-        }
-        self.bump_admin_key_generation();
     }
 
     /// Every admin verifying key the cluster has ever known (anchor +
