@@ -488,23 +488,29 @@ impl LocalClient {
             return false;
         };
         // The owner agent must currently be a known, non-revoked agent.
-        let owner_att = match crate::sigchain::find_agent_attestation(self, owner_pk) {
-            Ok(Some(att)) => att,
-            _ => return false,
-        };
-        if self.is_agent_revoked(owner_pk) {
+        if crate::sigchain::find_agent_attestation(self, owner_pk)
+            .ok()
+            .flatten()
+            .is_none()
+            || self.is_agent_revoked(owner_pk)
+        {
             return false;
         }
         // 2. Owner self-delegation.
         if issuer_pubkey == owner_pk {
             return true;
         }
-        // 3. Host-on-behalf: the owner's attesting node, still trusted.
-        if *issuer_pubkey == owner_att.node_pubkey
-            && self.is_node_trusted(&owner_att.node_pubkey)
-            && !self.is_node_revoked(&owner_att.node_pubkey)
-        {
-            return true;
+        // 3. Host-on-behalf: the owner's *sole* attesting node, still
+        // trusted. Ambiguous attestation (two nodes) denies this path, so
+        // a trusted node can't seize host authority by minting a rival
+        // attestation.
+        if let Ok(Some(attester)) = crate::sigchain::sole_attesting_node(self, owner_pk) {
+            if *issuer_pubkey == attester
+                && self.is_node_trusted(&attester)
+                && !self.is_node_revoked(&attester)
+            {
+                return true;
+            }
         }
         false
     }

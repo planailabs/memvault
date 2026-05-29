@@ -1240,3 +1240,64 @@ async fn submit_signed_grant_unauthorized_rejected() {
         .expect_err("unauthorized issuer must be rejected on submit");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
 }
+
+/// If two distinct nodes attest the same owner agent, host-on-behalf
+/// authority is ambiguous and denied for everyone — a rival trusted node
+/// can't seize delegation authority by minting a second attestation.
+#[tokio::test]
+async fn conflicting_attestations_deny_host_authority() {
+    let node = TestNode::new();
+    let (_owner_sk, owner_pk, owner_id) =
+        setup_agent_keyed(&node, "ambig-owner", Role::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "ambig-grantee", Role::AgentHost).await;
+    let bucket = make_owned_bucket(&node, "ambig-bucket", owner_id.clone(), owner_pk).await;
+
+    let node_sk = node.client.node_signing_key().expect("node key").clone();
+    let node_pk = node_sk.verifying_key().to_bytes();
+
+    // A rival key publishes a second attestation for the same owner pubkey.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let rival = SigningKey::from_bytes(&seed);
+    let rival_att = sign_agent_attestation(
+        &rival,
+        owner_id,
+        owner_pk,
+        Role::AgentHost,
+        u64::MAX,
+    )
+    .expect("rival attestation");
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &rival_att)
+        .expect("publish rival attestation");
+
+    // Trust the legit node.
+    {
+        use memvault_auth::jwt::NodeTrust;
+        use std::collections::{HashMap, HashSet};
+        use std::sync::{Arc, RwLock};
+        let mut nt = HashMap::new();
+        nt.insert(node_pk, NodeTrust::PreGenesis);
+        node.client
+            .set_trust_state(memvault_api::sigchain::LiveTrustState {
+                node_trust: Arc::new(RwLock::new(nt)),
+                revoked_agents: Arc::new(RwLock::new(HashSet::new())),
+                revoked_nodes: Arc::new(RwLock::new(HashSet::new())),
+                trusted_agents: Arc::new(RwLock::new(HashSet::new())),
+                trusted_attestations: Arc::new(RwLock::new(HashMap::new())),
+            });
+    }
+
+    // The legit node's host-on-behalf grant is now denied (ambiguous attester).
+    insert_raw_grant_at(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        node_pk,
+        Some(&node_sk),
+        memvault_core::wall_ns(),
+    );
+    let err = acl::check_bucket_access(&node.client, &grantee_pk, &bucket, Action::Read)
+        .expect_err("host authority must be denied under conflicting attestations");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}

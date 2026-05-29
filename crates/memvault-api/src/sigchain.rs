@@ -798,19 +798,74 @@ pub fn find_agent_attestation(
     client: &LocalClient,
     agent_pubkey: &[u8; 32],
 ) -> Result<Option<AgentAttestation>> {
+    // Deterministic, conservative selection: if an agent pubkey has more
+    // than one signature-valid attestation, pick the **most restrictive
+    // role** (tie-broken by node_pubkey), never whichever block happens to
+    // load first. This removes block-order role pinning — an attacker
+    // cannot escalate by adding a higher-role attestation for the pubkey.
+    let mut best: Option<AgentAttestation> = None;
     for bytes in load_blocks_by_label(client, LABEL_AGENT_ATT)? {
         let Ok(att) = serde_ipld_dagcbor::from_slice::<AgentAttestation>(&bytes) else {
             continue;
         };
-        if att.agent_pubkey != *agent_pubkey {
+        if att.agent_pubkey != *agent_pubkey || att.verify_signature().is_err() {
             continue;
         }
-        if att.verify_signature().is_err() {
-            continue;
-        }
-        return Ok(Some(att));
+        best = Some(match best {
+            None => att,
+            Some(cur) => {
+                let (a, b) = (role_privilege(&att.role), role_privilege(&cur.role));
+                if a < b || (a == b && att.node_pubkey < cur.node_pubkey) {
+                    att
+                } else {
+                    cur
+                }
+            }
+        });
     }
-    Ok(None)
+    Ok(best)
+}
+
+/// Lower = less privileged ("more restrictive"). Used to pick the
+/// safest attestation when an agent pubkey has several.
+fn role_privilege(role: &memvault_auth::Role) -> u8 {
+    use memvault_auth::Role::*;
+    match role {
+        Service => 0,
+        Auditor => 1,
+        AgentHost => 2,
+        Admin => 3,
+    }
+}
+
+/// The single node that attested `agent_pubkey`, or `None` if there is no
+/// valid attestation or **more than one distinct attesting node**.
+///
+/// Used for the host-on-behalf grant authority (a node delegating its
+/// agent's bucket): authority is only granted when the attesting node is
+/// unambiguous. If two trusted nodes both attest the same agent pubkey,
+/// host authority is denied for everyone (degrades to admin/owner only)
+/// rather than letting either node claim it — closing the escalation
+/// where any trusted node mints an attestation to seize host authority.
+pub fn sole_attesting_node(
+    client: &LocalClient,
+    agent_pubkey: &[u8; 32],
+) -> Result<Option<[u8; 32]>> {
+    let mut node: Option<[u8; 32]> = None;
+    for bytes in load_blocks_by_label(client, LABEL_AGENT_ATT)? {
+        let Ok(att) = serde_ipld_dagcbor::from_slice::<AgentAttestation>(&bytes) else {
+            continue;
+        };
+        if att.agent_pubkey != *agent_pubkey || att.verify_signature().is_err() {
+            continue;
+        }
+        match node {
+            None => node = Some(att.node_pubkey),
+            Some(n) if n == att.node_pubkey => {}
+            Some(_) => return Ok(None), // conflicting attesters — ambiguous
+        }
+    }
+    Ok(node)
 }
 
 pub fn scan_agent_attestations(client: &LocalClient) -> Result<Vec<AgentAttestation>> {
