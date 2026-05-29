@@ -1304,27 +1304,18 @@ impl LocalClient {
         crate::sigchain::publish_node_revocation(self, &rev)
     }
 
-    /// Find or create an `Agent`-role bucket for the given agent ID.
-    /// Returns the bucket ID (existing or newly created).
+    dual_impl! {
     /// Signed `bucket_create` with an explicit `bucket_id` and optional
-    /// `owner_agent_override`. Public-facing `bucket_create` calls this
-    /// with a random ID and a `None` override (so the owner falls back
-    /// to whatever's bound on the client); `ensure_agent_bucket_for`
-    /// calls it with a deterministic ID + an explicit owner so the
-    /// bucket can be located on subsequent runs without depending on
-    /// the LocalClient already being agent-bound at creation time.
+    /// `owner_agent_override`. Does no async work, so it's exposed as a
+    /// sync/async pair (via `dual_impl!`) — agent enrollment can ensure the
+    /// bucket from sync contexts (connectors, `init_ui_agent`) as well as
+    /// async handlers. Public-facing `bucket_create` calls it with a random
+    /// ID + a `None` override; `ensure_agent_bucket_*` with a deterministic
+    /// ID + explicit owner so the bucket is locatable on later runs.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn bucket_create_inner(
-        &self,
-        bucket_id: memvault_core::BucketId,
-        name: &str,
-        description: Option<&str>,
-        default_visibility: Visibility,
-        default_classification: memvault_core::classification::Classification,
-        role: memvault_doc::BucketRole,
-        owner_agent_override: Option<memvault_core::AgentId>,
-        owner_agent_pubkey: Option<[u8; 32]>,
-    ) -> Result<memvault_core::BucketId> {
+    (bucket_create_inner_sync, bucket_create_inner_async)
+    fn(&self, bucket_id: memvault_core::BucketId, name: &str, description: Option<&str>, default_visibility: Visibility, default_classification: memvault_core::classification::Classification, role: memvault_doc::BucketRole, owner_agent_override: Option<memvault_core::AgentId>, owner_agent_pubkey: Option<[u8; 32]>) -> Result<memvault_core::BucketId>
+    {
         use memvault_doc::BucketDecl;
 
         let now_ns = memvault_core::wall_ns();
@@ -1402,6 +1393,7 @@ impl LocalClient {
         tracing::info!(bucket = %bucket_id, name, has_cluster, "bucket created");
         Ok(bucket_id)
     }
+    }
 
     /// Create a bucket on behalf of a specific agent, recording them as
     /// `owner_agent`. The HTTP `POST /buckets` handler uses this so the
@@ -1418,7 +1410,7 @@ impl LocalClient {
         default_classification: memvault_core::classification::Classification,
         role: memvault_doc::BucketRole,
     ) -> Result<memvault_core::BucketId> {
-        self.bucket_create_inner(
+        self.bucket_create_inner_async(
             memvault_core::BucketId::random(),
             name,
             description,
@@ -1440,9 +1432,19 @@ impl LocalClient {
         agent_pubkey: &[u8],
         name_hint: &str,
     ) -> Result<memvault_core::BucketId> {
+        self.ensure_agent_bucket_for_pubkey_sync(agent_pubkey, name_hint)
+    }
+
+    /// Synchronous twin of [`Self::ensure_agent_bucket_for_pubkey`] — the
+    /// bucket-create path does no async work, so sync callers (connectors,
+    /// `init_ui_agent`) can ensure an agent's bucket without a runtime.
+    pub fn ensure_agent_bucket_for_pubkey_sync(
+        &self,
+        agent_pubkey: &[u8],
+        name_hint: &str,
+    ) -> Result<memvault_core::BucketId> {
         let agent_id_for_owner = memvault_core::AgentId(name_hint.to_string());
         self.ensure_agent_bucket_inner(agent_pubkey, name_hint, agent_id_for_owner)
-            .await
     }
 
     /// Back-compat wrapper: resolves the agent's pubkey on-chain by
@@ -1469,10 +1471,9 @@ impl LocalClient {
                 ))
             })?;
         self.ensure_agent_bucket_inner(&attestation.agent_pubkey, &agent_id.0, agent_id.clone())
-            .await
     }
 
-    async fn ensure_agent_bucket_inner(
+    fn ensure_agent_bucket_inner(
         &self,
         agent_pubkey: &[u8],
         name_hint: &str,
@@ -1499,18 +1500,16 @@ impl LocalClient {
         }
 
         let name = format!("agent:{name_hint}");
-        let bid = self
-            .bucket_create_inner(
-                bucket_id,
-                &name,
-                Some("auto-created agent bucket"),
-                Visibility::Internal,
-                memvault_core::classification::Classification::Internal,
-                memvault_doc::BucketRole::Agent,
-                Some(owner_agent.clone()),
-                <[u8; 32]>::try_from(agent_pubkey).ok(),
-            )
-            .await?;
+        let bid = self.bucket_create_inner_sync(
+            bucket_id,
+            &name,
+            Some("auto-created agent bucket"),
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Agent,
+            Some(owner_agent.clone()),
+            <[u8; 32]>::try_from(agent_pubkey).ok(),
+        )?;
         // bucket_create_inner already auto-binds when has_cluster, but
         // surface bind errors here (the inner path swallows them since
         // a fresh bucket without a cluster is a valid pre-genesis
@@ -4268,7 +4267,7 @@ impl MemvaultClient for LocalClient {
         default_classification: memvault_core::classification::Classification,
         role: memvault_doc::BucketRole,
     ) -> Result<memvault_core::BucketId> {
-        self.bucket_create_inner(
+        self.bucket_create_inner_async(
             memvault_core::BucketId::random(),
             name,
             description,
