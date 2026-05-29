@@ -756,3 +756,35 @@ async fn founder_key_grant_accepted_locally() {
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
         .expect("registered founder key grant accepted locally");
 }
+
+/// migrate_legacy_grants re-issues a legacy (unsigned) grant under the
+/// admin key so access works under strict verification, and revokes the
+/// legacy original.
+#[tokio::test]
+async fn migrate_legacy_grants_reissues_under_admin() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "migrate-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "migrate-bucket").await;
+
+    // A legacy unsigned grant (as written before the admin_pubkey field).
+    insert_raw_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        [0u8; 32],
+        None,
+    );
+    assert_eq!(node.client.count_legacy_grants().unwrap(), 1);
+    // Denied under strict (the default).
+    assert!(acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read).is_err());
+
+    // Migrate: reissue under the admin key, revoke the legacy original.
+    let (scanned, reissued) = node.client.migrate_legacy_grants().await.expect("migrate");
+    assert_eq!((scanned, reissued), (1, 1));
+    assert_eq!(node.client.count_legacy_grants().unwrap(), 0);
+
+    // Access now works under strict verification.
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("reissued admin-signed grant grants access under strict");
+}

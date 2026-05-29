@@ -568,6 +568,72 @@ impl LocalClient {
         Ok(reissued)
     }
 
+    /// Count non-revoked legacy (unsigned, pre-`admin_pubkey`) grants
+    /// across all buckets. Operators run this before enabling strict
+    /// verification to see how many grants need migrating.
+    pub fn count_legacy_grants(&self) -> Result<usize> {
+        let buckets = self.store.list_buckets()?;
+        let mut count = 0usize;
+        for (bid_bytes, _decl) in buckets {
+            let Ok(arr) = <[u8; 32]>::try_from(bid_bytes) else {
+                continue;
+            };
+            let bucket = memvault_core::BucketId(arr);
+            for (cid, grant) in self.list_bucket_grants(&bucket)? {
+                if grant.is_legacy_unsigned() && !self.store.is_revoked(&cid).unwrap_or(false) {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Migrate every non-revoked legacy grant across all buckets: re-issue
+    /// an equivalent grant signed by the current cluster admin key, then
+    /// revoke the legacy one. After this, strict verification can be
+    /// enabled without losing access. Returns `(scanned, reissued)`.
+    ///
+    /// Requires a held, currently-valid admin key.
+    pub async fn migrate_legacy_grants(&self) -> Result<(usize, usize)> {
+        let now_ns = memvault_core::wall_ns();
+        if self.admin_signing_key_at_ns(now_ns).is_none() {
+            return Err(ApiError::Other(
+                "no valid admin signing key — cannot migrate legacy grants".into(),
+            ));
+        }
+        let buckets = self.store.list_buckets()?;
+        let mut scanned = 0usize;
+        let mut reissued = 0usize;
+        for (bid_bytes, _decl) in buckets {
+            let Ok(arr) = <[u8; 32]>::try_from(bid_bytes) else {
+                continue;
+            };
+            let bucket = memvault_core::BucketId(arr);
+            for (cid, grant) in self.list_bucket_grants(&bucket)? {
+                if !grant.is_legacy_unsigned() || self.store.is_revoked(&cid).unwrap_or(false) {
+                    continue;
+                }
+                scanned += 1;
+                let ttl_secs = grant.not_after_ns.saturating_sub(now_ns) / 1_000_000_000;
+                self.issue_bucket_grant(
+                    &bucket,
+                    grant.audience.clone(),
+                    grant.actions.clone(),
+                    ttl_secs,
+                )
+                .await?;
+                self.revoke_bucket_grant(
+                    &cid,
+                    "migrated: legacy grant reissued under admin signature",
+                )
+                .await?;
+                reissued += 1;
+            }
+        }
+        tracing::info!(scanned, reissued, "legacy grant migration complete");
+        Ok((scanned, reissued))
+    }
+
     /// True if `pubkey` was a cluster-valid admin at `time_ns`, OR is a
     /// local founder key (trusted by this node for any time, for its own
     /// pre-genesis private buckets — never cluster-wide).
