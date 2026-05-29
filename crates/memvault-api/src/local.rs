@@ -607,6 +607,32 @@ impl LocalClient {
         Ok(bucket_id)
     }
 
+    /// Create a bucket on behalf of a specific agent, recording them as
+    /// `owner_agent`. The HTTP `POST /buckets` handler uses this so the
+    /// requesting agent — not the daemon — owns the new bucket and
+    /// therefore passes [`crate::acl::check_bucket_access`] without
+    /// needing a follow-up grant.
+    pub async fn bucket_create_as(
+        &self,
+        owner_agent: memvault_core::AgentId,
+        name: &str,
+        description: Option<&str>,
+        default_visibility: Visibility,
+        default_classification: memvault_core::classification::Classification,
+        role: memvault_doc::BucketRole,
+    ) -> Result<memvault_core::BucketId> {
+        self.bucket_create_inner(
+            memvault_core::BucketId::random(),
+            name,
+            description,
+            default_visibility,
+            default_classification,
+            role,
+            Some(owner_agent),
+        )
+        .await
+    }
+
     /// Core agent-bucket ensure path keyed by the agent's **pubkey**
     /// (cryptographically unique). The `name_hint` is only used as the
     /// display label on the BucketDecl — collisions in name don't

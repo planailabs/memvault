@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::api::auth::{RequireAdmin, RequireAuth, RequireWrite};
+use crate::error::ApiError;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBucketRequest {
@@ -76,13 +77,35 @@ pub async fn get_bucket(
 }
 
 pub async fn create_bucket(
-    _auth: RequireWrite,
-    State(state): State<Arc<AppState>>,
+    auth: RequireWrite,
+    State(_state): State<Arc<AppState>>,
     Json(req): Json<CreateBucketRequest>,
-) -> Result<Json<CreateBucketResponse>, StatusCode> {
-    let bucket_id = state
-        .client
-        .bucket_create(
+) -> Result<Json<CreateBucketResponse>, ApiError> {
+    // Resolve the caller's on-chain agent_id so the new bucket records
+    // them as `owner_agent`. Without this, the BucketDecl would inherit
+    // the daemon's identity and the caller would have no implicit
+    // access to a bucket they just created.
+    let client = crate::ui::state::local_client()
+        .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
+    let pubkey_bytes = hex::decode(&auth.claims.sub)
+        .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+    let pubkey_arr: [u8; 32] = pubkey_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::bad_request("claims.sub must be 32 bytes".to_string()))?;
+    let attestation = memvault_api::sigchain::find_agent_attestation(&client, &pubkey_arr)
+        .map_err(|e| ApiError::internal(format!("attestation lookup: {e}")))?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "no agent attestation on chain for pubkey {}",
+                auth.claims.sub
+            ),
+        })?;
+
+    let bucket_id = client
+        .bucket_create_as(
+            attestation.agent_id,
             &req.name,
             req.description.as_deref(),
             memvault_core::Visibility::Internal,
@@ -90,7 +113,7 @@ pub async fn create_bucket(
             memvault_doc::BucketRole::Standard,
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("bucket_create: {e}")))?;
 
     Ok(Json(CreateBucketResponse {
         id: hex::encode(bucket_id.0),

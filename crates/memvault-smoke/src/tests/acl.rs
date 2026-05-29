@@ -187,6 +187,54 @@ async fn owner_agent_bypasses_grants() {
         .expect("owner Write");
 }
 
+/// Regression: when the HTTP `POST /buckets` handler creates a bucket
+/// on behalf of a caller, it threads the caller's `agent_id` through
+/// `bucket_create_as` so the new bucket records them as `owner_agent`.
+/// Without that, the BucketDecl inherited the daemon's identity and
+/// the caller couldn't even read the bucket they just created.
+#[tokio::test]
+async fn bucket_create_as_sets_owner_and_grants_access() {
+    let node = TestNode::new();
+    let (agent_pk, agent_id) =
+        setup_agent(&node, "create-as-agent", Role::AgentHost).await;
+
+    let bucket = node
+        .client
+        .bucket_create_as(
+            agent_id.clone(),
+            "create-as-bucket",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .expect("bucket_create_as");
+
+    let info = node
+        .client
+        .bucket_get(&bucket)
+        .await
+        .expect("bucket_get")
+        .expect("bucket exists");
+    assert_eq!(
+        info.owner_agent.as_ref(),
+        Some(&agent_id),
+        "owner_agent must be the caller, not the daemon"
+    );
+
+    let grants = node.client.list_bucket_grants(&bucket).expect("list");
+    assert!(
+        grants.is_empty(),
+        "creating a bucket must not require/issue a separate grant"
+    );
+
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("creator Read");
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect("creator Write");
+}
+
 #[tokio::test]
 async fn expired_grant_denied() {
     let node = TestNode::new();
