@@ -83,4 +83,24 @@ mod tests {
         let parsed = cid_from_string(&s).unwrap();
         assert_eq!(c, parsed);
     }
+
+    #[test]
+    fn verify_cid_handles_any_codec_and_hash() {
+        // Attachment/file chunks are raw codec (0x55) + SHA2-256 (0x12), NOT
+        // the Blake3/DAG-CBOR scheme of `cid_from_bytes`. Sync-ingress
+        // integrity must verify against the CID's *own* algorithm, else every
+        // such chunk is wrongly dropped (regression: the swarm check used
+        // cid_from_bytes and dropped all raw/sha256 blocks).
+        let data = b"file chunk bytes";
+        let sha_raw = Cid::new_v1(codec::RAW, Code::Sha2_256.digest(data));
+        let sha_raw_bytes = sha_raw.to_bytes();
+        assert!(sha_raw_bytes.starts_with(&[0x01, 0x55, 0x12, 0x20]), "raw+sha256 prefix");
+        assert!(verify_cid(&sha_raw_bytes, data).unwrap(), "raw/sha256 chunk verifies");
+        assert!(!verify_cid(&sha_raw_bytes, b"tampered").unwrap(), "tampered rejected");
+
+        // The default Blake3/DAG-CBOR envelope path still verifies.
+        let blake = cid_from_bytes(data);
+        assert!(verify_cid(&blake.to_bytes(), data).unwrap());
+        assert!(!verify_cid(&blake.to_bytes(), b"other").unwrap());
+    }
 }

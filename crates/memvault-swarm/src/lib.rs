@@ -960,17 +960,19 @@ fn handle_block_response(
             if store.get_block(&entry.cid).ok().flatten().is_some() {
                 continue; // already have it
             }
-            // Content-addressing integrity: the claimed CID MUST equal the
-            // hash of the bytes. Without this a peer could serve content Y
-            // under a CID X it isn't (substitution / id-reuse) — poisoning
-            // the store so a later lookup of X returns the wrong content,
-            // or shadowing a not-yet-held legitimate block. Every block in
-            // the system is keyed by `cid_from_bytes(bytes)`, so a mismatch
-            // is always malicious or corrupt; drop it.
-            if memvault_core::cid_from_bytes(&entry.data).to_bytes() != entry.cid {
+            // Content-addressing integrity: the bytes MUST hash to the
+            // claimed CID. Without this a peer could serve content Y under a
+            // CID X it isn't (substitution / id-reuse) — poisoning the store
+            // so a later lookup of X returns the wrong content, or shadowing
+            // a not-yet-held legitimate block. Use `verify_cid`, which hashes
+            // with the CID's *own* algorithm + verifies the digest — so it
+            // accepts both DAG-CBOR/Blake3 envelopes and raw/SHA2-256
+            // attachment chunks (recomputing via `cid_from_bytes` assumed one
+            // fixed codec+hash and dropped every attachment chunk).
+            if !matches!(memvault_core::verify_cid(&entry.cid, &entry.data), Ok(true)) {
                 tracing::warn!(
                     cid = %hex::encode(&entry.cid),
-                    "dropping synced block: CID does not match content hash"
+                    "dropping synced block: bytes do not hash to the claimed CID"
                 );
                 continue;
             }
