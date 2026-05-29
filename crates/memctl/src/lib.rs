@@ -44,7 +44,7 @@ mod native {
         /// Has effect on commands that go through `create_client*`
         /// (`put`, `get`, `list`, `search`, etc.). Administrative
         /// commands that read raw files (`genesis`, `cluster-join`,
-        /// `token-issue`, `agent-enroll`) ignore it.
+        /// `token issue`, `agent enroll`) ignore it.
         #[arg(long, global = true, env = "MEMVAULT_AGENT_ID")]
         pub agent_id: Option<String>,
 
@@ -128,32 +128,9 @@ mod native {
             /// Hex-encoded DocId
             doc_id: String,
         },
-        /// List outlinks for a document (cached, from the latest extracted-text
-        /// annotation under doc:<head-cid>).
-        DocLinks {
-            /// Hex-encoded DocId
-            doc_id: String,
-        },
-        /// List backlinks pointing at a node (any kind).
-        DocBacklinks {
-            /// Target tag label, e.g. `doc:abcd…`, `entity:1234…`, `file:c0ffee…`.
-            node: String,
-        },
-        /// List body-extracted edges whose target is a pending (unresolved)
-        /// alias placeholder. These are the dangling links.
-        DocDangling {
-            /// Optional bucket filter (hex bucket-id).
-            #[arg(long)]
-            bucket: Option<String>,
-        },
-        /// Force a re-parse of a document's body — drops the cached
-        /// extraction annotation and re-runs the extractor, which in turn
-        /// re-reconciles graph edges.
-        DocReindexLinks {
-            /// Hex-encoded DocId. If omitted, reindex every doc.
-            #[arg(long)]
-            doc_id: Option<String>,
-        },
+        /// Document link tooling (links / backlinks / dangling / reindex-links)
+        #[command(subcommand)]
+        Doc(DocCommands),
         /// Retract a memory
         Retract {
             /// Hex-encoded CID to retract
@@ -162,31 +139,9 @@ mod native {
             #[arg(short, long)]
             reason: String,
         },
-        /// Issue a join token
-        TokenIssue {
-            /// Role for the token recipient
-            #[arg(long, default_value = "agent-host")]
-            role: String,
-            /// TTL in seconds
-            #[arg(long, default_value = "3600")]
-            ttl: u64,
-            /// Maximum uses
-            #[arg(long, default_value = "1")]
-            max_uses: u32,
-            /// Human-readable label
-            #[arg(long)]
-            label: Option<String>,
-        },
-        /// List tokens
-        TokenList,
-        /// Revoke a token
-        TokenRevoke {
-            /// Hex-encoded token CID
-            cid: String,
-            /// Reason
-            #[arg(short, long)]
-            reason: String,
-        },
+        /// Join-token management (issue / list / revoke)
+        #[command(subcommand)]
+        Token(TokenCommands),
         /// List key rotations
         Rotations,
         /// Multi-admin key management
@@ -194,37 +149,9 @@ mod native {
         Admin(AdminCommands),
         /// Show node status
         Status,
-        /// Add an entity to the knowledge graph
-        GraphAdd {
-            /// Entity kind
-            kind: String,
-            /// Properties as key=value pairs
-            #[arg(short, long)]
-            prop: Vec<String>,
-        },
-        /// Link two entities
-        GraphLink {
-            /// Source entity ID (hex)
-            source: String,
-            /// Target entity ID (hex)
-            target: String,
-            /// Relation type
-            relation: String,
-            /// Edge weight
-            #[arg(long)]
-            weight: Option<f32>,
-        },
-        /// Traverse the knowledge graph
-        GraphQuery {
-            /// Starting entity ID (hex)
-            from: String,
-            /// Relation filter
-            #[arg(long)]
-            relation: Option<String>,
-            /// Maximum depth
-            #[arg(long, default_value = "3")]
-            max_depth: usize,
-        },
+        /// Knowledge-graph operations (add / link / query)
+        #[command(subcommand)]
+        Graph(GraphCommands),
         /// Run garbage collection
         Gc {
             /// Document ID (hex)
@@ -316,71 +243,12 @@ mod native {
             #[arg(short, long, default_value = "internal")]
             visibility: String,
         },
-        /// List share inbox (proposals received)
-        ShareInbox,
-        /// List share outbox (proposals sent)
-        ShareOutbox,
-        /// Approve a share proposal
-        ShareApprove {
-            /// Hex-encoded proposal CID
-            cid: String,
-        },
-        /// Reject a share proposal
-        ShareReject {
-            /// Hex-encoded proposal CID
-            cid: String,
-            /// Reason for rejection
-            #[arg(short, long)]
-            reason: String,
-        },
-        /// Create a new bucket
-        BucketNew {
-            /// Bucket name
-            name: String,
-            /// Description
-            #[arg(long)]
-            desc: Option<String>,
-            /// Visibility (internal, federated, public)
-            #[arg(long, default_value = "internal")]
-            visibility: String,
-            /// Classification (public, internal, confidential)
-            #[arg(long, default_value = "internal")]
-            classification: String,
-        },
-        /// List buckets
-        BucketList,
-        /// Show bucket details
-        BucketShow {
-            /// Bucket ID (hex)
-            id: String,
-        },
-        /// Rename a bucket
-        BucketRename {
-            /// Bucket ID (hex)
-            id: String,
-            /// New name
-            name: String,
-        },
-        /// Attach a private bucket to the cluster (makes it visible to peers)
-        BucketAttach {
-            /// Bucket ID (hex)
-            id: String,
-        },
-        /// Archive a bucket (soft-remove, data preserved)
-        BucketArchive {
-            /// Bucket ID (hex)
-            id: String,
-            /// Reason for archival
-            #[arg(short, long)]
-            reason: String,
-        },
-        /// Bind a bucket to a cluster
-        BucketBind {
-            /// Bucket ID (hex)
-            bucket_id: String,
-            /// Cluster ID (hex)
-            cluster_id: String,
-        },
+        /// Share-proposal operations (inbox / outbox / approve / reject)
+        #[command(subcommand)]
+        Share(ShareCommands),
+        /// Bucket operations (new / list / show / rename / attach / archive / bind)
+        #[command(subcommand)]
+        Bucket(BucketCommands),
         /// Run a standalone memvault cluster node with P2P networking + API
         ///
         /// A cluster node participates in gossip, bitswap, and serves the REST API.
@@ -398,7 +266,7 @@ mod native {
         },
         /// Join this node to an existing cluster using a join token
         ///
-        /// The token (issued by the cluster admin via `token-issue`) carries
+        /// The token (issued by the cluster admin via `token issue`) carries
         /// the cluster_id and the cluster's `AdminGenesis` block. The join
         /// pins the admin pubkey from the token — this is the only path
         /// that establishes the chain of trust required to verify
@@ -406,7 +274,7 @@ mod native {
         /// removed: it could not pin admin and left the joining node
         /// permanently in pre-genesis mode.
         ///
-        /// For enrolling an AGENT (like openclaw), use `agent-enroll`.
+        /// For enrolling an AGENT (like openclaw), use `agent enroll`.
         ClusterJoin {
             /// Join token (`mvjoin1:…`) issued by the cluster admin.
             token: String,
@@ -425,30 +293,14 @@ mod native {
             #[arg(long, default_value = "agent-host")]
             role: String,
         },
-        /// Enroll an agent (e.g. openclaw, hermes) for API access
+        /// Agent operations (enroll / list / show)
         ///
         /// Agents are CLIENTS that connect to a cluster node's HTTP API.
         /// They have their own Ed25519 identity for signing operations.
         /// This is different from cluster nodes — agents don't participate
         /// in P2P gossip/bitswap; they just read and write via the API.
-        AgentEnroll {
-            /// Join token string (mvjoin1:...)
-            #[arg(long)]
-            token: String,
-            /// Agent identifier (e.g. "openclaw", "hermes")
-            #[arg(long)]
-            agent_id: String,
-            /// Identity directory (default: <data-dir>/agents/<agent-id>/)
-            #[arg(long)]
-            identity_dir: Option<PathBuf>,
-        },
-        /// List enrolled agents on this node
-        AgentList,
-        /// Show an agent's enrollment details
-        AgentShow {
-            /// Agent identifier
-            agent_id: String,
-        },
+        #[command(subcommand)]
+        Agent(AgentCommands),
         /// Seed the vault with random documents, entities, files, links and VFS entries
         #[command(hide = true)]
         Seed {
@@ -512,6 +364,202 @@ mod native {
         },
         /// List the cluster's admin keys and their validity windows.
         List,
+    }
+
+    /// Join-token subcommands.
+    #[derive(Subcommand, Debug)]
+    pub enum TokenCommands {
+        /// Issue a join token
+        Issue {
+            /// Role for the token recipient
+            #[arg(long, default_value = "agent-host")]
+            role: String,
+            /// TTL in seconds
+            #[arg(long, default_value = "3600")]
+            ttl: u64,
+            /// Maximum uses
+            #[arg(long, default_value = "1")]
+            max_uses: u32,
+            /// Human-readable label
+            #[arg(long)]
+            label: Option<String>,
+        },
+        /// List tokens
+        List,
+        /// Revoke a token
+        Revoke {
+            /// Hex-encoded token CID
+            cid: String,
+            /// Reason
+            #[arg(short, long)]
+            reason: String,
+        },
+    }
+
+    /// Document link-graph subcommands.
+    #[derive(Subcommand, Debug)]
+    pub enum DocCommands {
+        /// List outlinks for a document (cached, from the latest extracted-text
+        /// annotation under doc:<head-cid>).
+        Links {
+            /// Hex-encoded DocId
+            doc_id: String,
+        },
+        /// List backlinks pointing at a node (any kind).
+        Backlinks {
+            /// Target tag label, e.g. `doc:abcd…`, `entity:1234…`, `file:c0ffee…`.
+            node: String,
+        },
+        /// List body-extracted edges whose target is a pending (unresolved)
+        /// alias placeholder. These are the dangling links.
+        Dangling {
+            /// Optional bucket filter (hex bucket-id).
+            #[arg(long)]
+            bucket: Option<String>,
+        },
+        /// Force a re-parse of a document's body — drops the cached
+        /// extraction annotation and re-runs the extractor, which in turn
+        /// re-reconciles graph edges.
+        ReindexLinks {
+            /// Hex-encoded DocId. If omitted, reindex every doc.
+            #[arg(long)]
+            doc_id: Option<String>,
+        },
+    }
+
+    /// Knowledge-graph subcommands.
+    #[derive(Subcommand, Debug)]
+    pub enum GraphCommands {
+        /// Add an entity to the knowledge graph
+        Add {
+            /// Entity kind
+            kind: String,
+            /// Properties as key=value pairs
+            #[arg(short, long)]
+            prop: Vec<String>,
+        },
+        /// Link two entities
+        Link {
+            /// Source entity ID (hex)
+            source: String,
+            /// Target entity ID (hex)
+            target: String,
+            /// Relation type
+            relation: String,
+            /// Edge weight
+            #[arg(long)]
+            weight: Option<f32>,
+        },
+        /// Traverse the knowledge graph
+        Query {
+            /// Starting entity ID (hex)
+            from: String,
+            /// Relation filter
+            #[arg(long)]
+            relation: Option<String>,
+            /// Maximum depth
+            #[arg(long, default_value = "3")]
+            max_depth: usize,
+        },
+    }
+
+    /// Share-proposal subcommands.
+    #[derive(Subcommand, Debug)]
+    pub enum ShareCommands {
+        /// List share inbox (proposals received)
+        Inbox,
+        /// List share outbox (proposals sent)
+        Outbox,
+        /// Approve a share proposal
+        Approve {
+            /// Hex-encoded proposal CID
+            cid: String,
+        },
+        /// Reject a share proposal
+        Reject {
+            /// Hex-encoded proposal CID
+            cid: String,
+            /// Reason for rejection
+            #[arg(short, long)]
+            reason: String,
+        },
+    }
+
+    /// Bucket subcommands.
+    #[derive(Subcommand, Debug)]
+    pub enum BucketCommands {
+        /// Create a new bucket
+        New {
+            /// Bucket name
+            name: String,
+            /// Description
+            #[arg(long)]
+            desc: Option<String>,
+            /// Visibility (internal, federated, public)
+            #[arg(long, default_value = "internal")]
+            visibility: String,
+            /// Classification (public, internal, confidential)
+            #[arg(long, default_value = "internal")]
+            classification: String,
+        },
+        /// List buckets
+        List,
+        /// Show bucket details
+        Show {
+            /// Bucket ID (hex)
+            id: String,
+        },
+        /// Rename a bucket
+        Rename {
+            /// Bucket ID (hex)
+            id: String,
+            /// New name
+            name: String,
+        },
+        /// Attach a private bucket to the cluster (makes it visible to peers)
+        Attach {
+            /// Bucket ID (hex)
+            id: String,
+        },
+        /// Archive a bucket (soft-remove, data preserved)
+        Archive {
+            /// Bucket ID (hex)
+            id: String,
+            /// Reason for archival
+            #[arg(short, long)]
+            reason: String,
+        },
+        /// Bind a bucket to a cluster
+        Bind {
+            /// Bucket ID (hex)
+            bucket_id: String,
+            /// Cluster ID (hex)
+            cluster_id: String,
+        },
+    }
+
+    /// Agent subcommands.
+    #[derive(Subcommand, Debug)]
+    pub enum AgentCommands {
+        /// Enroll an agent (e.g. openclaw, hermes) for API access
+        Enroll {
+            /// Join token string (mvjoin1:...)
+            #[arg(long)]
+            token: String,
+            /// Agent identifier (e.g. "openclaw", "hermes")
+            #[arg(long)]
+            agent_id: String,
+            /// Identity directory (default: <data-dir>/agents/<agent-id>/)
+            #[arg(long)]
+            identity_dir: Option<PathBuf>,
+        },
+        /// List enrolled agents on this node
+        List,
+        /// Show an agent's enrollment details
+        Show {
+            /// Agent identifier
+            agent_id: String,
+        },
     }
 
     fn default_data_dir() -> PathBuf {
@@ -1163,12 +1211,12 @@ mod native {
                 let tombstone = client.retract(&cid_bytes, &reason).await?;
                 println!("Retracted. Tombstone: {}", hex::encode(&tombstone));
             }
-            Commands::TokenIssue {
+            Commands::Token(TokenCommands::Issue {
                 role,
                 ttl,
                 max_uses,
                 label,
-            } => {
+            }) => {
                 let role = match role.as_str() {
                     "admin" => Role::Admin,
                     "auditor" => Role::Auditor,
@@ -1218,7 +1266,7 @@ mod native {
                 )?;
                 println!("{token_str}");
             }
-            Commands::TokenList => {
+            Commands::Token(TokenCommands::List) => {
                 let ks = memvault_api::keystore_open::open_token_keystore(
                     cli_data_dir().join("identity"),
                 )
@@ -1238,7 +1286,7 @@ mod native {
                     );
                 }
             }
-            Commands::TokenRevoke { cid, reason } => {
+            Commands::Token(TokenCommands::Revoke { cid, reason }) => {
                 let cid_bytes = hex::decode(&cid)?;
                 let ks = memvault_api::keystore_open::open_token_keystore(
                     cli_data_dir().join("identity"),
@@ -1288,7 +1336,7 @@ mod native {
                     println!("  {} kind={:?}", hex::encode(&r.cid), r.op_kind);
                 }
             }
-            Commands::DocLinks { doc_id } => {
+            Commands::Doc(DocCommands::Links { doc_id }) => {
                 let did = parse_doc_id(&doc_id)?;
                 let store = make_store()?;
                 let client = create_client(store)?;
@@ -1309,7 +1357,7 @@ mod native {
                     );
                 }
             }
-            Commands::DocBacklinks { node } => {
+            Commands::Doc(DocCommands::Backlinks { node }) => {
                 let Some(node_ref) = memvault_core::NodeRef::from_tag_label(&node) else {
                     return Err(anyhow::anyhow!(
                         "node must be `doc:<hex>`, `entity:<hex>`, or `file:<hex>`"
@@ -1332,7 +1380,7 @@ mod native {
                     );
                 }
             }
-            Commands::DocDangling { bucket } => {
+            Commands::Doc(DocCommands::Dangling { bucket }) => {
                 let bucket_id = match bucket {
                     Some(s) => Some(parse_bucket_id(&s)?),
                     None => None,
@@ -1345,7 +1393,7 @@ mod native {
                     println!("  {source} → [[{alias}]]");
                 }
             }
-            Commands::DocReindexLinks { doc_id } => {
+            Commands::Doc(DocCommands::ReindexLinks { doc_id }) => {
                 let store = make_store()?;
                 let client = create_client(store)?;
                 match doc_id {
@@ -1366,7 +1414,7 @@ mod native {
                     }
                 }
             }
-            Commands::GraphAdd { kind, prop } => {
+            Commands::Graph(GraphCommands::Add { kind, prop }) => {
                 let store = make_store()?;
                 let client = create_client(store)?;
                 let props: BTreeMap<String, serde_json::Value> = prop
@@ -1387,12 +1435,12 @@ mod native {
                     .await?;
                 println!("{}", hex::encode(id.0));
             }
-            Commands::GraphLink {
+            Commands::Graph(GraphCommands::Link {
                 source,
                 target,
                 relation,
                 weight,
-            } => {
+            }) => {
                 let source_id = parse_entity_id(&source)?;
                 let target_id = parse_entity_id(&target)?;
                 let store = make_store()?;
@@ -1411,11 +1459,11 @@ mod native {
                     .await?;
                 println!("{}", hex::encode(edge_id.0));
             }
-            Commands::GraphQuery {
+            Commands::Graph(GraphCommands::Query {
                 from,
                 relation,
                 max_depth,
-            } => {
+            }) => {
                 let entity_id = parse_entity_id(&from)?;
                 let store = make_store()?;
                 let client = create_client(store)?;
@@ -1675,7 +1723,7 @@ mod native {
                         .await?;
                 println!("Imported {imported} document(s).");
             }
-            Commands::ShareInbox => {
+            Commands::Share(ShareCommands::Inbox) => {
                 let client = connect().connect().await?;
                 let proposals = client.share_inbox().await?;
                 if proposals.is_empty() {
@@ -1685,7 +1733,7 @@ mod native {
                     println!("{}", hex::encode(&cid));
                 }
             }
-            Commands::ShareOutbox => {
+            Commands::Share(ShareCommands::Outbox) => {
                 let client = connect().connect().await?;
                 let proposals = client.share_outbox().await?;
                 if proposals.is_empty() {
@@ -1695,13 +1743,13 @@ mod native {
                     println!("{}", hex::encode(&cid));
                 }
             }
-            Commands::ShareApprove { cid } => {
+            Commands::Share(ShareCommands::Approve { cid }) => {
                 let cid_bytes = hex::decode(&cid)?;
                 let client = connect().connect().await?;
                 client.share_decide(&cid_bytes, true, None).await?;
                 println!("Share proposal approved.");
             }
-            Commands::ShareReject { cid, reason } => {
+            Commands::Share(ShareCommands::Reject { cid, reason }) => {
                 let cid_bytes = hex::decode(&cid)?;
                 let client = connect().connect().await?;
                 client
@@ -1709,12 +1757,12 @@ mod native {
                     .await?;
                 println!("Share proposal rejected.");
             }
-            Commands::BucketNew {
+            Commands::Bucket(BucketCommands::New {
                 name,
                 desc,
                 visibility,
                 classification,
-            } => {
+            }) => {
                 let vis = memvault_api::docs::parse_visibility(Some(&visibility));
                 let class = match classification.as_str() {
                     "public" => memvault_core::classification::Classification::Public,
@@ -1727,7 +1775,7 @@ mod native {
                     .await?;
                 println!("Bucket created: {}", hex::encode(bucket_id.0));
             }
-            Commands::BucketList => {
+            Commands::Bucket(BucketCommands::List) => {
                 let client = connect().connect().await?;
                 let buckets = client.bucket_list().await?;
                 if buckets.is_empty() {
@@ -1750,7 +1798,7 @@ mod native {
                     );
                 }
             }
-            Commands::BucketShow { id } => {
+            Commands::Bucket(BucketCommands::Show { id }) => {
                 let bucket_bytes = hex::decode(&id)?;
                 let bucket_arr: [u8; 32] = bucket_bytes
                     .try_into()
@@ -1788,7 +1836,7 @@ mod native {
                     }
                 }
             }
-            Commands::BucketRename { id, name } => {
+            Commands::Bucket(BucketCommands::Rename { id, name }) => {
                 let bucket_bytes = hex::decode(&id)?;
                 let bucket_arr: [u8; 32] = bucket_bytes
                     .try_into()
@@ -1798,7 +1846,7 @@ mod native {
                 client.bucket_rename(&bucket_id, &name).await?;
                 println!("Bucket renamed to '{name}'.");
             }
-            Commands::BucketAttach { id } => {
+            Commands::Bucket(BucketCommands::Attach { id }) => {
                 let bucket_bytes = hex::decode(&id)?;
                 let bucket_arr: [u8; 32] = bucket_bytes
                     .try_into()
@@ -1808,7 +1856,7 @@ mod native {
                 client.bucket_attach(&bucket_id).await?;
                 println!("Bucket attached to cluster.");
             }
-            Commands::BucketArchive { id, reason } => {
+            Commands::Bucket(BucketCommands::Archive { id, reason }) => {
                 let bucket_bytes = hex::decode(&id)?;
                 let bucket_arr: [u8; 32] = bucket_bytes
                     .try_into()
@@ -1818,10 +1866,10 @@ mod native {
                 client.bucket_archive(&bucket_id, &reason).await?;
                 println!("Bucket archived: {reason}");
             }
-            Commands::BucketBind {
+            Commands::Bucket(BucketCommands::Bind {
                 bucket_id,
                 cluster_id,
-            } => {
+            }) => {
                 let bucket_bytes = hex::decode(&bucket_id)?;
                 let bucket_arr: [u8; 32] = bucket_bytes
                     .try_into()
@@ -2115,11 +2163,11 @@ mod native {
                 println!("  Role:            {role}");
                 println!("  The peer's pre-genesis status will clear once this block syncs over.");
             }
-            Commands::AgentEnroll {
+            Commands::Agent(AgentCommands::Enroll {
                 token,
                 agent_id,
                 identity_dir,
-            } => {
+            }) => {
                 // Identity dir layout: `<data-dir>/agents/<agent-id>/`
                 // unless explicitly overridden.
                 let identity_dir =
@@ -2175,7 +2223,7 @@ mod native {
                 println!("  Public key:   {}", hex::encode(agent_pubkey));
                 println!("  Attestation:  {}", hex::encode(&result.attestation_cid));
             }
-            Commands::AgentList => {
+            Commands::Agent(AgentCommands::List) => {
                 let agents_dir = dirs::data_local_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("memvault")
@@ -2213,7 +2261,7 @@ mod native {
                     println!("No agents enrolled.");
                 }
             }
-            Commands::AgentShow { agent_id } => {
+            Commands::Agent(AgentCommands::Show { agent_id }) => {
                 let agent_dir = dirs::data_local_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("memvault")

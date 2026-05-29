@@ -150,7 +150,7 @@ pub fn TokenManagement() -> Element {
                             "Run on the agent host (or this node) to enroll:"
                         }
                         code { class: "block mt-1 font-mono text-sm break-all",
-                            "memctl agent-enroll --agent-id {agent_id} --token {token}"
+                            "memctl agent enroll --agent-id {agent_id} --token {token}"
                         }
                     }
                 }
