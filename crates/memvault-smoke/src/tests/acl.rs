@@ -425,6 +425,151 @@ async fn expired_grant_denied() {
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
 }
 
+/// Store a raw grant block with a caller-chosen `admin_pubkey` and
+/// signer, bypassing `issue_bucket_grant`. Lets tests forge grants the
+/// way a malicious peer would (injecting a block via sync). `signer` is
+/// the key that actually signs; `admin_pubkey` is what the grant claims.
+fn insert_raw_grant(
+    node: &TestNode,
+    bucket: &BucketId,
+    audience: GrantAudience,
+    actions: Vec<Action>,
+    admin_pubkey: [u8; 32],
+    signer: Option<&SigningKey>,
+) -> Vec<u8> {
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let mut grant = Grant {
+        issuer: PeerId(node.client.peer_id().to_vec()),
+        issuing_cluster: node.cluster_id.clone(),
+        admin_pubkey,
+        audience,
+        scopes: vec![],
+        actions,
+        not_before_ns: 1,
+        not_after_ns: u64::MAX,
+        parent: None,
+        nonce,
+        bucket_scopes: vec![bucket.clone()],
+        signature: [0u8; 64],
+    };
+    if let Some(sk) = signer {
+        use ed25519_dalek::Signer;
+        let sb = grant.signing_bytes().expect("signing bytes");
+        grant.signature = sk.sign(&sb).to_bytes();
+    }
+    let grant_bytes = serde_ipld_dagcbor::to_vec(&grant).expect("encode grant");
+    let cid = memvault_core::cid_from_bytes(&grant_bytes);
+    let meta = memvault_store::EnvelopeMeta {
+        author: node.client.peer_id().to_vec(),
+        tags: vec![
+            ("grant".to_string(), hex::encode(bucket.0)),
+            ("kind".to_string(), "grant".to_string()),
+        ],
+        wall_ns: 1,
+        cluster_id: Some(node.cluster_id.0.to_vec()),
+        bucket_id: Some(bucket.0.to_vec()),
+        ..Default::default()
+    };
+    node.client
+        .store()
+        .insert_envelope(&cid.to_bytes(), &grant_bytes, &meta)
+        .expect("insert raw grant");
+    cid.to_bytes()
+}
+
+/// A grant predating the `admin_pubkey` field (all-zero) must be denied
+/// under strict verification (the default) — otherwise a peer could
+/// forge access by simply omitting the signer.
+#[tokio::test]
+async fn legacy_unsigned_grant_denied_when_strict() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "legacy-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "legacy-bucket").await;
+
+    insert_raw_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        [0u8; 32], // legacy: no admin_pubkey
+        None,      // legacy: no signature
+    );
+
+    assert!(node.client.strict_grant_verify(), "strict is the default");
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect_err("legacy unsigned grant must be denied under strict");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+
+    // Migration window: with strict off, the legacy grant is honoured.
+    node.client.set_strict_grant_verify(false);
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("legacy grant honoured when strict verification is disabled");
+}
+
+/// A grant whose signature verifies against its embedded `admin_pubkey`,
+/// but whose key was never a cluster admin, must be denied. This is the
+/// core forgery defence: a malicious peer signs a grant with their own
+/// key and claims it as the signer.
+#[tokio::test]
+async fn forged_grant_from_non_admin_denied() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "forge-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "forge-bucket").await;
+
+    // Attacker key — internally consistent (admin_pubkey matches signer)
+    // but not a cluster admin.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let attacker = SigningKey::from_bytes(&seed);
+
+    insert_raw_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read, Action::Write],
+        attacker.verifying_key().to_bytes(),
+        Some(&attacker),
+    );
+
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect_err("grant signed by a non-admin key must be denied");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+/// A grant claiming a real admin's `admin_pubkey` but signed by someone
+/// else (signature won't verify) must be denied.
+#[tokio::test]
+async fn grant_with_admin_pubkey_but_bad_signature_denied() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "badsig-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "badsig-bucket").await;
+
+    let admin_pubkey = node
+        .client
+        .admin_signing_key()
+        .expect("admin key")
+        .verifying_key()
+        .to_bytes();
+    // Claim the real admin's pubkey, but sign with a different key.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let imposter = SigningKey::from_bytes(&seed);
+
+    insert_raw_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        admin_pubkey,
+        Some(&imposter),
+    );
+
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect_err("grant with mismatched signature must be denied");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
 #[tokio::test]
 async fn no_attestation_denied() {
     let node = TestNode::new();

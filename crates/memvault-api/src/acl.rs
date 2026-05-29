@@ -66,6 +66,13 @@ pub fn check_bucket_access(
         if client.store().is_revoked(&cid).unwrap_or(false) {
             continue;
         }
+        // Grant integrity: the grant must be signed by a key that was a
+        // cluster-valid admin when it was issued. This stops a peer from
+        // injecting a forged grant via sync — a fabricated grant won't
+        // carry a valid admin signature. (Verdict cached per-CID.)
+        if !client.grant_signature_valid(&cid, &grant) {
+            continue;
+        }
         if !grant.actions.contains(&action) {
             continue;
         }

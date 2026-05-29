@@ -281,6 +281,18 @@ pub struct LocalClient {
     /// Read by the ACL grant-signature cache to detect staleness — a
     /// cache entry computed under an older generation must be recomputed.
     admin_key_generation: std::sync::atomic::AtomicU64,
+    /// When true (default), bucket grants must carry a valid admin
+    /// signature issued by a key that was a cluster-valid admin at the
+    /// grant's `not_before_ns`. Legacy grants (no `admin_pubkey`) are
+    /// denied. Set false only for a controlled migration window — it
+    /// tolerates legacy unsigned grants, which a peer could forge via
+    /// sync, so it is a deliberate temporary loosening.
+    strict_grant_verify: std::sync::atomic::AtomicBool,
+    /// Cache of grant-signature verdicts keyed by grant CID. Value is
+    /// `(admin_key_generation_at_compute, verdict)`; a generation mismatch
+    /// forces recompute (admin set changed). Grants are immutable, so a
+    /// same-generation hit is always correct.
+    grant_sig_cache: std::sync::RwLock<std::collections::HashMap<Vec<u8>, (u64, bool)>>,
     /// Optional node signing key — the daemon's libp2p ed25519 private key,
     /// used to sign agent attestations and agent revocations. Distinct from
     /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
@@ -316,6 +328,8 @@ impl LocalClient {
             held_admin_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
             admin_key_state: std::sync::RwLock::new(memvault_auth::AdminKeyState::default()),
             admin_key_generation: std::sync::atomic::AtomicU64::new(0),
+            strict_grant_verify: std::sync::atomic::AtomicBool::new(true),
+            grant_sig_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
             node_signing_key: std::sync::OnceLock::new(),
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
@@ -412,6 +426,68 @@ impl LocalClient {
     fn bump_admin_key_generation(&self) {
         self.admin_key_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // The grant-signature cache is keyed on the admin set; drop it so
+        // stale verdicts don't linger (the generation check would catch
+        // them anyway, but this bounds memory).
+        if let Ok(mut c) = self.grant_sig_cache.write() {
+            c.clear();
+        }
+    }
+
+    /// Whether strict grant-signature verification is enabled (default
+    /// true). See the field docs on `strict_grant_verify`.
+    pub fn strict_grant_verify(&self) -> bool {
+        self.strict_grant_verify
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Toggle strict grant-signature verification. Intended for a
+    /// controlled migration window only.
+    pub fn set_strict_grant_verify(&self, strict: bool) {
+        self.strict_grant_verify
+            .store(strict, std::sync::atomic::Ordering::Release);
+        if let Ok(mut c) = self.grant_sig_cache.write() {
+            c.clear();
+        }
+    }
+
+    /// Decide whether a bucket grant's signature is acceptable, with
+    /// per-CID caching keyed on the admin-key generation.
+    ///
+    /// A grant is acceptable iff:
+    /// - it carries an `admin_pubkey` and a signature that verifies
+    ///   against it, AND
+    /// - that key was a cluster-valid admin at the grant's
+    ///   `not_before_ns`.
+    ///
+    /// Legacy grants (no `admin_pubkey`) are accepted only when strict
+    /// verification is off. `grant_cid` must be the grant block's CID.
+    pub fn grant_signature_valid(
+        &self,
+        grant_cid: &[u8],
+        grant: &memvault_auth::Grant,
+    ) -> bool {
+        let generation = self.admin_key_generation();
+        if let Ok(cache) = self.grant_sig_cache.read() {
+            if let Some((cached_gen, verdict)) = cache.get(grant_cid) {
+                if *cached_gen == generation {
+                    return *verdict;
+                }
+            }
+        }
+
+        let verdict = if grant.is_legacy_unsigned() {
+            // No signer recorded — only honoured during a migration window.
+            !self.strict_grant_verify()
+        } else {
+            grant.verify_admin_signature().is_ok()
+                && self.is_admin_key_valid_at(&grant.admin_pubkey, grant.not_before_ns)
+        };
+
+        if let Ok(mut cache) = self.grant_sig_cache.write() {
+            cache.insert(grant_cid.to_vec(), (generation, verdict));
+        }
+        verdict
     }
 
     /// True if `pubkey` was a cluster-valid admin at `time_ns`.
