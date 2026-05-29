@@ -1061,3 +1061,157 @@ async fn token_lifecycle_through_keystore_is_cross_process() {
     let after = issuer.list_tokens().await.unwrap();
     assert!(after[0].revoked);
 }
+
+// ---------------------------------------------------------------------------
+// Live upgrade: legacy loose identity files migrate into the keystore
+// ---------------------------------------------------------------------------
+
+#[test]
+fn legacy_identity_files_migrate_to_keystore() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = dir.path().join("identity");
+    std::fs::create_dir_all(&identity).unwrap();
+
+    // Lay down the pre-keystore on-disk layout an existing genesis node had:
+    // admin.key (raw seed), cluster_admin_genesis.cbor (signed), cluster_id.
+    let seed = [77u8; 32];
+    let admin_sk = memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed);
+    let admin_pubkey = admin_sk.verifying_key().to_bytes();
+    let cluster = memvault_core::ClusterId([3u8; 32]);
+    let genesis = memvault_auth::sign_admin_genesis(&admin_sk, cluster.clone(), 1_000)
+        .expect("sign genesis");
+    std::fs::write(identity.join("admin.key"), seed).unwrap();
+    std::fs::write(
+        identity.join("cluster_admin_genesis.cbor"),
+        serde_ipld_dagcbor::to_vec(&genesis).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("cluster_id"), hex::encode(cluster.0)).unwrap();
+
+    // Boot a client over that data dir and run the one-time upgrade.
+    let c = bare_client(&dir, b"upgrade");
+    c.migrate_legacy_identity_files(&identity);
+
+    // Files are gone…
+    assert!(!identity.join("admin.key").exists(), "admin.key removed");
+    assert!(
+        !identity.join("cluster_admin_genesis.cbor").exists(),
+        "genesis.cbor removed"
+    );
+    assert!(!dir.path().join("cluster_id").exists(), "cluster_id file removed");
+
+    // …and the values now live in the keystore / store.
+    assert_eq!(c.load_admin_keys_from_keystore(), 1, "admin key in keystore");
+    assert!(c.admin_verifying_keys().iter().any(|k| k.to_bytes() == admin_pubkey));
+    let pinned = c
+        .pinned_admin_genesis_bytes_from_keystore()
+        .expect("genesis in keystore");
+    let decoded: memvault_auth::AdminGenesis =
+        serde_ipld_dagcbor::from_slice(&pinned).unwrap();
+    assert_eq!(decoded.admin_pubkey, admin_pubkey);
+    assert_eq!(
+        c.store().get_local_cluster_id().unwrap().as_deref(),
+        Some(&cluster.0[..]),
+        "cluster_id migrated to store"
+    );
+
+    // Idempotent: a second run with no files is a no-op.
+    c.migrate_legacy_identity_files(&identity);
+}
+
+#[test]
+fn admitted_admin_key_activates_live_from_keystore() {
+    // Models the co-admin path: a secret lands in the keystore (written by
+    // another process / the join thread), and when the admin-key state is
+    // rebuilt to include its pubkey, set_admin_key_state loads it live.
+    let dir = tempfile::tempdir().unwrap();
+    let c = bare_client(&dir, b"coadmin");
+
+    let seed = [55u8; 32];
+    let sk = memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubkey = sk.verifying_key().to_bytes();
+
+    // Secret present in the keystore but NOT yet held in memory.
+    c.keystore()
+        .put(format!("adminkey:{}", hex::encode(pubkey)).as_bytes(), &seed)
+        .unwrap();
+    assert!(
+        !c.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey),
+        "not held before the state names it"
+    );
+
+    // The admission lands → admin-key state rebuilt to include the pubkey.
+    let state = memvault_auth::AdminKeyState::new_with_bootstrap(pubkey, 0);
+    c.set_admin_key_state(state);
+
+    // Now it's activated live (held in memory) without a reload/restart.
+    assert!(
+        c.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey),
+        "admitted admin key activated from keystore"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Genesis: identity in the keystore yields tokens that embed the AdminGenesis
+// ---------------------------------------------------------------------------
+
+fn client_with_cluster(dir: &tempfile::TempDir, name: &[u8], cluster: &[u8; 32]) -> Arc<LocalClient> {
+    let redb_name = format!("redb-{}", String::from_utf8_lossy(name));
+    let store = Arc::new(MemvaultStore::open(dir.path().join(redb_name)).unwrap());
+    let index = Arc::new(RwLock::new(TextIndex::new()));
+    let quotas = Arc::new(RwLock::new(QuotaManager::default()));
+    let event_bus = Arc::new(EventBus::new(64));
+    let mut peer_id = [0u8; 32];
+    peer_id[..name.len().min(32)].copy_from_slice(&name[..name.len().min(32)]);
+    Arc::new(LocalClient::new(
+        store,
+        index,
+        quotas,
+        event_bus,
+        peer_id.to_vec(),
+        cluster.to_vec(),
+    ))
+}
+
+#[tokio::test]
+async fn genesis_identity_yields_tokens_embedding_genesis() {
+    use memvault_api::MemvaultClient;
+    let dir = tempfile::tempdir().unwrap();
+    let cluster = [7u8; 32];
+
+    // Genesis: generate the admin key + self-signed genesis and persist both
+    // into the keystore (what `memctl genesis` now does, no loose files).
+    let admin_sk = memvault_api::ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let admin_pubkey = admin_sk.verifying_key().to_bytes();
+    let genesis = memvault_auth::sign_admin_genesis(
+        &admin_sk,
+        memvault_core::ClusterId(cluster),
+        1_234,
+    )
+    .expect("sign genesis");
+    {
+        let a = client_with_cluster(&dir, b"genesis", &cluster);
+        a.set_admin_signing_key(admin_sk.clone());
+        a.set_pinned_admin_genesis(genesis.clone());
+    }
+
+    // A separate keystore-only issuer (own redb, shared keystore) loads the
+    // genesis identity and issues a token — which must embed the AdminGenesis
+    // so a joining node can pin cluster trust.
+    let issuer = client_with_cluster(&dir, b"issuer", &cluster);
+    assert_eq!(issuer.load_admin_keys_from_keystore(), 1, "admin key from keystore");
+    let pin = issuer
+        .pinned_admin_genesis_bytes_from_keystore()
+        .expect("genesis in keystore");
+    issuer.set_pinned_admin_genesis(serde_ipld_dagcbor::from_slice(&pin).unwrap());
+
+    let token_str = issuer
+        .issue_token(memvault_auth::Role::AgentHost, 3600, 1, None)
+        .await
+        .unwrap();
+    let decoded = memvault_auth::decode_token_string(&token_str).unwrap();
+    let embedded = decoded.admin_genesis.expect("token embeds AdminGenesis");
+    assert_eq!(embedded.admin_pubkey, admin_pubkey, "genesis admin matches");
+    embedded.verify_self_signature().expect("embedded genesis self-signature");
+    assert_eq!(decoded.cluster_id.0, cluster, "token cluster matches");
+}

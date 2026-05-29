@@ -51,6 +51,16 @@ fn issue_token(
     cluster_id: &ClusterId,
     genesis: &AdminGenesis,
 ) -> JoinToken {
+    issue_token_ex(admin_sk, admin_peer_id, cluster_id, genesis, false)
+}
+
+fn issue_token_ex(
+    admin_sk: &SigningKey,
+    admin_peer_id: &PeerId,
+    cluster_id: &ClusterId,
+    genesis: &AdminGenesis,
+    admit_as_admin: bool,
+) -> JoinToken {
     use ed25519_dalek::Signer;
     let now_ns = memvault_core::wall_ns();
     let mut token = JoinToken {
@@ -64,7 +74,7 @@ fn issue_token(
         nonce: random_seed()[..16].try_into().unwrap(),
         label: Some("smoke-test".into()),
         admin_genesis: Some(genesis.clone()),
-        admit_as_admin: false,
+        admit_as_admin,
         signature: [0u8; 64],
     };
     let bytes = token.signing_bytes().expect("signing bytes");
@@ -1110,4 +1120,150 @@ async fn join_consumes_token_once_and_refuses_replay() {
         "consumption count must equal 1, equalling token.max_uses — \
          further peers would hit the `used >= max_uses` refuse branch"
     );
+}
+
+/// Co-admin join: when the token is issued with `admit_as_admin`, the peer
+/// presents a fresh admin key + POP (via `JoinConfig.admit_admin_key`), and
+/// admin mints an `AdminKeyAdmission` over `/join/1.0` that the peer stores.
+/// This is the swarm-side of `cluster-join --admit-as-admin`.
+#[tokio::test]
+async fn join_admits_co_admin_when_token_allows() {
+    let admin_sk = SigningKey::from_bytes(&random_seed());
+    let admin_pubkey = admin_sk.verifying_key().to_bytes();
+    let cluster_id = ClusterId::random();
+    let genesis = sign_admin_genesis(&admin_sk, cluster_id.clone(), memvault_core::wall_ns())
+        .expect("sign admin_genesis");
+
+    let admin_kp = libp2p_keypair_from_seed(&random_seed());
+    let admin_node_pubkey = pubkey_from_libp2p(&admin_kp);
+    let peer_kp = libp2p_keypair_from_seed(&random_seed());
+    let peer_node_pubkey = pubkey_from_libp2p(&peer_kp);
+
+    // The fresh admin key the joining peer wants admitted.
+    let co_admin_sk = SigningKey::from_bytes(&random_seed());
+    let co_admin_pubkey = co_admin_sk.verifying_key().to_bytes();
+
+    // Token issued WITH admit-as-admin.
+    let admin_peer_for_token = PeerId(admin_node_pubkey.to_vec());
+    let token = issue_token_ex(&admin_sk, &admin_peer_for_token, &cluster_id, &genesis, true);
+    let token_str = encode_token_string(&token).expect("encode token");
+
+    let admin_dir = tempfile::tempdir().unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let admin_store =
+        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store =
+        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
+    peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
+
+    let mut admin_swarm = standalone_swarm(
+        admin_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let admin_listen = await_listen_addr(&mut admin_swarm).await;
+    let mut peer_swarm = standalone_swarm(
+        peer_kp.clone(),
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+    )
+    .await
+    .unwrap();
+    let _ = await_listen_addr(&mut peer_swarm).await;
+    peer_swarm.dial(admin_listen.clone()).unwrap();
+
+    let admin_join = JoinConfig {
+        pending_token: None,
+        node_pubkey: admin_node_pubkey,
+        admin_signing_key: Some(admin_sk.clone()),
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        admit_admin_key: None,
+        keystore: None,
+        on_join_success: None,
+    };
+    let peer_join = JoinConfig {
+        pending_token: Some(token_str.clone()),
+        node_pubkey: peer_node_pubkey,
+        admin_signing_key: None,
+        pinned_admin_pubkey: Some(admin_pubkey),
+        cluster_id: cluster_id.0,
+        // Peer presents the co-admin key for admission.
+        admit_admin_key: Some(co_admin_sk.clone()),
+        keystore: None,
+        on_join_success: None,
+    };
+
+    let (a_tx, a_rx) = mpsc::unbounded_channel::<OutboundHead>();
+    let (p_tx, p_rx) = mpsc::unbounded_channel::<OutboundHead>();
+    drop(a_tx);
+    drop(p_tx);
+
+    let admin_store_t = Arc::clone(&admin_store);
+    let admin_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut admin_swarm,
+            admin_store_t,
+            a_rx,
+            SyncConfig {
+                cluster_id: cluster_id.0.to_vec(),
+                ..Default::default()
+            },
+            admin_join,
+        )
+        .await;
+    });
+    let peer_store_t = Arc::clone(&peer_store);
+    let peer_cluster = cluster_id.0;
+    let peer_task = tokio::spawn(async move {
+        memvault_swarm::run_sync_loop(
+            &mut peer_swarm,
+            peer_store_t,
+            p_rx,
+            SyncConfig {
+                cluster_id: peer_cluster.to_vec(),
+                ..Default::default()
+            },
+            peer_join,
+        )
+        .await;
+    });
+
+    // The peer should store an AdminKeyAdmission for its co-admin pubkey.
+    let admission = timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(cids) = peer_store.query_by_tag("sigchain", "admin_admission", 0, 64) {
+                for cid in cids {
+                    if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
+                        if let Ok(adm) = serde_ipld_dagcbor::from_slice::<
+                            memvault_auth::AdminKeyAdmission,
+                        >(&bytes)
+                        {
+                            if adm.new_pubkey == co_admin_pubkey {
+                                return adm;
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for AdminKeyAdmission");
+
+    assert_eq!(admission.new_pubkey, co_admin_pubkey, "admitted the peer's key");
+    assert_eq!(
+        admission.admitting_pubkey, admin_pubkey,
+        "admitted by the cluster admin"
+    );
+    assert_eq!(admission.cluster_id.0, cluster_id.0, "cluster matches");
+
+    admin_task.abort();
+    peer_task.abort();
+    let _ = admin_task.await;
+    let _ = peer_task.await;
 }
