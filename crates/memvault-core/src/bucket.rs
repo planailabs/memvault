@@ -45,6 +45,11 @@ pub struct BucketDecl {
     pub description: Option<String>,
     /// If Some, this bucket was created by a specific agent. If None, cluster-owned.
     pub owner_agent: Option<AgentId>,
+    /// The owner agent's ed25519 pubkey, when known at creation. Lets ACL
+    /// enforcement resolve owner/attesting-node grant authority without an
+    /// agent_id→pubkey scan. `None` for cluster-owned or legacy buckets.
+    #[serde(default)]
+    pub owner_agent_pubkey: Option<[u8; 32]>,
     pub default_visibility: Visibility,
     pub default_classification: Classification,
     pub created_ns: u64,

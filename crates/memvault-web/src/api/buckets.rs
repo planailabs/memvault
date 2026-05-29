@@ -106,6 +106,7 @@ pub async fn create_bucket(
     let bucket_id = client
         .bucket_create_as(
             attestation.agent_id,
+            Some(pubkey_arr),
             &req.name,
             req.description.as_deref(),
             memvault_core::Visibility::Internal,

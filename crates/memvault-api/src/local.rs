@@ -439,41 +439,91 @@ impl LocalClient {
     /// Decide whether a bucket grant's signature is acceptable, with
     /// per-CID caching keyed on the admin-key generation.
     ///
-    /// A grant is acceptable iff:
-    /// - it carries an `admin_pubkey` and a signature that verifies
-    ///   against it, AND
-    /// - that key was a cluster-valid admin at the grant's
-    ///   `not_before_ns`.
+    /// Whether the grant's signature cryptographically verifies against
+    /// its embedded `admin_pubkey` (the *issuer*: an admin key, a bucket
+    /// owner's agent key, or that owner's attesting node key — the field
+    /// keeps its historical name). This is pure signature *authenticity*,
+    /// independent of *authority* (whether that issuer is allowed to grant
+    /// on a given bucket — see `acl::check_bucket_access`).
     ///
-    /// Legacy grants (no `admin_pubkey`) are always rejected — there is no
-    /// migration/tolerance mode; reissue them under an admin key.
-    /// `grant_cid` must be the grant block's CID.
-    pub fn grant_signature_valid(
+    /// The verdict is immutable for a given grant CID (the signed bytes
+    /// never change), so it's cached permanently. Legacy grants (all-zero
+    /// `admin_pubkey`) are never authentic.
+    pub fn grant_signature_authentic(
         &self,
         grant_cid: &[u8],
         grant: &memvault_auth::Grant,
     ) -> bool {
-        let generation = self.admin_key_generation();
         if let Ok(cache) = self.grant_sig_cache.read() {
-            if let Some((cached_gen, verdict)) = cache.get(grant_cid) {
-                if *cached_gen == generation {
-                    return *verdict;
-                }
+            if let Some((_, verdict)) = cache.get(grant_cid) {
+                return *verdict;
             }
         }
-
-        let verdict = if grant.is_legacy_unsigned() {
-            // No signer recorded — never honoured.
-            false
-        } else {
-            grant.verify_admin_signature().is_ok()
-                && self.is_admin_key_valid_at(&grant.admin_pubkey, grant.not_before_ns)
-        };
-
+        let verdict = !grant.is_legacy_unsigned() && grant.verify_admin_signature().is_ok();
         if let Ok(mut cache) = self.grant_sig_cache.write() {
-            cache.insert(grant_cid.to_vec(), (generation, verdict));
+            cache.insert(grant_cid.to_vec(), (0, verdict));
         }
         verdict
+    }
+
+    /// Is `issuer_pubkey` authorised to issue/revoke grants on a bucket
+    /// owned by `owner_agent_pubkey`, as of `at_ns`? Three authorities:
+    ///   1. a cluster-valid admin (can act on any bucket);
+    ///   2. the bucket **owner**'s own agent key (self-delegation);
+    ///   3. the **node that attested the owner** (host-on-behalf).
+    /// Owner/attester paths require the owner agent to be a known,
+    /// non-revoked agent; the attester must be a trusted, non-revoked node.
+    pub fn grant_issuer_authorized(
+        &self,
+        issuer_pubkey: &[u8; 32],
+        at_ns: u64,
+        owner_agent_pubkey: Option<&[u8; 32]>,
+    ) -> bool {
+        // 1. Admin authority.
+        if self.is_admin_key_valid_at(issuer_pubkey, at_ns) {
+            return true;
+        }
+        let Some(owner_pk) = owner_agent_pubkey else {
+            return false;
+        };
+        // The owner agent must currently be a known, non-revoked agent.
+        let owner_att = match crate::sigchain::find_agent_attestation(self, owner_pk) {
+            Ok(Some(att)) => att,
+            _ => return false,
+        };
+        if self.is_agent_revoked(owner_pk) {
+            return false;
+        }
+        // 2. Owner self-delegation.
+        if issuer_pubkey == owner_pk {
+            return true;
+        }
+        // 3. Host-on-behalf: the owner's attesting node, still trusted.
+        if *issuer_pubkey == owner_att.node_pubkey
+            && self.is_node_trusted(&owner_att.node_pubkey)
+            && !self.is_node_revoked(&owner_att.node_pubkey)
+        {
+            return true;
+        }
+        false
+    }
+
+    fn is_agent_revoked(&self, pubkey: &[u8; 32]) -> bool {
+        self.trust_state()
+            .and_then(|s| s.revoked_agents.read().ok().map(|r| r.contains(pubkey)))
+            .unwrap_or(false)
+    }
+
+    fn is_node_revoked(&self, pubkey: &[u8; 32]) -> bool {
+        self.trust_state()
+            .and_then(|s| s.revoked_nodes.read().ok().map(|r| r.contains(pubkey)))
+            .unwrap_or(false)
+    }
+
+    fn is_node_trusted(&self, pubkey: &[u8; 32]) -> bool {
+        self.trust_state()
+            .and_then(|s| s.node_trust.read().ok().map(|m| m.contains_key(pubkey)))
+            .unwrap_or(false)
     }
 
     /// Re-issue, under the current cluster admin key, every grant on
@@ -1030,6 +1080,7 @@ impl LocalClient {
         default_classification: memvault_core::classification::Classification,
         role: memvault_doc::BucketRole,
         owner_agent_override: Option<memvault_core::AgentId>,
+        owner_agent_pubkey: Option<[u8; 32]>,
     ) -> Result<memvault_core::BucketId> {
         use memvault_doc::BucketDecl;
 
@@ -1040,11 +1091,19 @@ impl LocalClient {
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
         let owner_agent = owner_agent_override
             .or_else(|| self.agent_identity.get().map(|i| i.agent_id.clone()));
+        // Owner pubkey: explicit arg wins; else fall back to the bound
+        // agent identity's pubkey when that is the owner.
+        let owner_agent_pubkey = owner_agent_pubkey.or_else(|| {
+            self.agent_identity
+                .get()
+                .map(|i| i.verifying_key.to_bytes())
+        });
         let decl = BucketDecl {
             bucket_id: bucket_id.clone(),
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
             owner_agent,
+            owner_agent_pubkey,
             default_visibility,
             default_classification,
             created_ns: now_ns,
@@ -1108,6 +1167,7 @@ impl LocalClient {
     pub async fn bucket_create_as(
         &self,
         owner_agent: memvault_core::AgentId,
+        owner_agent_pubkey: Option<[u8; 32]>,
         name: &str,
         description: Option<&str>,
         default_visibility: Visibility,
@@ -1122,6 +1182,7 @@ impl LocalClient {
             default_classification,
             role,
             Some(owner_agent),
+            owner_agent_pubkey,
         )
         .await
     }
@@ -1203,6 +1264,7 @@ impl LocalClient {
                 memvault_core::classification::Classification::Internal,
                 memvault_doc::BucketRole::Agent,
                 Some(owner_agent.clone()),
+                <[u8; 32]>::try_from(agent_pubkey).ok(),
             )
             .await?;
         // bucket_create_inner already auto-binds when has_cluster, but
@@ -1275,6 +1337,7 @@ impl LocalClient {
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
             owner_agent: None,
+            owner_agent_pubkey: None,
             default_visibility,
             default_classification,
             created_ns: 0,
@@ -1561,6 +1624,7 @@ impl LocalClient {
             name: decl.name,
             description: decl.description,
             owner_agent: decl.owner_agent,
+            owner_agent_pubkey: decl.owner_agent_pubkey,
             cluster_id,
             is_attached: decl.private_to_peer.is_none(),
             default_visibility: decl.default_visibility,
@@ -3862,6 +3926,7 @@ impl MemvaultClient for LocalClient {
             default_visibility,
             default_classification,
             role,
+            None,
             None,
         )
         .await

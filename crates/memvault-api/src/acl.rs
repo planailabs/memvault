@@ -48,11 +48,17 @@ pub fn check_bucket_access(
             ))
         })?;
 
-    if let Ok(Some(bucket)) = client.bucket_info_sync(bucket_id) {
-        if bucket.owner_agent.as_ref() == Some(&attestation.agent_id) {
-            return Ok(());
+    // Resolve the bucket's owner pubkey once: it gates owner-bypass and
+    // the owner/attesting-node grant authorities below.
+    let owner_agent_pubkey = match client.bucket_info_sync(bucket_id) {
+        Ok(Some(bucket)) => {
+            if bucket.owner_agent.as_ref() == Some(&attestation.agent_id) {
+                return Ok(());
+            }
+            bucket.owner_agent_pubkey
         }
-    }
+        _ => None,
+    };
 
     let now_ns = memvault_core::wall_ns();
     let grants = client.list_bucket_grants(bucket_id)?;
@@ -77,11 +83,21 @@ pub fn check_bucket_access(
         if client.store().is_revoked(&cid).unwrap_or(false) {
             continue;
         }
-        // Grant integrity: the grant must be signed by a key that was a
-        // cluster-valid admin when it was issued. This stops a peer from
-        // injecting a forged grant via sync — a fabricated grant won't
-        // carry a valid admin signature. (Verdict cached per-CID.)
-        if !client.grant_signature_valid(&cid, &grant) {
+        // Grant integrity, two independent checks:
+        //  (a) the signature is authentic for the embedded issuer pubkey
+        //      (stops a peer injecting a forged grant via sync); and
+        //  (b) that issuer is *authorised* to grant on this bucket — a
+        //      cluster admin, the bucket owner's own agent key, or the
+        //      node that attested the owner (host-on-behalf). Authority is
+        //      checked at the grant's `not_before_ns`.
+        if !client.grant_signature_authentic(&cid, &grant) {
+            continue;
+        }
+        if !client.grant_issuer_authorized(
+            &grant.admin_pubkey,
+            grant.not_before_ns,
+            owner_agent_pubkey.as_ref(),
+        ) {
             continue;
         }
         if !grant.actions.contains(&action) {

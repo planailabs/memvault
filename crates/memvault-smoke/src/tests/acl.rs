@@ -202,6 +202,7 @@ async fn bucket_create_as_sets_owner_and_grants_access() {
         .client
         .bucket_create_as(
             agent_id.clone(),
+            Some(agent_pk),
             "create-as-bucket",
             None,
             Visibility::Internal,
@@ -969,4 +970,143 @@ async fn admit_rejects_expired_pop() {
         .await
         .expect_err("expired POP must be rejected");
     assert!(matches!(err, memvault_api::ApiError::Other(_)));
+}
+
+// ── Owner / attesting-node grant authority (paths 2 & 3) ─────────────
+
+/// Attest an agent and return its signing key too, so tests can sign
+/// owner grants with it.
+async fn setup_agent_keyed(
+    node: &TestNode,
+    name: &str,
+    role: Role,
+) -> (SigningKey, [u8; 32], AgentId) {
+    let node_sk = node.client.node_signing_key().expect("node key").clone();
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let agent_sk = SigningKey::from_bytes(&seed);
+    let agent_pk = agent_sk.verifying_key().to_bytes();
+    let att = sign_agent_attestation(
+        &node_sk,
+        AgentId(name.to_string()),
+        agent_pk,
+        role,
+        u64::MAX,
+    )
+    .expect("sign attestation");
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &att).expect("publish");
+    (agent_sk, agent_pk, AgentId(name.to_string()))
+}
+
+async fn make_owned_bucket(
+    node: &TestNode,
+    name: &str,
+    owner: AgentId,
+    owner_pk: [u8; 32],
+) -> BucketId {
+    node.client
+        .bucket_create_as(
+            owner,
+            Some(owner_pk),
+            name,
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .expect("create owned bucket")
+}
+
+/// Path 2: the bucket owner's own agent key can grant access to its bucket.
+#[tokio::test]
+async fn owner_signed_grant_accepted() {
+    let node = TestNode::new();
+    let (owner_sk, owner_pk, owner_id) =
+        setup_agent_keyed(&node, "owner-issuer", Role::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "grantee", Role::AgentHost).await;
+    let bucket = make_owned_bucket(&node, "owner-issued-bucket", owner_id, owner_pk).await;
+
+    // Owner signs a grant for the grantee with its own agent key.
+    insert_raw_grant_at(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        owner_pk,
+        Some(&owner_sk),
+        memvault_core::wall_ns(),
+    );
+    acl::check_bucket_access(&node.client, &grantee_pk, &bucket, Action::Read)
+        .expect("owner-signed grant must authorize the grantee");
+}
+
+/// Path 3: the node that attested the owner can grant on its behalf
+/// (host-on-behalf), signing with the node key — no admin needed.
+#[tokio::test]
+async fn attesting_node_signed_grant_accepted() {
+    let node = TestNode::new();
+    let (_owner_sk, owner_pk, owner_id) =
+        setup_agent_keyed(&node, "hosted-owner", Role::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "host-grantee", Role::AgentHost).await;
+    let bucket = make_owned_bucket(&node, "host-issued-bucket", owner_id, owner_pk).await;
+
+    let node_sk = node.client.node_signing_key().expect("node key").clone();
+    let node_pk = node_sk.verifying_key().to_bytes();
+
+    // Path 3 requires the attesting node to be a trusted cluster node.
+    // Production installs this via bootstrap; the bare harness doesn't, so
+    // install a minimal trust state trusting our node.
+    {
+        use memvault_auth::jwt::NodeTrust;
+        use std::collections::{HashMap, HashSet};
+        use std::sync::{Arc, RwLock};
+        let mut nt = HashMap::new();
+        nt.insert(node_pk, NodeTrust::PreGenesis);
+        node.client
+            .set_trust_state(memvault_api::sigchain::LiveTrustState {
+                node_trust: Arc::new(RwLock::new(nt)),
+                revoked_agents: Arc::new(RwLock::new(HashSet::new())),
+                revoked_nodes: Arc::new(RwLock::new(HashSet::new())),
+                trusted_agents: Arc::new(RwLock::new(HashSet::new())),
+                trusted_attestations: Arc::new(RwLock::new(HashMap::new())),
+            });
+    }
+
+    insert_raw_grant_at(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        node_pk,
+        Some(&node_sk),
+        memvault_core::wall_ns(),
+    );
+    acl::check_bucket_access(&node.client, &grantee_pk, &bucket, Action::Read)
+        .expect("attesting-node grant must authorize the grantee");
+}
+
+/// A node-signed grant on a bucket with no owner (not owned by an agent
+/// this node attested) is denied — host authority is scoped to owned
+/// buckets, the node isn't an admin.
+#[tokio::test]
+async fn node_signed_grant_on_unowned_bucket_denied() {
+    let node = TestNode::new();
+    let (grantee_pk, _) = setup_agent(&node, "unowned-grantee", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "unowned-bucket").await; // owner_agent_pubkey = None
+
+    let node_sk = node.client.node_signing_key().expect("node key").clone();
+    let node_pk = node_sk.verifying_key().to_bytes();
+    insert_raw_grant_at(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(grantee_pk.to_vec())),
+        vec![Action::Read],
+        node_pk,
+        Some(&node_sk),
+        memvault_core::wall_ns(),
+    );
+    let err = acl::check_bucket_access(&node.client, &grantee_pk, &bucket, Action::Read)
+        .expect_err("node-signed grant on an unowned bucket must be denied");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
 }

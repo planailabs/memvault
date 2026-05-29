@@ -87,6 +87,10 @@ pub struct BucketInfo {
     pub name: String,
     pub description: Option<String>,
     pub owner_agent: Option<memvault_core::AgentId>,
+    /// Owner agent's ed25519 pubkey, when recorded at creation. Used by
+    /// ACL to resolve owner / attesting-node grant authority.
+    #[serde(default)]
+    pub owner_agent_pubkey: Option<[u8; 32]>,
     /// Which cluster this bucket is bound to (None if unbound/standalone).
     pub cluster_id: Option<ClusterId>,
     /// Whether this bucket is attached to the cluster (private_to_peer is None).
