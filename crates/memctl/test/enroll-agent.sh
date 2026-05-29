@@ -7,7 +7,7 @@
 #
 # This is DIFFERENT from cluster-join:
 #   - cluster-join: node joins the P2P cluster (replicates data)
-#   - agent-enroll: agent gets API credentials (consumes data via HTTP)
+#   - agent enroll: agent gets API credentials (consumes data via HTTP)
 #
 # Prerequisites:
 #   1. Run genesis-node-a.sh (creates the cluster)
@@ -20,13 +20,9 @@ set -euo pipefail
 NODE_DIR="${MEMVAULT_DATA_DIR:-$HOME/.local/share/memvault.a}"
 AGENT_ID="${1:-openclaw}"
 
-if [ ! -f "$NODE_DIR/cluster_id" ]; then
-    echo "ERROR: $NODE_DIR has no cluster_id. Run genesis-node-a.sh first."
-    exit 1
-fi
-if [ ! -f "$NODE_DIR/identity/cluster_admin_genesis.cbor" ]; then
-    echo "ERROR: $NODE_DIR has no pinned admin_genesis."
-    echo "       Re-run genesis-node-a.sh (the updated version writes the pin)."
+# Identity (admin key, cluster_id, AdminGenesis) lives in the keystore.
+if [ ! -f "$NODE_DIR/identity/keystore.mvks" ]; then
+    echo "ERROR: $NODE_DIR has no keystore. Run genesis-node-a.sh first."
     exit 1
 fi
 
@@ -34,16 +30,16 @@ echo "=== Enroll agent '${AGENT_ID}' ==="
 echo "  Node data:  $NODE_DIR"
 echo "  Agent ID:   $AGENT_ID"
 
-# 1. Issue a join token. Token-issue prints only the token on its last
+# 1. Issue a join token. `token issue` prints only the token on its last
 #    line, so capture cleanly.
 echo ""
 echo "Step 1/4: Issue a join token..."
 TOKEN=$(MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
     cargo run -q -p memctl --features daemon -- \
-        token-issue --role agent-host --label "$AGENT_ID" --ttl 86400 \
+        token issue --role agent-host --label "$AGENT_ID" --ttl 86400 \
     | tail -n1)
 if [[ "$TOKEN" != mvjoin1:* ]]; then
-    echo "ERROR: token-issue did not return an mvjoin1: token."
+    echo "ERROR: token issue did not return an mvjoin1: token."
     echo "       Got: $TOKEN"
     exit 1
 fi
@@ -55,11 +51,13 @@ echo ""
 echo "Step 2/4: Enroll the agent locally..."
 MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
     cargo run -q -p memctl --features daemon -- \
-        agent-enroll --token "$TOKEN" --agent-id "$AGENT_ID"
+        agent enroll --token "$TOKEN" --agent-id "$AGENT_ID"
 
 IDENTITY_DIR="$NODE_DIR/agents/$AGENT_ID"
-if [ ! -f "$IDENTITY_DIR/attestation.cbor" ]; then
-    echo "ERROR: agent-enroll did not create $IDENTITY_DIR/attestation.cbor"
+# The agent's private key is the only on-disk artifact (the attestation
+# lives on the sigchain, resolved by pubkey at JWT-verify time).
+if [ ! -f "$IDENTITY_DIR/private_key.pem" ]; then
+    echo "ERROR: agent enroll did not create $IDENTITY_DIR/private_key.pem"
     exit 1
 fi
 echo "  Identity dir: $IDENTITY_DIR"

@@ -842,31 +842,44 @@ mod native {
         // an AdminKeyAdmission if the redeemed token has `admit_as_admin`.
         let identity_dir = data_dir.join("identity");
         let pending_admit_path = identity_dir.join("pending_admit_admin.key");
-        let admin_key_path = identity_dir.join("admin.key");
-        let admit_admin_key = std::fs::read(&pending_admit_path)
+        let admit_seed: Option<[u8; 32]> = std::fs::read(&pending_admit_path)
             .ok()
             .filter(|b| b.len() >= 32)
             .map(|b| {
                 let mut seed = [0u8; 32];
                 seed.copy_from_slice(&b[..32]);
-                ed25519_dalek::SigningKey::from_bytes(&seed)
+                seed
             });
+        let admit_admin_key = admit_seed.map(|s| ed25519_dalek::SigningKey::from_bytes(&s));
 
         let pending_token_path_for_cb = pending_token_path.clone();
+        let identity_dir_cb = identity_dir.clone();
         let on_join_success: std::sync::Arc<dyn Fn() + Send + Sync> =
             std::sync::Arc::new(move || {
                 let _ = std::fs::remove_file(&pending_token_path_for_cb);
-                // Promote the admitted admin key to this node's admin.key so
-                // it loads it (→ keystore) and can sign as admin on next
-                // start. Only on success — a refused admission leaves the
-                // key pending and unused.
-                if pending_admit_path.exists() {
-                    if let Err(e) = std::fs::rename(&pending_admit_path, &admin_key_path) {
-                        tracing::warn!(error = %e, "could not promote admitted admin key");
-                    } else {
-                        tracing::info!(
-                            "/join/1.0 admitted this node as co-admin; restart to activate admin capability"
-                        );
+                // On a successful admission, persist the admitted admin secret
+                // into the keystore. The running client's admin-key rescan
+                // (triggered when the AdminKeyAdmission block lands) then
+                // activates it live — no restart. Only on success: a refused
+                // admission leaves the pending key untouched and unused.
+                if let Some(seed) = admit_seed {
+                    let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                    let pubkey = sk.verifying_key().to_bytes();
+                    match memvault_api::keystore_open::open_token_keystore(&identity_dir_cb) {
+                        Ok(ks) => {
+                            let key = format!("adminkey:{}", hex::encode(pubkey));
+                            if let Err(e) = ks.put(key.as_bytes(), &seed) {
+                                tracing::warn!(error = %e, "could not store admitted admin key");
+                            } else {
+                                let _ = std::fs::remove_file(
+                                    identity_dir_cb.join("pending_admit_admin.key"),
+                                );
+                                tracing::info!(
+                                    "/join/1.0 admitted this node as co-admin; admin key activated"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "open keystore to store admin key"),
                     }
                 }
                 tracing::info!("/join/1.0 success; cleared pending token file");
@@ -1191,6 +1204,13 @@ mod native {
                 if rebound > 0 {
                     println!("  Rebound {rebound} pre-existing bucket(s) to new cluster.");
                 }
+
+                // Open a client once so the identity constructs land in the
+                // keystore (admin key, genesis, cluster_id, peer_id) — the
+                // intended store. This makes the keystore-only `token issue`
+                // work immediately, with no daemon run in between, and no
+                // dependence on the loose identity-dir files.
+                let _ = create_client_with_data_dir(store, &data_dir)?;
 
                 println!("Cluster genesis complete.");
                 println!("  Cluster ID:      {id_hex}");

@@ -6,7 +6,7 @@
 #
 # This is DIFFERENT from agent enrollment:
 #   - cluster-join: node joins the P2P cluster (replicates data)
-#   - agent-enroll: agent gets API credentials (consumes data via HTTP)
+#   - agent enroll: agent gets API credentials (consumes data via HTTP)
 #
 # A join token is issued by node_a (the admin); it embeds the
 # cluster's `AdminGenesis` block so node_b can pin the admin pubkey
@@ -23,28 +23,27 @@ echo "=== Join node_b to node_a's cluster (node-level) ==="
 echo "  Node A data: $NODE_A_DIR"
 echo "  Node B data: $NODE_B_DIR"
 
-# Sanity: node_a must be genesis'd, including the admin pin.
-if [ ! -f "$NODE_A_DIR/cluster_id" ]; then
-    echo "ERROR: node_a has no cluster_id. Run genesis-node-a.sh first."
-    exit 1
-fi
-if [ ! -f "$NODE_A_DIR/identity/cluster_admin_genesis.cbor" ]; then
-    echo "ERROR: node_a has no pinned admin_genesis."
-    echo "       Re-run genesis-node-a.sh (the updated version writes the pin)."
+# Sanity: node_a must be genesis'd. Identity (admin key, cluster_id, the
+# pinned AdminGenesis, peer_id) now lives in the keystore — the intended
+# store — not in loose files under identity/. genesis-node-a.sh opens a
+# client once so the keystore is populated.
+if [ ! -f "$NODE_A_DIR/identity/keystore.mvks" ]; then
+    echo "ERROR: node_a has no keystore. Run genesis-node-a.sh first."
     exit 1
 fi
 
-# Issue a join token on node_a. The token's AdminGenesis field is
-# populated automatically by `LocalClient::issue_token` from the pin.
+# Issue a join token on node_a. `token issue` reads the admin key,
+# cluster_id and AdminGenesis straight from node_a's keystore (no redb
+# open), and embeds the AdminGenesis in the token automatically.
 echo ""
 echo "Issuing join token on node_a..."
 TOKEN=$(MEMVAULT_DATA_DIR="$NODE_A_DIR" MEMVAULT_DB="$NODE_A_DIR/blocks.redb" \
     cargo run -q -p memctl --features daemon -- \
-        token-issue --role agent-host --ttl 3600 --max-uses 1 --label node-b-join \
+        token issue --role agent-host --ttl 3600 --max-uses 1 --label node-b-join \
     | tail -n1)
 
 if [[ "$TOKEN" != mvjoin1:* ]]; then
-    echo "ERROR: token-issue did not return an mvjoin1: token."
+    echo "ERROR: token issue did not return an mvjoin1: token."
     echo "       Got: $TOKEN"
     exit 1
 fi

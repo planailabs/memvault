@@ -37,6 +37,10 @@ pub struct IssueTokenRequest {
     pub ttl_secs: u64,
     pub max_uses: u32,
     pub label: Option<String>,
+    /// Also admit the redeeming node as a co-equal cluster admin. The joiner
+    /// must redeem with `cluster-join --admit-as-admin`.
+    #[serde(default)]
+    pub admit_as_admin: bool,
 }
 
 #[derive(Serialize)]
@@ -84,7 +88,7 @@ pub async fn issue_token(
     let role = parse_role(&req.role)?;
     let token = state
         .client
-        .issue_token(role, req.ttl_secs, req.max_uses, req.label)
+        .issue_token_ex(role, req.ttl_secs, req.max_uses, req.label, req.admit_as_admin)
         .await?;
     Ok((
         axum::http::StatusCode::CREATED,

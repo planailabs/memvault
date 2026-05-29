@@ -128,13 +128,28 @@ pub trait MemvaultClient: Send + Sync {
     async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()>;
 
     // -- Tokens --
+    /// Issue a join token, optionally also admitting the redeeming node as a
+    /// co-equal cluster admin (`admit_as_admin`). The joiner must present an
+    /// admin key + POP at join for the admission to be minted.
+    async fn issue_token_ex(
+        &self,
+        role: Role,
+        ttl_secs: u64,
+        max_uses: u32,
+        label: Option<String>,
+        admit_as_admin: bool,
+    ) -> Result<String>;
+    /// Convenience: issue an ordinary join token (no co-admin admission).
     async fn issue_token(
         &self,
         role: Role,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
-    ) -> Result<String>;
+    ) -> Result<String> {
+        self.issue_token_ex(role, ttl_secs, max_uses, label, false)
+            .await
+    }
     async fn list_tokens(&self) -> Result<Vec<TokenStatus>>;
     async fn revoke_token(&self, token_cid: &[u8], reason: &str) -> Result<()>;
 

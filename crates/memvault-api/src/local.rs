@@ -526,10 +526,45 @@ impl LocalClient {
     /// Replace the cluster admin-key validity state wholesale. Called by
     /// the bootstrap/rescan path with chain-derived truth.
     pub fn set_admin_key_state(&self, state: memvault_auth::AdminKeyState) {
+        let known: Vec<[u8; 32]> = state.keys.keys().copied().collect();
         if let Ok(mut s) = self.admin_key_state.write() {
             *s = state;
         }
         self.bump_admin_key_generation();
+        // Activate any admin secret we hold in the keystore that just became
+        // a known cluster key — e.g. a co-admin admission that landed live
+        // over /join/1.0, so admin capability turns on without a restart.
+        self.activate_held_admin_secrets(&known);
+    }
+
+    /// Load into memory any admin signing secret stored in the keystore whose
+    /// pubkey is in `pubkeys` but not yet held. Does not reseed the anchor
+    /// (the key is already in the rebuilt state).
+    fn activate_held_admin_secrets(&self, pubkeys: &[[u8; 32]]) {
+        for pk in pubkeys {
+            let held = self
+                .held_admin_keys
+                .read()
+                .map(|h| h.contains_key(pk))
+                .unwrap_or(true);
+            if held {
+                continue;
+            }
+            let key = format!("adminkey:{}", hex::encode(pk));
+            if let Some(seed) = self.keystore.get(key.as_bytes()) {
+                if seed.len() == 32 {
+                    let mut s = [0u8; 32];
+                    s.copy_from_slice(&seed);
+                    if let Ok(mut h) = self.held_admin_keys.write() {
+                        h.insert(*pk, ed25519_dalek::SigningKey::from_bytes(&s));
+                    }
+                    tracing::info!(
+                        pubkey = %hex::encode(pk),
+                        "activated admitted admin key from keystore (no restart)"
+                    );
+                }
+            }
+        }
     }
 
     /// Snapshot of the current admin-key validity state.
@@ -819,10 +854,18 @@ impl LocalClient {
         self.trust_state.get()
     }
 
-    /// Install the cluster's pinned `AdminGenesis`. Write-once. Daemons
-    /// call this at startup after reading
-    /// `<data_dir>/identity/cluster_admin_genesis.cbor`.
+    /// Install the cluster's pinned `AdminGenesis`. Write-once. Also mirrors
+    /// it into the keystore (under `genesis`) so keystore-only tooling — e.g.
+    /// `memctl token issue` with no redb/daemon running — can embed it in
+    /// issued join tokens without reading a loose file.
     pub fn set_pinned_admin_genesis(&self, genesis: memvault_auth::AdminGenesis) {
+        if !self.keystore.contains(b"genesis") {
+            if let Ok(bytes) = serde_ipld_dagcbor::to_vec(&genesis) {
+                if let Err(e) = self.persist_pinned_admin_genesis_bytes(&bytes) {
+                    tracing::warn!(error = %e, "could not persist genesis to keystore");
+                }
+            }
+        }
         let _ = self.pinned_admin_genesis.set(genesis);
     }
 
@@ -3985,12 +4028,13 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
-    async fn issue_token(
+    async fn issue_token_ex(
         &self,
         role: Role,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
+        admit_as_admin: bool,
     ) -> Result<String> {
         let admin_key = self.admin_signing_key().ok_or_else(|| {
             ApiError::Other("no admin signing key configured — cannot issue tokens".into())
@@ -4012,7 +4056,7 @@ impl MemvaultClient for LocalClient {
             max_uses,
             label,
             self.pinned_admin_genesis().cloned(),
-            false,
+            admit_as_admin,
             &self.keystore,
         )
     }

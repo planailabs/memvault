@@ -336,12 +336,13 @@ impl MemvaultClient for MockClient {
         Ok(vec![0u8; 32])
     }
 
-    async fn issue_token(
+    async fn issue_token_ex(
         &self,
         _role: Role,
         _ttl_secs: u64,
         _max_uses: u32,
         _label: Option<String>,
+        _admit_as_admin: bool,
     ) -> memvault_api::Result<String> {
         Ok("token-abc123".into())
     }

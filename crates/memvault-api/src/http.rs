@@ -725,18 +725,20 @@ impl MemvaultClient for HttpApiClient {
 
     // -- Tokens --
 
-    async fn issue_token(
+    async fn issue_token_ex(
         &self,
         role: Role,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
+        admit_as_admin: bool,
     ) -> Result<String> {
         let body = serde_json::json!({
             "role": role,
             "ttl_secs": ttl_secs,
             "max_uses": max_uses,
             "label": label,
+            "admit_as_admin": admit_as_admin,
         });
         let resp: serde_json::Value = self
             .client
