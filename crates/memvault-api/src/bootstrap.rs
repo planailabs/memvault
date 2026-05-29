@@ -98,7 +98,7 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
     // exist (written at genesis) and must match. Publish a fresh
     // NodeAttestation; the AdminGenesis block is published once at
     // genesis (in the `memctl genesis` command) and never re-emitted.
-    let (admin_pubkey, node_trust_entry) = if let Some(admin_sk) = client.admin_signing_key().cloned() {
+    let (admin_pubkey, node_trust_entry) = if let Some(admin_sk) = client.admin_signing_key() {
         let admin_pubkey = admin_sk.verifying_key();
 
         // Sanity: pin must agree with the key we hold. If not, either we

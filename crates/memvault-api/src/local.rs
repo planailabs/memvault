@@ -265,9 +265,22 @@ pub struct LocalClient {
     /// startup and installs it here. `None` for legacy data dirs that
     /// pre-date the pin file.
     pinned_admin_genesis: std::sync::OnceLock<memvault_auth::AdminGenesis>,
-    /// Optional admin signing key for token issuance and agent enrollment.
-    /// `OnceLock` allows write-once initialisation through a shared `Arc`.
-    admin_signing_key: std::sync::OnceLock<ed25519_dalek::SigningKey>,
+    /// Admin signing secrets this node holds, keyed by pubkey. A node is
+    /// usually the genesis admin (one key) but during a founder→cluster
+    /// fold or admin rotation it may transiently hold more than one. Used
+    /// to *sign* admin operations.
+    held_admin_keys:
+        std::sync::RwLock<std::collections::HashMap<[u8; 32], ed25519_dalek::SigningKey>>,
+    /// Validity windows for every admin key the cluster has ever known
+    /// (anchor + admitted + rotated + retired). Used to *verify* that a
+    /// signer was a cluster-valid admin at a given time. Rebuilt by
+    /// `crate::sigchain::rebuild_admin_key_state` at bootstrap and on
+    /// every admin envelope; seeded locally for founder/test nodes.
+    admin_key_state: std::sync::RwLock<memvault_auth::AdminKeyState>,
+    /// Bumped on every mutation of `admin_key_state` or `held_admin_keys`.
+    /// Read by the ACL grant-signature cache to detect staleness — a
+    /// cache entry computed under an older generation must be recomputed.
+    admin_key_generation: std::sync::atomic::AtomicU64,
     /// Optional node signing key — the daemon's libp2p ed25519 private key,
     /// used to sign agent attestations and agent revocations. Distinct from
     /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
@@ -300,7 +313,9 @@ impl LocalClient {
             event_bus,
             peer_id,
             cluster_id,
-            admin_signing_key: std::sync::OnceLock::new(),
+            held_admin_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
+            admin_key_state: std::sync::RwLock::new(memvault_auth::AdminKeyState::default()),
+            admin_key_generation: std::sync::atomic::AtomicU64::new(0),
             node_signing_key: std::sync::OnceLock::new(),
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
@@ -339,11 +354,72 @@ impl LocalClient {
         Ok(client)
     }
 
-    /// Set the admin signing key (enables real token issuance). Write-once;
-    /// subsequent calls are silently ignored so a daemon that re-enters
-    /// initialisation cannot accidentally swap admin identity.
+    /// Register an admin signing secret this node holds. Idempotent per
+    /// key. If the cluster's `admin_key_state` has no anchor yet (fresh
+    /// node / test harness that doesn't run the full bootstrap rescan),
+    /// the key is seeded as the anchor admin so the holder can
+    /// immediately sign and verify grants. The authoritative state is
+    /// later replaced by `set_admin_key_state` from the chain rescan.
     pub fn set_admin_signing_key(&self, key: ed25519_dalek::SigningKey) {
-        let _ = self.admin_signing_key.set(key);
+        let pubkey = key.verifying_key().to_bytes();
+        if let Ok(mut held) = self.held_admin_keys.write() {
+            held.insert(pubkey, key);
+        }
+        if let Ok(mut state) = self.admin_key_state.write() {
+            if state.anchor.is_none() {
+                *state = memvault_auth::AdminKeyState::new_with_bootstrap(pubkey, 0);
+            } else if !state.keys.contains_key(&pubkey) {
+                // A held key that isn't the anchor — seed it as valid so a
+                // node holding a non-anchor admin key (e.g. post-rotation,
+                // pre-rescan) can still operate.
+                state.keys.insert(
+                    pubkey,
+                    memvault_auth::KeyValidity {
+                        valid_from_ns: 0,
+                        valid_until_ns: u64::MAX,
+                        introduced_by: None,
+                    },
+                );
+            }
+        }
+        self.bump_admin_key_generation();
+    }
+
+    /// Replace the cluster admin-key validity state wholesale. Called by
+    /// the bootstrap/rescan path with chain-derived truth.
+    pub fn set_admin_key_state(&self, state: memvault_auth::AdminKeyState) {
+        if let Ok(mut s) = self.admin_key_state.write() {
+            *s = state;
+        }
+        self.bump_admin_key_generation();
+    }
+
+    /// Snapshot of the current admin-key validity state.
+    pub fn admin_key_state(&self) -> memvault_auth::AdminKeyState {
+        self.admin_key_state
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    /// Monotonic generation counter for admin-key state. Cache layers
+    /// store the value they were computed under and recompute on change.
+    pub fn admin_key_generation(&self) -> u64 {
+        self.admin_key_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn bump_admin_key_generation(&self) {
+        self.admin_key_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// True if `pubkey` was a cluster-valid admin at `time_ns`.
+    pub fn is_admin_key_valid_at(&self, pubkey: &[u8; 32], time_ns: u64) -> bool {
+        self.admin_key_state
+            .read()
+            .map(|s| s.is_key_valid_at(pubkey, time_ns))
+            .unwrap_or(false)
     }
 
     /// Publish the live trust state on this client. Write-once.
@@ -461,8 +537,7 @@ impl LocalClient {
     ) -> Result<Vec<u8>> {
         use ed25519_dalek::Signer;
         let admin_sk = self
-            .admin_signing_key
-            .get()
+            .admin_signing_key()
             .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
         let cluster_id_arr: [u8; 32] = self
             .cluster_id
@@ -510,10 +585,9 @@ impl LocalClient {
         reason: impl Into<String>,
     ) -> Result<Vec<u8>> {
         let admin_sk = self
-            .admin_signing_key
-            .get()
+            .admin_signing_key()
             .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
-        let rev = memvault_auth::sign_node_revocation(admin_sk, node_pubkey, reason)
+        let rev = memvault_auth::sign_node_revocation(&admin_sk, node_pubkey, reason)
             .map_err(|e| ApiError::Other(format!("sign node revocation: {e}")))?;
         crate::sigchain::publish_node_revocation(self, &rev)
     }
@@ -831,14 +905,54 @@ impl LocalClient {
     /// The admin signing key, if this daemon holds one (i.e. is the cluster
     /// admin). Used by callers that need to derive the admin verifying key
     /// or sign admin-only operations.
-    pub fn admin_signing_key(&self) -> Option<&ed25519_dalek::SigningKey> {
-        self.admin_signing_key.get()
+    /// A held admin signing secret, preferring one that is currently
+    /// valid as an admin (anchor first). Returns a clone — the secret
+    /// lives behind a lock and cannot be borrowed past the guard.
+    /// `None` on peer daemons that hold no admin key.
+    pub fn admin_signing_key(&self) -> Option<ed25519_dalek::SigningKey> {
+        self.admin_signing_key_at_ns(memvault_core::wall_ns())
     }
 
-    /// The admin's verifying key, derived from the signing key. `None` on
-    /// peer daemons that don't hold the admin key.
+    /// A held admin signing secret that is valid *at* `now_ns`, preferring
+    /// the anchor key. Used when signing new admin operations so we never
+    /// sign with a key that's outside its validity window.
+    pub fn admin_signing_key_at_ns(
+        &self,
+        now_ns: u64,
+    ) -> Option<ed25519_dalek::SigningKey> {
+        let held = self.held_admin_keys.read().ok()?;
+        let state = self.admin_key_state.read().ok()?;
+        // Prefer the anchor if we hold it and it's valid.
+        if let Some(anchor) = state.anchor {
+            if state.is_key_valid_at(&anchor, now_ns) {
+                if let Some(sk) = held.get(&anchor) {
+                    return Some(sk.clone());
+                }
+            }
+        }
+        // Otherwise any held key valid right now.
+        for (pk, sk) in held.iter() {
+            if state.is_key_valid_at(pk, now_ns) {
+                return Some(sk.clone());
+            }
+        }
+        // Last resort: any held key at all (covers pre-rescan/test states
+        // where admin_key_state may be empty but a secret is registered).
+        held.values().next().cloned()
+    }
+
+    /// The admin verifying key for a held, currently-valid admin secret.
+    /// `None` on peer daemons that don't hold an admin key.
     pub fn admin_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
-        self.admin_signing_key.get().map(|sk| sk.verifying_key())
+        self.admin_signing_key().map(|sk| sk.verifying_key())
+    }
+
+    /// True if this node holds at least one admin signing secret.
+    pub fn holds_admin_key(&self) -> bool {
+        self.held_admin_keys
+            .read()
+            .map(|h| !h.is_empty())
+            .unwrap_or(false)
     }
 
     pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
@@ -2209,11 +2323,17 @@ impl LocalClient {
         actions: Vec<memvault_auth::Action>,
         ttl_secs: u64,
     ) -> Result<Vec<u8>> {
-        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
-            ApiError::Other("no admin signing key — cannot issue grants".into())
-        })?;
-
         let now_ns = memvault_core::wall_ns();
+        // Sign with a held admin key that is valid *now*. Recording its
+        // pubkey in the grant binds the signer cryptographically (the
+        // field is part of the signed payload) so ACL enforcement can
+        // verify both the signature and that this key was a cluster-valid
+        // admin at the grant's `not_before_ns`.
+        let admin_key = self.admin_signing_key_at_ns(now_ns).ok_or_else(|| {
+            ApiError::Other("no valid admin signing key — cannot issue grants".into())
+        })?;
+        let admin_pubkey = admin_key.verifying_key().to_bytes();
+
         // `saturating_*` so callers can pass `u64::MAX` for "never expires"
         // without wrapping.
         let ttl_ns = ttl_secs.saturating_mul(1_000_000_000);
@@ -2230,6 +2350,7 @@ impl LocalClient {
         let mut grant = memvault_auth::Grant {
             issuer: memvault_core::PeerId(self.peer_id.clone()),
             issuing_cluster: memvault_core::ClusterId(cluster_id_arr),
+            admin_pubkey,
             audience,
             scopes: vec![],
             actions,
@@ -2343,12 +2464,12 @@ impl LocalClient {
                 ))
             })?;
 
-        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
+        let admin_key = self.admin_signing_key().ok_or_else(|| {
             ApiError::Other("no admin signing key — cannot revoke grants".into())
         })?;
 
         let target_cid = memvault_core::cid_from_bytes(&raw);
-        let revocation = memvault_auth::sign_grant_revocation(admin_key, target_cid, reason)
+        let revocation = memvault_auth::sign_grant_revocation(&admin_key, target_cid, reason)
             .map_err(|e| ApiError::Other(format!("sign grant revocation: {e}")))?;
 
         let rev_bytes = serde_ipld_dagcbor::to_vec(&revocation)
@@ -3186,7 +3307,7 @@ impl MemvaultClient for LocalClient {
         max_uses: u32,
         label: Option<String>,
     ) -> Result<String> {
-        let admin_key = self.admin_signing_key.get().ok_or_else(|| {
+        let admin_key = self.admin_signing_key().ok_or_else(|| {
             ApiError::Other("no admin signing key configured — cannot issue tokens".into())
         })?;
         let peer_id = memvault_core::PeerId(self.peer_id.clone());
@@ -3200,7 +3321,7 @@ impl MemvaultClient for LocalClient {
         crate::tokens::issue_token(
             &peer_id,
             &cluster_id,
-            admin_key,
+            &admin_key,
             role,
             ttl_secs,
             max_uses,
@@ -3646,7 +3767,7 @@ impl MemvaultClient for LocalClient {
 
         // If approved and we have an admin signing key, issue a BucketTrust
         if approve {
-            if let Some(admin_key) = self.admin_signing_key.get() {
+            if let Some(admin_key) = self.admin_signing_key() {
                 // Load the proposal to get bucket/cluster info
                 if let Some(proposal_block) = self.store.get_block(proposal_cid)? {
                     if let Ok(proposal) =
@@ -3683,7 +3804,7 @@ impl MemvaultClient for LocalClient {
                                 signature: [0u8; 64],
                             };
 
-                            match trust.sign(admin_key) {
+                            match trust.sign(&admin_key) {
                                 Ok(signed_trust) => {
                                     let trust_bytes =
                                         serde_ipld_dagcbor::to_vec(&signed_trust).unwrap_or_default();

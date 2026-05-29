@@ -381,6 +381,7 @@ async fn expired_grant_denied() {
     let mut grant = Grant {
         issuer: PeerId(node.client.peer_id().to_vec()),
         issuing_cluster: node.cluster_id.clone(),
+        admin_pubkey: admin_key.verifying_key().to_bytes(),
         audience: GrantAudience::Peer(PeerId(agent_pk.to_vec())),
         scopes: vec![],
         actions: vec![Action::Read, Action::Write],
