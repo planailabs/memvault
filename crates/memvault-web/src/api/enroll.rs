@@ -85,6 +85,15 @@ pub async fn enroll_agent(
     )
     .map_err(|e| ApiError::bad_request(format!("enroll: {e}")))?;
 
+    // Ensure the agent's default bucket exists immediately after enrollment,
+    // so the agent's first write has a home.
+    if let Err(e) = client
+        .ensure_agent_bucket_for_pubkey(&agent_pubkey, &req.agent_id)
+        .await
+    {
+        tracing::warn!(agent_id = %req.agent_id, error = %e, "could not ensure agent bucket");
+    }
+
     let attestation_cbor = serde_ipld_dagcbor::to_vec(&result.attestation)
         .map_err(|e| ApiError::internal(format!("encode attestation: {e}")))?;
 
