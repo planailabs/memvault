@@ -124,13 +124,8 @@ mod server_router {
             // saturates so this is treated as effectively never-expires.
             u64::MAX,
         )?;
-        // Ensure the UI agent's default bucket exists (sync path — this fn is
-        // called from a non-async daemon-init context).
-        if let Err(e) =
-            client.ensure_agent_bucket_for_pubkey_sync(&ui_identity.verifying_key.to_bytes(), "_ui")
-        {
-            tracing::warn!(error = %e, "could not ensure UI agent bucket");
-        }
+        // The `_ui` agent is a read/admin surface, not a writer — it doesn't
+        // get its own bucket.
         super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
         Ok(())
     }
