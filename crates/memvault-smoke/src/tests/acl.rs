@@ -437,6 +437,19 @@ fn insert_raw_grant(
     admin_pubkey: [u8; 32],
     signer: Option<&SigningKey>,
 ) -> Vec<u8> {
+    insert_raw_grant_at(node, bucket, audience, actions, admin_pubkey, signer, 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_raw_grant_at(
+    node: &TestNode,
+    bucket: &BucketId,
+    audience: GrantAudience,
+    actions: Vec<Action>,
+    admin_pubkey: [u8; 32],
+    signer: Option<&SigningKey>,
+    not_before_ns: u64,
+) -> Vec<u8> {
     let mut nonce = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut nonce);
     let mut grant = Grant {
@@ -446,7 +459,7 @@ fn insert_raw_grant(
         audience,
         scopes: vec![],
         actions,
-        not_before_ns: 1,
+        not_before_ns,
         not_after_ns: u64::MAX,
         parent: None,
         nonce,
@@ -593,4 +606,118 @@ async fn no_attestation_denied() {
     let err = acl::check_bucket_access(&node.client, &bogus, &bucket, Action::Read)
         .expect_err("caller with no attestation is unidentified → Forbidden");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+// ── Multi-admin lifecycle ────────────────────────────────────────────
+
+/// After admitting a second admin key, grants signed by that key verify.
+#[tokio::test]
+async fn admitted_admin_grant_accepted() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "admit-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "admit-bucket").await;
+
+    // New operator generates their key + POP offline.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let admin2 = SigningKey::from_bytes(&seed);
+    let pop = memvault_auth::sign_admin_pop(&admin2, &node.cluster_id);
+
+    // Anchor admits admin2, valid from epoch so a not_before=1 grant lands
+    // inside its window.
+    node.client
+        .admit_admin_key(admin2.verifying_key().to_bytes(), pop, Some(0))
+        .await
+        .expect("admit admin2");
+
+    // A grant signed by admin2 must now be accepted.
+    insert_raw_grant(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        admin2.verifying_key().to_bytes(),
+        Some(&admin2),
+    );
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("grant signed by admitted admin must be accepted");
+}
+
+/// A retired admin's grants issued before retirement keep working; grants
+/// it would issue after retirement are rejected.
+#[tokio::test]
+async fn retired_admin_past_grant_survives_new_rejected() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "retire-agent", Role::AgentHost).await;
+    let bucket = make_bucket(&node, "retire-bucket").await;
+
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let admin2 = SigningKey::from_bytes(&seed);
+    let admin2_pk = admin2.verifying_key().to_bytes();
+    let pop = memvault_auth::sign_admin_pop(&admin2, &node.cluster_id);
+    node.client
+        .admit_admin_key(admin2_pk, pop, Some(0))
+        .await
+        .expect("admit admin2");
+
+    // Grant issued while admin2 is valid (not_before = 1).
+    insert_raw_grant_at(
+        &node,
+        &bucket,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        admin2_pk,
+        Some(&admin2),
+        1,
+    );
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("pre-retirement grant valid");
+
+    // Retire admin2 (signed by the still-held anchor).
+    let retire_at = node
+        .client
+        .retire_admin_key(admin2_pk, "offboarding")
+        .await
+        .expect("retire admin2");
+    assert!(!retire_at.is_empty());
+
+    // Past grant still valid (its not_before precedes the retirement).
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("past grant survives retirement");
+
+    // A grant admin2 issues *after* retirement (not_before in the far
+    // future, past the retirement instant) must be rejected.
+    let bucket2 = make_bucket(&node, "retire-bucket-2").await;
+    insert_raw_grant_at(
+        &node,
+        &bucket2,
+        GrantAudience::Peer(PeerId(agent_pk.to_vec())),
+        vec![Action::Read],
+        admin2_pk,
+        Some(&admin2),
+        u64::MAX - 1,
+    );
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket2, Action::Read)
+        .expect_err("post-retirement grant must be rejected");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+/// The cluster must never be able to retire its last valid admin.
+#[tokio::test]
+async fn cannot_retire_last_admin() {
+    let node = TestNode::new();
+    let anchor_pk = node
+        .client
+        .admin_signing_key()
+        .expect("anchor key")
+        .verifying_key()
+        .to_bytes();
+
+    let err = node
+        .client
+        .retire_admin_key(anchor_pk, "oops")
+        .await
+        .expect_err("retiring the only admin must fail");
+    assert!(matches!(err, memvault_api::ApiError::Other(_)));
 }

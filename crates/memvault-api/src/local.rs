@@ -568,6 +568,198 @@ impl LocalClient {
         let _ = self.pinned_admin_genesis.set(genesis);
     }
 
+    fn cluster_id_arr(&self) -> Result<[u8; 32]> {
+        self.cluster_id
+            .clone()
+            .try_into()
+            .map_err(|_| ApiError::Other("cluster_id must be 32 bytes".into()))
+    }
+
+    /// Re-derive and reinstall `admin_key_state` from the chain, anchored
+    /// at the pinned/known anchor. Call after publishing an admission or
+    /// retirement so the local view updates without waiting for the
+    /// watcher.
+    fn refresh_admin_key_state(&self) -> Result<()> {
+        let anchor = self
+            .admin_key_state()
+            .anchor
+            .and_then(|a| ed25519_dalek::VerifyingKey::from_bytes(&a).ok());
+        if let Some(anchor) = anchor {
+            crate::sigchain::rebuild_admin_key_state(self, &anchor)?;
+        }
+        Ok(())
+    }
+
+    /// Admit a new co-equal admin key to the cluster (multi-admin).
+    ///
+    /// Signed by a held admin key that is currently valid; carries the
+    /// incoming admin's proof-of-possession (`pop`, produced offline via
+    /// [`memvault_auth::sign_admin_pop`]). The admission is published to
+    /// the sigchain and the local admin-key state is rebuilt immediately.
+    ///
+    /// `valid_from_ns` defaults to now when `None`.
+    pub async fn admit_admin_key(
+        &self,
+        new_pubkey: [u8; 32],
+        pop: [u8; 64],
+        valid_from_ns: Option<u64>,
+    ) -> Result<Vec<u8>> {
+        let now_ns = memvault_core::wall_ns();
+        let admitting = self.admin_signing_key_at_ns(now_ns).ok_or_else(|| {
+            ApiError::Other("no valid admin signing key — cannot admit admin".into())
+        })?;
+        let cluster = memvault_core::ClusterId(self.cluster_id_arr()?);
+
+        // Verify the POP before publishing — fail fast on a bad handoff.
+        memvault_auth::verify_admin_pop(&cluster, &new_pubkey, &pop)
+            .map_err(|e| ApiError::Other(format!("admin POP invalid: {e}")))?;
+
+        let admission = memvault_auth::sign_admin_admission(
+            &admitting,
+            new_pubkey,
+            cluster,
+            valid_from_ns.unwrap_or(now_ns),
+            now_ns,
+            None,
+            pop,
+        )
+        .map_err(|e| ApiError::Other(format!("sign admin admission: {e}")))?;
+
+        let cid = crate::sigchain::publish_admin_admission(self, &admission)?;
+        self.refresh_admin_key_state()?;
+        tracing::info!(
+            new_admin = %hex::encode(new_pubkey),
+            cid = %hex::encode(&cid),
+            "admin key admitted"
+        );
+        Ok(cid)
+    }
+
+    /// Retire an admin key. Signed by a *different* held admin key that is
+    /// currently valid. Grants the retired key signed before now stay
+    /// valid; it can no longer sign new operations.
+    pub async fn retire_admin_key(
+        &self,
+        retired_pubkey: [u8; 32],
+        reason: impl Into<String>,
+    ) -> Result<Vec<u8>> {
+        let now_ns = memvault_core::wall_ns();
+        let cluster = memvault_core::ClusterId(self.cluster_id_arr()?);
+
+        // Pick a held, currently-valid admin key that is NOT the one being
+        // retired (no self-retirement).
+        let retiring = {
+            let held = self
+                .held_admin_keys
+                .read()
+                .map_err(|_| ApiError::Other("held_admin_keys lock poisoned".into()))?;
+            let state = self
+                .admin_key_state
+                .read()
+                .map_err(|_| ApiError::Other("admin_key_state lock poisoned".into()))?;
+            held.iter()
+                .find(|(pk, _)| **pk != retired_pubkey && state.is_key_valid_at(pk, now_ns))
+                .map(|(_, sk)| sk.clone())
+        }
+        .ok_or_else(|| {
+            ApiError::Other(
+                "no held admin key (other than the target) is valid — cannot retire".into(),
+            )
+        })?;
+
+        // Local no-lockout pre-check (the rebuild re-checks authoritatively).
+        let others_valid = self
+            .admin_key_state()
+            .valid_keys_at(now_ns)
+            .into_iter()
+            .any(|k| k != retired_pubkey);
+        if !others_valid {
+            return Err(ApiError::Other(
+                "refusing to retire the last valid admin key (cluster lockout)".into(),
+            ));
+        }
+
+        let retirement = memvault_auth::sign_admin_retirement(
+            &retiring,
+            retired_pubkey,
+            cluster,
+            now_ns,
+            reason,
+            None,
+        )
+        .map_err(|e| ApiError::Other(format!("sign admin retirement: {e}")))?;
+
+        let cid = crate::sigchain::publish_admin_retirement(self, &retirement)?;
+        self.refresh_admin_key_state()?;
+        tracing::info!(
+            retired = %hex::encode(retired_pubkey),
+            cid = %hex::encode(&cid),
+            "admin key retired"
+        );
+        Ok(cid)
+    }
+
+    /// Rotate the cluster admin key: admit `new_signing_key` (proof of
+    /// possession generated locally since we hold it) effective now, then
+    /// schedule retirement of the current signing key after an overlap
+    /// window. The new key is registered as held so this node keeps admin
+    /// capability across the rotation.
+    pub async fn rotate_admin_key(
+        &self,
+        new_signing_key: ed25519_dalek::SigningKey,
+        overlap_secs: u64,
+    ) -> Result<Vec<u8>> {
+        let now_ns = memvault_core::wall_ns();
+        let cluster = memvault_core::ClusterId(self.cluster_id_arr()?);
+        let old = self.admin_signing_key_at_ns(now_ns).ok_or_else(|| {
+            ApiError::Other("no valid admin signing key — cannot rotate".into())
+        })?;
+        let old_pubkey = old.verifying_key().to_bytes();
+        let new_pubkey = new_signing_key.verifying_key().to_bytes();
+        if new_pubkey == old_pubkey {
+            return Err(ApiError::Other("rotation target equals current key".into()));
+        }
+
+        // Admit the new key (we hold it, so generate its POP locally).
+        let pop = memvault_auth::sign_admin_pop(&new_signing_key, &cluster);
+        let adm = memvault_auth::sign_admin_admission(
+            &old, new_pubkey, cluster.clone(), now_ns, now_ns, None, pop,
+        )
+        .map_err(|e| ApiError::Other(format!("sign rotation admission: {e}")))?;
+        let cid = crate::sigchain::publish_admin_admission(self, &adm)?;
+
+        // Register the new secret and rebuild so the new key is usable.
+        self.set_admin_signing_key(new_signing_key);
+        self.refresh_admin_key_state()?;
+
+        // Retire the old key after the overlap window. Signed by the new
+        // key (now valid). retired_at in the future keeps the old key
+        // valid during overlap.
+        let retired_at_ns = now_ns.saturating_add(overlap_secs.saturating_mul(1_000_000_000));
+        let new_held = self
+            .admin_signing_key_at_ns(now_ns)
+            .ok_or_else(|| ApiError::Other("new admin key not usable after admission".into()))?;
+        let ret = memvault_auth::sign_admin_retirement(
+            &new_held,
+            old_pubkey,
+            cluster,
+            retired_at_ns,
+            "admin key rotation",
+            None,
+        )
+        .map_err(|e| ApiError::Other(format!("sign rotation retirement: {e}")))?;
+        crate::sigchain::publish_admin_retirement(self, &ret)?;
+        self.refresh_admin_key_state()?;
+
+        tracing::info!(
+            old = %hex::encode(old_pubkey),
+            new = %hex::encode(new_pubkey),
+            overlap_secs,
+            "admin key rotated"
+        );
+        Ok(cid)
+    }
+
     /// Borrow the pinned `AdminGenesis` — the cluster's root of trust.
     /// `None` when no pin has been installed (truly pre-genesis, or
     /// legacy data dir).
