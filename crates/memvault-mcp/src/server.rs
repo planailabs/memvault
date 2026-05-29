@@ -848,21 +848,6 @@ impl MemvaultServer {
     }
 
     #[tool(
-        name = "memvault_bucket_attach",
-        description = "Attach a private bucket to the cluster (makes it visible to peers)."
-    )]
-    async fn bucket_attach(&self, Parameters(params): Parameters<BucketAttachParams>) -> String {
-        let bid = match BucketId::from_hex(&params.id) {
-            Ok(b) => b,
-            Err(e) => return format!("error: {e}"),
-        };
-        match self.client.bucket_attach(&bid).await {
-            Ok(()) => serde_json::json!({ "status": "attached" }).to_string(),
-            Err(e) => format!("error: {e}"),
-        }
-    }
-
-    #[tool(
         name = "memvault_bucket_archive",
         description = "Archive a bucket (soft-remove, data preserved)."
     )]
@@ -942,7 +927,7 @@ impl MemvaultServer {
         description = "List directory contents at a VFS path. Shows name, type, and node ID for each entry."
     )]
     async fn vfs_ls(&self, Parameters(params): Parameters<VfsLsParams>) -> String {
-        let bucket = match self.vfs_bucket(None) {
+        let bucket = match self.vfs_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
@@ -962,7 +947,7 @@ impl MemvaultServer {
         description = "Resolve a VFS path to its target node ID (type:hex format)."
     )]
     async fn vfs_resolve(&self, Parameters(params): Parameters<VfsResolveParams>) -> String {
-        let bucket = match self.vfs_bucket(None) {
+        let bucket = match self.vfs_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
@@ -1030,7 +1015,7 @@ impl MemvaultServer {
         description = "Remove an entry from a VFS path. The underlying node is NOT deleted — only the VFS link is removed."
     )]
     async fn vfs_unlink(&self, Parameters(params): Parameters<VfsUnlinkParams>) -> String {
-        let bucket = match self.vfs_bucket(None) {
+        let bucket = match self.vfs_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
@@ -1069,7 +1054,7 @@ impl MemvaultServer {
         description = "Display an ASCII tree view of the VFS hierarchy from a given path."
     )]
     async fn vfs_tree(&self, Parameters(params): Parameters<VfsTreeParams>) -> String {
-        let bucket = match self.vfs_bucket(None) {
+        let bucket = match self.vfs_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
@@ -1086,7 +1071,7 @@ impl MemvaultServer {
         description = "Find all VFS paths that link to a given node. Useful for discovering where a node is mounted."
     )]
     async fn vfs_find(&self, Parameters(params): Parameters<VfsFindParams>) -> String {
-        let bucket = match self.vfs_bucket(None) {
+        let bucket = match self.vfs_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };

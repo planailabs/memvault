@@ -340,12 +340,6 @@ pub struct BucketRenameParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct BucketAttachParams {
-    /// Hex-encoded bucket ID.
-    pub id: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
 pub struct BucketArchiveParams {
     /// Hex-encoded bucket ID.
     pub id: String,
@@ -429,12 +423,19 @@ pub struct VfsLsParams {
     /// If true, list recursively. Defaults to false.
     #[serde(default)]
     pub recursive: Option<bool>,
+    /// Optional bucket ID (hex). Defaults to the agent bucket. VFS is
+    /// per-bucket — a path resolves differently in each bucket.
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct VfsResolveParams {
     /// Absolute VFS path to resolve (e.g. "/projects/acme/spec.md").
     pub path: String,
+    /// Optional bucket ID (hex). Defaults to the agent bucket.
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -461,6 +462,9 @@ pub struct VfsLinkParams {
 pub struct VfsUnlinkParams {
     /// Absolute VFS path to remove (e.g. "/projects/old-spec.md"). The underlying node is NOT deleted.
     pub path: String,
+    /// Optional bucket ID (hex). Defaults to the agent bucket.
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -482,12 +486,18 @@ pub struct VfsTreeParams {
     /// Maximum depth to display (defaults to 5).
     #[serde(default)]
     pub max_depth: Option<usize>,
+    /// Optional bucket ID (hex). Defaults to the agent bucket.
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct VfsFindParams {
     /// Node ID to search for — "doc:<hex>", "entity:<hex>", or "file:<hex>".
     pub node: String,
+    /// Optional bucket ID (hex). Defaults to the agent bucket.
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 // -- Export tools --
@@ -499,6 +509,9 @@ pub struct ExportNodeParams {
     /// Include historical versions (applies to documents).
     #[serde(default)]
     pub history: Option<bool>,
+    // bucket: intentionally absent — `memvault_export::export_node` does
+    // not yet take a bucket filter, so exposing one here would be
+    // misleading. Add when the export crate gains the parameter.
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -517,4 +530,6 @@ pub struct ExportVaultParams {
     /// Filter by view name.
     #[serde(default)]
     pub view: Option<String>,
+    // bucket: intentionally absent — `ExportOptions` doesn't carry a
+    // bucket filter today. See ExportNodeParams for the same note.
 }

@@ -605,20 +605,55 @@ impl LocalClient {
         Ok(bucket_id)
     }
 
+    /// Core agent-bucket ensure path keyed by the agent's **pubkey**
+    /// (cryptographically unique). The `name_hint` is only used as the
+    /// display label on the BucketDecl — collisions in name don't
+    /// matter, the bucket id derives from the pubkey alone.
+    pub async fn ensure_agent_bucket_for_pubkey(
+        &self,
+        agent_pubkey: &[u8],
+        name_hint: &str,
+    ) -> Result<memvault_core::BucketId> {
+        let agent_id_for_owner = memvault_core::AgentId(name_hint.to_string());
+        self.ensure_agent_bucket_inner(agent_pubkey, name_hint, agent_id_for_owner)
+            .await
+    }
+
+    /// Back-compat wrapper: resolves the agent's pubkey on-chain by
+    /// name, then delegates to the pubkey-keyed path. Errors if no
+    /// attestation matching this `agent_id` exists (silent fallback
+    /// would re-introduce the duplicate-bucket bug). For callers that
+    /// already have the pubkey in hand, prefer
+    /// `ensure_agent_bucket_for_pubkey`.
     pub async fn ensure_agent_bucket_for(
         &self,
         agent_id: &memvault_core::AgentId,
     ) -> Result<memvault_core::BucketId> {
-        // Bucket id is a stable function of (cluster_id, agent_id) so
-        // every node lands on the same id without needing to scan the
-        // bucket list. The old listing path checked
-        // `b.owner_agent == Some(agent_id)`, but `bucket_create` set
-        // `owner_agent` from the LocalClient's currently-bound
-        // identity — the MCP server invokes ensure_agent_bucket BEFORE
-        // it has any agent bound, so every BucketDecl was written with
-        // `owner_agent: None` and the next lookup created a duplicate.
+        let attestations = crate::sigchain::scan_agent_attestations(self)?;
+        let attestation = attestations
+            .into_iter()
+            .find(|a| a.agent_id == *agent_id)
+            .ok_or_else(|| {
+                ApiError::Other(format!(
+                    "no on-chain attestation found for agent_id {:?} — \
+                     enroll the agent before ensuring its bucket, or pass \
+                     the agent pubkey directly via \
+                     ensure_agent_bucket_for_pubkey",
+                    agent_id.0
+                ))
+            })?;
+        self.ensure_agent_bucket_inner(&attestation.agent_pubkey, &agent_id.0, agent_id.clone())
+            .await
+    }
+
+    async fn ensure_agent_bucket_inner(
+        &self,
+        agent_pubkey: &[u8],
+        name_hint: &str,
+        owner_agent: memvault_core::AgentId,
+    ) -> Result<memvault_core::BucketId> {
         let bucket_id =
-            crate::rebuild::deterministic_agent_bucket_id(&self.cluster_id, &agent_id.0);
+            crate::rebuild::deterministic_agent_bucket_id(&self.cluster_id, agent_pubkey);
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
         if self
             .store
@@ -637,7 +672,7 @@ impl LocalClient {
             return Ok(bucket_id);
         }
 
-        let name = format!("agent:{}", agent_id.0);
+        let name = format!("agent:{name_hint}");
         let bid = self
             .bucket_create_inner(
                 bucket_id,
@@ -646,7 +681,7 @@ impl LocalClient {
                 Visibility::Internal,
                 memvault_core::classification::Classification::Internal,
                 memvault_doc::BucketRole::Agent,
-                Some(agent_id.clone()),
+                Some(owner_agent.clone()),
             )
             .await?;
         // bucket_create_inner already auto-binds when has_cluster, but
@@ -664,7 +699,12 @@ impl LocalClient {
                     ))
                 })?;
         }
-        tracing::info!(agent = %agent_id.0, bucket = %bid, "created and bound agent bucket");
+        tracing::info!(
+            agent = %name_hint,
+            agent_pubkey = %hex::encode(agent_pubkey),
+            bucket = %bid,
+            "created and bound agent bucket"
+        );
         Ok(bid)
     }
 

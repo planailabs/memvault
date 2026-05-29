@@ -41,17 +41,21 @@ pub fn deterministic_legacy_id(client: &LocalClient) -> BucketId {
 }
 
 /// Deterministic agent-bucket ID — a stable function of
-/// `(cluster_id, agent_id)` so every node in the cluster lands on the
-/// same bucket without consulting any list. Pre-genesis (zero
-/// cluster_id) the seed degrades to "agent_id alone" — still
-/// idempotent on this node, and `rebuild` swaps the legacy bucket out
-/// at first post-genesis rebuild the same way `deterministic_legacy_id`
-/// does for the unbucketed-adoption bucket.
-pub fn deterministic_agent_bucket_id(cluster_id: &[u8], agent_id: &str) -> BucketId {
-    let mut payload: Vec<u8> = Vec::with_capacity(cluster_id.len() + agent_id.len() + 16);
+/// `(cluster_id, agent_pubkey)` so every node in the cluster lands on
+/// the same bucket without consulting any list, and so collisions
+/// across reused names are impossible. The agent's pubkey is the
+/// uniqueness anchor; the `AgentId` string label can be reused or
+/// re-claimed and is therefore unsafe as a primary key.
+///
+/// Pre-genesis (zero `cluster_id`) the seed degrades to "pubkey
+/// alone" — still idempotent on this node, and `rebuild` rebinds the
+/// resulting bucket at first post-genesis rebuild the same way
+/// `deterministic_legacy_id` does for unbucketed-adoption.
+pub fn deterministic_agent_bucket_id(cluster_id: &[u8], agent_pubkey: &[u8]) -> BucketId {
+    let mut payload: Vec<u8> = Vec::with_capacity(cluster_id.len() + agent_pubkey.len() + 16);
     payload.extend_from_slice(cluster_id);
     payload.extend_from_slice(b"::agent::");
-    payload.extend_from_slice(agent_id.as_bytes());
+    payload.extend_from_slice(agent_pubkey);
     let cid = memvault_core::cid_from_bytes(&payload);
     let mut id = [0u8; 32];
     id.copy_from_slice(&cid.to_bytes()[..32]);
