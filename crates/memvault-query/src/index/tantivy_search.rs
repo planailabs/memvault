@@ -696,9 +696,13 @@ impl TantivyIndex {
         mode: RetractionMode,
         limit: usize,
     ) -> Vec<crate::index::search::UnifiedHit> {
-        let hits = self
-            .search_scoped(query, &[], &[], mode, limit)
-            .unwrap_or_default();
+        let hits = match self.search_scoped(query, &[], &[], mode, limit) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("tantivy search failed for {query:?}: {e}");
+                Vec::new()
+            }
+        };
         hits.into_iter()
             .map(|h| crate::index::search::UnifiedHit {
                 node_id: h.node_id,
