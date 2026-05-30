@@ -459,6 +459,7 @@ pub fn issue_join_token(
         label,
         admin_genesis,
         admit_as_admin: false,
+        issuer_addrs: vec![],
         signature: [0u8; 64], // placeholder
     };
 

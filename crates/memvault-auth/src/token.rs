@@ -38,6 +38,13 @@ pub struct JoinToken {
     /// normal join confers no admin authority.
     #[serde(default)]
     pub admit_as_admin: bool,
+    /// Optional dialable multiaddrs for the issuing node, so a joiner can
+    /// connect directly instead of waiting for the issuer's peer id (derived
+    /// from `issuer`) to surface via mDNS/Kademlia. Advisory hints — the
+    /// joiner still verifies the responder against the pinned admin key.
+    /// `None`/empty on tokens issued without `--addr`.
+    #[serde(default)]
+    pub issuer_addrs: Vec<String>,
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
@@ -55,6 +62,7 @@ struct TokenSigningPayload<'a> {
     label: &'a Option<String>,
     admin_genesis: &'a Option<AdminGenesis>,
     admit_as_admin: bool,
+    issuer_addrs: &'a [String],
 }
 
 impl JoinToken {
@@ -72,6 +80,7 @@ impl JoinToken {
             label: &self.label,
             admin_genesis: &self.admin_genesis,
             admit_as_admin: self.admit_as_admin,
+            issuer_addrs: &self.issuer_addrs,
         };
         crate::domain_sign(b"memvault/sig/join-token/v1", &payload)
     }

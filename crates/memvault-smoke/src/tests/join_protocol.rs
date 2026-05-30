@@ -76,6 +76,7 @@ fn issue_token_ex(
         label: Some("smoke-test".into()),
         admin_genesis: Some(genesis.clone()),
         admit_as_admin,
+        issuer_addrs: vec![],
         signature: [0u8; 64],
     };
     let bytes = token.signing_bytes().expect("signing bytes");

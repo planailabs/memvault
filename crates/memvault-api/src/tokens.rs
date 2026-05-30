@@ -85,8 +85,20 @@ pub fn issue_token(
     label: Option<String>,
     admin_genesis: Option<memvault_auth::AdminGenesis>,
     admit_as_admin: bool,
+    issuer_addrs: Vec<String>,
     keystore: &KeyStore,
 ) -> Result<String> {
+    // Admin and node membership tokens admit a peer into the cluster's trust
+    // (a co-admin or a replicating node). They must only be minted once the
+    // cluster is set up — i.e. the AdminGenesis exists — both so the cluster
+    // has an established trust root and so the joiner can pin it from the
+    // token. Agent roles (AgentHost/Auditor/Service) may predate genesis.
+    if matches!(role, Role::Admin | Role::Node) && admin_genesis.is_none() {
+        return Err(ApiError::Other(format!(
+            "{role:?} tokens require a set-up cluster (run genesis first)"
+        )));
+    }
+
     let now_ns = memvault_core::time::wall_ns();
     let ttl_ns = ttl_secs * 1_000_000_000;
     let mut nonce = [0u8; 16];
@@ -104,6 +116,7 @@ pub fn issue_token(
         label: label.clone(),
         admin_genesis,
         admit_as_admin,
+        issuer_addrs,
         signature: [0u8; 64],
     };
 

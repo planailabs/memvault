@@ -771,6 +771,7 @@ fn join_token_roundtrip_with_verify() {
         label: Some("test".into()),
         admin_genesis: None,
         admit_as_admin: false,
+        issuer_addrs: vec![],
         signature: [0u8; 64],
     };
 
@@ -927,6 +928,7 @@ fn join_token_admit_as_admin_is_signature_bound() {
         label: None,
         admin_genesis: None,
         admit_as_admin: true,
+        issuer_addrs: vec![],
         signature: [0u8; 64],
     };
     token.signature = sk.sign(&token.signing_bytes().unwrap()).to_bytes();

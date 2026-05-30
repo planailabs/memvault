@@ -392,6 +392,12 @@ mod native {
             /// presents an admin key + POP; the admission is minted at join.
             #[arg(long)]
             admit_as_admin: bool,
+            /// Dialable multiaddr(s) of this node to embed in the token, so a
+            /// joiner can connect directly instead of waiting to discover the
+            /// issuer's peer id. Repeatable. Omit to rely on mDNS/Kademlia
+            /// discovery of the issuer.
+            #[arg(long = "addr")]
+            addrs: Vec<String>,
         },
         /// List tokens
         List,
@@ -1274,8 +1280,15 @@ mod native {
                 max_uses,
                 label,
                 admit_as_admin,
+                addrs,
             }) => {
                 let role: Role = role.into();
+                // Validate each --addr parses as a multiaddr before embedding;
+                // a malformed addr would be useless to the joiner.
+                for a in &addrs {
+                    a.parse::<libp2p::Multiaddr>()
+                        .map_err(|e| anyhow::anyhow!("invalid --addr {a:?}: {e}"))?;
+                }
                 // Keystore-only: never opens redb, so this works while the
                 // daemon holds the blockstore. Identity (admin key, peer_id,
                 // cluster_id, genesis) is read from the keystore, populated by
@@ -1315,7 +1328,7 @@ mod native {
                 });
                 let token_str = memvault_api::tokens::issue_token(
                     &peer_id, &cluster_id, &admin_key, role, ttl, max_uses, label, genesis,
-                    admit_as_admin, &ks,
+                    admit_as_admin, addrs, &ks,
                 )?;
                 println!("{token_str}");
                 if admit_as_admin {

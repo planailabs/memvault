@@ -44,7 +44,19 @@ impl TestNode {
         // Admin key for token issuance
         let mut seed = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
-        client.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&seed));
+        let admin_sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+        client.set_admin_signing_key(admin_sk.clone());
+
+        // Pin a self-signed AdminGenesis so this node represents a real,
+        // set-up (post-genesis) cluster — required to issue admin/node
+        // membership tokens, mirroring a node created via `memctl genesis`.
+        let genesis = memvault_auth::sign_admin_genesis(
+            &admin_sk,
+            cluster_id.clone(),
+            memvault_core::wall_ns(),
+        )
+        .unwrap();
+        client.set_pinned_admin_genesis(genesis);
 
         // Node signing key — without one, every write goes down the
         // unsigned fallback path in build_signed_envelope. That uses a

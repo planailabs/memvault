@@ -119,6 +119,34 @@ pub async fn run_sync_loop(
     join_retry_timer.tick().await; // skip immediate fire
     resync_timer.tick().await; // consume the immediate first tick
 
+    // If we hold a pending join token that embeds the issuer's dialable
+    // multiaddr(s), dial them directly so join works without mDNS/Kademlia
+    // discovery. The token's `issuer` pubkey identifies the target peer; we
+    // register the addrs against it and dial. Only the real admin (matching
+    // our pinned genesis) returns Success, so dialing the wrong peer is
+    // harmless — it just replies NotAdminPeer and we keep waiting.
+    if let Some(token_str) = &join_config.pending_token {
+        if let Ok(token) = memvault_auth::decode_token_string(token_str) {
+            let issuer_peer = peer_id_from_pubkey(&token.issuer.0);
+            for addr_str in &token.issuer_addrs {
+                match addr_str.parse::<libp2p::Multiaddr>() {
+                    Ok(addr) => {
+                        if let Some(peer) = issuer_peer {
+                            swarm.behaviour_mut().kad.add_address(&peer, addr.clone());
+                        }
+                        match swarm.dial(addr.clone()) {
+                            Ok(()) => tracing::info!(%addr, "dialing join-token issuer addr"),
+                            Err(e) => tracing::warn!(%addr, error = %e, "failed to dial issuer addr"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(addr = %addr_str, error = %e, "skipping unparseable issuer addr")
+                    }
+                }
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             event = swarm.next() => {
@@ -1500,6 +1528,15 @@ fn peer_id_matches_pubkey(peer: libp2p::PeerId, pubkey: &[u8; 32]) -> bool {
     };
     let pk: libp2p::identity::PublicKey = ed_pk.into();
     pk.to_peer_id() == peer
+}
+
+/// Derive the libp2p `PeerId` from a 32-byte ed25519 pubkey (e.g. a join
+/// token's `issuer`). Returns `None` if the bytes aren't a valid key.
+fn peer_id_from_pubkey(pubkey: &[u8]) -> Option<libp2p::PeerId> {
+    let arr: [u8; 32] = pubkey.try_into().ok()?;
+    let ed_pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&arr).ok()?;
+    let pk: libp2p::identity::PublicKey = ed_pk.into();
+    Some(pk.to_peer_id())
 }
 
 /// Returns `true` if the response was a successful node attestation that

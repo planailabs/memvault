@@ -3085,6 +3085,7 @@ impl LocalClient {
             label,
             self.pinned_admin_genesis().cloned(),
             true,
+            vec![],
             &self.keystore,
         )
     }
@@ -4148,6 +4149,7 @@ impl MemvaultClient for LocalClient {
             label,
             self.pinned_admin_genesis().cloned(),
             admit_as_admin,
+            vec![],
             &self.keystore,
         )
     }
