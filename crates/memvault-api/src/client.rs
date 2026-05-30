@@ -164,6 +164,7 @@ pub trait MemvaultClient: Send + Sync {
                 label,
                 tags,
                 retracted: false,
+                detail: None,
             })
             .collect())
     }

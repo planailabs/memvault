@@ -112,6 +112,18 @@ impl NodeKind {
     }
 }
 
+/// How much per-node detail a scoped listing returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailLevel {
+    /// Lean node summaries only (node_id, type, label, tags, retracted).
+    #[default]
+    Summary,
+    /// Additionally populate each entry's type-specific `detail` (doc mtime +
+    /// attachment count, entity kind + props, file name/mime/size). Costs a
+    /// per-node lookup, so it's opt-in.
+    Full,
+}
+
 /// How retracted nodes participate in a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RetractionMode {
@@ -171,6 +183,8 @@ pub struct QueryScope {
     pub retraction: RetractionMode,
     /// Restrict to a single node kind (doc / file / entity). `None` = all kinds.
     pub kind: Option<NodeKind>,
+    /// How much per-node detail a scoped listing returns.
+    pub detail: DetailLevel,
 }
 
 impl QueryScope {
@@ -214,6 +228,12 @@ impl QueryScope {
     /// Builder: restrict to a single node kind.
     pub fn with_kind(mut self, kind: Option<NodeKind>) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Builder: set the detail level.
+    pub fn with_detail(mut self, detail: DetailLevel) -> Self {
+        self.detail = detail;
         self
     }
 }

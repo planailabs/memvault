@@ -23,8 +23,8 @@ pub use error::{Error, Result};
 pub use bucket::{BucketBinding, BucketDecl, BucketRole};
 pub use ids::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId};
 pub use scope::{
-    BucketSelector, NodeKind, QueryScope, RetractionMode, bucket_scope_id, view_bucket_scope_id,
-    view_scope_id,
+    BucketSelector, DetailLevel, NodeKind, QueryScope, RetractionMode, bucket_scope_id,
+    view_bucket_scope_id, view_scope_id,
 };
 pub use tags::{Tag, TagPattern};
 pub use tags_lint::lint_tags;

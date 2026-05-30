@@ -26,6 +26,30 @@ pub struct NodeSummary {
     pub tags: Vec<(String, String)>,
     #[serde(default)]
     pub retracted: bool,
+    /// Type-specific detail, populated only when the scope requests
+    /// `DetailLevel::Full`. `None` for lean summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<NodeDetail>,
+}
+
+/// Type-specific enrichment for a [`NodeSummary`], populated on
+/// `DetailLevel::Full`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeDetail {
+    Doc {
+        updated_ns: u64,
+        attachment_count: usize,
+    },
+    Entity {
+        entity_kind: String,
+        props: std::collections::BTreeMap<String, serde_json::Value>,
+    },
+    File {
+        filename: String,
+        mime_type: String,
+        size: u64,
+    },
 }
 
 /// Active/retracted counts for a query scope.

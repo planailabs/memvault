@@ -2861,18 +2861,101 @@ impl LocalClient {
             if !self.node_passes_bucket(&node_id, &known, &eff) {
                 continue;
             }
+            let detail = if scope.detail == memvault_core::DetailLevel::Full {
+                self.node_detail(&node_id, &node_type).await
+            } else {
+                None
+            };
             out.push(crate::types::NodeSummary {
                 node_id,
                 node_type,
                 label,
                 tags,
                 retracted,
+                detail,
             });
             if out.len() >= limit {
                 break;
             }
         }
         Ok(out)
+    }
+
+    /// A document's `(updated_ns, attachment_count)`. `updated_ns` is the
+    /// latest envelope wall-clock for the doc; `attachment_count` mirrors
+    /// `list_docs` (currently 0 — not separately tracked).
+    fn doc_detail(&self, doc_id: &DocId) -> (u64, usize) {
+        let (_, label) = Self::doc_tag(doc_id);
+        let cids = self
+            .store
+            .query_by_tag("doc", &label, 0, usize::MAX)
+            .unwrap_or_default();
+        let mut updated_ns = 0u64;
+        for cid in &cids {
+            if let Ok(Some(data)) = self.store.get_block(cid) {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(w) = val.get("wall_ns").and_then(|v| v.as_u64()) {
+                        updated_ns = updated_ns.max(w);
+                    }
+                }
+            }
+        }
+        (updated_ns, 0)
+    }
+
+    /// Build the type-specific [`NodeDetail`] for a node (DetailLevel::Full).
+    /// Best-effort: returns `None` if the underlying data can't be loaded.
+    async fn node_detail(
+        &self,
+        node_id: &str,
+        node_type: &str,
+    ) -> Option<crate::types::NodeDetail> {
+        match node_type {
+            "doc" => {
+                let hex = node_id.strip_prefix("doc:")?;
+                let bytes = hex::decode(hex).ok()?;
+                let arr: [u8; 32] = bytes.try_into().ok()?;
+                let doc_id = DocId(arr);
+                let (updated_ns, attachment_count) = self.doc_detail(&doc_id);
+                Some(crate::types::NodeDetail::Doc {
+                    updated_ns,
+                    attachment_count,
+                })
+            }
+            "entity" => {
+                let hex = node_id.strip_prefix("entity:")?;
+                let bytes = hex::decode(hex).ok()?;
+                let arr: [u8; 32] = bytes.try_into().ok()?;
+                let entity = self.get_entity_async(&EntityId(arr), true).await.ok()??;
+                Some(crate::types::NodeDetail::Entity {
+                    entity_kind: entity.kind,
+                    props: entity.props,
+                })
+            }
+            "file" | "attachment" => {
+                let hex = node_id
+                    .strip_prefix("file:")
+                    .or_else(|| node_id.strip_prefix("attachment:"))?;
+                let manifest_cid = hex::decode(hex).ok()?;
+                let bytes = self.get_file_manifest(&manifest_cid).await.ok()??;
+                let m: serde_json::Value =
+                    memvault_store::deserialize_block(&bytes).unwrap_or_default();
+                Some(crate::types::NodeDetail::File {
+                    filename: m
+                        .get("filename")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                    mime_type: m
+                        .get("mime_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("application/octet-stream")
+                        .to_string(),
+                    size: m.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0),
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Scoped unified search.
@@ -2965,6 +3048,8 @@ impl LocalClient {
             buckets: scope.buckets.clone(),
             retraction: memvault_core::RetractionMode::IncludeRetracted,
             kind: scope.kind,
+            // Counting never needs per-node detail.
+            detail: memvault_core::DetailLevel::Summary,
         };
         let rows = self.scoped_list(&counting, usize::MAX).await?;
         let mut c = crate::types::ScopeCount::default();

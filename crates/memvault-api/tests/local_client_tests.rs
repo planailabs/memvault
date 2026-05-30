@@ -1561,3 +1561,92 @@ async fn scoped_list_filters_by_node_kind() {
         .unwrap();
     assert_eq!(c.active, 1);
 }
+
+#[tokio::test]
+async fn scoped_list_detail_level_enriches_entries() {
+    use memvault_core::{DetailLevel, NodeKind, QueryScope};
+
+    let (_dir, client) = make_client();
+    let bucket = client
+        .bucket_create(
+            "vault",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+
+    let mut fm = BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("Titled Doc"));
+    client
+        .put_doc(
+            Document::new(DocId::random(), "body".into(), fm),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    client
+        .add_entity(
+            Entity {
+                id: EntityId::random(),
+                kind: "person".to_string(),
+                props: {
+                    let mut p = BTreeMap::new();
+                    p.insert("name".to_string(), serde_json::json!("Ada"));
+                    p
+                },
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+
+    let base = QueryScope::all().with_bucket(Some(bucket.clone()));
+
+    // Summary: no detail populated.
+    let summary = client.list_scoped(&base, 100).await.unwrap();
+    assert!(summary.iter().all(|n| n.detail.is_none()));
+
+    // Full + kind=Document: doc entry carries Doc detail with a non-zero mtime.
+    let docs = client
+        .list_scoped(
+            &base
+                .clone()
+                .with_kind(Some(NodeKind::Document))
+                .with_detail(DetailLevel::Full),
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+    match docs[0].detail.as_ref().expect("doc detail populated") {
+        memvault_api::NodeDetail::Doc { updated_ns, .. } => assert!(*updated_ns > 0),
+        other => panic!("expected Doc detail, got {other:?}"),
+    }
+
+    // Full + kind=GraphEntity: entity entry carries Entity detail (kind+props).
+    let ents = client
+        .list_scoped(
+            &base
+                .clone()
+                .with_kind(Some(NodeKind::GraphEntity))
+                .with_detail(DetailLevel::Full),
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ents.len(), 1);
+    match ents[0].detail.as_ref().expect("entity detail populated") {
+        memvault_api::NodeDetail::Entity { entity_kind, props } => {
+            assert_eq!(entity_kind, "person");
+            assert_eq!(props.get("name"), Some(&serde_json::json!("Ada")));
+        }
+        other => panic!("expected Entity detail, got {other:?}"),
+    }
+}
