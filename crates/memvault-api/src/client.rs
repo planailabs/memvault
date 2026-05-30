@@ -138,8 +138,10 @@ pub trait MemvaultClient: Send + Sync {
         max_uses: u32,
         label: Option<String>,
         admit_as_admin: bool,
+        issuer_addrs: Vec<String>,
     ) -> Result<String>;
-    /// Convenience: issue an ordinary join token (no co-admin admission).
+    /// Convenience: issue an ordinary join token (no co-admin admission, no
+    /// embedded issuer addresses).
     async fn issue_token(
         &self,
         role: Role,
@@ -147,7 +149,7 @@ pub trait MemvaultClient: Send + Sync {
         max_uses: u32,
         label: Option<String>,
     ) -> Result<String> {
-        self.issue_token_ex(role, ttl_secs, max_uses, label, false)
+        self.issue_token_ex(role, ttl_secs, max_uses, label, false, vec![])
             .await
     }
     async fn list_tokens(&self) -> Result<Vec<TokenStatus>>;

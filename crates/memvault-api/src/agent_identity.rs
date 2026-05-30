@@ -422,13 +422,45 @@ pub fn enroll_remote_agent(
     .map_err(|e| ApiError::Other(format!("sign attestation: {e}")))?;
     let attestation_cid = crate::sigchain::publish_agent_attestation(client, &attestation)?;
 
-    // Record consumption.
-    let _ = client.record_token_consumption(&token_cid, &agent_pubkey, now_ns);
+    // Record consumption; stamp invalidation if this redemption exhausts the
+    // token's max_uses (starts the 30-day retention clock).
+    let _ = crate::tokens::record_consumption_and_maybe_invalidate(
+        client.keystore(),
+        &token_cid,
+        token.max_uses,
+        now_ns,
+    );
+
+    // Audit: publish a signed TokenConsumption pointing at the minted
+    // AgentAttestation, so the redemption shows up in the audit log with a
+    // verifiable link to the attestation. Best-effort — a failure here must
+    // not fail the enrolment that already succeeded.
+    if let Some(node_sk) = client.node_signing_key() {
+        let att_cid_obj = memvault_core::cid_from_bytes(&attestation_bytes(&attestation));
+        if let Ok(tc) = memvault_auth::sign_token_consumption(
+            node_sk,
+            memvault_core::cid_from_bytes(&token_cbor),
+            memvault_core::PeerId(agent_pubkey.to_vec()),
+            now_ns,
+            att_cid_obj,
+        ) {
+            if let Err(e) = crate::sigchain::publish_token_consumption(client, &tc) {
+                tracing::warn!(error = %e, "failed to publish token-redeemed audit record");
+            }
+        }
+    }
 
     Ok(EnrollResult {
         attestation,
         attestation_cid,
     })
+}
+
+/// Serialize an `AgentAttestation` to the same DAG-CBOR bytes used to derive
+/// its block CID (so the audit record's `issued_attestation` matches the
+/// published attestation block).
+fn attestation_bytes(att: &memvault_auth::AgentAttestation) -> Vec<u8> {
+    serde_ipld_dagcbor::to_vec(att).unwrap_or_default()
 }
 
 /// Issue a join token for an agent, signed by the admin key.

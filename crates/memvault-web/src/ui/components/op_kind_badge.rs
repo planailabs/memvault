@@ -14,6 +14,8 @@ pub fn OpKindBadge(kind: String) -> Element {
         "TagUpdate" => PillVariant::Muted,
         "Extraction" => PillVariant::Muted,
         "Retract" => PillVariant::Bad,
+        "TokenIssue" => PillVariant::Accent,
+        "TokenRedeem" => PillVariant::Ok,
         _ => PillVariant::Muted,
     };
     rsx! { Pill { variant, "{kind}" } }

@@ -1283,12 +1283,8 @@ mod native {
                 addrs,
             }) => {
                 let role: Role = role.into();
-                // Validate each --addr parses as a multiaddr before embedding;
-                // a malformed addr would be useless to the joiner.
-                for a in &addrs {
-                    a.parse::<libp2p::Multiaddr>()
-                        .map_err(|e| anyhow::anyhow!("invalid --addr {a:?}: {e}"))?;
-                }
+                // `issue_token` parses + canonicalises each --addr as a real
+                // multiaddr (rejecting malformed input), so no pre-check here.
                 // Keystore-only: never opens redb, so this works while the
                 // daemon holds the blockstore. Identity (admin key, peer_id,
                 // cluster_id, genesis) is read from the keystore, populated by

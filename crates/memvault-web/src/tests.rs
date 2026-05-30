@@ -343,6 +343,7 @@ impl MemvaultClient for MockClient {
         _max_uses: u32,
         _label: Option<String>,
         _admit_as_admin: bool,
+        _issuer_addrs: Vec<String>,
     ) -> memvault_api::Result<String> {
         Ok("token-abc123".into())
     }

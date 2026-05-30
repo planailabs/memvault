@@ -61,6 +61,8 @@ pub use rotation::{AdminKeyRotation, AgentKeyRotation, RotationAborted};
 pub use share::{
     BucketTrust, ShareDecision, ShareProposal, ShareRecipient, ShareReply, ShareStatus,
 };
-pub use token::{JoinToken, TokenConsumption, decode_token_string, encode_token_string};
+pub use token::{
+    JoinToken, TokenConsumption, decode_token_string, encode_token_string, sign_token_consumption,
+};
 pub use trust::ClusterTrust;
 pub use verifier::{AuthVerifier, RevocationStore};

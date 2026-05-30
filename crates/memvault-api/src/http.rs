@@ -732,6 +732,7 @@ impl MemvaultClient for HttpApiClient {
         max_uses: u32,
         label: Option<String>,
         admit_as_admin: bool,
+        issuer_addrs: Vec<String>,
     ) -> Result<String> {
         let body = serde_json::json!({
             "role": role,
@@ -739,6 +740,7 @@ impl MemvaultClient for HttpApiClient {
             "max_uses": max_uses,
             "label": label,
             "admit_as_admin": admit_as_admin,
+            "issuer_addrs": issuer_addrs,
         });
         let resp: serde_json::Value = self
             .client

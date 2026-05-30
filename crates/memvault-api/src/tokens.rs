@@ -14,6 +14,9 @@ use crate::types::TokenStatus;
 //   token:<cid-hex>      → token CBOR bytes
 //   tokused:<cid-hex>    → u32 LE consumption count
 //   tokrevoked:<cid-hex> → revocation reason (presence ⇒ revoked)
+//   tokinval:<cid-hex>   → u64 LE ns of explicit invalidation (revoke or
+//                          max_uses exhaustion); absent ⇒ only TTL expiry
+//                          applies. Drives the retention GC below.
 fn token_key(cid: &[u8]) -> Vec<u8> {
     format!("token:{}", hex::encode(cid)).into_bytes()
 }
@@ -22,6 +25,31 @@ pub(crate) fn token_used_key(cid: &[u8]) -> Vec<u8> {
 }
 pub(crate) fn token_revoked_key(cid: &[u8]) -> Vec<u8> {
     format!("tokrevoked:{}", hex::encode(cid)).into_bytes()
+}
+pub(crate) fn token_invalidated_key(cid: &[u8]) -> Vec<u8> {
+    format!("tokinval:{}", hex::encode(cid)).into_bytes()
+}
+
+/// How long an invalidated (revoked / expired / exhausted) token record is
+/// retained before [`gc_invalidated_tokens`] deletes it — 30 days.
+pub const INVALIDATED_TOKEN_RETENTION_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+
+/// Stamp the explicit invalidation time for a token (revocation or
+/// max-uses exhaustion). First write wins — the earliest invalidation is
+/// what the retention clock runs from; later calls are no-ops.
+pub(crate) fn mark_invalidated(keystore: &KeyStore, cid: &[u8], ns: u64) {
+    let key = token_invalidated_key(cid);
+    if !keystore.contains(&key) {
+        let _ = keystore.put(&key, &ns.to_le_bytes());
+    }
+}
+
+/// Explicit invalidation timestamp for a token, if one was stamped.
+pub(crate) fn token_invalidated_at(keystore: &KeyStore, cid: &[u8]) -> Option<u64> {
+    keystore
+        .get(&token_invalidated_key(cid))
+        .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+        .map(u64::from_le_bytes)
 }
 
 /// Keystore marker recording that the one-off redb→keystore token
@@ -99,6 +127,19 @@ pub fn issue_token(
         )));
     }
 
+    // Parse every issuer addr as a real multiaddr before embedding it, and
+    // store the canonical string form — so a malformed addr is rejected at
+    // issue time (single chokepoint for the CLI, HTTP, and programmatic
+    // paths) rather than silently shipped to a joiner that can't use it.
+    let issuer_addrs: Vec<String> = issuer_addrs
+        .into_iter()
+        .map(|a| {
+            a.parse::<multiaddr::Multiaddr>()
+                .map(|m| m.to_string())
+                .map_err(|e| ApiError::Other(format!("invalid issuer addr {a:?}: {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     let now_ns = memvault_core::time::wall_ns();
     let ttl_ns = ttl_secs * 1_000_000_000;
     let mut nonce = [0u8; 16];
@@ -163,6 +204,7 @@ fn status_for(keystore: &KeyStore, cid_bytes: Vec<u8>, token: JoinToken) -> Toke
     TokenStatus {
         consumed_count: token_consumed(keystore, &cid_bytes),
         revoked: token_revoked(keystore, &cid_bytes),
+        invalidated_at_ns: token_invalidated_at(keystore, &cid_bytes),
         label: token.label,
         role: token.role,
         max_uses: token.max_uses,
@@ -171,11 +213,75 @@ fn status_for(keystore: &KeyStore, cid_bytes: Vec<u8>, token: JoinToken) -> Toke
     }
 }
 
-/// Revoke a token by CID in the keystore (works with no redb open).
+/// Revoke a token by CID in the keystore (works with no redb open). Also
+/// stamps the invalidation time so the retention GC can reclaim the record
+/// 30 days later.
 pub fn revoke_token(keystore: &KeyStore, cid: &[u8], reason: &str) -> Result<()> {
     keystore
         .put(&token_revoked_key(cid), reason.as_bytes())
-        .map_err(|e| ApiError::Other(format!("keystore revoke token: {e}")))
+        .map_err(|e| ApiError::Other(format!("keystore revoke token: {e}")))?;
+    mark_invalidated(keystore, cid, memvault_core::time::wall_ns());
+    Ok(())
+}
+
+/// Record a single redemption of a token and, if that redemption exhausts
+/// `max_uses`, stamp the token's invalidation time. Returns the new
+/// consumption count. Used by both redemption paths (agent enrol, node
+/// join) so an exhausted token starts its 30-day retention clock.
+pub fn record_consumption_and_maybe_invalidate(
+    keystore: &KeyStore,
+    cid: &[u8],
+    max_uses: u32,
+    now_ns: u64,
+) -> u32 {
+    // fetch_add_u32 returns the post-increment count.
+    let new_count = keystore.fetch_add_u32(&token_used_key(cid), 1).unwrap_or(0);
+    if new_count >= max_uses {
+        mark_invalidated(keystore, cid, now_ns);
+    }
+    new_count
+}
+
+/// Delete keystore records for tokens that were invalidated more than
+/// [`INVALIDATED_TOKEN_RETENTION_NS`] ago. A token is invalidated when it is
+/// revoked, exhausts `max_uses` (both stamped via [`mark_invalidated`]), or
+/// passes its `not_after_ns` expiry. The retention clock runs from the
+/// explicit stamp when present, else from `not_after_ns`. Returns the number
+/// of tokens deleted.
+pub fn gc_invalidated_tokens(keystore: &KeyStore, now_ns: u64) -> usize {
+    let mut deleted = 0;
+    for k in keystore.keys_with_prefix(b"token:") {
+        let Some(hex_cid) = k.strip_prefix(b"token:") else {
+            continue;
+        };
+        let Ok(cid_bytes) = hex::decode(hex_cid) else {
+            continue;
+        };
+        let Some(cbor) = keystore.get(&k) else { continue };
+        let Ok(token) = serde_ipld_dagcbor::from_slice::<JoinToken>(&cbor) else {
+            continue;
+        };
+        // Effective invalidation: the explicit stamp (revoke/exhaust) if set,
+        // otherwise the TTL expiry. A token with neither (not yet expired,
+        // not revoked/exhausted) is still live and never collected here.
+        let invalidated_at = match token_invalidated_at(keystore, &cid_bytes) {
+            Some(ns) => Some(ns),
+            None if now_ns > token.not_after_ns => Some(token.not_after_ns),
+            None => None,
+        };
+        let Some(invalidated_at) = invalidated_at else {
+            continue;
+        };
+        if now_ns.saturating_sub(invalidated_at) <= INVALIDATED_TOKEN_RETENTION_NS {
+            continue;
+        }
+        let _ = keystore.delete(&token_key(&cid_bytes));
+        let _ = keystore.delete(&token_used_key(&cid_bytes));
+        let _ = keystore.delete(&token_revoked_key(&cid_bytes));
+        let _ = keystore.delete(&token_invalidated_key(&cid_bytes));
+        deleted += 1;
+    }
+    deleted
 }
 
 /// List all tokens from the keystore (the source of truth; redb token

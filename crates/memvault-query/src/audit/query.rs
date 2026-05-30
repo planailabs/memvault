@@ -27,6 +27,7 @@ pub enum OpKind {
     BucketBind,
     ViewCreate,
     TokenIssue,
+    TokenRedeem,
     SharePropose,
     ShareDecide,
     Other(String),
@@ -75,6 +76,16 @@ pub fn query_audit(
     let before = query.before_ns.unwrap_or(u64::MAX);
     let limit = query.limit.unwrap_or(100);
 
+    // "Token redeemed" audit records are signed TokenConsumption sigchain
+    // blocks (tag `sigchain/token_redeem`). They don't carry the generic
+    // envelope shape the parser below expects, so decode them by type here
+    // and key them by CID. The time/author scan then SKIPS these CIDs (they
+    // would otherwise come back as Other("unknown")), and we merge the typed
+    // records in afterwards.
+    let redeem_records = token_redeem_records(store, after, limit)?;
+    let redeem_cids: std::collections::HashSet<Vec<u8>> =
+        redeem_records.keys().cloned().collect();
+
     let cids = if let Some(author) = &query.author {
         store.query_by_author(author, after, limit)?
     } else {
@@ -85,6 +96,9 @@ pub fn query_audit(
 
     let mut records = Vec::new();
     for cid in cids {
+        if redeem_cids.contains(&cid) {
+            continue;
+        }
         if let Some(data) = store.get_block(&cid)? {
             // Use deserialize_block — handles both raw-JSON envelopes
             // (legacy) and DAG-CBOR Signed<T> envelopes (post-Phase 1).
@@ -107,7 +121,90 @@ pub fn query_audit(
         }
     }
 
+    // Merge in the typed token-redeem records, honouring the op_kind filter
+    // (doc_id never matches these). Then sort newest-first and cap to limit
+    // so the merged set stays consistent with the per-scan ordering.
+    let want_redeem = query
+        .op_kind
+        .as_ref()
+        .map(|k| k == &OpKind::TokenRedeem)
+        .unwrap_or(true);
+    if query.doc_id.is_none() && want_redeem {
+        for (_cid, rec) in redeem_records {
+            if rec.wall_ns < after || rec.wall_ns > before {
+                continue;
+            }
+            if let Some(filter_author) = &query.author {
+                if &rec.author != filter_author {
+                    continue;
+                }
+            }
+            records.push(rec);
+        }
+    }
+    records.sort_by(|a, b| b.wall_ns.cmp(&a.wall_ns));
+    records.truncate(limit);
+
     Ok(records)
+}
+
+/// Decode the `sigchain/token_redeem` blocks (signed `TokenConsumption`
+/// records) into audit rows keyed by block CID. Each row links the redeemed
+/// token to the attestation block minted for it, and best-effort resolves
+/// whether that attestation is a node or agent attestation.
+fn token_redeem_records(
+    store: &MemvaultStore,
+    after: u64,
+    limit: usize,
+) -> Result<std::collections::HashMap<Vec<u8>, AuditRecord>, QueryError> {
+    let mut out = std::collections::HashMap::new();
+    let cids = store
+        .query_by_tag("sigchain", "token_redeem", after, limit)
+        .unwrap_or_default();
+    for cid in cids {
+        let Some(data) = store.get_block(&cid)? else {
+            continue;
+        };
+        let Ok(tc) = serde_ipld_dagcbor::from_slice::<memvault_auth::TokenConsumption>(&data) else {
+            continue;
+        };
+        let att_cid = tc.issued_attestation.to_bytes();
+        // Best-effort: classify the minted attestation for nicer display.
+        let att_type = match store.get_block(&att_cid) {
+            Ok(Some(b)) => {
+                if serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&b).is_ok() {
+                    "node"
+                } else if serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&b)
+                    .is_ok()
+                {
+                    "agent"
+                } else {
+                    "unknown"
+                }
+            }
+            _ => "unknown",
+        };
+        let tags = vec![
+            ("token".to_string(), hex::encode(tc.token_cid.to_bytes())),
+            ("attestation".to_string(), hex::encode(&att_cid)),
+            ("att_type".to_string(), att_type.to_string()),
+        ];
+        out.insert(
+            cid.clone(),
+            AuditRecord {
+                cid,
+                op_kind: OpKind::TokenRedeem,
+                author: tc.consumer.0.clone(),
+                agent_attestation: None,
+                wall_ns: tc.consumed_at_ns,
+                doc_id: None,
+                entity_id: None,
+                attachment_cid: None,
+                tags,
+            },
+        );
+    }
+    Ok(out)
 }
 
 pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {

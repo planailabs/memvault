@@ -44,6 +44,11 @@ pub struct TokenStatus {
     pub consumed_count: u32,
     pub not_after_ns: u64,
     pub revoked: bool,
+    /// Unix ns at which the token was explicitly invalidated (revoked or
+    /// exhausted). `None` if it is only subject to TTL expiry. After
+    /// `INVALIDATED_TOKEN_RETENTION_NS` the record is GC'd.
+    #[serde(default)]
+    pub invalidated_at_ns: Option<u64>,
 }
 
 /// Information about a key rotation.

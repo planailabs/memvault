@@ -31,6 +31,8 @@ const LABEL_NODE_REV: &str = "node_rev";
 const LABEL_ADMIN_ADMISSION: &str = "admin_admission";
 const LABEL_ADMIN_RETIREMENT: &str = "admin_retirement";
 const LABEL_GRANT_REVOCATION: &str = "grant_revocation";
+/// Label for the "token redeemed" audit record (`TokenConsumption`).
+pub const LABEL_TOKEN_REDEEM: &str = "token_redeem";
 
 fn write_block(client: &LocalClient, label: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     write_block_with_extra_tags(client, label, bytes, Vec::new())
@@ -373,6 +375,21 @@ pub fn publish_agent_attestation(
     let bytes = serde_ipld_dagcbor::to_vec(attestation)
         .map_err(|e| ApiError::Serialization(e.to_string()))?;
     write_block(client, LABEL_AGENT_ATT, &bytes)
+}
+
+/// Publish a signed `TokenConsumption` — the "token redeemed" audit record.
+/// It points at the attestation block minted when the token was redeemed
+/// (a `NodeAttestation` for a node join, an `AgentAttestation` for an agent
+/// enrolment), giving the audit log a verifiable link from the redemption
+/// back to the exact attestation. Tagged `sigchain/token_redeem`; the audit
+/// query surfaces it as `OpKind::TokenRedeem`.
+pub fn publish_token_consumption(
+    client: &LocalClient,
+    consumption: &memvault_auth::TokenConsumption,
+) -> Result<Vec<u8>> {
+    let bytes = serde_ipld_dagcbor::to_vec(consumption)
+        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    write_block(client, LABEL_TOKEN_REDEEM, &bytes)
 }
 
 /// Persist an `AgentRevocation`.

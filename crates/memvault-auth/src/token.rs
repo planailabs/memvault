@@ -1,6 +1,6 @@
 use cid::Cid;
 use data_encoding::BASE32_NOPAD;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use memvault_core::{ClusterId, PeerId};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
@@ -144,6 +144,30 @@ impl TokenConsumption {
         key.verify(&bytes, &sig)
             .map_err(|_| AuthError::SignatureInvalid)
     }
+}
+
+/// Build a `TokenConsumption` audit record and sign it with `key` (the
+/// attesting key — the node key for agent enrolment, the admin key for a
+/// node join). `issued_attestation` is the CID of the attestation minted
+/// when the token was redeemed, giving the audit log a verifiable pointer
+/// from "token redeemed" back to the exact attestation block.
+pub fn sign_token_consumption(
+    key: &SigningKey,
+    token_cid: Cid,
+    consumer: PeerId,
+    consumed_at_ns: u64,
+    issued_attestation: Cid,
+) -> Result<TokenConsumption> {
+    let mut tc = TokenConsumption {
+        token_cid,
+        consumer,
+        consumed_at_ns,
+        issued_attestation,
+        signature: [0u8; 64],
+    };
+    let bytes = tc.signing_bytes()?;
+    tc.signature = key.sign(&bytes).to_bytes();
+    Ok(tc)
 }
 
 /// Encode a `JoinToken` to the wire-format string: `mvjoin1:<base32(cbor(token))>`.

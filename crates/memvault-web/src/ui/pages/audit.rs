@@ -390,6 +390,31 @@ async fn build_description(
                 None,
             )
         }
+        "TokenRedeem" => {
+            // Signed TokenConsumption: links the redeemed token to the
+            // attestation block minted for it (node join or agent enrol).
+            let att_type = tags
+                .iter()
+                .find(|(s, _)| s == "att_type")
+                .map(|(_, l)| l.as_str())
+                .unwrap_or("unknown");
+            let att_cid = tags
+                .iter()
+                .find(|(s, _)| s == "attestation")
+                .map(|(_, l)| l.as_str());
+            let kind = match att_type {
+                "node" => "NodeAttestation",
+                "agent" => "AgentAttestation",
+                _ => "attestation",
+            };
+            match att_cid {
+                Some(cid) => (
+                    format!("Redeemed token \u{2192} minted {kind} {}", short_id(cid)),
+                    None,
+                ),
+                None => (format!("Redeemed token \u{2192} minted {kind}"), None),
+            }
+        }
         // ── Share events ────────────────────────────────────────
         "SharePropose" => ("Sent share proposal".to_string(), None),
         "ShareDecide" => ("Decided share proposal".to_string(), None),

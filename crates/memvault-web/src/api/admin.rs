@@ -29,6 +29,11 @@ pub struct TokenStatusResponse {
     pub consumed_count: u32,
     pub not_after_ns: u64,
     pub revoked: bool,
+    /// Unix ns when the token was explicitly invalidated (revoked or
+    /// exhausted); `None` if only subject to TTL expiry. Record is GC'd
+    /// 30 days after invalidation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidated_at_ns: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +46,11 @@ pub struct IssueTokenRequest {
     /// must redeem with `cluster-join --admit-as-admin`.
     #[serde(default)]
     pub admit_as_admin: bool,
+    /// Optional dialable multiaddr(s) of the issuing node to embed in the
+    /// token, so a joiner can connect directly instead of waiting to
+    /// discover the issuer's peer id. Each must be a valid multiaddr.
+    #[serde(default)]
+    pub issuer_addrs: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -86,9 +96,25 @@ pub async fn issue_token(
     Json(req): Json<IssueTokenRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     let role = parse_role(&req.role)?;
+    // Sanity-check the addrs (multiaddrs always start with '/'); the joiner
+    // does the authoritative parse and skips anything unparseable.
+    for a in &req.issuer_addrs {
+        if !a.starts_with('/') {
+            return Err(ApiError::bad_request(format!(
+                "invalid issuer_addr {a:?}: multiaddr must start with '/'"
+            )));
+        }
+    }
     let token = state
         .client
-        .issue_token_ex(role, req.ttl_secs, req.max_uses, req.label, req.admit_as_admin)
+        .issue_token_ex(
+            role,
+            req.ttl_secs,
+            req.max_uses,
+            req.label,
+            req.admit_as_admin,
+            req.issuer_addrs,
+        )
         .await?;
     Ok((
         axum::http::StatusCode::CREATED,
@@ -112,6 +138,7 @@ pub async fn list_tokens(
             consumed_count: t.consumed_count,
             not_after_ns: t.not_after_ns,
             revoked: t.revoked,
+            invalidated_at_ns: t.invalidated_at_ns,
         })
         .collect();
     Ok(Json(results))

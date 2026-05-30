@@ -308,6 +308,14 @@ pub async fn run_sync_loop(
                             if let Some(cb) = join_config.on_join_success.take() {
                                 cb();
                             }
+                            // Re-request heads from the admin now that it has
+                            // minted our NodeAttestation. Any block requests we
+                            // sent on first connect were refused ("peer is not
+                            // an attested cluster node") because the mint hadn't
+                            // happened yet; this retries the pull now that we're
+                            // attested, instead of waiting for the periodic
+                            // resync timer to heal it.
+                            request_remote_heads(swarm, &store, &config, peer);
                         }
                     }
 
@@ -1397,6 +1405,47 @@ fn build_join_response(
             None => {
                 if let Err(e) = store.record_token_consumption(&token_cid, &claimed, now_ns) {
                     tracing::warn!(%peer, %e, "failed to record token consumption");
+                }
+            }
+        }
+
+        // Stamp the token's invalidation time once it exhausts max_uses, so
+        // the api-side retention GC can reclaim the record after 30 days.
+        // (Keystore only — matches where revocation/invalidation live.)
+        if let Some(ks) = &join_config.keystore {
+            let used_key = format!("tokused:{}", hex::encode(&token_cid));
+            if ks.get_u32(used_key.as_bytes()) >= token.max_uses {
+                let inval_key = format!("tokinval:{}", hex::encode(&token_cid));
+                if !ks.contains(inval_key.as_bytes()) {
+                    let _ = ks.put(inval_key.as_bytes(), &now_ns.to_le_bytes());
+                }
+            }
+        }
+
+        // Audit: publish a signed TokenConsumption pointing at the minted
+        // NodeAttestation, so the join shows up in the audit log with a
+        // verifiable link back to the attestation. Signed by the admin key
+        // (the attesting authority for a node join). Best-effort.
+        let token_cid_obj = memvault_core::cid_from_bytes(&token_cbor);
+        let att_cid_obj = memvault_core::cid_from_bytes(&att_bytes);
+        if let Ok(tc) = memvault_auth::sign_token_consumption(
+            admin_sk,
+            token_cid_obj,
+            memvault_core::PeerId(claimed.to_vec()),
+            now_ns,
+            att_cid_obj,
+        ) {
+            if let Ok(tc_bytes) = serde_ipld_dagcbor::to_vec(&tc) {
+                let tc_cid = memvault_core::cid_from_bytes(&tc_bytes).to_bytes();
+                let tc_meta = memvault_store::EnvelopeMeta {
+                    author: claimed.to_vec(),
+                    tags: vec![("sigchain".to_string(), "token_redeem".to_string())],
+                    wall_ns: now_ns,
+                    cluster_id: Some(join_config.cluster_id.to_vec()),
+                    ..Default::default()
+                };
+                if matches!(store.get_block(&tc_cid), Ok(None)) {
+                    let _ = store.insert_envelope(&tc_cid, &tc_bytes, &tc_meta);
                 }
             }
         }

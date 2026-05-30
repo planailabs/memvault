@@ -4127,6 +4127,7 @@ impl MemvaultClient for LocalClient {
         max_uses: u32,
         label: Option<String>,
         admit_as_admin: bool,
+        issuer_addrs: Vec<String>,
     ) -> Result<String> {
         let admin_key = self.admin_signing_key().ok_or_else(|| {
             ApiError::Other("no admin signing key configured — cannot issue tokens".into())
@@ -4149,7 +4150,7 @@ impl MemvaultClient for LocalClient {
             label,
             self.pinned_admin_genesis().cloned(),
             admit_as_admin,
-            vec![],
+            issuer_addrs,
             &self.keystore,
         )
     }
