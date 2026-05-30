@@ -628,6 +628,33 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
         viewport.set(Viewport::fit_to_nodes(&s.nodes));
     });
 
+    // Re-seed the simulation when the incoming node set changes. The parent
+    // keys this component to force a remount on scope change, but single-
+    // component key remounts aren't reliable here, so the canvas (which reads
+    // `sim`, seeded once via use_signal) would otherwise stay frozen while the
+    // sidebar — which reads `initial_nodes` directly — already updated.
+    let current_key = node_set_key(&initial_nodes);
+    let mut last_key = use_signal(|| current_key);
+    if *last_key.peek() != current_key {
+        last_key.set(current_key);
+        let mut s = ForceSimulation::new();
+        for node in &initial_nodes {
+            s.add_node(node.id.clone(), node.kind.clone(), node.label.clone());
+        }
+        for node in &initial_nodes {
+            let source = s.nodes.iter().position(|n| n.id == node.id).unwrap_or(0);
+            for edge in &node.edges {
+                if let Some(target) = s.nodes.iter().position(|n| n.id == edge.target_id) {
+                    s.add_edge(source, target, edge.relation.clone(), edge.weight);
+                }
+            }
+        }
+        sim.set(s);
+        // Re-run physics for the new node set (the physics effect is gated on
+        // this flag).
+        sim_ran.set(false);
+    }
+
     let s = sim.read();
     let all_nodes: Vec<GraphNode> = s.nodes.clone();
     let all_edges: Vec<GraphEdge> = s.edges.clone();
