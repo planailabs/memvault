@@ -1218,3 +1218,280 @@ async fn genesis_identity_yields_tokens_embedding_genesis() {
     embedded.verify_self_signature().expect("embedded genesis self-signature");
     assert_eq!(decoded.cluster_id.0, cluster, "token cluster matches");
 }
+
+// ── Scoped queries (scoped-indexes) ────────────────────────────────
+
+#[tokio::test]
+async fn scoped_list_spans_multiple_buckets() {
+    use memvault_core::QueryScope;
+
+    let (_dir, client) = make_client();
+
+    // Three buckets.
+    let mut ids = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        ids.push(
+            client
+                .bucket_create(
+                    name,
+                    None,
+                    Visibility::Internal,
+                    memvault_core::classification::Classification::Internal,
+                    BucketRole::Standard,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+
+    // One doc per bucket.
+    for (i, b) in ids.iter().enumerate() {
+        let doc = Document::new(
+            DocId::random(),
+            format!("shared note {i}"),
+            BTreeMap::new(),
+        );
+        client
+            .put_doc(doc, vec![], Visibility::Internal, Some(b))
+            .await
+            .unwrap();
+    }
+
+    // All accessible buckets → 3.
+    let all = client
+        .list_scoped(&QueryScope::all(), 100)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3, "all buckets");
+
+    // Two of three explicitly → 2 (the multi-bucket agent case).
+    let scope = QueryScope::all().with_buckets(vec![ids[0].clone(), ids[2].clone()]);
+    let two = client.list_scoped(&scope, 100).await.unwrap();
+    assert_eq!(two.len(), 2, "two-bucket union");
+
+    // Single bucket → 1.
+    let one = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(ids[1].clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(one.len(), 1, "single bucket");
+
+    // Empty explicit set → 0.
+    let none = client
+        .list_scoped(&QueryScope::all().with_buckets(vec![]), 100)
+        .await
+        .unwrap();
+    assert_eq!(none.len(), 0, "empty bucket set");
+}
+
+#[tokio::test]
+async fn scoped_search_respects_bucket_set() {
+    use memvault_core::QueryScope;
+
+    let (_dir, client) = make_client();
+    let a = client
+        .bucket_create(
+            "a",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+    let b = client
+        .bucket_create(
+            "b",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+
+    client
+        .put_doc(
+            Document::new(DocId::random(), "kubernetes guide".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    client
+        .put_doc(
+            Document::new(DocId::random(), "kubernetes notes".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&b),
+        )
+        .await
+        .unwrap();
+
+    let all = client
+        .search_scoped(&QueryScope::all(), "kubernetes", 50)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    let just_a = client
+        .search_scoped(
+            &QueryScope::all().with_bucket(Some(a.clone())),
+            "kubernetes",
+            50,
+        )
+        .await
+        .unwrap();
+    assert_eq!(just_a.len(), 1);
+}
+
+#[tokio::test]
+async fn scoped_retraction_modes_and_count() {
+    use memvault_core::{QueryScope, RetractionMode};
+
+    let (_dir, client) = make_client();
+    let bucket = client
+        .bucket_create(
+            "vault",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+
+    let keep = DocId::random();
+    let drop = DocId::random();
+    client
+        .put_doc(
+            Document::new(keep.clone(), "keep me".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    client
+        .put_doc(
+            Document::new(drop.clone(), "drop me".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+
+    let drop_node = format!("doc:{}", hex::encode(drop.0));
+    client.retract_node(&drop_node, "test").await.unwrap();
+
+    let scope = QueryScope::all().with_bucket(Some(bucket.clone()));
+
+    // Active only → 1 (keep).
+    let active = client.list_scoped(&scope, 100).await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert!(active.iter().all(|n| !n.retracted));
+
+    // Include retracted → 2.
+    let incl = client
+        .list_scoped(&scope.clone().with_retraction(RetractionMode::IncludeRetracted), 100)
+        .await
+        .unwrap();
+    assert_eq!(incl.len(), 2);
+    assert_eq!(incl.iter().filter(|n| n.retracted).count(), 1);
+
+    // Retracted only → 1 (drop), and it still resolves its label.
+    let only = client
+        .list_scoped(&scope.clone().with_retraction(RetractionMode::RetractedOnly), 100)
+        .await
+        .unwrap();
+    assert_eq!(only.len(), 1);
+    assert!(only[0].retracted);
+
+    // Counts.
+    let c = client.count_scoped(&scope.clone().with_retraction(RetractionMode::IncludeRetracted)).await.unwrap();
+    assert_eq!(c.active, 1);
+    assert_eq!(c.retracted, 1);
+    assert_eq!(c.total(), 2);
+}
+
+#[tokio::test]
+async fn scoped_view_bucket_partition_counts() {
+    use memvault_core::{BucketId, QueryScope};
+    use memvault_api::View;
+
+    let (_dir, client) = make_client();
+    let bucket = client
+        .bucket_create(
+            "proj",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+
+    // A view requiring tag ("kind","note").
+    client
+        .create_view(View {
+            name: "notes".into(),
+            tags: vec![("kind".into(), "note".into())],
+            created_ns: 1,
+            cid: String::new(),
+            bucket_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Two docs match the view, one doesn't.
+    for (body, tag_match) in [("note one", true), ("note two", true), ("other", false)] {
+        let tags = if tag_match {
+            vec![("kind".into(), "note".into())]
+        } else {
+            vec![("kind".into(), "memo".into())]
+        };
+        client
+            .put_doc(
+                Document::new(DocId::random(), body.into(), BTreeMap::new()),
+                tags,
+                Visibility::Internal,
+                Some(&bucket),
+            )
+            .await
+            .unwrap();
+    }
+
+    let scope = QueryScope::all()
+        .with_view(Some("notes".into()))
+        .with_bucket(Some(bucket.clone()));
+
+    let listed = client.list_scoped(&scope, 100).await.unwrap();
+    assert_eq!(listed.len(), 2, "only view members in bucket");
+
+    // count_scoped lazily builds the view×bucket partition; should be 2 active.
+    let c = client.count_scoped(&scope).await.unwrap();
+    assert_eq!(c.active, 2);
+    assert_eq!(c.retracted, 0);
+
+    // A later matching doc is maintained into the (now-registered) partition.
+    client
+        .put_doc(
+            Document::new(DocId::random(), "note three".into(), BTreeMap::new()),
+            vec![("kind".into(), "note".into())],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    let c2 = client.count_scoped(&scope).await.unwrap();
+    assert_eq!(c2.active, 3, "live maintenance added the new note");
+
+    // sanity: a bucket id that isn't accessible contributes nothing.
+    let bogus = QueryScope::all()
+        .with_view(Some("notes".into()))
+        .with_bucket(Some(BucketId([99u8; 32])));
+    let c3 = client.count_scoped(&bogus).await.unwrap();
+    assert_eq!(c3.total(), 0);
+}

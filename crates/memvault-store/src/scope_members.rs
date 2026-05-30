@@ -306,6 +306,20 @@ impl MemvaultStore {
         Ok(())
     }
 
+    /// Clear all scope member-sets and the registry. Called on a full index
+    /// rebuild so stale partitions are discarded and rebuilt lazily.
+    pub fn scope_clear_all(&self) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut members = txn.open_table(SCOPE_MEMBERS)?;
+            while members.pop_first()?.is_some() {}
+            let mut reg = txn.open_table(SCOPE_REGISTRY)?;
+            while reg.pop_first()?.is_some() {}
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     /// Apply signed deltas to a scope's registry counters within an open write
     /// txn. Creates a bare registry entry (kind=Bucket, empty coords) if none
     /// exists yet. Counts saturate at zero.

@@ -16,6 +16,31 @@ pub struct DocSummary {
     pub attachment_count: usize,
 }
 
+/// A node summary for scoped listing — supersedes the
+/// `(node_id, node_type, label, tags)` tuple and adds the retracted flag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeSummary {
+    pub node_id: String,
+    pub node_type: String,
+    pub label: String,
+    pub tags: Vec<(String, String)>,
+    #[serde(default)]
+    pub retracted: bool,
+}
+
+/// Active/retracted counts for a query scope.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScopeCount {
+    pub active: u64,
+    pub retracted: u64,
+}
+
+impl ScopeCount {
+    pub fn total(&self) -> u64 {
+        self.active + self.retracted
+    }
+}
+
 /// A hit from a graph traversal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraversalHit {

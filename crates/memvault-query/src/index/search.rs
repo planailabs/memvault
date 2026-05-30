@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use memvault_core::DocId;
+use memvault_core::{DocId, RetractionMode};
 use serde::{Deserialize, Serialize};
 
 /// A legacy search hit (doc-only).
@@ -42,7 +42,12 @@ struct IndexedEntry {
 }
 
 /// Bump this when the index format changes to trigger automatic re-indexing.
-pub const INDEX_FORMAT_VERSION: u32 = 5;
+///
+/// v6: retraction retains the indexed entry (flag-only) instead of deleting it,
+/// so retracted nodes — with their labels/tags — remain visible under
+/// `RetractionMode::{IncludeRetracted,RetractedOnly}`. Old v5 caches dropped
+/// retracted entries, so they must be rebuilt.
+pub const INDEX_FORMAT_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct IndexSnapshot {
@@ -222,13 +227,25 @@ impl TextIndex {
 
     // ── Retraction ─────────────────────────────────────────────────
 
+    /// Mark a node retracted. The indexed entry is **retained** (so the node's
+    /// label/tags remain available to admins/auditors under
+    /// `RetractionMode::{IncludeRetracted,RetractedOnly}`); only the flag flips.
     pub fn retract_node(&mut self, node_id: &str) {
         self.retracted.insert(node_id.to_string());
-        self.unified.remove(node_id);
+    }
+
+    /// Clear a node's retracted flag.
+    pub fn unretract_node(&mut self, node_id: &str) {
+        self.retracted.remove(node_id);
     }
 
     pub fn is_retracted(&self, node_id: &str) -> bool {
         self.retracted.contains(node_id)
+    }
+
+    /// Whether a node passes the given retraction mode's filter.
+    fn passes_mode(&self, node_id: &str, mode: RetractionMode) -> bool {
+        mode.admits(self.retracted.contains(node_id))
     }
 
     // ── Tags ───────────────────────────────────────────────────────
@@ -481,6 +498,121 @@ impl TextIndex {
         });
         hits.truncate(limit);
         hits
+    }
+    // ── RetractionMode-aware queries (scoped-indexes) ──────────────
+    //
+    // These supersede the boolean `_ex` variants: they support all three
+    // modes (active-only / include-retracted / retracted-only) and, because
+    // retraction now retains the entry, can actually surface retracted nodes.
+
+    /// View members filtered by retraction mode.
+    pub fn members_of_view_mode(
+        &self,
+        required_tags: &[(String, String)],
+        mode: RetractionMode,
+    ) -> Vec<String> {
+        self.unified
+            .iter()
+            .filter(|(id, entry)| {
+                self.passes_mode(id, mode)
+                    && required_tags.iter().all(|(scope, label)| {
+                        entry.tags.iter().any(|(s, l)| s == scope && l == label)
+                    })
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// List all nodes (optionally view-filtered) by retraction mode, with each
+    /// row's retracted flag. Returns (node_id, node_type, label, tags, retracted).
+    #[allow(clippy::type_complexity)]
+    pub fn list_all_mode(
+        &self,
+        view_tags: Option<&[(String, String)]>,
+        mode: RetractionMode,
+        limit: usize,
+    ) -> Vec<(String, String, String, Vec<(String, String)>, bool)> {
+        self.unified
+            .iter()
+            .filter(|(id, entry)| {
+                if !self.passes_mode(id, mode) {
+                    return false;
+                }
+                match view_tags {
+                    Some(tags) => tags.iter().all(|(scope, label)| {
+                        entry.tags.iter().any(|(s, l)| s == scope && l == label)
+                    }),
+                    None => true,
+                }
+            })
+            .take(limit)
+            .map(|(id, entry)| {
+                (
+                    id.clone(),
+                    entry.node_type.clone(),
+                    entry.label.clone(),
+                    entry.tags.clone(),
+                    self.retracted.contains(id),
+                )
+            })
+            .collect()
+    }
+
+    /// Unified search filtered by retraction mode.
+    pub fn search_unified_mode(
+        &self,
+        query: &str,
+        mode: RetractionMode,
+        limit: usize,
+    ) -> Vec<UnifiedHit> {
+        let query_lower = query.to_lowercase();
+        let terms: Vec<&str> = query_lower.split_whitespace().collect();
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let mut hits: Vec<UnifiedHit> = Vec::new();
+        for (node_id, entry) in &self.unified {
+            if !self.passes_mode(node_id, mode) {
+                continue;
+            }
+            let text_lower = entry.text.to_lowercase();
+            let label_lower = entry.label.to_lowercase();
+            let mut score: f32 = 0.0;
+            let mut matched = false;
+            for term in &terms {
+                let text_count = text_lower.matches(term).count();
+                let label_count = label_lower.matches(term).count();
+                if text_count > 0 || label_count > 0 {
+                    matched = true;
+                    score += text_count as f32 + label_count as f32 * 3.0;
+                }
+            }
+            if matched {
+                hits.push(UnifiedHit {
+                    node_id: node_id.clone(),
+                    node_type: entry.node_type.clone(),
+                    label: entry.label.clone(),
+                    score,
+                    snippet: extract_snippet(&entry.text, &terms),
+                    match_contexts: extract_match_contexts(&entry.text, &terms, 3),
+                });
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(limit);
+        hits
+    }
+
+    /// Resolve a node's label under a retraction mode.
+    pub fn resolve_label_mode(&self, node_id: &str, mode: RetractionMode) -> Option<String> {
+        if !self.passes_mode(node_id, mode) {
+            return None;
+        }
+        self.unified.get(node_id).map(|e| e.label.clone())
     }
 }
 

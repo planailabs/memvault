@@ -1892,6 +1892,11 @@ impl LocalClient {
             return Ok((count, 0, 0));
         }
         tracing::info!("text index cache missing or stale, rebuilding from blockstore...");
+        // A full text-index rebuild invalidates the derived scope member-sets;
+        // drop them so they rebuild lazily against fresh state.
+        if let Err(e) = self.store.scope_clear_all() {
+            tracing::warn!("failed to clear scope member-sets on rebuild: {e}");
+        }
         let counts = self.populate_index().await?;
         let idx = self.index.read().await;
         if let Err(e) = idx.save(cache_path) {
@@ -2562,6 +2567,307 @@ impl LocalClient {
     /// Access the text index (for direct queries in local backend).
     pub fn index_ref(&self) -> &Arc<RwLock<TextIndex>> {
         &self.index
+    }
+
+    // ── Scoped indexes (scoped-indexes Phases 3/4) ─────────────────
+    //
+    // Listings/search are computed from the live TextIndex (the source of
+    // truth, which now retains retracted entries) filtered by the bucket set
+    // and view tags. The redb member-sets are maintained live as the
+    // persistent realization + O(1) count cache; queries don't depend on them
+    // for correctness.
+
+    /// Resolve a view name to `(view_cid_bytes, required_tags)`.
+    pub(crate) async fn resolve_view_coord(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Vec<u8>, Vec<(String, String)>)>> {
+        for v in self.list_views().await? {
+            if v.name == name {
+                let cid = hex::decode(&v.cid).unwrap_or_default();
+                return Ok(Some((cid, v.tags)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// All 32-byte bucket ids known to the store.
+    fn all_bucket_id_arrays(&self) -> std::collections::HashSet<[u8; 32]> {
+        self.store
+            .list_buckets()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, _)| id.try_into().ok())
+            .collect()
+    }
+
+    /// Resolve a `BucketSelector` to the effective explicit id set, intersected
+    /// with known buckets. `None` = no explicit restriction (all buckets).
+    fn effective_bucket_set(
+        &self,
+        sel: &memvault_core::BucketSelector,
+        known: &std::collections::HashSet<[u8; 32]>,
+    ) -> Option<std::collections::HashSet<[u8; 32]>> {
+        match sel {
+            memvault_core::BucketSelector::Accessible => None,
+            memvault_core::BucketSelector::Only(req) => {
+                Some(req.iter().map(|b| b.0).filter(|b| known.contains(b)).collect())
+            }
+        }
+    }
+
+    /// Whether a node passes the bucket filter given the known set and the
+    /// effective explicit set (`None` = all known buckets).
+    fn node_passes_bucket(
+        &self,
+        node_id: &str,
+        known: &std::collections::HashSet<[u8; 32]>,
+        eff: &Option<std::collections::HashSet<[u8; 32]>>,
+    ) -> bool {
+        if known.is_empty() {
+            return true; // pre-genesis: no bucket scoping yet
+        }
+        let arr: Option<[u8; 32]> = self
+            .inferred_bucket_for_node_id(node_id)
+            .and_then(|b| b.try_into().ok());
+        match (arr, eff) {
+            (Some(a), None) => known.contains(&a),
+            (Some(a), Some(set)) => set.contains(&a),
+            (None, _) => false,
+        }
+    }
+
+    /// Scoped listing: nodes matching the `(view, buckets, retracted)` triplet.
+    pub(crate) async fn scoped_list(
+        &self,
+        scope: &memvault_core::QueryScope,
+        limit: usize,
+    ) -> Result<Vec<crate::types::NodeSummary>> {
+        let view_tags = match &scope.view {
+            Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
+            None => None,
+        };
+        let known = self.all_bucket_id_arrays();
+        let eff = self.effective_bucket_set(&scope.buckets, &known);
+        if matches!(&eff, Some(s) if s.is_empty()) {
+            return Ok(Vec::new()); // explicit empty set → empty result
+        }
+
+        let fetch = if limit == usize::MAX {
+            usize::MAX
+        } else {
+            limit.saturating_mul(4).max(limit)
+        };
+        let rows = {
+            let idx = self.index.read().await;
+            idx.list_all_mode(view_tags.as_deref(), scope.retraction, fetch)
+        };
+        let mut out = Vec::new();
+        for (node_id, node_type, label, tags, retracted) in rows {
+            if !self.node_passes_bucket(&node_id, &known, &eff) {
+                continue;
+            }
+            out.push(crate::types::NodeSummary {
+                node_id,
+                node_type,
+                label,
+                tags,
+                retracted,
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Scoped unified search.
+    pub(crate) async fn scoped_search(
+        &self,
+        scope: &memvault_core::QueryScope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        let view_tags = match &scope.view {
+            Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
+            None => None,
+        };
+        let known = self.all_bucket_id_arrays();
+        let eff = self.effective_bucket_set(&scope.buckets, &known);
+        if matches!(&eff, Some(s) if s.is_empty()) {
+            return Ok(Vec::new());
+        }
+
+        let fetch = limit.saturating_mul(4).max(limit);
+        let (hits, view_set) = {
+            let idx = self.index.read().await;
+            let view_set: Option<std::collections::HashSet<String>> = view_tags
+                .as_ref()
+                .map(|t| idx.members_of_view_mode(t, scope.retraction).into_iter().collect());
+            let hits = idx.search_unified_mode(query, scope.retraction, fetch);
+            (hits, view_set)
+        };
+        let mut out = Vec::new();
+        for h in hits {
+            if let Some(set) = &view_set {
+                if !set.contains(&h.node_id) {
+                    continue;
+                }
+            }
+            if !self.node_passes_bucket(&h.node_id, &known, &eff) {
+                continue;
+            }
+            out.push(h);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Scoped active/retracted counts.
+    ///
+    /// For a view + explicit bucket set we use the materialized view×bucket
+    /// member-sets — lazily built on first call, then maintained live — so the
+    /// count is O(1) per bucket. All other shapes compute from the live index.
+    pub(crate) async fn scoped_count(
+        &self,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<crate::types::ScopeCount> {
+        if let (Some(view_name), memvault_core::BucketSelector::Only(bs)) =
+            (&scope.view, &scope.buckets)
+        {
+            if !bs.is_empty() {
+                if let Some((vcid, vtags)) = self.resolve_view_coord(view_name).await? {
+                    let known = self.all_bucket_id_arrays();
+                    let mut total = crate::types::ScopeCount::default();
+                    for b in bs {
+                        if !known.contains(&b.0) {
+                            continue; // not an accessible bucket
+                        }
+                        self.ensure_view_bucket_partition(&vcid, &vtags, b).await?;
+                        let sid = memvault_core::view_bucket_scope_id(&vcid, b);
+                        if let Some(reg) = self.store.scope_registry_get(&sid)? {
+                            total.active += reg.active_count;
+                            total.retracted += reg.retracted_count;
+                        }
+                    }
+                    return Ok(apply_retraction_mode(total, scope.retraction));
+                }
+            }
+        }
+
+        // Compute: one include-retracted pass, tally active vs retracted.
+        let counting = memvault_core::QueryScope {
+            view: scope.view.clone(),
+            buckets: scope.buckets.clone(),
+            retraction: memvault_core::RetractionMode::IncludeRetracted,
+        };
+        let rows = self.scoped_list(&counting, usize::MAX).await?;
+        let mut c = crate::types::ScopeCount::default();
+        for r in rows {
+            if r.retracted {
+                c.retracted += 1;
+            } else {
+                c.active += 1;
+            }
+        }
+        Ok(apply_retraction_mode(c, scope.retraction))
+    }
+
+    /// Lazily build + register a view×bucket member-set partition on first
+    /// access. No-op if already registered (thereafter maintained live by
+    /// [`sync_node_scopes`]).
+    pub(crate) async fn ensure_view_bucket_partition(
+        &self,
+        view_cid: &[u8],
+        view_tags: &[(String, String)],
+        bucket: &BucketId,
+    ) -> Result<()> {
+        let vbsid = memvault_core::view_bucket_scope_id(view_cid, bucket);
+        if self.store.scope_is_registered(&vbsid).unwrap_or(false) {
+            return Ok(());
+        }
+        let (members, retracted_set): (Vec<String>, std::collections::HashSet<String>) = {
+            let idx = self.index.read().await;
+            let all = idx
+                .members_of_view_mode(view_tags, memvault_core::RetractionMode::IncludeRetracted);
+            let retr = idx
+                .members_of_view_mode(view_tags, memvault_core::RetractionMode::RetractedOnly)
+                .into_iter()
+                .collect();
+            (all, retr)
+        };
+        for nid in members {
+            let nb: Option<[u8; 32]> = self
+                .inferred_bucket_for_node_id(&nid)
+                .and_then(|b| b.try_into().ok());
+            if nb == Some(bucket.0) {
+                let _ = self
+                    .store
+                    .scope_member_upsert(&vbsid, &nid, retracted_set.contains(&nid), 0);
+            }
+        }
+        self.store.scope_register(
+            &vbsid,
+            memvault_store::scope_members::ScopeKind::ViewBucket,
+            view_cid,
+            &bucket.0,
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Live member-set maintenance for a single node: refreshes its membership
+    /// in every already-registered view×bucket partition from the current
+    /// index state. Cheap (only touches built partitions) and best-effort.
+    pub(crate) async fn sync_node_scopes(&self, node_id: &str) {
+        let views = self.list_views().await.unwrap_or_default();
+        let views: Vec<(Vec<u8>, Vec<(String, String)>)> = views
+            .into_iter()
+            .map(|v| (hex::decode(&v.cid).unwrap_or_default(), v.tags))
+            .collect();
+        self.sync_node_scopes_with(node_id, &views).await;
+    }
+
+    /// As [`sync_node_scopes`] but with a precomputed view list (avoids a
+    /// `list_views` scan per node during bulk rebuilds).
+    pub(crate) async fn sync_node_scopes_with(
+        &self,
+        node_id: &str,
+        views: &[(Vec<u8>, Vec<(String, String)>)],
+    ) {
+        let (tags, retracted, exists) = {
+            let idx = self.index.read().await;
+            let exists = idx
+                .resolve_label_mode(node_id, memvault_core::RetractionMode::IncludeRetracted)
+                .is_some();
+            (idx.get_tags(node_id), idx.is_retracted(node_id), exists)
+        };
+        if !exists {
+            return;
+        }
+        let bucket: Option<[u8; 32]> = self
+            .inferred_bucket_for_node_id(node_id)
+            .and_then(|b| b.try_into().ok());
+        let Some(b) = bucket else {
+            return; // unbucketed node: not part of any view×bucket partition
+        };
+        for (vcid, vtags) in views {
+            let vbsid = memvault_core::view_bucket_scope_id(vcid, &BucketId(b));
+            if !self.store.scope_is_registered(&vbsid).unwrap_or(false) {
+                continue; // only maintain partitions that have been built (lazy)
+            }
+            let matches = vtags.is_empty()
+                || vtags
+                    .iter()
+                    .all(|(s, l)| tags.iter().any(|(ts, tl)| ts == s && tl == l));
+            if matches {
+                let _ = self.store.scope_member_upsert(&vbsid, node_id, retracted, 0);
+            } else {
+                let _ = self.store.scope_member_remove(&vbsid, node_id);
+            }
+        }
     }
 
     /// Access the quota manager.
@@ -3396,6 +3702,8 @@ impl MemvaultClient for LocalClient {
             let mut idx = self.index.write().await;
             idx.index_doc(doc.id.clone(), &doc.body, title.as_deref(), tags.clone());
         }
+        let doc_node_id = format!("doc:{}", hex::encode(doc.id.0));
+        self.sync_node_scopes(&doc_node_id).await;
 
         self.event_bus.publish(MemvaultEvent::DocCreated {
             doc_id: doc.id.clone(),
@@ -3636,6 +3944,8 @@ impl MemvaultClient for LocalClient {
                 tags.clone(),
             );
         }
+        let file_node_id = format!("file:{}", hex::encode(&manifest_cid_bytes));
+        self.sync_node_scopes(&file_node_id).await;
 
         self.event_bus.publish(MemvaultEvent::FileAttached {
             doc_id: DocId([0; 32]), // No doc association in new system
@@ -3780,6 +4090,8 @@ impl MemvaultClient for LocalClient {
             let mut idx = self.index.write().await;
             idx.index_entity(&entity_id, &entity.kind, &entity.props, tags.clone());
         }
+        let entity_node_id = format!("entity:{}", hex::encode(entity_id.0));
+        self.sync_node_scopes(&entity_node_id).await;
 
         self.event_bus.publish(MemvaultEvent::EntityCreated {
             entity_id: entity_id.clone(),
@@ -4137,6 +4449,32 @@ impl MemvaultClient for LocalClient {
             .collect())
     }
 
+    // -- Scoped reads (multi-bucket, member-set backed) --
+
+    async fn list_scoped(
+        &self,
+        scope: &memvault_core::QueryScope,
+        limit: usize,
+    ) -> Result<Vec<crate::types::NodeSummary>> {
+        LocalClient::scoped_list(self, scope, limit).await
+    }
+
+    async fn search_scoped(
+        &self,
+        scope: &memvault_core::QueryScope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        LocalClient::scoped_search(self, scope, query, limit).await
+    }
+
+    async fn count_scoped(
+        &self,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<crate::types::ScopeCount> {
+        LocalClient::scoped_count(self, scope).await
+    }
+
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
         self.resolve_label_ex(node_id, false).await
     }
@@ -4182,9 +4520,13 @@ impl MemvaultClient for LocalClient {
         )?;
         tracing::info!(node_id, reason, "node retracted");
 
-        // Remove from in-memory index.
-        let mut idx = self.index.write().await;
-        idx.retract_node(node_id);
+        // Flag retracted in the in-memory index (entry retained so it stays
+        // visible to admins/auditors under IncludeRetracted/RetractedOnly).
+        {
+            let mut idx = self.index.write().await;
+            idx.retract_node(node_id);
+        }
+        self.sync_node_scopes(node_id).await;
 
         Ok(())
     }
@@ -4240,16 +4582,22 @@ impl MemvaultClient for LocalClient {
 
     async fn add_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()> {
         self.store_tag_update(node_id, &tags, &[])?;
-        let mut idx = self.index.write().await;
-        idx.apply_tag_update(node_id, &tags, &[]);
+        {
+            let mut idx = self.index.write().await;
+            idx.apply_tag_update(node_id, &tags, &[]);
+        }
+        self.sync_node_scopes(node_id).await;
         tracing::debug!(node_id, tag_count = tags.len(), "tags added");
         Ok(())
     }
 
     async fn remove_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()> {
         self.store_tag_update(node_id, &[], &tags)?;
-        let mut idx = self.index.write().await;
-        idx.apply_tag_update(node_id, &[], &tags);
+        {
+            let mut idx = self.index.write().await;
+            idx.apply_tag_update(node_id, &[], &tags);
+        }
+        self.sync_node_scopes(node_id).await;
         tracing::debug!(node_id, tag_count = tags.len(), "tags removed");
         Ok(())
     }
@@ -4793,5 +5141,23 @@ impl MemvaultClient for LocalClient {
         name_hint: &str,
     ) -> Result<BucketId> {
         LocalClient::ensure_agent_bucket_for_pubkey(self, agent_pubkey, name_hint).await
+    }
+}
+
+/// Project an active/retracted count pair onto a retraction mode for reporting.
+fn apply_retraction_mode(
+    c: crate::types::ScopeCount,
+    mode: memvault_core::RetractionMode,
+) -> crate::types::ScopeCount {
+    match mode {
+        memvault_core::RetractionMode::ActiveOnly => crate::types::ScopeCount {
+            active: c.active,
+            retracted: 0,
+        },
+        memvault_core::RetractionMode::RetractedOnly => crate::types::ScopeCount {
+            active: 0,
+            retracted: c.retracted,
+        },
+        memvault_core::RetractionMode::IncludeRetracted => c,
     }
 }

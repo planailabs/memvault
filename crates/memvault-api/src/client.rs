@@ -3,14 +3,14 @@
 use async_trait::async_trait;
 use memvault_auth::TokenRole;
 use memvault_core::classification::Classification;
-use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, QueryScope, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
-use memvault_query::{AuditQuery, AuditRecord, SearchHit};
+use memvault_query::{AuditQuery, AuditRecord, SearchHit, UnifiedHit};
 
 use crate::error::Result;
 use crate::types::{
-    BucketInfo, DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, TokenStatus,
-    TraversalHit,
+    BucketInfo, DocSummary, GrantInfo, NodeStatus, NodeSummary, RotationInfo, ScopeCount,
+    ShareProposalInfo, TokenStatus, TraversalHit,
 };
 
 /// The complete memvault API surface.
@@ -196,6 +196,55 @@ pub trait MemvaultClient: Send + Sync {
     ) -> Result<Option<String>> {
         let _ = include_retracted;
         self.resolve_label(node_id).await
+    }
+
+    // -- Scoped reads (the (view, buckets, retracted) triplet) --
+    //
+    // These supersede the per-method `bucket` parameter + `*_ex` flag with a
+    // single `QueryScope`, and — unlike the legacy methods — can span a *set*
+    // of buckets in one call (an agent's accessible set). The default impls
+    // honour view + retraction via the legacy methods (single-/all-bucket);
+    // `LocalClient` overrides them with true multi-bucket member-set-backed
+    // behaviour. Handlers must intersect the scope's buckets with the caller's
+    // accessible set before calling — scope never widens visibility.
+
+    /// List nodes matching the scope. Returns node summaries (with retracted flag).
+    async fn list_scoped(&self, scope: &QueryScope, limit: usize) -> Result<Vec<NodeSummary>> {
+        let include = scope.retraction.includes_retracted();
+        let rows = self
+            .list_all_ex(scope.view.as_deref(), limit, include)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(node_id, node_type, label, tags)| NodeSummary {
+                node_id,
+                node_type,
+                label,
+                tags,
+                retracted: false,
+            })
+            .collect())
+    }
+
+    /// Unified search constrained to the scope.
+    async fn search_scoped(
+        &self,
+        scope: &QueryScope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<UnifiedHit>> {
+        self.search_unified_ex(query, limit, scope.retraction.includes_retracted())
+            .await
+    }
+
+    /// Active/retracted counts for the scope.
+    async fn count_scoped(&self, scope: &QueryScope) -> Result<ScopeCount> {
+        let rows = self.list_scoped(scope, usize::MAX).await?;
+        let retracted = rows.iter().filter(|r| r.retracted).count() as u64;
+        Ok(ScopeCount {
+            active: rows.len() as u64 - retracted,
+            retracted,
+        })
     }
 
     /// Resolve the legacy bucket (used only for adoption of pre-bucket data).
