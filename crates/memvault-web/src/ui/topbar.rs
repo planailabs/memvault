@@ -36,7 +36,13 @@ pub type ActiveBucketSignal = Signal<ActiveBucket>;
 /// Global "show retracted" toggle (top bar). When true, every UI read passes
 /// `include_retracted` so retracted entries are shown. Pages read this signal
 /// in their data-fetch closures so flipping it re-fetches.
-pub type ShowRetractedSignal = Signal<bool>;
+///
+/// A distinct newtype (not a bare `Signal<bool>`) so it doesn't collide with
+/// other `Signal<bool>` contexts (e.g. the command-palette open state) — Dioxus
+/// keys context by type.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ShowRetracted(pub bool);
+pub type ShowRetractedSignal = Signal<ShowRetracted>;
 
 /// Set the topbar title for the current page.
 pub fn use_topbar(title: &str) {
@@ -144,8 +150,8 @@ pub fn Topbar() -> Element {
                         title: "Include retracted entries in all lists, search, and detail views",
                         input {
                             r#type: "checkbox",
-                            checked: show_retracted(),
-                            onchange: move |e| show_retracted.set(e.checked()),
+                            checked: show_retracted().0,
+                            onchange: move |e| show_retracted.set(ShowRetracted(e.checked())),
                         }
                         "Retracted"
                     }

@@ -96,7 +96,7 @@ pub fn NoteList() -> Element {
     let notes = use_server_future(move || {
         let v = active_view.read().name.clone();
         let b = active_bucket.read().id.clone();
-        let r = *show_retracted.read();
+        let r = show_retracted().0;
         async move { list_notes(v, b, r).await }
     })?;
 

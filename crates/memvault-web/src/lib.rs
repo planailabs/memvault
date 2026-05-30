@@ -109,23 +109,19 @@ mod server_router {
     /// standalone, memctl daemon-mode). Headless / CLI consumers skip it.
     pub fn init_ui_agent(
         client: &memvault_api::LocalClient,
-        data_dir: &std::path::Path,
+        _data_dir: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Delegates to the canonical LocalClient enrollment helper.
-        // Web-specific work here is limited to picking the identity_dir
-        // and installing the resulting identity in the UI state cache.
-        let ui_identity_dir = data_dir.join("identity").join("ui_agent");
-        let ui_identity = memvault_api::agent_identity::enroll_local_agent(
+        // The `_ui` agent is the daemon's own web surface: an API admin
+        // (AgentRole::Admin — ACL-exempt, full access). Its signing key lives
+        // in the keystore (not redb, not an on-disk identity dir); the
+        // attestation lives on the sigchain. No data bucket (not a writer).
+        let ui_identity = memvault_api::agent_identity::enroll_local_agent_in_keystore(
             client,
             "_ui",
-            &ui_identity_dir,
-            memvault_auth::AgentRole::AgentHost,
-            // Daemon-managed identity — no expiry. `generate_local`
-            // saturates so this is treated as effectively never-expires.
+            memvault_auth::AgentRole::Admin,
+            // Daemon-managed identity — effectively never expires (saturates).
             u64::MAX,
         )?;
-        // The `_ui` agent is a read/admin surface, not a writer — it doesn't
-        // get its own bucket.
         super::ui::state::set_ui_agent_identity(Arc::new(ui_identity));
         Ok(())
     }

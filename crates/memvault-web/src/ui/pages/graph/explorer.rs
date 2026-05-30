@@ -536,7 +536,7 @@ pub fn GraphExplorer() -> Element {
     let nodes_res = use_server_future(move || {
         let v = active_view.read().name.clone();
         let b = active_bucket.read().id.clone();
-        let r = *show_retracted.read();
+        let r = show_retracted().0;
         async move { list_graph_nodes(v, b, r).await }
     })?;
 
@@ -875,7 +875,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                     selected.set(Some(click_id.clone()));
                                                     let nid = click_id.clone();
                                                     spawn(async move {
-                                                        if let Ok(d) = get_node_detail(nid, *show_retracted.read()).await {
+                                                        if let Ok(d) = get_node_detail(nid, show_retracted().0).await {
                                                             detail.set(Some(d));
                                                         }
                                                     });
@@ -1093,7 +1093,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                     selected.set(Some(click_id.clone()));
                                                     let nid = click_id.clone();
                                                     spawn(async move {
-                                                        if let Ok(d) = get_node_detail(nid, *show_retracted.read()).await {
+                                                        if let Ok(d) = get_node_detail(nid, show_retracted().0).await {
                                                             detail.set(Some(d));
                                                         }
                                                     });
@@ -1110,7 +1110,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 move |_| {
                                                     let eid = eid.clone();
                                                     spawn(async move {
-                                                        if let Ok(neighbors) = expand_node(eid, *show_retracted.read()).await {
+                                                        if let Ok(neighbors) = expand_node(eid, show_retracted().0).await {
                                                             let mut s = sim.write();
                                                             for neighbor in &neighbors {
                                                                 s.add_node(neighbor.id.clone(), neighbor.kind.clone(), neighbor.label.clone());

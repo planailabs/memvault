@@ -237,7 +237,7 @@ pub fn NoteDetail(id: String) -> Element {
     let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let note = use_server_future(move || {
         let id = id.clone();
-        let r = *show_retracted.read();
+        let r = show_retracted().0;
         async move { get_note(id, r).await }
     })?;
 

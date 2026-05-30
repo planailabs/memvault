@@ -83,7 +83,7 @@ pub fn EntityDetail(id: ReadSignal<String>) -> Element {
     let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let entity = use_server_future(move || {
         let id = id.read().clone();
-        let r = *show_retracted.read();
+        let r = show_retracted().0;
         async move { get_entity_detail(id, r).await }
     })?;
 

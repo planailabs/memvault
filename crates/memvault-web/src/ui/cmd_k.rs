@@ -135,7 +135,7 @@ pub fn CommandPalette() -> Element {
             results.set(Vec::new());
             return;
         }
-        let sr = *show_retracted.read();
+        let sr = show_retracted().0;
         searching.set(true);
         spawn(async move {
             if let Ok(r) = palette_search(q, sr).await {
@@ -157,7 +157,7 @@ pub fn CommandPalette() -> Element {
             return;
         }
 
-        let sr = *show_retracted.read();
+        let sr = show_retracted().0;
         spawn(async move {
             // Wait 500ms, then check if this is still the latest keystroke.
             #[cfg(target_arch = "wasm32")]

@@ -281,6 +281,70 @@ pub fn enroll_local_agent(
     Ok(identity)
 }
 
+/// Like [`enroll_local_agent`], but the agent's signing key is persisted in the
+/// **keystore** (under `agentsk:<agent_id>`) instead of an on-disk identity
+/// directory. Nothing is written to disk or redb. Used for daemon-managed
+/// identities such as the web UI's `_ui` agent. Idempotent: reuses the stored
+/// key across restarts and re-publishes (idempotently) its attestation.
+pub fn enroll_local_agent_in_keystore(
+    client: &crate::LocalClient,
+    agent_id: &str,
+    role: AgentRole,
+    ttl_ns: u64,
+) -> Result<AgentIdentity> {
+    use ed25519_dalek::SigningKey;
+
+    let node_signing_key = client
+        .node_signing_key()
+        .ok_or_else(|| {
+            ApiError::Other(
+                "enroll_local_agent_in_keystore: node signing key not set on LocalClient".into(),
+            )
+        })?
+        .clone();
+
+    let keystore = client.keystore();
+    let ks_key = format!("agentsk:{agent_id}").into_bytes();
+
+    // Load the signing key from the keystore, or generate + persist a new one.
+    let signing_key = match keystore.get(&ks_key) {
+        Some(bytes) if bytes.len() == 32 => {
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&bytes);
+            SigningKey::from_bytes(&seed)
+        }
+        _ => {
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+            keystore
+                .put(&ks_key, &seed)
+                .map_err(|e| ApiError::Other(format!("keystore put agent key: {e}")))?;
+            SigningKey::from_bytes(&seed)
+        }
+    };
+    let verifying_key = signing_key.verifying_key();
+
+    // Mint + publish the attestation (idempotent on CID).
+    let now_ns = memvault_core::time::wall_ns();
+    let attestation = memvault_auth::sign_agent_attestation(
+        &node_signing_key,
+        AgentId(agent_id.to_string()),
+        verifying_key.to_bytes(),
+        role,
+        now_ns.saturating_add(ttl_ns),
+    )
+    .map_err(|e| ApiError::Other(format!("sign agent attestation: {e}")))?;
+    let attestation_cid = crate::sigchain::publish_agent_attestation(client, &attestation)
+        .map_err(|e| ApiError::Other(format!("publish agent attestation: {e}")))?;
+    client.set_agent_attestation_cid(attestation_cid);
+
+    Ok(AgentIdentity {
+        agent_id: AgentId(agent_id.to_string()),
+        signing_key,
+        verifying_key,
+    })
+}
+
 /// Persist the agent's private key. That's the entire on-disk identity
 /// now — `agent_id` derives from the parent directory's basename and
 /// the attestation lives on the sigchain.

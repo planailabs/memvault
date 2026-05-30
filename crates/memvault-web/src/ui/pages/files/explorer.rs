@@ -130,7 +130,7 @@ pub fn FileExplorer() -> Element {
     let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let files = use_server_future(move || {
         let v = active_view.read().name.clone();
-        let r = *show_retracted.read();
+        let r = show_retracted().0;
         async move { list_files(v, r).await }
     })?;
     let mut grid_view = use_signal(|| false);

@@ -137,7 +137,7 @@ pub fn SearchPage() -> Element {
             results.set(None);
             return;
         }
-        let r = *show_retracted.read();
+        let r = show_retracted().0;
         searching.set(true);
         spawn(async move {
             match search_docs(q, 50, r).await {
