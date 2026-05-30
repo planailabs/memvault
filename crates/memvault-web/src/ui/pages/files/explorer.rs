@@ -46,55 +46,36 @@ async fn list_files(
 ) -> Result<Vec<FileRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
-    // Active bucket → restrict to attachment node-ids in that bucket. Files
-    // (attachments) have no dedicated bucket-scoped query, so we derive the
-    // in-bucket file set from the bucket's node list.
-    let bucket_files: Option<std::collections::HashSet<String>> = match bucket_hex.as_deref() {
-        Some(_) => {
-            let items = client
-                .list_all_ex(None, 5000, show_retracted)
-                .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
-            Some(
-                items
-                    .into_iter()
-                    .filter(|(_, nt, _, _)| nt == "file" || nt == "attachment")
-                    .filter_map(|(id, _, _, _)| {
-                        id.strip_prefix("file:")
-                            .or_else(|| id.strip_prefix("attachment:"))
-                            .map(|s| s.to_string())
-                    })
-                    .collect(),
-            )
-        }
-        None => None,
-    };
-
-    // If a view is active, use list_all filtered to files.
-    if let Some(ref view_name) = view {
-        let items = client
-            .list_all_ex(Some(view_name), 500, show_retracted)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-        return Ok(items
-            .into_iter()
-            .filter(|(_, node_type, _, _)| node_type == "file" || node_type == "attachment")
-            .map(|(id, _, label, _)| FileRow {
-                cid: id,
-                filename: label,
-                mime_type: "".to_string(),
-                size: 0,
-                wall_ns: 0,
-            })
-            .collect());
-    }
+    // Authoritative scoped file set: the (view, bucket, retracted) triplet is
+    // resolved server-side by `list_scoped` (which combines view ∩ bucket ∩
+    // retraction — the per-bucket inferred-bucket filter the old per-page logic
+    // got wrong). We then enrich + time-order via the audit log below.
+    let scope = crate::ui::state::query_scope(
+        view,
+        bucket_hex.into_iter().collect(),
+        show_retracted,
+    );
+    let scoped_files: std::collections::HashSet<String> = client
+        .list_scoped(&scope, 5000)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_iter()
+        .filter(|n| n.node_type == "file" || n.node_type == "attachment")
+        .filter_map(|n| {
+            n.node_id
+                .strip_prefix("file:")
+                .or_else(|| n.node_id.strip_prefix("attachment:"))
+                .map(|s| s.to_string())
+        })
+        .collect();
 
     use memvault_query::AuditQuery;
 
-    // Query audit log for AttachFile operations to discover files.
+    // Query audit log for AttachFile operations to discover files (gives us
+    // wall_ns + manifest metadata), filtered to the scoped set.
     let query = AuditQuery {
         op_kind: Some(memvault_query::OpKind::AttachFile),
-        limit: Some(500),
+        limit: Some(5000),
         ..Default::default()
     };
     let records = client
@@ -103,16 +84,18 @@ async fn list_files(
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut files = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for record in records {
         let manifest_cid = match &record.attachment_cid {
             Some(cid) => cid.clone(),
             None => continue,
         };
         let cid_hex = hex::encode(&manifest_cid);
-        if let Some(ref bf) = bucket_files {
-            if !bf.contains(&cid_hex) {
-                continue;
-            }
+        if !scoped_files.contains(&cid_hex) {
+            continue;
+        }
+        if !seen.insert(cid_hex.clone()) {
+            continue;
         }
         // Read manifest block (always exists after repair-index). The
         // block is DAG-CBOR, not JSON — use the canonical helper so

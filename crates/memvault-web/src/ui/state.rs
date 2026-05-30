@@ -104,6 +104,43 @@ mod inner {
         let _ = LOCAL_CLIENT.set(Arc::clone(&client));
         Ok(client as Arc<dyn MemvaultClient>)
     }
+
+    /// Build a `QueryScope` from the top-bar filter trio. The bucket selection
+    /// is a *set* (`buckets`), so the web layer is multi-bucket-capable; a
+    /// single-bucket top-bar passes a one-element vec, and an empty vec / `None`
+    /// means all accessible buckets.
+    pub fn query_scope(
+        view: Option<String>,
+        buckets_hex: Vec<String>,
+        show_retracted: bool,
+    ) -> memvault_core::QueryScope {
+        use memvault_core::{BucketId, BucketSelector, QueryScope, RetractionMode};
+
+        let parse = |h: &str| -> Option<BucketId> {
+            let bytes = hex::decode(h).ok()?;
+            if bytes.len() != 32 {
+                return None;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Some(BucketId(arr))
+        };
+        let ids: Vec<BucketId> = buckets_hex.iter().filter_map(|h| parse(h)).collect();
+        let buckets = if ids.is_empty() {
+            BucketSelector::Accessible
+        } else {
+            BucketSelector::Only(ids)
+        };
+        QueryScope {
+            view,
+            buckets,
+            retraction: if show_retracted {
+                RetractionMode::IncludeRetracted
+            } else {
+                RetractionMode::ActiveOnly
+            },
+        }
+    }
 }
 
 #[cfg(feature = "server")]

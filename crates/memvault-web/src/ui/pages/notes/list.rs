@@ -49,19 +49,26 @@ async fn list_notes(
         Some(memvault_core::BucketId(arr))
     });
 
-    // If a view is active, use list_all (view-filtered) and filter to docs only.
-    if let Some(ref view_name) = view {
+    // If a view is active, scope by (view ∩ bucket ∩ retracted) via list_scoped
+    // — the old view path ignored the active bucket entirely. (Doc-only rows
+    // carry no attachment count / mtime here, as before.)
+    if view.is_some() {
+        let scope = crate::ui::state::query_scope(
+            view,
+            bucket_hex.into_iter().collect(),
+            show_retracted,
+        );
         let items = client
-            .list_all_ex(Some(view_name), 500, show_retracted)
+            .list_scoped(&scope, 500)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         return Ok(items
             .into_iter()
-            .filter(|(_, node_type, _, _)| node_type == "doc")
-            .map(|(id, _, label, tags)| NoteRow {
-                id,
-                title: label,
-                tags,
+            .filter(|n| n.node_type == "doc")
+            .map(|n| NoteRow {
+                id: n.node_id,
+                title: n.label,
+                tags: n.tags,
                 visibility: "internal".to_string(),
                 attachment_count: 0,
                 updated_ns: 0,
