@@ -3415,7 +3415,21 @@ impl LocalClient {
 
     fn inferred_bucket_for_node_id(&self, node_id: &str) -> Option<Vec<u8>> {
         if let Some(node) = NodeRef::from_tag_label(node_id) {
-            return self.inferred_node_bucket(&node);
+            if let Some(bucket) = self.inferred_node_bucket(&node) {
+                return Some(bucket);
+            }
+            // Document extraction annotations are keyed by the head op CID
+            // (`doc:<cid>`) rather than the stable DocId, so `NodeRef`
+            // parsing alone cannot find their bucket. Fall through and try
+            // the hex suffix as an envelope CID before treating it as
+            // unbucketed legacy data.
+        }
+        if let Some(hex_part) = node_id.strip_prefix("doc:") {
+            let cid = hex::decode(hex_part).ok()?;
+            if let Ok(Some(data)) = self.store.get_block(&cid) {
+                return Self::bucket_id_from_envelope_bytes(&data);
+            }
+            return None;
         }
         if let Some(hex_part) = node_id.strip_prefix("file:") {
             let cid = hex::decode(hex_part).ok()?;
