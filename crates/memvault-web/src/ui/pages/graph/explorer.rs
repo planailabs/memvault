@@ -77,11 +77,19 @@ async fn list_graph_nodes(
     // If a view is active, get all nodes matching the view.
     if let Some(ref view_name) = view {
         let items = client
-            .list_all_ex(Some(view_name), 200, show_retracted)
+            .list_scoped(
+                &memvault_core::QueryScope::all()
+                    .with_view(Some(view_name.to_string()))
+                    .with_include_retracted(show_retracted),
+                200,
+            )
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         let mut nodes = Vec::new();
-        for (id, node_type, label, _tags) in &items {
+        for item in &items {
+            let id = &item.node_id;
+            let node_type = &item.node_type;
+            let label = &item.label;
             // Skip vfs:dir entities from graph view.
             if node_type == "entity" {
                 if let Some(memvault_core::NodeRef::Entity(eid)) =

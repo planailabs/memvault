@@ -25,7 +25,11 @@ async fn palette_search(
 
     // Unified search across docs, entities, and attachments.
     let hits = client
-        .search_unified_ex(&query, 15, show_retracted)
+        .search_scoped(
+            &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+            &query,
+            15,
+        )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 

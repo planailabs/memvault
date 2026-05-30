@@ -4565,18 +4565,9 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        self.search_ex(query, limit, false).await
-    }
-
-    async fn search_ex(
-        &self,
-        query: &str,
-        limit: usize,
-        include_retracted: bool,
-    ) -> Result<Vec<SearchHit>> {
         self.flush_index().await;
         let idx = self.index.read().await;
-        let mode = RetractionMode::from_include_flag(include_retracted);
+        let mode = RetractionMode::ActiveOnly;
         let hits: Vec<SearchHit> = idx
             .search_unified_mode(query, mode, limit * 2)
             .into_iter()
@@ -4623,18 +4614,9 @@ impl MemvaultClient for LocalClient {
         query: &str,
         limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
-        self.search_unified_ex(query, limit, false).await
-    }
-
-    async fn search_unified_ex(
-        &self,
-        query: &str,
-        limit: usize,
-        include_retracted: bool,
-    ) -> Result<Vec<memvault_query::UnifiedHit>> {
         self.flush_index().await;
         let idx = self.index.read().await;
-        let mode = RetractionMode::from_include_flag(include_retracted);
+        let mode = RetractionMode::ActiveOnly;
         let hits = idx.search_unified_mode(query, mode, limit * 2);
         drop(idx);
 
@@ -4658,21 +4640,13 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
-        self.view_members_ex(view_name, false).await
-    }
-
-    async fn view_members_ex(
-        &self,
-        view_name: &str,
-        include_retracted: bool,
-    ) -> Result<Vec<String>> {
         let view = self
             .get_view(view_name)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("view '{view_name}' not found")))?;
         self.flush_index().await;
         let idx = self.index.read().await;
-        let mode = RetractionMode::from_include_flag(include_retracted);
+        let mode = RetractionMode::ActiveOnly;
         Ok(idx.members_of_view_mode(&view.tags, mode))
     }
 
@@ -4680,15 +4654,6 @@ impl MemvaultClient for LocalClient {
         &self,
         view_name: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
-        self.list_all_ex(view_name, limit, false).await
-    }
-
-    async fn list_all_ex(
-        &self,
-        view_name: Option<&str>,
-        limit: usize,
-        include_retracted: bool,
     ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
         let view_tags = if let Some(name) = view_name {
             let view = self
@@ -4701,7 +4666,7 @@ impl MemvaultClient for LocalClient {
         };
         self.flush_index().await;
         let idx = self.index.read().await;
-        let mode = RetractionMode::from_include_flag(include_retracted);
+        let mode = RetractionMode::ActiveOnly;
         let all: Vec<(String, String, String, Vec<(String, String)>)> = idx
             .list_all_mode(view_tags.as_deref(), mode, limit * 2)
             .into_iter()

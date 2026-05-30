@@ -211,16 +211,21 @@ pub async fn list_nodes(
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let items = state
         .client
-        .list_all_ex(params.view.as_deref(), limit, include_retracted)
+        .list_scoped(
+            &memvault_core::QueryScope::all()
+                .with_view(params.view.clone())
+                .with_include_retracted(include_retracted),
+            limit,
+        )
         .await?;
-    let items = crate::api::auth::filter_readable(&auth.claims, items, |(id, _, _, _)| id.clone())?;
+    let items = crate::api::auth::filter_readable(&auth.claims, items, |n| n.node_id.clone())?;
     Ok(Json(serde_json::json!({
         "count": items.len(),
-        "nodes": items.iter().map(|(id, nt, label, tags)| serde_json::json!({
-            "node_id": id,
-            "node_type": nt,
-            "label": label,
-            "tags": tags,
+        "nodes": items.iter().map(|n| serde_json::json!({
+            "node_id": n.node_id,
+            "node_type": n.node_type,
+            "label": n.label,
+            "tags": n.tags,
         })).collect::<Vec<_>>(),
     })))
 }

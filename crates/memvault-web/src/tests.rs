@@ -267,10 +267,21 @@ impl MemvaultClient for MockClient {
 
     async fn search_unified(
         &self,
-        _query: &str,
+        query: &str,
         _limit: usize,
     ) -> memvault_api::Result<Vec<memvault_query::UnifiedHit>> {
-        Ok(vec![])
+        if query == "hello" {
+            Ok(vec![memvault_query::UnifiedHit {
+                node_id: format!("doc:{}", hex::encode(DocId::random().0)),
+                node_type: "doc".into(),
+                label: "hello world".into(),
+                score: 1.0,
+                snippet: "hello world".into(),
+                match_contexts: vec![],
+            }])
+        } else {
+            Ok(vec![])
+        }
     }
 
     async fn resolve_label(&self, _node_id: &str) -> memvault_api::Result<Option<String>> {

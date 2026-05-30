@@ -139,8 +139,16 @@ pub async fn view_members(
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let members = state
         .client
-        .view_members_ex(&name, include_retracted)
-        .await?;
+        .list_scoped(
+            &memvault_core::QueryScope::all()
+                .with_view(Some(name.clone()))
+                .with_include_retracted(include_retracted),
+            usize::MAX,
+        )
+        .await?
+        .into_iter()
+        .map(|n| n.node_id)
+        .collect::<Vec<String>>();
     let members = crate::api::auth::filter_readable(&auth.claims, members, |m| m.clone())?;
     Ok(Json(
         serde_json::json!({ "view": name, "count": members.len(), "members": members }),

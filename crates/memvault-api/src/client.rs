@@ -142,41 +142,6 @@ pub trait MemvaultClient: Send + Sync {
         let _ = include_retracted;
         self.list_entities(limit, bucket).await
     }
-    async fn search_ex(
-        &self,
-        query: &str,
-        limit: usize,
-        include_retracted: bool,
-    ) -> Result<Vec<SearchHit>> {
-        let _ = include_retracted;
-        self.search(query, limit).await
-    }
-    async fn search_unified_ex(
-        &self,
-        query: &str,
-        limit: usize,
-        include_retracted: bool,
-    ) -> Result<Vec<memvault_query::UnifiedHit>> {
-        let _ = include_retracted;
-        self.search_unified(query, limit).await
-    }
-    async fn list_all_ex(
-        &self,
-        view_name: Option<&str>,
-        limit: usize,
-        include_retracted: bool,
-    ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
-        let _ = include_retracted;
-        self.list_all(view_name, limit).await
-    }
-    async fn view_members_ex(
-        &self,
-        view_name: &str,
-        include_retracted: bool,
-    ) -> Result<Vec<String>> {
-        let _ = include_retracted;
-        self.view_members(view_name).await
-    }
 
     // -- Scoped reads (the (view, buckets, retracted) triplet) --
     //
@@ -190,10 +155,7 @@ pub trait MemvaultClient: Send + Sync {
 
     /// List nodes matching the scope. Returns node summaries (with retracted flag).
     async fn list_scoped(&self, scope: &QueryScope, limit: usize) -> Result<Vec<NodeSummary>> {
-        let include = scope.retraction.includes_retracted();
-        let rows = self
-            .list_all_ex(scope.view.as_deref(), limit, include)
-            .await?;
+        let rows = self.list_all(scope.view.as_deref(), limit).await?;
         Ok(rows
             .into_iter()
             .map(|(node_id, node_type, label, tags)| NodeSummary {
@@ -209,12 +171,11 @@ pub trait MemvaultClient: Send + Sync {
     /// Unified search constrained to the scope.
     async fn search_scoped(
         &self,
-        scope: &QueryScope,
+        _scope: &QueryScope,
         query: &str,
         limit: usize,
     ) -> Result<Vec<UnifiedHit>> {
-        self.search_unified_ex(query, limit, scope.retraction.includes_retracted())
-            .await
+        self.search_unified(query, limit).await
     }
 
     /// Active/retracted counts for the scope.

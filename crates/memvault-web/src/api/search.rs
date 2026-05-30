@@ -33,13 +33,22 @@ pub async fn search(
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let hits = state
         .client
-        .search_ex(&params.q, limit, include_retracted)
+        .search_scoped(
+            &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
+            &params.q,
+            limit,
+        )
         .await?;
 
     let results: Vec<SearchHitResponse> = hits
         .into_iter()
+        .filter(|h| h.node_type == "doc")
         .map(|h| SearchHitResponse {
-            doc_id: hex::encode(h.doc_id.0),
+            doc_id: h
+                .node_id
+                .strip_prefix("doc:")
+                .unwrap_or(&h.node_id)
+                .to_string(),
             score: h.score,
             snippet: h.snippet,
         })

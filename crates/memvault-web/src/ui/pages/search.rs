@@ -28,16 +28,32 @@ async fn search_docs(
     let client = crate::ui::state::client()?;
     let q_lower = query.to_lowercase();
     let hits = client
-        .search_ex(&query, limit, show_retracted)
+        .search_scoped(
+            &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+            &query,
+            limit,
+        )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut results = Vec::new();
     for h in hits {
-        let doc_id = hex::encode(h.doc_id.0);
+        if h.node_type != "doc" {
+            continue;
+        }
+        let hex_str = h.node_id.strip_prefix("doc:").unwrap_or(&h.node_id);
+        let doc_id = hex_str.to_string();
+        let doc_id_typed = match hex::decode(hex_str) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                memvault_core::DocId(arr)
+            }
+            _ => continue,
+        };
 
         // Fetch title from the document.
-        let title = if let Ok(Some(doc)) = client.get_doc_scoped(&h.doc_id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
+        let title = if let Ok(Some(doc)) = client.get_doc_scoped(&doc_id_typed, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
             doc.frontmatter
                 .get("title")
                 .and_then(|v| v.as_str())
