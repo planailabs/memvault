@@ -2,7 +2,7 @@
 
 use memvault_api::MemvaultClient;
 use memvault_auth::share::*;
-use memvault_auth::{Action, Role};
+use memvault_auth::Action;
 use memvault_core::{BucketId, ClusterId, PeerId};
 
 use crate::harness::TestNode;

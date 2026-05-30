@@ -48,6 +48,12 @@ pub fn check_bucket_access(
             ))
         })?;
 
+    // API admin is ACL-exempt: an `AgentRole::Admin` agent bypasses
+    // bucket/grant checks entirely.
+    if attestation.role == memvault_auth::AgentRole::Admin {
+        return Ok(());
+    }
+
     // Resolve the bucket's owner pubkey once: it gates owner-bypass and
     // the owner/attesting-node grant authorities below.
     let (owner_agent_pubkey, owner_node_pubkey) = match client.bucket_info_sync(bucket_id) {

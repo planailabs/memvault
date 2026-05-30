@@ -14,7 +14,7 @@ use tempfile::tempdir;
 use memvault_api::MemvaultClient;
 use memvault_api::agent_identity::AgentIdentity;
 use memvault_api::sigchain;
-use memvault_auth::{Role, decode_token_string};
+use memvault_auth::{AgentRole, TokenRole, decode_token_string};
 use memvault_core::{DocId, Visibility};
 use memvault_doc::Document;
 
@@ -74,13 +74,13 @@ async fn enroll_agent_then_write_and_verify_authorship() {
 
     // ── 2. Issue a join token (the `memctl token-issue` path) ──────
     let token_str = client_arc
-        .issue_token(Role::AgentHost, 3600, 1, Some("test-agent".into()))
+        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, Some("test-agent".into()))
         .await
         .unwrap();
     assert!(token_str.starts_with("mvjoin1:"));
 
     let token = decode_token_string(&token_str).expect("decode token");
-    assert_eq!(token.role, Role::AgentHost);
+    assert_eq!(token.role, TokenRole::Agent(AgentRole::AgentHost));
     assert_eq!(token.cluster_id.0, node.cluster_id.0);
     // Token should carry the AdminGenesis (so a joining peer can pin).
     assert!(
@@ -95,11 +95,11 @@ async fn enroll_agent_then_write_and_verify_authorship() {
         "test-agent",
         &node.cluster_id,
         &node_sk,
-        Role::AgentHost,
+        AgentRole::AgentHost,
         365 * 24 * 60 * 60 * 1_000_000_000,
     )
     .expect("generate agent identity");
-    assert_eq!(attestation.role, Role::AgentHost);
+    assert_eq!(attestation.role, AgentRole::AgentHost);
     assert_eq!(
         attestation.node_pubkey,
         node_sk.verifying_key().to_bytes(),

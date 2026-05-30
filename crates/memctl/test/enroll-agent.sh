@@ -36,7 +36,7 @@ echo ""
 echo "Step 1/4: Issue a join token..."
 TOKEN=$(MEMVAULT_DATA_DIR="$NODE_DIR" MEMVAULT_DB="$NODE_DIR/blocks.redb" \
     cargo run -q -p memctl --features daemon -- \
-        token issue --role agent-host --label "$AGENT_ID" --ttl 86400 \
+        token issue --agent-role agent-host --label "$AGENT_ID" --ttl 86400 \
     | tail -n1)
 if [[ "$TOKEN" != mvjoin1:* ]]; then
     echo "ERROR: token issue did not return an mvjoin1: token."

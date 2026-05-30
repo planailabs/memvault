@@ -10,8 +10,8 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use memvault_api::{EventBus, MemvaultClient, NodeStatus, RotationInfo, TokenStatus, TraversalHit};
-use memvault_auth::Role;
 use memvault_auth::node_attestation::{AttestationOrigin, NodeAttestation};
+use memvault_auth::{AgentRole, TokenRole};
 use memvault_core::{ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
@@ -36,7 +36,6 @@ fn test_node_attestation(admin: &SigningKey, node: &SigningKey) -> NodeAttestati
     let mut att = NodeAttestation {
         cluster_id: ClusterId([0u8; 32]),
         member: PeerId(node.verifying_key().as_bytes().to_vec()),
-        role: Role::Node,
         not_after_ns: u64::MAX,
         issued_via: AttestationOrigin::Direct,
         signature: [0u8; 64],
@@ -71,7 +70,7 @@ fn test_jwt() -> String {
         &node,
         memvault_core::AgentId("test-agent".to_string()),
         agent.verifying_key().to_bytes(),
-        Role::AgentHost,
+        AgentRole::AgentHost,
         u64::MAX,
     )
     .unwrap();
@@ -338,11 +337,10 @@ impl MemvaultClient for MockClient {
 
     async fn issue_token_ex(
         &self,
-        _role: Role,
+        _role: TokenRole,
         _ttl_secs: u64,
         _max_uses: u32,
         _label: Option<String>,
-        _admit_as_admin: bool,
         _issuer_addrs: Vec<String>,
     ) -> memvault_api::Result<String> {
         Ok("token-abc123".into())
@@ -469,7 +467,7 @@ fn test_agent_attestation() -> memvault_auth::AgentAttestation {
         &node,
         memvault_core::AgentId("test-agent".to_string()),
         agent.verifying_key().to_bytes(),
-        Role::AgentHost,
+        AgentRole::AgentHost,
         u64::MAX,
     )
     .expect("sign_agent_attestation")

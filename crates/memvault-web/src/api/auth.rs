@@ -197,7 +197,7 @@ impl FromRequestParts<Arc<AppState>> for RequireAuth {
 pub fn caller_role(
     state: &Arc<AppState>,
     claims: &AgentTokenClaims,
-) -> Option<memvault_auth::Role> {
+) -> Option<memvault_auth::AgentRole> {
     let decoded = hex::decode(&claims.sub).ok()?;
     let sub: [u8; 32] = decoded.try_into().ok()?;
     let att = if let Some(lookup) = &state.agent_attestation_lookup {
@@ -217,7 +217,7 @@ pub fn caller_role(
 pub fn caller_sees_retracted(state: &Arc<AppState>, claims: &AgentTokenClaims) -> bool {
     matches!(
         caller_role(state, claims),
-        Some(memvault_auth::Role::Auditor) | Some(memvault_auth::Role::Admin)
+        Some(memvault_auth::AgentRole::Auditor) | Some(memvault_auth::AgentRole::Admin)
     )
 }
 

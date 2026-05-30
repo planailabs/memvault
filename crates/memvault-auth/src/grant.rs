@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 use crate::error::{AuthError, Result};
-use crate::role::Role;
+use crate::role::AgentRole;
 
 /// Who the grant is addressed to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +13,8 @@ pub enum GrantAudience {
     Cluster(ClusterId),
     Peer(PeerId),
     Agent(AgentId),
-    Role(Role),
+    /// An agent role — matched against the agent's `AgentAttestation.role`.
+    Role(AgentRole),
 }
 
 /// Actions that can be granted.

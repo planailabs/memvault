@@ -147,7 +147,7 @@ async fn two_node_independent_workflow() {
     let token = node_a
         .client
         .issue_token(
-            memvault_auth::Role::AgentHost,
+            memvault_auth::TokenRole::Agent(memvault_auth::AgentRole::AgentHost),
             3600,
             5,
             Some("shared".into()),

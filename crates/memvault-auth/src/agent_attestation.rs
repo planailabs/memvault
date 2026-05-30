@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 use crate::error::{AuthError, Result};
-use crate::role::Role;
+use crate::role::AgentRole;
 
 /// Proves an agent (`agent_pubkey`, `agent_id`) is trusted by a node
 /// (`node_pubkey`). Signed by the node's ed25519 private key.
@@ -34,7 +34,7 @@ pub struct AgentAttestation {
     /// Ed25519 public key the agent will sign JWTs with.
     pub agent_pubkey: [u8; 32],
     /// What the agent is allowed to do (Admin / AgentHost / Auditor / Service).
-    pub role: Role,
+    pub role: AgentRole,
     /// Unix nanoseconds after which this attestation is invalid.
     pub not_after_ns: u64,
     /// Ed25519 signature over [`AgentAttestation::signing_bytes`] using the
@@ -49,7 +49,7 @@ struct AgentAttestationSigningPayload<'a> {
     node_pubkey: &'a [u8; 32],
     agent_id: &'a AgentId,
     agent_pubkey: &'a [u8; 32],
-    role: &'a Role,
+    role: &'a AgentRole,
     not_after_ns: u64,
 }
 
@@ -95,7 +95,7 @@ pub fn sign_agent_attestation(
     node_key: &SigningKey,
     agent_id: AgentId,
     agent_pubkey: [u8; 32],
-    role: Role,
+    role: AgentRole,
     not_after_ns: u64,
 ) -> Result<AgentAttestation> {
     let mut att = AgentAttestation {
@@ -130,7 +130,7 @@ mod tests {
             &node,
             AgentId("alice".to_string()),
             agent.verifying_key().to_bytes(),
-            Role::AgentHost,
+            AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();
@@ -146,12 +146,12 @@ mod tests {
             &node,
             AgentId("alice".to_string()),
             agent.verifying_key().to_bytes(),
-            Role::AgentHost,
+            AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();
         // Elevate role without re-signing.
-        att.role = Role::Admin;
+        att.role = AgentRole::Admin;
         assert!(att.verify_signature().is_err());
     }
 
@@ -164,7 +164,7 @@ mod tests {
             &node,
             AgentId("alice".to_string()),
             agent.verifying_key().to_bytes(),
-            Role::AgentHost,
+            AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();

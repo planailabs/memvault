@@ -1,7 +1,7 @@
 //! The MemvaultClient trait — the full API surface.
 
 use async_trait::async_trait;
-use memvault_auth::Role;
+use memvault_auth::TokenRole;
 use memvault_core::classification::Classification;
 use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
@@ -211,28 +211,26 @@ pub trait MemvaultClient: Send + Sync {
     async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()>;
 
     // -- Tokens --
-    /// Issue a join token, optionally also admitting the redeeming node as a
-    /// co-equal cluster admin (`admit_as_admin`). The joiner must present an
-    /// admin key + POP at join for the admission to be minted.
+    /// Issue a join token. A `TokenRole::Node(NodeRole::Admin)` token also
+    /// permits admin-key admission at join (the joiner must present a valid
+    /// POP for the admission to mint).
     async fn issue_token_ex(
         &self,
-        role: Role,
+        role: TokenRole,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
-        admit_as_admin: bool,
         issuer_addrs: Vec<String>,
     ) -> Result<String>;
-    /// Convenience: issue an ordinary join token (no co-admin admission, no
-    /// embedded issuer addresses).
+    /// Convenience: issue a join token with no embedded issuer addresses.
     async fn issue_token(
         &self,
-        role: Role,
+        role: TokenRole,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
     ) -> Result<String> {
-        self.issue_token_ex(role, ttl_secs, max_uses, label, false, vec![])
+        self.issue_token_ex(role, ttl_secs, max_uses, label, vec![])
             .await
     }
     async fn list_tokens(&self) -> Result<Vec<TokenStatus>>;

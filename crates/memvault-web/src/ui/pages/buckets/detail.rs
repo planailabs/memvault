@@ -191,10 +191,10 @@ async fn create_grant(
     let audience = match audience_type.as_str() {
         "role" => {
             let role = match audience_value.as_str() {
-                "admin" => memvault_auth::Role::Admin,
-                "agent_host" => memvault_auth::Role::AgentHost,
-                "auditor" => memvault_auth::Role::Auditor,
-                "service" => memvault_auth::Role::Service,
+                "admin" => memvault_auth::AgentRole::Admin,
+                "agent_host" => memvault_auth::AgentRole::AgentHost,
+                "auditor" => memvault_auth::AgentRole::Auditor,
+                "service" => memvault_auth::AgentRole::Service,
                 _ => return Err(ServerFnError::new(format!("unknown role: {audience_value}"))),
             };
             memvault_auth::GrantAudience::Role(role)

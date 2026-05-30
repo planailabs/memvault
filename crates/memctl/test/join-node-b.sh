@@ -39,7 +39,7 @@ echo ""
 echo "Issuing join token on node_a..."
 TOKEN=$(MEMVAULT_DATA_DIR="$NODE_A_DIR" MEMVAULT_DB="$NODE_A_DIR/blocks.redb" \
     cargo run -q -p memctl --features daemon -- \
-        token issue --role node --ttl 3600 --max-uses 1 --label node-b-join \
+        token issue --node-role node --ttl 3600 --max-uses 1 --label node-b-join \
     | tail -n1)
 
 if [[ "$TOKEN" != mvjoin1:* ]]; then

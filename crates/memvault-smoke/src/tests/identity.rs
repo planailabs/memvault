@@ -1,7 +1,7 @@
 //! Agent identity and enrollment smoke tests.
 
 use memvault_api::agent_identity::AgentIdentity;
-use memvault_auth::Role;
+use memvault_auth::AgentRole;
 use memvault_core::ClusterId;
 
 #[test]
@@ -18,7 +18,7 @@ fn generate_and_load_identity() {
         "smoke-agent",
         &cluster_id,
         &node_sk,
-        Role::AgentHost,
+        AgentRole::AgentHost,
         86400_000_000_000,
     )
     .unwrap();
@@ -55,7 +55,7 @@ fn ensure_idempotent() {
         "agent",
         &cluster_id,
         &node_sk,
-        Role::AgentHost,
+        AgentRole::AgentHost,
         86400_000_000_000,
     )
     .unwrap();
@@ -64,7 +64,7 @@ fn ensure_idempotent() {
         "agent",
         &cluster_id,
         &node_sk,
-        Role::AgentHost,
+        AgentRole::AgentHost,
         86400_000_000_000,
     )
     .unwrap();

@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use memvault_auth::{JoinToken, Role, encode_token_string};
+use memvault_auth::{AgentRole, JoinToken, TokenRole, encode_token_string};
 use memvault_core::{AgentId, ClusterId, PeerId};
 
 use crate::error::{ApiError, Result};
@@ -82,7 +82,7 @@ impl AgentIdentity {
         agent_id: &str,
         _cluster_id: &ClusterId,
         node_signing_key: &SigningKey,
-        role: Role,
+        role: AgentRole,
         ttl_ns: u64,
     ) -> Result<(Self, memvault_auth::AgentAttestation)> {
         std::fs::create_dir_all(identity_dir)
@@ -133,7 +133,7 @@ impl AgentIdentity {
         agent_id: &str,
         cluster_id: &ClusterId,
         node_signing_key: &SigningKey,
-        role: Role,
+        role: AgentRole,
         ttl_ns: u64,
     ) -> Result<Self> {
         if Self::exists(identity_dir) {
@@ -201,7 +201,7 @@ pub fn enroll_local_agent(
     client: &crate::LocalClient,
     agent_id: &str,
     identity_dir: &Path,
-    role: Role,
+    role: AgentRole,
     ttl_ns: u64,
 ) -> Result<AgentIdentity> {
     let node_signing_key = client
@@ -408,6 +408,17 @@ pub fn enroll_remote_agent(
         ));
     }
 
+    // Agent enrolment requires an agent token; a node-join token can't mint an
+    // agent attestation (and vice-versa — enforced structurally by TokenRole).
+    let agent_role = match token.role {
+        memvault_auth::TokenRole::Agent(r) => r,
+        memvault_auth::TokenRole::Node(_) => {
+            return Err(ApiError::Other(
+                "agent enrolment requires an agent token, got a node-join token".into(),
+            ));
+        }
+    };
+
     // Mint + publish.
     let node_sk = client
         .node_signing_key()
@@ -416,7 +427,7 @@ pub fn enroll_remote_agent(
         node_sk,
         AgentId(agent_id.to_string()),
         agent_pubkey,
-        token.role,
+        agent_role,
         token.not_after_ns,
     )
     .map_err(|e| ApiError::Other(format!("sign attestation: {e}")))?;
@@ -469,7 +480,7 @@ pub fn issue_join_token(
     admin_peer_id: &PeerId,
     cluster_id: &ClusterId,
     admin_key: &SigningKey,
-    role: Role,
+    role: TokenRole,
     ttl_ns: u64,
     max_uses: u32,
     label: Option<String>,
@@ -490,7 +501,6 @@ pub fn issue_join_token(
         nonce,
         label,
         admin_genesis,
-        admit_as_admin: false,
         issuer_addrs: vec![],
         signature: [0u8; 64], // placeholder
     };
@@ -546,7 +556,7 @@ mod tests {
             "test-agent",
             &cluster_id,
             &admin_sk, // re-using the same key as the "node" signing key for this test
-            Role::AgentHost,
+            AgentRole::AgentHost,
             86400_000_000_000, // 1 day in ns
         )
         .unwrap();
@@ -590,7 +600,7 @@ mod tests {
             "ensure-agent",
             &cluster_id,
             &admin_sk,
-            Role::AgentHost,
+            AgentRole::AgentHost,
             86400_000_000_000,
         )
         .unwrap();
@@ -601,7 +611,7 @@ mod tests {
             "ensure-agent",
             &cluster_id,
             &admin_sk,
-            Role::AgentHost,
+            AgentRole::AgentHost,
             86400_000_000_000,
         )
         .unwrap();
@@ -619,7 +629,7 @@ mod tests {
             &admin_peer_id,
             &cluster_id,
             &admin_sk,
-            Role::AgentHost,
+            TokenRole::Agent(AgentRole::AgentHost),
             3600_000_000_000, // 1 hour
             1,
             Some("test-token".to_string()),

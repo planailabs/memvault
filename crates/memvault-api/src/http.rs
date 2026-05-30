@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use memvault_auth::Role;
+use memvault_auth::TokenRole;
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
@@ -727,11 +727,10 @@ impl MemvaultClient for HttpApiClient {
 
     async fn issue_token_ex(
         &self,
-        role: Role,
+        role: TokenRole,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
-        admit_as_admin: bool,
         issuer_addrs: Vec<String>,
     ) -> Result<String> {
         let body = serde_json::json!({
@@ -739,7 +738,6 @@ impl MemvaultClient for HttpApiClient {
             "ttl_secs": ttl_secs,
             "max_uses": max_uses,
             "label": label,
-            "admit_as_admin": admit_as_admin,
             "issuer_addrs": issuer_addrs,
         });
         let resp: serde_json::Value = self

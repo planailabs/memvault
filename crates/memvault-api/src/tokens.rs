@@ -1,7 +1,7 @@
 //! Token lifecycle helpers (issue, redeem, revoke, list).
 
 use ed25519_dalek::{Signer, SigningKey};
-use memvault_auth::{JoinToken, Role, encode_token_string};
+use memvault_auth::{JoinToken, TokenRole, encode_token_string};
 use memvault_core::{ClusterId, PeerId};
 use memvault_keystore::KeyStore;
 use memvault_store::MemvaultStore;
@@ -107,24 +107,22 @@ pub fn issue_token(
     admin_peer_id: &PeerId,
     cluster_id: &ClusterId,
     admin_key: &SigningKey,
-    role: Role,
+    role: TokenRole,
     ttl_secs: u64,
     max_uses: u32,
     label: Option<String>,
     admin_genesis: Option<memvault_auth::AdminGenesis>,
-    admit_as_admin: bool,
     issuer_addrs: Vec<String>,
     keystore: &KeyStore,
 ) -> Result<String> {
-    // Admin and node membership tokens admit a peer into the cluster's trust
-    // (a co-admin or a replicating node). They must only be minted once the
-    // cluster is set up — i.e. the AdminGenesis exists — both so the cluster
-    // has an established trust root and so the joiner can pin it from the
-    // token. Agent roles (AgentHost/Auditor/Service) may predate genesis.
-    if matches!(role, Role::Admin | Role::Node) && admin_genesis.is_none() {
-        return Err(ApiError::Other(format!(
-            "{role:?} tokens require a set-up cluster (run genesis first)"
-        )));
+    // Node-join tokens admit a peer into the cluster's membership/trust, so
+    // they must only be minted once the cluster is set up — the AdminGenesis
+    // exists — both so the cluster has a trust root and so the joiner can pin
+    // it from the token. Agent tokens (API roles) may predate genesis.
+    if matches!(role, TokenRole::Node(_)) && admin_genesis.is_none() {
+        return Err(ApiError::Other(
+            "node-join tokens require a set-up cluster (run genesis first)".into(),
+        ));
     }
 
     // Parse every issuer addr as a real multiaddr before embedding it, and
@@ -156,7 +154,6 @@ pub fn issue_token(
         nonce,
         label: label.clone(),
         admin_genesis,
-        admit_as_admin,
         issuer_addrs,
         signature: [0u8; 64],
     };

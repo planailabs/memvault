@@ -765,12 +765,8 @@ fn peer_is_trusted_node(
         else {
             continue;
         };
-        // Only `Role::Node` attestations confer node (block-serving) trust.
-        // A node attestation carrying any other role is not a peer node and
-        // must not be served the cluster's blocks.
-        if att.role != memvault_auth::Role::Node {
-            continue;
-        }
+        // A valid (admin-signed) node attestation confers block-serving trust;
+        // NodeAttestation carries no role — its existence is the trust.
         if att.cluster_id.0 != join_config.cluster_id {
             continue;
         }
@@ -1279,12 +1275,10 @@ fn build_join_response(
 
     // Role gate: /join/1.0 mints a NodeAttestation, which confers full P2P
     // sync rights (see `peer_is_trusted_node`). Only `Role::Node` tokens may
-    // become nodes — agent roles (AgentHost/Auditor/Service) must go through
-    // `agent enroll`, which mints a node-signed AgentAttestation instead, and
-    // `Admin` is admitted via the separate `admit_as_admin` POP path. Without
-    // this gate a limited app-level token could be redeemed here to become a
-    // fully-trusted replicating peer.
-    if token.role != memvault_auth::Role::Node {
+    // become nodes — agent tokens (`TokenRole::Agent`) must go through
+    // `agent enroll`, which mints a node-signed AgentAttestation instead.
+    // Structurally enforced by the token's tagged role.
+    if !matches!(token.role, memvault_auth::TokenRole::Node(_)) {
         return refuse(JoinRefuseReason::RoleNotAllowed);
     }
 
@@ -1328,7 +1322,6 @@ fn build_join_response(
     let mut node_att = memvault_auth::NodeAttestation {
         cluster_id: memvault_core::ClusterId(join_config.cluster_id),
         member: memvault_core::PeerId(claimed.to_vec()),
-        role: token.role,
         not_after_ns: u64::MAX,
         issued_via: memvault_auth::AttestationOrigin::Direct,
         signature: [0u8; 64],
@@ -1493,7 +1486,7 @@ fn mint_join_admission(
     request: &JoinRequest,
     now_ns: u64,
 ) -> Option<Vec<u8>> {
-    if !token.admit_as_admin {
+    if !token.admits_as_admin() {
         return None;
     }
     let new_pk: [u8; 32] = request.admin_pubkey.as_deref()?.try_into().ok()?;

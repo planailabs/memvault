@@ -845,14 +845,13 @@ pub fn find_agent_attestation(
 
 /// Lower = less privileged ("more restrictive"). Used to pick the
 /// safest attestation when an agent pubkey has several.
-fn role_privilege(role: &memvault_auth::Role) -> u8 {
-    use memvault_auth::Role::*;
+fn role_privilege(role: &memvault_auth::AgentRole) -> u8 {
+    use memvault_auth::AgentRole::*;
     match role {
         Service => 0,
         Auditor => 1,
         AgentHost => 2,
-        Node => 3,
-        Admin => 4,
+        Admin => 3,
     }
 }
 
@@ -1008,17 +1007,8 @@ pub fn scan_trusted_nodes(
                 continue;
             }
         };
-        // Only `Role::Node` attestations establish node trust. Agent roles
-        // (AgentHost/Auditor/Service) belong on AgentAttestations, not node
-        // attestations; a non-Node node attestation is not a peer node.
-        if att.role != memvault_auth::Role::Node {
-            tracing::warn!(
-                member = %hex::encode(&att.member.0),
-                role = ?att.role,
-                "skipping node attestation: role is not Node"
-            );
-            continue;
-        }
+        // A valid (admin-signed) node attestation establishes node trust —
+        // NodeAttestation carries no role; its existence is the trust.
         // Multi-admin: accept if ANY known cluster admin key verifies it.
         if !admin_keys.iter().any(|k| att.verify_signature(k).is_ok()) {
             tracing::warn!(

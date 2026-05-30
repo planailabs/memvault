@@ -7,7 +7,7 @@ use serde_big_array::BigArray;
 
 use crate::admin_genesis::AdminGenesis;
 use crate::error::{AuthError, Result};
-use crate::role::Role;
+use crate::role::{NodeRole, TokenRole};
 
 /// The prefix for encoded join tokens.
 const TOKEN_PREFIX: &str = "mvjoin1:";
@@ -17,7 +17,10 @@ const TOKEN_PREFIX: &str = "mvjoin1:";
 pub struct JoinToken {
     pub issuer: PeerId,
     pub cluster_id: ClusterId,
-    pub role: Role,
+    /// Whether this token is a node-join or an agent-enrolment token, and the
+    /// role it mints. A `TokenRole::Node(NodeRole::Admin)` token also permits
+    /// admin-key admission at join (subsumes the old `admit_as_admin` flag).
+    pub role: TokenRole,
     pub initial_grants: Vec<Cid>,
     pub not_before_ns: u64,
     pub not_after_ns: u64,
@@ -31,13 +34,6 @@ pub struct JoinToken {
     /// before this field existed.
     #[serde(default)]
     pub admin_genesis: Option<AdminGenesis>,
-    /// Opt-in capability: when true, redeeming this token may also admit
-    /// the joiner's supplied admin key as a co-equal cluster admin (in
-    /// addition to minting the node attestation), provided the join
-    /// request carries a valid proof-of-possession. Default false — a
-    /// normal join confers no admin authority.
-    #[serde(default)]
-    pub admit_as_admin: bool,
     /// Optional dialable multiaddrs for the issuing node, so a joiner can
     /// connect directly instead of waiting for the issuer's peer id (derived
     /// from `issuer`) to surface via mDNS/Kademlia. Advisory hints — the
@@ -53,7 +49,7 @@ pub struct JoinToken {
 struct TokenSigningPayload<'a> {
     issuer: &'a PeerId,
     cluster_id: &'a ClusterId,
-    role: &'a Role,
+    role: &'a TokenRole,
     initial_grants: &'a [Cid],
     not_before_ns: u64,
     not_after_ns: u64,
@@ -61,7 +57,6 @@ struct TokenSigningPayload<'a> {
     nonce: &'a [u8; 16],
     label: &'a Option<String>,
     admin_genesis: &'a Option<AdminGenesis>,
-    admit_as_admin: bool,
     issuer_addrs: &'a [String],
 }
 
@@ -79,10 +74,16 @@ impl JoinToken {
             nonce: &self.nonce,
             label: &self.label,
             admin_genesis: &self.admin_genesis,
-            admit_as_admin: self.admit_as_admin,
             issuer_addrs: &self.issuer_addrs,
         };
         crate::domain_sign(b"memvault/sig/join-token/v1", &payload)
+    }
+
+    /// Whether redeeming this token permits admin-key admission (the token is
+    /// a `NodeRole::Admin` node-join token). Replaces the old `admit_as_admin`
+    /// field; the joiner must still present a valid POP for admission to mint.
+    pub fn admits_as_admin(&self) -> bool {
+        matches!(self.role, TokenRole::Node(NodeRole::Admin))
     }
 
     /// Verify the token signature against the issuer's key.

@@ -114,7 +114,8 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
             let (kind, role, origin, not_after_ns) = match trust {
                 NodeTrust::Attested(att) => (
                     "attested".to_string(),
-                    Some(format!("{:?}", att.role)),
+                    // NodeAttestation carries no role.
+                    None,
                     Some(format!("{:?}", att.issued_via)),
                     Some(att.not_after_ns),
                 ),

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use memvault_attach::{self, AttachmentManifest};
-use memvault_auth::Role;
+use memvault_auth::TokenRole;
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility, cid_from_bytes};
 use memvault_doc::{Document, Edge, Entity, Op, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, QuotaManager, SearchHit, TextIndex, query_audit};
@@ -1242,20 +1242,8 @@ impl LocalClient {
     /// attestation block's CID.
     ///
     /// Errors if no admin signing key is set on this client.
-    pub fn attest_node(
-        &self,
-        peer_pubkey: [u8; 32],
-        role: memvault_auth::Role,
-    ) -> Result<Vec<u8>> {
+    pub fn attest_node(&self, peer_pubkey: [u8; 32]) -> Result<Vec<u8>> {
         use ed25519_dalek::Signer;
-        // Node attestations confer peer (block-serving) trust and must carry
-        // `Role::Node`; the node-trust gates reject any other role. Reject
-        // up front rather than mint an attestation that will never be trusted.
-        if role != memvault_auth::Role::Node {
-            return Err(ApiError::Other(format!(
-                "node attestations must use role 'node', got {role:?}"
-            )));
-        }
         let admin_sk = self
             .admin_signing_key()
             .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
@@ -1267,7 +1255,6 @@ impl LocalClient {
         let mut node_att = memvault_auth::NodeAttestation {
             cluster_id: memvault_core::ClusterId(cluster_id_arr),
             member: memvault_core::PeerId(peer_pubkey.to_vec()),
-            role,
             not_after_ns: u64::MAX,
             issued_via: memvault_auth::AttestationOrigin::Direct,
             signature: [0u8; 64],
@@ -3068,7 +3055,6 @@ impl LocalClient {
     /// `issue_token` tokens never confer admin authority.
     pub async fn issue_admin_admit_token(
         &self,
-        role: Role,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
@@ -3083,12 +3069,11 @@ impl LocalClient {
             &peer_id,
             &cluster_id,
             &admin_key,
-            role,
+            memvault_auth::TokenRole::Node(memvault_auth::NodeRole::Admin),
             ttl_secs,
             max_uses,
             label,
             self.pinned_admin_genesis().cloned(),
-            true,
             vec![],
             &self.keystore,
         )
@@ -4206,11 +4191,10 @@ impl MemvaultClient for LocalClient {
 
     async fn issue_token_ex(
         &self,
-        role: Role,
+        role: TokenRole,
         ttl_secs: u64,
         max_uses: u32,
         label: Option<String>,
-        admit_as_admin: bool,
         issuer_addrs: Vec<String>,
     ) -> Result<String> {
         let admin_key = self.admin_signing_key().ok_or_else(|| {
@@ -4233,7 +4217,6 @@ impl MemvaultClient for LocalClient {
             max_uses,
             label,
             self.pinned_admin_genesis().cloned(),
-            admit_as_admin,
             issuer_addrs,
             &self.keystore,
         )

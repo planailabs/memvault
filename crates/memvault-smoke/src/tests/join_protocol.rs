@@ -18,7 +18,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use memvault_auth::{
-    AdminGenesis, JoinToken, Role, encode_token_string, sign_admin_genesis,
+    AdminGenesis, AgentRole, JoinToken, NodeRole, TokenRole, encode_token_string,
+    sign_admin_genesis,
 };
 use memvault_core::{ClusterId, PeerId};
 use memvault_net::standalone_swarm;
@@ -63,11 +64,16 @@ fn issue_token_ex(
 ) -> JoinToken {
     use ed25519_dalek::Signer;
     let now_ns = memvault_core::wall_ns();
+    let node_role = if admit_as_admin {
+        NodeRole::Admin
+    } else {
+        NodeRole::Node
+    };
     let mut token = JoinToken {
         issuer: admin_peer_id.clone(),
         cluster_id: cluster_id.clone(),
-        // /join/1.0 only admits `Role::Node` tokens as peer nodes.
-        role: Role::Node,
+        // /join/1.0 only admits node-join (`TokenRole::Node`) tokens.
+        role: TokenRole::Node(node_role),
         initial_grants: vec![],
         not_before_ns: now_ns.saturating_sub(60_000_000_000),
         not_after_ns: now_ns + 3600 * 1_000_000_000,
@@ -75,7 +81,6 @@ fn issue_token_ex(
         nonce: random_seed()[..16].try_into().unwrap(),
         label: Some("smoke-test".into()),
         admin_genesis: Some(genesis.clone()),
-        admit_as_admin,
         issuer_addrs: vec![],
         signature: [0u8; 64],
     };
@@ -247,7 +252,6 @@ async fn join_protocol_promotes_peer_to_attested() {
 
     let att = attested.expect("attestation present");
     assert_eq!(att.cluster_id.0, cluster_id.0, "cluster_id matches");
-    assert_eq!(att.role, Role::Node, "role matches token");
 
     // Signature must verify against admin pubkey (the pin).
     let admin_vk =
@@ -521,7 +525,7 @@ async fn agent_attestation_syncs_with_correct_tag() {
         &admin_node_sk,
         memvault_core::AgentId("test_ui".into()),
         agent_sk.verifying_key().to_bytes(),
-        Role::AgentHost,
+        AgentRole::AgentHost,
         u64::MAX,
     )
     .expect("sign agent attestation");
@@ -799,8 +803,6 @@ async fn join_bundles_admin_node_attestation() {
     let mut admin_self_att = memvault_auth::NodeAttestation {
         cluster_id: cluster_id.clone(),
         member: memvault_core::PeerId(admin_node_pubkey.to_vec()),
-        // Matches `bootstrap_cluster_trust`: the genesis node is `Role::Node`.
-        role: Role::Node,
         not_after_ns: u64::MAX,
         issued_via: memvault_auth::AttestationOrigin::Direct,
         signature: [0u8; 64],

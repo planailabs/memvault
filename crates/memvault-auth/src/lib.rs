@@ -56,7 +56,7 @@ pub use grant_revocation::{GrantRevocation, sign_grant_revocation};
 pub use jwt::{AgentTokenClaims, issue as issue_agent_token, scope, verify as verify_agent_token};
 pub use key_state::{AdminKeyState, KeyValidity};
 pub use revocation::Revocation;
-pub use role::Role;
+pub use role::{AgentRole, NodeRole, TokenRole};
 pub use rotation::{AdminKeyRotation, AgentKeyRotation, RotationAborted};
 pub use share::{
     BucketTrust, ShareDecision, ShareProposal, ShareRecipient, ShareReply, ShareStatus,

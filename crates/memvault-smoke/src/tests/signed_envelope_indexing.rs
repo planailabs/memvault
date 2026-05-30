@@ -203,7 +203,7 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
     let (node, node_sk) = node_with_signed_writes();
 
     // Mint and publish an agent attestation off the node's SK.
-    let role = memvault_auth::Role::AgentHost;
+    let role = memvault_auth::AgentRole::AgentHost;
     let dir = tempfile::tempdir().unwrap();
     let (agent, attestation) = memvault_api::agent_identity::AgentIdentity::generate_local(
         dir.path(),
@@ -296,7 +296,7 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
     let (node, node_sk) = node_with_signed_writes();
 
     // Mint an agent attestation off the node's SK.
-    let role = memvault_auth::Role::AgentHost;
+    let role = memvault_auth::AgentRole::AgentHost;
     let dir = tempfile::tempdir().unwrap();
     let (agent, attestation) = memvault_api::agent_identity::AgentIdentity::generate_local(
         dir.path(),

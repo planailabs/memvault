@@ -7,7 +7,7 @@ use rand::RngCore;
 
 use memvault_api::MemvaultClient;
 use memvault_api::acl;
-use memvault_auth::{Action, Grant, GrantAudience, Role, sign_agent_attestation};
+use memvault_auth::{Action, AgentRole, Grant, GrantAudience, sign_agent_attestation};
 use memvault_core::{AgentId, BucketId, PeerId, Visibility};
 
 use crate::harness::TestNode;
@@ -18,7 +18,7 @@ use crate::harness::TestNode;
 async fn setup_agent(
     node: &TestNode,
     agent_name: &str,
-    role: Role,
+    role: AgentRole,
 ) -> ([u8; 32], AgentId) {
     let node_sk = node
         .client
@@ -64,7 +64,7 @@ async fn make_bucket(node: &TestNode, name: &str) -> BucketId {
 #[tokio::test]
 async fn deny_without_grant() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "no-grant-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "no-grant-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "no-grant-bucket").await;
 
     let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
@@ -78,7 +78,7 @@ async fn deny_without_grant() {
 #[tokio::test]
 async fn allow_peer_audience() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "peer-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "peer-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "peer-bucket").await;
 
     node.client
@@ -103,7 +103,7 @@ async fn allow_peer_audience() {
 #[tokio::test]
 async fn allow_agent_audience() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "named-agent", Role::AgentHost).await;
+    let (agent_pk, agent_id) = setup_agent(&node, "named-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "named-bucket").await;
 
     node.client
@@ -123,13 +123,13 @@ async fn allow_agent_audience() {
 #[tokio::test]
 async fn allow_role_audience() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "role-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "role-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "role-bucket").await;
 
     node.client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Role(Role::AgentHost),
+            GrantAudience::Role(AgentRole::AgentHost),
             vec![Action::Read, Action::Write],
             u64::MAX,
         )
@@ -146,13 +146,13 @@ async fn allow_role_audience() {
 async fn role_mismatch_denied() {
     let node = TestNode::new();
     // Agent enrolled as Service, but the grant targets AgentHost.
-    let (agent_pk, _) = setup_agent(&node, "svc-agent", Role::Service).await;
+    let (agent_pk, _) = setup_agent(&node, "svc-agent", AgentRole::Service).await;
     let bucket = make_bucket(&node, "role-mismatch-bucket").await;
 
     node.client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Role(Role::AgentHost),
+            GrantAudience::Role(AgentRole::AgentHost),
             vec![Action::Write],
             u64::MAX,
         )
@@ -167,7 +167,7 @@ async fn role_mismatch_denied() {
 #[tokio::test]
 async fn owner_agent_bypasses_grants() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "owner-agent", Role::AgentHost).await;
+    let (agent_pk, agent_id) = setup_agent(&node, "owner-agent", AgentRole::AgentHost).await;
 
     // Mint a bucket owned by this agent via the deterministic
     // pubkey-keyed helper — same path the daemon uses for agent buckets.
@@ -196,7 +196,7 @@ async fn owner_agent_bypasses_grants() {
 async fn bucket_create_as_sets_owner_and_grants_access() {
     let node = TestNode::new();
     let (agent_pk, agent_id) =
-        setup_agent(&node, "create-as-agent", Role::AgentHost).await;
+        setup_agent(&node, "create-as-agent", AgentRole::AgentHost).await;
 
     let bucket = node
         .client
@@ -242,7 +242,7 @@ async fn bucket_create_as_sets_owner_and_grants_access() {
 #[tokio::test]
 async fn revoked_grant_denied() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "revoke-agent", Role::AgentHost).await;
+    let (agent_pk, agent_id) = setup_agent(&node, "revoke-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "revoke-bucket").await;
 
     let grant_cid = node
@@ -293,7 +293,7 @@ async fn revoked_grant_denied() {
 #[tokio::test]
 async fn revocation_is_grant_specific() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "two-grant-agent", Role::AgentHost).await;
+    let (agent_pk, agent_id) = setup_agent(&node, "two-grant-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "two-grant-bucket").await;
 
     // Two grants, same audience, same actions — only the first is revoked.
@@ -366,7 +366,7 @@ async fn revoke_rejects_non_grant_cid() {
 #[tokio::test]
 async fn expired_grant_denied() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "expired-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "expired-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "expired-bucket").await;
 
     // Issue a grant directly with a not_after_ns in the past — bypass
@@ -498,7 +498,7 @@ fn insert_raw_grant_at(
 #[tokio::test]
 async fn legacy_unsigned_grant_always_denied() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "legacy-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "legacy-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "legacy-bucket").await;
 
     insert_raw_grant(
@@ -522,7 +522,7 @@ async fn legacy_unsigned_grant_always_denied() {
 #[tokio::test]
 async fn forged_grant_from_non_admin_denied() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "forge-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "forge-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "forge-bucket").await;
 
     // Attacker key — internally consistent (admin_pubkey matches signer)
@@ -550,7 +550,7 @@ async fn forged_grant_from_non_admin_denied() {
 #[tokio::test]
 async fn grant_with_admin_pubkey_but_bad_signature_denied() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "badsig-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "badsig-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "badsig-bucket").await;
 
     let admin_pubkey = node
@@ -591,7 +591,7 @@ async fn no_attestation_denied() {
     node.client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Role(Role::AgentHost),
+            GrantAudience::Role(AgentRole::AgentHost),
             vec![Action::Read],
             u64::MAX,
         )
@@ -609,7 +609,7 @@ async fn no_attestation_denied() {
 #[tokio::test]
 async fn admitted_admin_grant_accepted() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "admit-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "admit-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "admit-bucket").await;
 
     // New operator generates their key + POP offline (POP never expires).
@@ -645,7 +645,7 @@ async fn admitted_admin_grant_accepted() {
 #[tokio::test]
 async fn retired_admin_past_grant_survives_new_rejected() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "retire-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "retire-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "retire-bucket").await;
 
     let mut seed = [0u8; 32];
@@ -727,7 +727,7 @@ async fn cannot_retire_last_admin() {
 #[tokio::test]
 async fn grant_scoped_to_other_bucket_denied() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "scope-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "scope-agent", AgentRole::AgentHost).await;
     let bucket_a = make_bucket(&node, "scope-bucket-a").await;
     let bucket_b = make_bucket(&node, "scope-bucket-b").await;
 
@@ -784,7 +784,7 @@ async fn grant_scoped_to_other_bucket_denied() {
 #[tokio::test]
 async fn future_dated_grant_denied() {
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "future-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "future-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "future-bucket").await;
     let admin_key = node.client.admin_signing_key().expect("admin key");
 
@@ -810,7 +810,7 @@ async fn future_dated_grant_denied() {
 #[tokio::test]
 async fn synced_grant_revocation_applies_on_scan() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "syncrev-agent", Role::AgentHost).await;
+    let (agent_pk, agent_id) = setup_agent(&node, "syncrev-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "syncrev-bucket").await;
 
     let grant_cid = node
@@ -871,7 +871,7 @@ async fn agent_revocation_must_come_from_attesting_node() {
     use memvault_auth::jwt::NodeTrust;
 
     let node = TestNode::new();
-    let (agent_pk, _) = setup_agent(&node, "rev-bind-agent", Role::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "rev-bind-agent", AgentRole::AgentHost).await;
 
     // The agent was attested by this node's node key (the attester).
     let attester_pk = node
@@ -945,7 +945,7 @@ async fn admit_rejects_expired_pop() {
 async fn setup_agent_keyed(
     node: &TestNode,
     name: &str,
-    role: Role,
+    role: AgentRole,
 ) -> (SigningKey, [u8; 32], AgentId) {
     let node_sk = node.client.node_signing_key().expect("node key").clone();
     let mut seed = [0u8; 32];
@@ -989,8 +989,8 @@ async fn make_owned_bucket(
 async fn owner_signed_grant_accepted() {
     let node = TestNode::new();
     let (owner_sk, owner_pk, owner_id) =
-        setup_agent_keyed(&node, "owner-issuer", Role::AgentHost).await;
-    let (grantee_pk, _) = setup_agent(&node, "grantee", Role::AgentHost).await;
+        setup_agent_keyed(&node, "owner-issuer", AgentRole::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "grantee", AgentRole::AgentHost).await;
     let bucket = make_owned_bucket(&node, "owner-issued-bucket", owner_id, owner_pk).await;
 
     // Owner signs a grant for the grantee with its own agent key.
@@ -1013,8 +1013,8 @@ async fn owner_signed_grant_accepted() {
 async fn attesting_node_signed_grant_accepted() {
     let node = TestNode::new();
     let (_owner_sk, owner_pk, owner_id) =
-        setup_agent_keyed(&node, "hosted-owner", Role::AgentHost).await;
-    let (grantee_pk, _) = setup_agent(&node, "host-grantee", Role::AgentHost).await;
+        setup_agent_keyed(&node, "hosted-owner", AgentRole::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "host-grantee", AgentRole::AgentHost).await;
     let bucket = make_owned_bucket(&node, "host-issued-bucket", owner_id, owner_pk).await;
 
     let node_sk = node.client.node_signing_key().expect("node key").clone();
@@ -1058,7 +1058,7 @@ async fn attesting_node_signed_grant_accepted() {
 #[tokio::test]
 async fn node_signed_grant_on_unowned_bucket_denied() {
     let node = TestNode::new();
-    let (grantee_pk, _) = setup_agent(&node, "unowned-grantee", Role::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "unowned-grantee", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "unowned-bucket").await; // owner_agent_pubkey = None
 
     let node_sk = node.client.node_signing_key().expect("node key").clone();
@@ -1083,7 +1083,7 @@ async fn node_signed_grant_on_unowned_bucket_denied() {
 #[tokio::test]
 async fn node_owned_bucket_grant_authority() {
     let node = TestNode::new();
-    let (grantee_pk, _) = setup_agent(&node, "node-owned-grantee", Role::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "node-owned-grantee", AgentRole::AgentHost).await;
 
     let node_sk = node.client.node_signing_key().expect("node key").clone();
     let node_pk = node_sk.verifying_key().to_bytes();
@@ -1190,8 +1190,8 @@ fn build_signed_grant(
 async fn submit_signed_grant_owner_accepted() {
     let node = TestNode::new();
     let (owner_sk, owner_pk, owner_id) =
-        setup_agent_keyed(&node, "submit-owner", Role::AgentHost).await;
-    let (grantee_pk, _) = setup_agent(&node, "submit-grantee", Role::AgentHost).await;
+        setup_agent_keyed(&node, "submit-owner", AgentRole::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "submit-grantee", AgentRole::AgentHost).await;
     let bucket = make_owned_bucket(&node, "submit-bucket", owner_id, owner_pk).await;
 
     let grant = build_signed_grant(
@@ -1217,8 +1217,8 @@ async fn submit_signed_grant_owner_accepted() {
 async fn submit_signed_grant_unauthorized_rejected() {
     let node = TestNode::new();
     let (_owner_sk, owner_pk, owner_id) =
-        setup_agent_keyed(&node, "submit-owner2", Role::AgentHost).await;
-    let (grantee_pk, _) = setup_agent(&node, "submit-grantee2", Role::AgentHost).await;
+        setup_agent_keyed(&node, "submit-owner2", AgentRole::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "submit-grantee2", AgentRole::AgentHost).await;
     let bucket = make_owned_bucket(&node, "submit-bucket2", owner_id, owner_pk).await;
 
     // A random key (not admin, owner, or attesting node).
@@ -1248,8 +1248,8 @@ async fn submit_signed_grant_unauthorized_rejected() {
 async fn conflicting_attestations_deny_host_authority() {
     let node = TestNode::new();
     let (_owner_sk, owner_pk, owner_id) =
-        setup_agent_keyed(&node, "ambig-owner", Role::AgentHost).await;
-    let (grantee_pk, _) = setup_agent(&node, "ambig-grantee", Role::AgentHost).await;
+        setup_agent_keyed(&node, "ambig-owner", AgentRole::AgentHost).await;
+    let (grantee_pk, _) = setup_agent(&node, "ambig-grantee", AgentRole::AgentHost).await;
     let bucket = make_owned_bucket(&node, "ambig-bucket", owner_id.clone(), owner_pk).await;
 
     let node_sk = node.client.node_signing_key().expect("node key").clone();
@@ -1263,7 +1263,7 @@ async fn conflicting_attestations_deny_host_authority() {
         &rival,
         owner_id,
         owner_pk,
-        Role::AgentHost,
+        AgentRole::AgentHost,
         u64::MAX,
     )
     .expect("rival attestation");

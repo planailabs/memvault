@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 use crate::error::{AuthError, Result};
-use crate::role::Role;
 
 /// How the attestation was issued.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,12 +15,13 @@ pub enum AttestationOrigin {
     TokenRedemption(Cid),
 }
 
-/// Proves that a peer is a member of a cluster with a given role.
+/// Proves that a peer is a member of a cluster. Carries no role: a valid
+/// node attestation confers block-serving / membership trust, and cluster
+/// admin authority is established by the admin-attestation chain, not here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeAttestation {
     pub cluster_id: ClusterId,
     pub member: PeerId,
-    pub role: Role,
     pub not_after_ns: u64,
     pub issued_via: AttestationOrigin,
     #[serde(with = "BigArray")]
@@ -33,7 +33,6 @@ pub struct NodeAttestation {
 struct AttestationSigningPayload<'a> {
     cluster_id: &'a ClusterId,
     member: &'a PeerId,
-    role: &'a Role,
     not_after_ns: u64,
     issued_via: &'a AttestationOrigin,
 }
@@ -44,7 +43,6 @@ impl NodeAttestation {
         let payload = AttestationSigningPayload {
             cluster_id: &self.cluster_id,
             member: &self.member,
-            role: &self.role,
             not_after_ns: self.not_after_ns,
             issued_via: &self.issued_via,
         };

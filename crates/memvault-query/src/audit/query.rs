@@ -217,7 +217,7 @@ fn sigchain_record(
         attachment_cid: None,
         tags,
     };
-    let role_str = |r: &memvault_auth::Role| format!("{r:?}").to_lowercase();
+    let role_str = |r: &memvault_auth::AgentRole| format!("{r:?}").to_lowercase();
     match label {
         "token_redeem" => {
             let tc = serde_ipld_dagcbor::from_slice::<memvault_auth::TokenConsumption>(data).ok()?;
@@ -252,10 +252,7 @@ fn sigchain_record(
             Some(mk(
                 OpKind::NodeAttest,
                 na.member.0.clone(),
-                vec![
-                    ("member".to_string(), hex::encode(&na.member.0)),
-                    ("role".to_string(), role_str(&na.role)),
-                ],
+                vec![("member".to_string(), hex::encode(&na.member.0))],
             ))
         }
         "agent_att" => {

@@ -328,7 +328,7 @@ mod tests {
     use super::*;
     use crate::agent_attestation::sign_agent_attestation;
     use crate::node_attestation::AttestationOrigin;
-    use crate::role::Role;
+    use crate::role::AgentRole;
     use ed25519_dalek::SigningKey;
     use memvault_core::{AgentId, ClusterId, PeerId};
     use rand::RngCore;
@@ -343,7 +343,6 @@ mod tests {
         let mut a = NodeAttestation {
             cluster_id: ClusterId([7u8; 32]),
             member: PeerId(node.verifying_key().to_bytes().to_vec()),
-            role: Role::AgentHost,
             not_after_ns: u64::MAX,
             issued_via: AttestationOrigin::Direct,
             signature: [0u8; 64],
@@ -364,7 +363,7 @@ mod tests {
             &node,
             AgentId("alice".into()),
             agent.verifying_key().to_bytes(),
-            Role::AgentHost,
+            AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();
@@ -383,7 +382,7 @@ mod tests {
             &node,
             AgentId("alice".into()),
             agent.verifying_key().to_bytes(),
-            Role::AgentHost,
+            AgentRole::AgentHost,
             1,
         )
         .unwrap();
@@ -406,7 +405,6 @@ mod tests {
         let mut n_att = NodeAttestation {
             cluster_id: ClusterId([7u8; 32]),
             member: PeerId(node.verifying_key().to_bytes().to_vec()),
-            role: Role::AgentHost,
             not_after_ns: 1,
             issued_via: AttestationOrigin::Direct,
             signature: [0u8; 64],
@@ -416,7 +414,7 @@ mod tests {
             &node,
             AgentId("alice".into()),
             agent.verifying_key().to_bytes(),
-            Role::AgentHost,
+            AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();
@@ -455,7 +453,7 @@ mod tests {
             &key,
             AgentId("alice".into()),
             agent.verifying_key().to_bytes(),
-            Role::AgentHost,
+            AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();

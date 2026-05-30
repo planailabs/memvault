@@ -1,6 +1,6 @@
 //! Request/response types for the memvault API.
 
-use memvault_auth::Role;
+use memvault_auth::TokenRole;
 use memvault_core::classification::Classification;
 use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ impl TraversalHit {
 pub struct TokenStatus {
     pub cid: Vec<u8>,
     pub label: Option<String>,
-    pub role: Role,
+    pub role: TokenRole,
     pub max_uses: u32,
     pub consumed_count: u32,
     pub not_after_ns: u64,

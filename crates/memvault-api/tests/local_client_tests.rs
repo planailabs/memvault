@@ -749,7 +749,9 @@ fn agent_identity_requires_all_files() {
 #[test]
 fn join_token_roundtrip_with_verify() {
     use ed25519_dalek::{Signer, SigningKey};
-    use memvault_auth::{JoinToken, Role, decode_token_string, encode_token_string};
+    use memvault_auth::{
+        AgentRole, JoinToken, TokenRole, decode_token_string, encode_token_string,
+    };
     use memvault_core::{ClusterId, PeerId};
 
     let mut secret = [0u8; 32];
@@ -762,7 +764,7 @@ fn join_token_roundtrip_with_verify() {
     let token = JoinToken {
         issuer: peer_id.clone(),
         cluster_id: cluster_id.clone(),
-        role: Role::AgentHost,
+        role: TokenRole::Agent(AgentRole::AgentHost),
         initial_grants: vec![],
         not_before_ns: 0,
         not_after_ns: u64::MAX,
@@ -770,7 +772,6 @@ fn join_token_roundtrip_with_verify() {
         nonce: [42u8; 16],
         label: Some("test".into()),
         admin_genesis: None,
-        admit_as_admin: false,
         issuer_addrs: vec![],
         signature: [0u8; 64],
     };
@@ -905,13 +906,13 @@ fn envelope_v2_tampered_bucket_fails_verify() {
     assert!(envelope.verify(&vk).is_err());
 }
 
-/// The `admit_as_admin` capability flag is part of the token's signed
-/// payload, so an attacker can't flip it on a normal token to gain admin
-/// admission at join.
+/// The token's `role` (which now carries admit-as-admin intent via
+/// `NodeRole::Admin`) is part of the signed payload, so an attacker can't flip
+/// a plain node-join token into an admin-admitting one.
 #[test]
-fn join_token_admit_as_admin_is_signature_bound() {
+fn join_token_role_is_signature_bound() {
     use ed25519_dalek::{Signer, SigningKey};
-    use memvault_auth::JoinToken;
+    use memvault_auth::{JoinToken, NodeRole, TokenRole};
     use memvault_core::{ClusterId, PeerId};
 
     let sk = SigningKey::from_bytes(&[7u8; 32]);
@@ -919,7 +920,7 @@ fn join_token_admit_as_admin_is_signature_bound() {
     let mut token = JoinToken {
         issuer: PeerId(vk.to_bytes().to_vec()),
         cluster_id: ClusterId([1u8; 32]),
-        role: memvault_auth::Role::AgentHost,
+        role: TokenRole::Node(NodeRole::Admin),
         initial_grants: vec![],
         not_before_ns: 0,
         not_after_ns: u64::MAX,
@@ -927,19 +928,19 @@ fn join_token_admit_as_admin_is_signature_bound() {
         nonce: [3u8; 16],
         label: None,
         admin_genesis: None,
-        admit_as_admin: true,
         issuer_addrs: vec![],
         signature: [0u8; 64],
     };
     token.signature = sk.sign(&token.signing_bytes().unwrap()).to_bytes();
-    token.verify_signature(&vk).expect("admit-as-admin token verifies");
+    token.verify_signature(&vk).expect("admin node-join token verifies");
+    assert!(token.admits_as_admin());
 
-    // Flipping the flag must invalidate the signature.
+    // Downgrading the role to a plain node join must invalidate the signature.
     let mut tampered = token.clone();
-    tampered.admit_as_admin = false;
+    tampered.role = TokenRole::Node(NodeRole::Node);
     assert!(
         tampered.verify_signature(&vk).is_err(),
-        "flipping admit_as_admin must break the signature"
+        "flipping the token role must break the signature"
     );
 }
 
@@ -1039,7 +1040,7 @@ async fn token_lifecycle_through_keystore_is_cross_process() {
     issuer.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]));
 
     let _tok = issuer
-        .issue_token(memvault_auth::Role::AgentHost, 3600, 2, Some("k".into()))
+        .issue_token(memvault_auth::TokenRole::Agent(memvault_auth::AgentRole::AgentHost), 3600, 2, Some("k".into()))
         .await
         .unwrap();
 
@@ -1208,7 +1209,7 @@ async fn genesis_identity_yields_tokens_embedding_genesis() {
     issuer.set_pinned_admin_genesis(serde_ipld_dagcbor::from_slice(&pin).unwrap());
 
     let token_str = issuer
-        .issue_token(memvault_auth::Role::AgentHost, 3600, 1, None)
+        .issue_token(memvault_auth::TokenRole::Agent(memvault_auth::AgentRole::AgentHost), 3600, 1, None)
         .await
         .unwrap();
     let decoded = memvault_auth::decode_token_string(&token_str).unwrap();

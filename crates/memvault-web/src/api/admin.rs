@@ -38,14 +38,17 @@ pub struct TokenStatusResponse {
 
 #[derive(Deserialize)]
 pub struct IssueTokenRequest {
-    pub role: String,
+    /// Agent role for an agent-enrolment token (agenthost/auditor/service/admin).
+    /// Exactly one of `agent_role` or `node_role` must be set.
+    #[serde(default)]
+    pub agent_role: Option<String>,
+    /// Node role for a node-join token (node/admin). `admin` also permits
+    /// admin-key admission at join.
+    #[serde(default)]
+    pub node_role: Option<String>,
     pub ttl_secs: u64,
     pub max_uses: u32,
     pub label: Option<String>,
-    /// Also admit the redeeming node as a co-equal cluster admin. The joiner
-    /// must redeem with `cluster-join --admit-as-admin`.
-    #[serde(default)]
-    pub admit_as_admin: bool,
     /// Optional dialable multiaddr(s) of the issuing node to embed in the
     /// token, so a joiner can connect directly instead of waiting to
     /// discover the issuer's peer id. Each must be a valid multiaddr.
@@ -95,7 +98,7 @@ pub async fn issue_token(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IssueTokenRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
-    let role = parse_role(&req.role)?;
+    let role = parse_token_role(req.agent_role.as_deref(), req.node_role.as_deref())?;
     // Sanity-check the addrs (multiaddrs always start with '/'); the joiner
     // does the authoritative parse and skips anything unparseable.
     for a in &req.issuer_addrs {
@@ -112,7 +115,6 @@ pub async fn issue_token(
             req.ttl_secs,
             req.max_uses,
             req.label,
-            req.admit_as_admin,
             req.issuer_addrs,
         )
         .await?;
@@ -174,14 +176,35 @@ pub async fn list_rotations(
     Ok(Json(results))
 }
 
-fn parse_role(s: &str) -> Result<memvault_auth::Role, ApiError> {
+pub(crate) fn parse_agent_role(s: &str) -> Result<memvault_auth::AgentRole, ApiError> {
     match s {
-        "admin" => Ok(memvault_auth::Role::Admin),
-        "agent_host" => Ok(memvault_auth::Role::AgentHost),
-        "auditor" => Ok(memvault_auth::Role::Auditor),
-        "service" => Ok(memvault_auth::Role::Service),
-        "node" => Ok(memvault_auth::Role::Node),
-        _ => Err(ApiError::bad_request(format!("Unknown role: {s}"))),
+        "agent_host" | "agenthost" => Ok(memvault_auth::AgentRole::AgentHost),
+        "auditor" => Ok(memvault_auth::AgentRole::Auditor),
+        "service" => Ok(memvault_auth::AgentRole::Service),
+        "admin" => Ok(memvault_auth::AgentRole::Admin),
+        _ => Err(ApiError::bad_request(format!("Unknown agent role: {s}"))),
+    }
+}
+
+fn parse_node_role(s: &str) -> Result<memvault_auth::NodeRole, ApiError> {
+    match s {
+        "node" => Ok(memvault_auth::NodeRole::Node),
+        "admin" => Ok(memvault_auth::NodeRole::Admin),
+        _ => Err(ApiError::bad_request(format!("Unknown node role: {s}"))),
+    }
+}
+
+/// Build a `TokenRole` from the request's mutually-exclusive role fields.
+fn parse_token_role(
+    agent_role: Option<&str>,
+    node_role: Option<&str>,
+) -> Result<memvault_auth::TokenRole, ApiError> {
+    match (agent_role, node_role) {
+        (Some(a), None) => Ok(memvault_auth::TokenRole::Agent(parse_agent_role(a)?)),
+        (None, Some(n)) => Ok(memvault_auth::TokenRole::Node(parse_node_role(n)?)),
+        _ => Err(ApiError::bad_request(
+            "specify exactly one of agent_role or node_role".to_string(),
+        )),
     }
 }
 

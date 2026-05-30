@@ -43,15 +43,18 @@ async fn list_tokens() -> Result<Vec<TokenRow>, ServerFnError> {
 
 #[server]
 async fn issue_token(role: String, label: String, max_uses: u32) -> Result<String, ServerFnError> {
-    use memvault_auth::Role;
+    use memvault_auth::{AgentRole, NodeRole, TokenRole};
 
     let client = crate::ui::state::client()?;
+    // `role` is a category-qualified value: "agent:<role>" or "node:<role>".
     let role = match role.as_str() {
-        "Admin" => Role::Admin,
-        "AgentHost" => Role::AgentHost,
-        "Auditor" => Role::Auditor,
-        "Node" => Role::Node,
-        _ => Role::Service,
+        "agent:agenthost" => TokenRole::Agent(AgentRole::AgentHost),
+        "agent:auditor" => TokenRole::Agent(AgentRole::Auditor),
+        "agent:service" => TokenRole::Agent(AgentRole::Service),
+        "agent:admin" => TokenRole::Agent(AgentRole::Admin),
+        "node:node" => TokenRole::Node(NodeRole::Node),
+        "node:admin" => TokenRole::Node(NodeRole::Admin),
+        other => return Err(ServerFnError::new(format!("unknown role: {other}"))),
     };
     let label = if label.is_empty() { None } else { Some(label) };
     let token = client
@@ -77,7 +80,7 @@ pub fn TokenManagement() -> Element {
     use_topbar(&t!("tokens-title"));
     let mut tokens = use_server_future(list_tokens)?;
     let mut show_form = use_signal(|| false);
-    let mut new_role = use_signal(|| "Service".to_string());
+    let mut new_role = use_signal(|| "agent:service".to_string());
     let mut new_label = use_signal(String::new);
     let mut new_max_uses = use_signal(|| "1000".to_string());
     let mut issued_token = use_signal(|| None::<String>);
@@ -92,7 +95,7 @@ pub fn TokenManagement() -> Element {
         let role = new_role.read().clone();
         let label = new_label.read().clone();
         let max_uses: u32 = new_max_uses.read().parse().unwrap_or(1000);
-        let agent_id_for_success = if role == "AgentHost" && !label.is_empty() {
+        let agent_id_for_success = if role == "agent:agenthost" && !label.is_empty() {
             Some(label.clone())
         } else {
             None
@@ -114,7 +117,7 @@ pub fn TokenManagement() -> Element {
     // Operator types the agent id and submits; the success card shows
     // the resulting `memctl agent-enroll` invocation.
     let prefill_enrollment = move |_| {
-        new_role.set("AgentHost".to_string());
+        new_role.set("agent:agenthost".to_string());
         new_max_uses.set("1".to_string());
         new_label.set(String::new());
         show_form.set(true);
@@ -177,11 +180,16 @@ pub fn TokenManagement() -> Element {
                                         class: "input input-sm",
                                         value: "{new_role}",
                                         onchange: move |e: Event<FormData>| new_role.set(e.value()),
-                                        option { value: "Service", {t!("tokens-role-service")} }
-                                        option { value: "AgentHost", {t!("tokens-role-agent-host")} }
-                                        option { value: "Node", {t!("tokens-role-node")} }
-                                        option { value: "Auditor", {t!("tokens-role-auditor")} }
-                                        option { value: "Admin", {t!("tokens-role-admin")} }
+                                        optgroup { label: "Agent roles",
+                                            option { value: "agent:agenthost", {t!("tokens-role-agent-host")} }
+                                            option { value: "agent:auditor", {t!("tokens-role-auditor")} }
+                                            option { value: "agent:service", {t!("tokens-role-service")} }
+                                            option { value: "agent:admin", {t!("tokens-role-admin")} }
+                                        }
+                                        optgroup { label: "Node roles",
+                                            option { value: "node:node", {t!("tokens-role-node")} }
+                                            option { value: "node:admin", {t!("tokens-role-admin")} }
+                                        }
                                     }
                                 }
                             }

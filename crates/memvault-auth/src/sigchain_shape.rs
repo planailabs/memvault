@@ -160,7 +160,6 @@ mod tests {
         let att = NodeAttestation {
             cluster_id: ClusterId([1u8; 32]),
             member: PeerId(vec![2u8; 32]),
-            role: crate::Role::AgentHost,
             not_after_ns: u64::MAX,
             issued_via: crate::AttestationOrigin::Direct,
             signature: [3u8; 64],
@@ -177,7 +176,7 @@ mod tests {
             &node,
             AgentId("u".into()),
             agent_pk,
-            crate::Role::AgentHost,
+            crate::AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();

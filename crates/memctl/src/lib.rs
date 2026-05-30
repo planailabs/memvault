@@ -15,7 +15,6 @@ mod native {
     use tokio::sync::RwLock;
 
     use memvault_api::{EventBus, LocalClient, MemvaultClient};
-    use memvault_auth::Role;
     use memvault_core::{ClusterId, DocId, EntityId, Visibility};
     use memvault_doc::{Edge, Entity};
     use memvault_query::{QuotaManager, TextIndex};
@@ -292,10 +291,6 @@ mod native {
         NodeAttest {
             /// Hex-encoded peer ed25519 pubkey (32 bytes / 64 hex chars).
             peer_pubkey: String,
-            /// Role to grant the peer. Node attestations must be `node`;
-            /// other roles are rejected.
-            #[arg(long, value_enum, default_value = "node")]
-            role: RoleArg,
         },
         /// Agent operations (enroll / list / show)
         ///
@@ -373,11 +368,16 @@ mod native {
     /// Join-token subcommands.
     #[derive(Subcommand, Debug)]
     pub enum TokenCommands {
-        /// Issue a join token
+        /// Issue a join token. Exactly one of `--agent-role` (an agent-enrol
+        /// token) or `--node-role` (a node-join token) must be given.
         Issue {
-            /// Role for the token recipient
-            #[arg(long, value_enum, default_value = "agent-host")]
-            role: RoleArg,
+            /// Agent role for an agent-enrolment token.
+            #[arg(long, value_enum, conflicts_with = "node_role")]
+            agent_role: Option<AgentRoleArg>,
+            /// Node role for a node-join token. `admin` also permits admin-key
+            /// admission at join (joiner runs `cluster-join --admit-as-admin`).
+            #[arg(long, value_enum, conflicts_with = "agent_role")]
+            node_role: Option<NodeRoleArg>,
             /// TTL in seconds
             #[arg(long, default_value = "3600")]
             ttl: u64,
@@ -387,11 +387,6 @@ mod native {
             /// Human-readable label
             #[arg(long)]
             label: Option<String>,
-            /// Also admit the redeeming node as a co-equal cluster admin.
-            /// The joiner must run `cluster-join --admit-as-admin` so it
-            /// presents an admin key + POP; the admission is minted at join.
-            #[arg(long)]
-            admit_as_admin: bool,
             /// Dialable multiaddr(s) of this node to embed in the token, so a
             /// joiner can connect directly instead of waiting to discover the
             /// issuer's peer id. Repeatable. Omit to rely on mDNS/Kademlia
@@ -583,32 +578,37 @@ mod native {
     /// listing, shell completion, and rejects typos instead of silently
     /// defaulting to agent-host.
     #[derive(Copy, Clone, Debug, clap::ValueEnum)]
-    pub enum RoleArg {
-        Admin,
+    pub enum AgentRoleArg {
         AgentHost,
         Auditor,
         Service,
-        Node,
+        Admin,
     }
 
-    impl From<RoleArg> for memvault_auth::Role {
-        fn from(r: RoleArg) -> Self {
+    impl From<AgentRoleArg> for memvault_auth::AgentRole {
+        fn from(r: AgentRoleArg) -> Self {
             match r {
-                RoleArg::Admin => Self::Admin,
-                RoleArg::AgentHost => Self::AgentHost,
-                RoleArg::Auditor => Self::Auditor,
-                RoleArg::Service => Self::Service,
-                RoleArg::Node => Self::Node,
+                AgentRoleArg::AgentHost => Self::AgentHost,
+                AgentRoleArg::Auditor => Self::Auditor,
+                AgentRoleArg::Service => Self::Service,
+                AgentRoleArg::Admin => Self::Admin,
             }
         }
     }
 
-    impl std::fmt::Display for RoleArg {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            // Render the canonical kebab name (admin / agent-host / …).
-            match clap::ValueEnum::to_possible_value(self) {
-                Some(v) => f.write_str(v.get_name()),
-                None => Ok(()),
+    /// Node-join role. `admin` also requests an admin attestation at join
+    /// (the joiner must present a valid POP via `cluster-join --admit-as-admin`).
+    #[derive(Copy, Clone, Debug, clap::ValueEnum)]
+    pub enum NodeRoleArg {
+        Node,
+        Admin,
+    }
+
+    impl From<NodeRoleArg> for memvault_auth::NodeRole {
+        fn from(r: NodeRoleArg) -> Self {
+            match r {
+                NodeRoleArg::Node => Self::Node,
+                NodeRoleArg::Admin => Self::Admin,
             }
         }
     }
@@ -1275,14 +1275,23 @@ mod native {
                 println!("Retracted. Tombstone: {}", hex::encode(&tombstone));
             }
             Commands::Token(TokenCommands::Issue {
-                role,
+                agent_role,
+                node_role,
                 ttl,
                 max_uses,
                 label,
-                admit_as_admin,
                 addrs,
             }) => {
-                let role: Role = role.into();
+                let role: memvault_auth::TokenRole = match (agent_role, node_role) {
+                    (Some(a), None) => memvault_auth::TokenRole::Agent(a.into()),
+                    (None, Some(n)) => memvault_auth::TokenRole::Node(n.into()),
+                    (None, None) => {
+                        anyhow::bail!("specify exactly one of --agent-role or --node-role")
+                    }
+                    (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
+                };
+                let admits_as_admin =
+                    matches!(role, memvault_auth::TokenRole::Node(memvault_auth::NodeRole::Admin));
                 // `issue_token` parses + canonicalises each --addr as a real
                 // multiaddr (rejecting malformed input), so no pre-check here.
                 // Keystore-only: never opens redb, so this works while the
@@ -1323,11 +1332,11 @@ mod native {
                     serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok()
                 });
                 let token_str = memvault_api::tokens::issue_token(
-                    &peer_id, &cluster_id, &admin_key, role, ttl, max_uses, label, genesis,
-                    admit_as_admin, addrs, &ks,
+                    &peer_id, &cluster_id, &admin_key, role, ttl, max_uses, label, genesis, addrs,
+                    &ks,
                 )?;
                 println!("{token_str}");
-                if admit_as_admin {
+                if admits_as_admin {
                     println!(
                         "  NOTE: this token also admits the joiner as a cluster admin; \
                          have them run `memctl cluster-join --admit-as-admin <token>`."
@@ -2154,9 +2163,9 @@ mod native {
                 // NOTE: do NOT mint a local admin key here. Peers are not
                 // admins — unless the operator asked for co-admin admission.
                 if admit_as_admin {
-                    if !parsed.admit_as_admin {
+                    if !parsed.admits_as_admin() {
                         println!(
-                            "  WARNING: this token was not issued with --admit-as-admin; \
+                            "  WARNING: this token was not issued as --node-role admin; \
                              the admin will refuse the admission and attest you as a normal node."
                         );
                     }
@@ -2177,21 +2186,19 @@ mod native {
                 println!("Joined cluster {cluster_hex}");
                 println!("  Data dir:  {}", data_dir.display());
             }
-            Commands::NodeAttest { peer_pubkey, role } => {
+            Commands::NodeAttest { peer_pubkey } => {
                 let pk_bytes = hex::decode(&peer_pubkey)
                     .map_err(|e| anyhow::anyhow!("decode peer_pubkey hex: {e}"))?;
                 let pk_arr: [u8; 32] = pk_bytes
                     .try_into()
                     .map_err(|_| anyhow::anyhow!("peer_pubkey must be 32 bytes"))?;
-                let role_enum: memvault_auth::Role = role.into();
                 let store = make_store()?;
                 let client = create_client(store)?;
                 let cid = client
-                    .attest_node(pk_arr, role_enum)
+                    .attest_node(pk_arr)
                     .map_err(|e| anyhow::anyhow!("attest_node: {e}"))?;
                 println!("Attested peer {peer_pubkey}");
                 println!("  Attestation CID: {}", hex::encode(&cid));
-                println!("  Role:            {role}");
                 println!("  The peer's pre-genesis status will clear once this block syncs over.");
             }
             Commands::Agent(AgentCommands::Enroll {
