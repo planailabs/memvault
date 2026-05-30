@@ -41,9 +41,34 @@ impl FileRow {
 #[server]
 async fn list_files(
     view: Option<String>,
+    bucket_hex: Option<String>,
     show_retracted: bool,
 ) -> Result<Vec<FileRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
+
+    // Active bucket → restrict to attachment node-ids in that bucket. Files
+    // (attachments) have no dedicated bucket-scoped query, so we derive the
+    // in-bucket file set from the bucket's node list.
+    let bucket_files: Option<std::collections::HashSet<String>> = match bucket_hex.as_deref() {
+        Some(_) => {
+            let items = client
+                .list_all_ex(None, 5000, show_retracted)
+                .await
+                .map_err(|e| ServerFnError::new(e.to_string()))?;
+            Some(
+                items
+                    .into_iter()
+                    .filter(|(_, nt, _, _)| nt == "file" || nt == "attachment")
+                    .filter_map(|(id, _, _, _)| {
+                        id.strip_prefix("file:")
+                            .or_else(|| id.strip_prefix("attachment:"))
+                            .map(|s| s.to_string())
+                    })
+                    .collect(),
+            )
+        }
+        None => None,
+    };
 
     // If a view is active, use list_all filtered to files.
     if let Some(ref view_name) = view {
@@ -84,6 +109,11 @@ async fn list_files(
             None => continue,
         };
         let cid_hex = hex::encode(&manifest_cid);
+        if let Some(ref bf) = bucket_files {
+            if !bf.contains(&cid_hex) {
+                continue;
+            }
+        }
         // Read manifest block (always exists after repair-index). The
         // block is DAG-CBOR, not JSON — use the canonical helper so
         // filename/mime_type/content_size come through instead of
@@ -126,12 +156,10 @@ async fn list_files(
 #[component]
 pub fn FileExplorer() -> Element {
     use_topbar(&t!("files-title"));
-    let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
-    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
+    let filters = crate::ui::filters::use_filters();
     let files = use_server_future(move || {
-        let v = active_view.read().name.clone();
-        let r = show_retracted().0;
-        async move { list_files(v, r).await }
+        let f = filters.read();
+        async move { list_files(f.view, f.bucket, f.show_retracted).await }
     })?;
     let mut grid_view = use_signal(|| false);
 
