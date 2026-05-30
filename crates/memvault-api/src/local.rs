@@ -2648,6 +2648,83 @@ impl LocalClient {
     // persistent realization + O(1) count cache; queries don't depend on them
     // for correctness.
 
+    /// True if the node satisfies every dimension of the scope: retraction
+    /// mode, bucket set, and (if set) the view's tag conjunction. Used by the
+    /// `get_*_scoped` by-id getters to verify a fetched object is in scope.
+    pub(crate) async fn node_in_scope(
+        &self,
+        node_id: &str,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<bool> {
+        // Retraction.
+        let retracted = { self.index.read().await.is_retracted(node_id) };
+        if !scope.retraction.admits(retracted) {
+            return Ok(false);
+        }
+        // View tag conjunction.
+        if let Some(view_name) = &scope.view {
+            if let Some((_, tags)) = self.resolve_view_coord(view_name).await? {
+                let node_tags = { self.index.read().await.get_tags(node_id) };
+                let in_view = tags
+                    .iter()
+                    .all(|(s, l)| node_tags.iter().any(|(ts, tl)| ts == s && tl == l));
+                if !in_view {
+                    return Ok(false);
+                }
+            }
+        }
+        // Bucket set.
+        let known = self.all_bucket_id_arrays();
+        let eff = self.effective_bucket_set(&scope.buckets, &known);
+        if matches!(&eff, Some(s) if s.is_empty()) {
+            return Ok(false);
+        }
+        Ok(self.node_passes_bucket(node_id, &known, &eff))
+    }
+
+    /// Fetch a document by id only if it satisfies `scope`. Returns `Ok(None)`
+    /// if the doc is absent OR out of scope (so handlers 404 rather than 500).
+    pub(crate) async fn get_doc_scoped(
+        &self,
+        id: &DocId,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<Option<Document>> {
+        let node_id = format!("doc:{}", hex::encode(id.0));
+        if !self.node_in_scope(&node_id, scope).await? {
+            return Ok(None);
+        }
+        self.get_doc_async(id, scope.retraction.includes_retracted())
+            .await
+    }
+
+    /// Fetch an entity by id only if it satisfies `scope`. Returns `Ok(None)`
+    /// if absent OR out of scope.
+    pub(crate) async fn get_entity_scoped(
+        &self,
+        id: &EntityId,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<Option<Entity>> {
+        let node_id = format!("entity:{}", hex::encode(id.0));
+        if !self.node_in_scope(&node_id, scope).await? {
+            return Ok(None);
+        }
+        self.get_entity_async(id, scope.retraction.includes_retracted())
+            .await
+    }
+
+    /// Resolve a node's label only if it satisfies `scope`.
+    pub(crate) async fn resolve_label_scoped(
+        &self,
+        node_id: &str,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<Option<String>> {
+        if !self.node_in_scope(node_id, scope).await? {
+            return Ok(None);
+        }
+        let idx = self.index.read().await;
+        Ok(idx.resolve_label_mode(node_id, scope.retraction))
+    }
+
     /// Resolve a view name to `(view_cid_bytes, required_tags)`.
     pub(crate) async fn resolve_view_coord(
         &self,
@@ -4614,6 +4691,30 @@ impl MemvaultClient for LocalClient {
         scope: &memvault_core::QueryScope,
     ) -> Result<crate::types::ScopeCount> {
         LocalClient::scoped_count(self, scope).await
+    }
+
+    async fn get_doc_scoped(
+        &self,
+        id: &DocId,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<Option<Document>> {
+        LocalClient::get_doc_scoped(self, id, scope).await
+    }
+
+    async fn get_entity_scoped(
+        &self,
+        id: &EntityId,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<Option<Entity>> {
+        LocalClient::get_entity_scoped(self, id, scope).await
+    }
+
+    async fn resolve_label_scoped(
+        &self,
+        node_id: &str,
+        scope: &memvault_core::QueryScope,
+    ) -> Result<Option<String>> {
+        LocalClient::resolve_label_scoped(self, node_id, scope).await
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {

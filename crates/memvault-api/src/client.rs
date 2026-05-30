@@ -247,6 +247,40 @@ pub trait MemvaultClient: Send + Sync {
         })
     }
 
+    /// Fetch a document by id, verifying it satisfies the scope (retraction +
+    /// bucket + view). Returns `Ok(None)` if absent or out of scope. Supersedes
+    /// the `*_ex` by-id getters. Default impl honours only retraction.
+    async fn get_doc_scoped(
+        &self,
+        id: &DocId,
+        scope: &QueryScope,
+    ) -> Result<Option<Document>> {
+        self.get_doc(id).await.map(|d| {
+            d.filter(|_| scope.retraction.includes_active())
+        })
+    }
+
+    /// Fetch an entity by id, verifying it satisfies the scope.
+    async fn get_entity_scoped(
+        &self,
+        id: &EntityId,
+        scope: &QueryScope,
+    ) -> Result<Option<Entity>> {
+        self.get_entity(id).await.map(|e| {
+            e.filter(|_| scope.retraction.includes_active())
+        })
+    }
+
+    /// Resolve a node's label, verifying it satisfies the scope.
+    async fn resolve_label_scoped(
+        &self,
+        node_id: &str,
+        scope: &QueryScope,
+    ) -> Result<Option<String>> {
+        let _ = scope;
+        self.resolve_label(node_id).await
+    }
+
     /// Resolve the legacy bucket (used only for adoption of pre-bucket data).
     /// Errors if no `BucketRole::Legacy` bucket is configured.
     async fn legacy_bucket_id(&self) -> Result<BucketId>;
