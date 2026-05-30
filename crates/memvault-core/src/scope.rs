@@ -76,6 +76,42 @@ impl BucketSelector {
     }
 }
 
+/// A node-type filter for scoped queries. `None` on the scope means all kinds;
+/// a concrete kind restricts results to that node type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    Document,
+    File,
+    GraphEntity,
+}
+
+impl NodeKind {
+    /// The `node_type` strings (as stored in the index) this kind matches.
+    /// Files accept both the modern "file" and legacy "attachment" labels.
+    pub fn node_types(self) -> &'static [&'static str] {
+        match self {
+            NodeKind::Document => &["doc"],
+            NodeKind::File => &["file", "attachment"],
+            NodeKind::GraphEntity => &["entity"],
+        }
+    }
+
+    /// Whether the given `node_type` string belongs to this kind.
+    pub fn matches(self, node_type: &str) -> bool {
+        self.node_types().contains(&node_type)
+    }
+
+    /// Map a `node_type` string to its kind, if recognised.
+    pub fn from_node_type(node_type: &str) -> Option<NodeKind> {
+        match node_type {
+            "doc" => Some(NodeKind::Document),
+            "file" | "attachment" => Some(NodeKind::File),
+            "entity" => Some(NodeKind::GraphEntity),
+            _ => None,
+        }
+    }
+}
+
 /// How retracted nodes participate in a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RetractionMode {
@@ -133,6 +169,8 @@ pub struct QueryScope {
     pub buckets: BucketSelector,
     /// How retracted nodes participate.
     pub retraction: RetractionMode,
+    /// Restrict to a single node kind (doc / file / entity). `None` = all kinds.
+    pub kind: Option<NodeKind>,
 }
 
 impl QueryScope {
@@ -170,6 +208,12 @@ impl QueryScope {
     /// Builder: set the retraction mode from a legacy boolean.
     pub fn with_include_retracted(mut self, include_retracted: bool) -> Self {
         self.retraction = RetractionMode::from_include_flag(include_retracted);
+        self
+    }
+
+    /// Builder: restrict to a single node kind.
+    pub fn with_kind(mut self, kind: Option<NodeKind>) -> Self {
+        self.kind = kind;
         self
     }
 }

@@ -54,13 +54,13 @@ async fn list_files(
         view,
         bucket_hex.into_iter().collect(),
         show_retracted,
+        Some(memvault_core::NodeKind::File),
     );
     let scoped_files: std::collections::HashSet<String> = client
         .list_scoped(&scope, 5000)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .into_iter()
-        .filter(|n| n.node_type == "file" || n.node_type == "attachment")
         .filter_map(|n| {
             n.node_id
                 .strip_prefix("file:")

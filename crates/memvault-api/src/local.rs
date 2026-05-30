@@ -2664,6 +2664,11 @@ impl LocalClient {
         };
         let mut out = Vec::new();
         for (node_id, node_type, label, tags, retracted) in rows {
+            if let Some(kind) = scope.kind {
+                if !kind.matches(&node_type) {
+                    continue;
+                }
+            }
             if !self.node_passes_bucket(&node_id, &known, &eff) {
                 continue;
             }
@@ -2709,6 +2714,11 @@ impl LocalClient {
         };
         let mut out = Vec::new();
         for h in hits {
+            if let Some(kind) = scope.kind {
+                if !kind.matches(&h.node_type) {
+                    continue;
+                }
+            }
             if let Some(set) = &view_set {
                 if !set.contains(&h.node_id) {
                     continue;
@@ -2737,7 +2747,9 @@ impl LocalClient {
         if let (Some(view_name), memvault_core::BucketSelector::Only(bs)) =
             (&scope.view, &scope.buckets)
         {
-            if !bs.is_empty() {
+            // The view×bucket member-sets don't partition by node kind, so a
+            // kind-filtered count must take the compute path.
+            if !bs.is_empty() && scope.kind.is_none() {
                 if let Some((vcid, vtags)) = self.resolve_view_coord(view_name).await? {
                     let known = self.all_bucket_id_arrays();
                     let mut total = crate::types::ScopeCount::default();
@@ -2762,6 +2774,7 @@ impl LocalClient {
             view: scope.view.clone(),
             buckets: scope.buckets.clone(),
             retraction: memvault_core::RetractionMode::IncludeRetracted,
+            kind: scope.kind,
         };
         let rows = self.scoped_list(&counting, usize::MAX).await?;
         let mut c = crate::types::ScopeCount::default();
@@ -3894,9 +3907,13 @@ impl MemvaultClient for LocalClient {
         let manifest_cid_bytes = manifest_cid.to_bytes();
         self.store.put_block(&manifest_cid_bytes, &manifest_bytes)?;
 
-        // Store envelope metadata for the manifest
+        // Store envelope metadata for the manifest. Include the `_manifest`
+        // reverse-lookup tag (manifest_cid → this envelope) in the *store*
+        // index so `get_file_manifest` and `inferred_attachment_bucket` work
+        // immediately on fresh uploads — not only after a reindex/sync. The
+        // envelope's own display tags (below, via `&tags`) stay unchanged.
         let bucket_id = self.resolve_bucket(bucket);
-        let meta = EnvelopeMeta {
+        let mut meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: tags.clone(),
             wall_ns: memvault_core::wall_ns(),
@@ -3906,6 +3923,8 @@ impl MemvaultClient for LocalClient {
             bucket_id,
                     ..Default::default()
         };
+        meta.tags
+            .push(("_manifest".to_string(), hex::encode(&manifest_cid_bytes)));
         let payload = serde_json::json!({
             "kind": "attachment",
             "manifest_cid": manifest_cid_bytes,

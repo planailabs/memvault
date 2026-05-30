@@ -124,6 +124,7 @@ mod inner {
         view: Option<String>,
         buckets_hex: Vec<String>,
         show_retracted: bool,
+        kind: Option<memvault_core::NodeKind>,
     ) -> memvault_core::QueryScope {
         use memvault_core::{BucketId, BucketSelector, QueryScope, RetractionMode};
 
@@ -150,6 +151,7 @@ mod inner {
             } else {
                 RetractionMode::ActiveOnly
             },
+            kind,
         }
     }
 }

@@ -57,6 +57,7 @@ async fn list_notes(
             view,
             bucket_hex.into_iter().collect(),
             show_retracted,
+            Some(memvault_core::NodeKind::Document),
         );
         let items = client
             .list_scoped(&scope, 500)
@@ -64,7 +65,6 @@ async fn list_notes(
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         return Ok(items
             .into_iter()
-            .filter(|n| n.node_type == "doc")
             .map(|n| NoteRow {
                 id: n.node_id,
                 title: n.label,

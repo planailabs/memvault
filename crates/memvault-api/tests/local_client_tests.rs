@@ -1495,3 +1495,81 @@ async fn scoped_view_bucket_partition_counts() {
     let c3 = client.count_scoped(&bogus).await.unwrap();
     assert_eq!(c3.total(), 0);
 }
+
+#[tokio::test]
+async fn scoped_list_filters_by_node_kind() {
+    use memvault_core::{NodeKind, QueryScope};
+
+    let (_dir, client) = make_client();
+    let bucket = client
+        .bucket_create(
+            "mixed",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+
+    // A doc, an entity, and a file in the same bucket.
+    client
+        .put_doc(
+            Document::new(DocId::random(), "a document".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    client
+        .add_entity(
+            Entity {
+                id: EntityId::random(),
+                kind: "person".to_string(),
+                props: BTreeMap::new(),
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    client
+        .upload_file(b"hello", Some("f.txt"), "text/plain", vec![], "internal", Some(&bucket))
+        .await
+        .unwrap();
+
+    let base = QueryScope::all().with_bucket(Some(bucket.clone()));
+
+    let all = client.list_scoped(&base, 100).await.unwrap();
+    assert_eq!(all.len(), 3, "all kinds");
+
+    let docs = client
+        .list_scoped(&base.clone().with_kind(Some(NodeKind::Document)), 100)
+        .await
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+    assert!(docs.iter().all(|n| n.node_type == "doc"));
+
+    let files = client
+        .list_scoped(&base.clone().with_kind(Some(NodeKind::File)), 100)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].node_type, "file");
+
+    let entities = client
+        .list_scoped(&base.clone().with_kind(Some(NodeKind::GraphEntity)), 100)
+        .await
+        .unwrap();
+    assert_eq!(entities.len(), 1);
+    assert_eq!(entities[0].node_type, "entity");
+
+    // Count honours the kind filter.
+    let c = client
+        .count_scoped(&base.with_kind(Some(NodeKind::Document)))
+        .await
+        .unwrap();
+    assert_eq!(c.active, 1);
+}
