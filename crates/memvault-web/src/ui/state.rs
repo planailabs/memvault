@@ -8,6 +8,11 @@ mod inner {
 
     static CLIENT: OnceLock<Arc<dyn MemvaultClient>> = OnceLock::new();
     static LOCAL_CLIENT: OnceLock<Arc<memvault_api::LocalClient>> = OnceLock::new();
+    /// Serializes the fallible lazy init so concurrent callers don't all run
+    /// `init_local_client` at once and collide on the redb file lock — the
+    /// source of flaky 500s when API tests run in parallel. (OnceLock has no
+    /// stable fallible get-or-init, so we double-check under this mutex.)
+    static INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Set the client explicitly (used by the daemon). Populates both the
     /// trait-object and concrete handles so grant/ACL server functions work.
@@ -23,7 +28,13 @@ mod inner {
             return Ok(c.clone());
         }
 
-        // Lazy init for standalone mode (dx serve).
+        // Lazy init for standalone mode (dx serve). Serialize via INIT_LOCK so
+        // only one thread opens the redb; concurrent callers wait and then see
+        // the populated OnceLock (double-checked locking).
+        let _guard = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = CLIENT.get() {
+            return Ok(c.clone());
+        }
         let client = init_local_client()
             .map_err(|e| dioxus::prelude::ServerFnError::new(format!("memvault init: {e}")))?;
         let _ = CLIENT.set(client);

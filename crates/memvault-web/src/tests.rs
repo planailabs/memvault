@@ -488,7 +488,29 @@ fn test_agent_lookup()
     })
 }
 
+/// Point the lazily-initialized global `LocalClient` (used by ACL helpers
+/// like `enforce_doc_action` / `filter_readable`) at a throwaway temp redb,
+/// set once per test process. Without this the helpers open the *real*
+/// `~/.local/share/memvault/blocks.redb`, which (a) lock-conflicts with a
+/// running daemon and (b) makes results depend on machine state — the source
+/// of flaky 500s. Hermetic temp DB = deterministic tests.
+fn ensure_test_env() {
+    use std::sync::OnceLock;
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("memvault-web-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: set once, at the start of the test process, before any
+        // server function triggers the global client's lazy init.
+        unsafe {
+            std::env::set_var("MEMVAULT_DATA_DIR", &dir);
+            std::env::set_var("MEMVAULT_DB", dir.join("blocks.redb"));
+        }
+    });
+}
+
 fn test_app_state(client: Arc<dyn MemvaultClient>) -> Arc<AppState> {
+    ensure_test_env();
     Arc::new(AppState {
         client,
         event_bus: Arc::new(EventBus::new(16)),
