@@ -123,10 +123,6 @@ pub trait MemvaultClient: Send + Sync {
     // requester's role, or the web UI's "show retracted" toggle) decides.
     // Default impls ignore the flag (= filtered behaviour); `LocalClient` and
     // the HTTP client override them to honour it.
-    async fn get_doc_ex(&self, id: &DocId, include_retracted: bool) -> Result<Option<Document>> {
-        let _ = include_retracted;
-        self.get_doc(id).await
-    }
     async fn list_docs_ex(
         &self,
         tag_filter: Option<(String, String)>,
@@ -136,14 +132,6 @@ pub trait MemvaultClient: Send + Sync {
     ) -> Result<Vec<DocSummary>> {
         let _ = include_retracted;
         self.list_docs(tag_filter, limit, bucket).await
-    }
-    async fn get_entity_ex(
-        &self,
-        id: &EntityId,
-        include_retracted: bool,
-    ) -> Result<Option<Entity>> {
-        let _ = include_retracted;
-        self.get_entity(id).await
     }
     async fn list_entities_ex(
         &self,
@@ -188,14 +176,6 @@ pub trait MemvaultClient: Send + Sync {
     ) -> Result<Vec<String>> {
         let _ = include_retracted;
         self.view_members(view_name).await
-    }
-    async fn resolve_label_ex(
-        &self,
-        node_id: &str,
-        include_retracted: bool,
-    ) -> Result<Option<String>> {
-        let _ = include_retracted;
-        self.resolve_label(node_id).await
     }
 
     // -- Scoped reads (the (view, buckets, retracted) triplet) --

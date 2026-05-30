@@ -64,7 +64,7 @@ async fn get_note(id: String, show_retracted: bool) -> Result<NoteData, ServerFn
     let doc_id =
         crate::api::docs::parse_doc_id(&id).map_err(|e| ServerFnError::new(format!("{e}")))?;
     let doc = client
-        .get_doc_ex(&doc_id, show_retracted)
+        .get_doc_scoped(&doc_id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted))
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Document not found"))?;

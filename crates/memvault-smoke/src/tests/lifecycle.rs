@@ -402,7 +402,11 @@ async fn auditor_bypasses_retraction() {
 
     // Auditor/admin bypass (include_retracted = true): the doc reappears.
     assert!(
-        node.client.get_doc_ex(&id, true).await.unwrap().is_some(),
+        node.client
+            .get_doc_scoped(&id, &memvault_core::QueryScope::all().with_include_retracted(true))
+            .await
+            .unwrap()
+            .is_some(),
         "include_retracted should surface the retracted doc"
     );
     let listed_ex = node
@@ -434,5 +438,9 @@ async fn status_counts_accurate() {
     let s1 = node.client.status().await.unwrap();
     assert_eq!(s1.doc_count, 7);
     assert!(s1.block_count >= 7);
-    assert!(s1.uptime_secs < 60); // test runs fast
+    // Sanity bound only: uptime is a small, sane number (not a unix timestamp
+    // or garbage), not a tight timing assertion — under heavy parallel test
+    // load this node's wall-clock lifetime can exceed a minute even though its
+    // own work is trivial.
+    assert!(s1.uptime_secs < 3600);
 }

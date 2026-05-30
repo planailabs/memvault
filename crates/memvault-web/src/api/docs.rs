@@ -174,7 +174,7 @@ pub async fn get_doc(
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let doc = state
         .client
-        .get_doc_ex(&doc_id, include_retracted)
+        .get_doc_scoped(&doc_id, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
         .await?
         .ok_or_else(|| ApiError::not_found("Document not found"))?;
 

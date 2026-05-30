@@ -40,7 +40,7 @@ async fn get_entity_detail(id: String, show_retracted: bool) -> Result<EntityDat
     let entity_id = memvault_core::EntityId(arr);
 
     let entity = client
-        .get_entity_ex(&entity_id, show_retracted)
+        .get_entity_scoped(&entity_id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted))
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Entity not found"))?;

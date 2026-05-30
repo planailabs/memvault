@@ -157,7 +157,7 @@ pub async fn get_node(
         NodeRef::Entity(eid) => {
             let entity = state
                 .client
-                .get_entity_ex(&eid, include_retracted)
+                .get_entity_scoped(&eid, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
                 .await?
                 .ok_or_else(|| ApiError::not_found("Entity not found"))?;
             Ok(Json(serde_json::json!({
@@ -177,7 +177,7 @@ pub async fn get_node(
         NodeRef::Doc(did) => {
             let doc = state
                 .client
-                .get_doc_ex(&did, include_retracted)
+                .get_doc_scoped(&did, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
                 .await?
                 .ok_or_else(|| ApiError::not_found("Document not found"))?;
             Ok(Json(serde_json::json!({

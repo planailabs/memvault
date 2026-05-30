@@ -2673,13 +2673,21 @@ impl LocalClient {
                 }
             }
         }
-        // Bucket set.
-        let known = self.all_bucket_id_arrays();
-        let eff = self.effective_bucket_set(&scope.buckets, &known);
-        if matches!(&eff, Some(s) if s.is_empty()) {
-            return Ok(false);
+        // Bucket set. For a by-id fetch, only an *explicit* set narrows the
+        // result — `Accessible` means "any accessible bucket" (authorization
+        // is enforced separately by the ACL layer), so it doesn't drop the
+        // node the way scoped listing does.
+        if let memvault_core::BucketSelector::Only(_) = &scope.buckets {
+            let known = self.all_bucket_id_arrays();
+            let eff = self.effective_bucket_set(&scope.buckets, &known);
+            if matches!(&eff, Some(s) if s.is_empty()) {
+                return Ok(false);
+            }
+            if !self.node_passes_bucket(node_id, &known, &eff) {
+                return Ok(false);
+            }
         }
-        Ok(self.node_passes_bucket(node_id, &known, &eff))
+        Ok(true)
     }
 
     /// Fetch a document by id only if it satisfies `scope`. Returns `Ok(None)`
@@ -3888,14 +3896,6 @@ impl MemvaultClient for LocalClient {
         self.get_doc_async(id, false).await
     }
 
-    async fn get_doc_ex(
-        &self,
-        id: &DocId,
-        include_retracted: bool,
-    ) -> Result<Option<Document>> {
-        self.get_doc_async(id, include_retracted).await
-    }
-
     async fn edit_doc(&self, id: &DocId, patch: TextPatch) -> Result<Vec<u8>> {
         let op = Op::DocEdit {
             doc_id: id.clone(),
@@ -4296,14 +4296,6 @@ impl MemvaultClient for LocalClient {
         self.get_entity_async(id, false).await
     }
 
-    async fn get_entity_ex(
-        &self,
-        id: &EntityId,
-        include_retracted: bool,
-    ) -> Result<Option<Entity>> {
-        self.get_entity_async(id, include_retracted).await
-    }
-
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>> {
         let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
         let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;
@@ -4360,7 +4352,10 @@ impl MemvaultClient for LocalClient {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&id_bytes);
             let entity_id = EntityId(arr);
-            if let Ok(Some(entity)) = self.get_entity_ex(&entity_id, include_retracted).await {
+            if let Ok(Some(entity)) = self
+                .get_entity_async(&entity_id, include_retracted)
+                .await
+            {
                 entities.push(entity);
             }
         }
@@ -4718,17 +4713,8 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
-        self.resolve_label_ex(node_id, false).await
-    }
-
-    async fn resolve_label_ex(
-        &self,
-        node_id: &str,
-        include_retracted: bool,
-    ) -> Result<Option<String>> {
         let idx = self.index.read().await;
-        let mode = RetractionMode::from_include_flag(include_retracted);
-        Ok(idx.resolve_label_mode(node_id, mode))
+        Ok(idx.resolve_label_mode(node_id, RetractionMode::ActiveOnly))
     }
 
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>> {

@@ -37,7 +37,7 @@ async fn search_docs(
         let doc_id = hex::encode(h.doc_id.0);
 
         // Fetch title from the document.
-        let title = if let Ok(Some(doc)) = client.get_doc_ex(&h.doc_id, show_retracted).await {
+        let title = if let Ok(Some(doc)) = client.get_doc_scoped(&h.doc_id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
             doc.frontmatter
                 .get("title")
                 .and_then(|v| v.as_str())

@@ -87,7 +87,7 @@ async fn list_graph_nodes(
                 if let Some(memvault_core::NodeRef::Entity(eid)) =
                     memvault_core::NodeRef::from_tag_label(id)
                 {
-                    if let Ok(Some(e)) = client.get_entity_ex(&eid, show_retracted).await {
+                    if let Ok(Some(e)) = client.get_entity_scoped(&eid, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
                         if e.kind == memvault_core::VFS_DIR_KIND {
                             continue;
                         }
@@ -183,7 +183,7 @@ async fn list_graph_nodes(
         let (node_type, kind, label) = match &node_ref {
             memvault_core::NodeRef::Doc(did) => {
                 let title = client
-                    .get_doc_ex(did, show_retracted)
+                    .get_doc_scoped(did, &memvault_core::QueryScope::all().with_include_retracted(show_retracted))
                     .await
                     .ok()
                     .flatten()
@@ -213,7 +213,7 @@ async fn list_graph_nodes(
             }
             memvault_core::NodeRef::Entity(eid) => {
                 // Skip vfs:dir entities that appear as edge targets.
-                if let Ok(Some(e)) = client.get_entity_ex(eid, show_retracted).await {
+                if let Ok(Some(e)) = client.get_entity_scoped(eid, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
                     if e.kind == memvault_core::VFS_DIR_KIND {
                         continue;
                     }
@@ -256,7 +256,7 @@ async fn get_node_detail(
     // Get properties + basic info
     let (kind, label, props) = match &node_ref {
         memvault_core::NodeRef::Entity(id) => {
-            if let Ok(Some(entity)) = client.get_entity_ex(id, show_retracted).await {
+            if let Ok(Some(entity)) = client.get_entity_scoped(id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
                 let label = entity
                     .props
                     .get("name")
@@ -270,7 +270,7 @@ async fn get_node_detail(
             }
         }
         memvault_core::NodeRef::Doc(id) => {
-            let label = if let Ok(Some(doc)) = client.get_doc_ex(id, show_retracted).await {
+            let label = if let Ok(Some(doc)) = client.get_doc_scoped(id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
                 doc.frontmatter
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -338,7 +338,7 @@ async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<NodeSummary
             let other_id = other.tag_label();
             // Try to get entity details for entity nodes
             if let memvault_core::NodeRef::Entity(eid) = other {
-                if let Ok(Some(entity)) = client.get_entity_ex(eid, show_retracted).await {
+                if let Ok(Some(entity)) = client.get_entity_scoped(eid, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
                     let label = entity
                         .props
                         .get("name")

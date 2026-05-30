@@ -119,7 +119,7 @@ pub async fn get_entity(
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let entity = state
         .client
-        .get_entity_ex(&entity_id, include_retracted)
+        .get_entity_scoped(&entity_id, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
         .await?
         .ok_or_else(|| ApiError::not_found("Entity not found"))?;
 
