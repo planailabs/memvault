@@ -16,6 +16,9 @@ pub fn OpKindBadge(kind: String) -> Element {
         "Retract" => PillVariant::Bad,
         "TokenIssue" => PillVariant::Accent,
         "TokenRedeem" => PillVariant::Ok,
+        // Cluster sigchain / membership events.
+        "ClusterGenesis" | "NodeAttest" | "AgentEnroll" | "AdminAdmit" => PillVariant::Accent,
+        "AgentRevoke" | "NodeRevoke" | "AdminRetire" | "GrantRevoke" => PillVariant::Bad,
         _ => PillVariant::Muted,
     };
     rsx! { Pill { variant, "{kind}" } }

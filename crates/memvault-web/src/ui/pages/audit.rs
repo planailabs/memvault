@@ -415,6 +415,39 @@ async fn build_description(
                 None => (format!("Redeemed token \u{2192} minted {kind}"), None),
             }
         }
+        // ── Cluster sigchain / membership events ─────────────────
+        "ClusterGenesis" => ("Cluster genesis — admin root established".to_string(), None),
+        "NodeAttest" => {
+            let role = tags
+                .iter()
+                .find(|(s, _)| s == "role")
+                .map(|(_, l)| l.as_str())
+                .unwrap_or("node");
+            let member = tags
+                .iter()
+                .find(|(s, _)| s == "member")
+                .map(|(_, l)| short_id(l))
+                .unwrap_or_default();
+            (format!("Node attested ({role}) {member}"), None)
+        }
+        "AgentEnroll" => {
+            let role = tags
+                .iter()
+                .find(|(s, _)| s == "role")
+                .map(|(_, l)| l.as_str())
+                .unwrap_or("agent");
+            let agent = tags
+                .iter()
+                .find(|(s, _)| s == "agent")
+                .map(|(_, l)| l.clone())
+                .unwrap_or_default();
+            (format!("Agent enrolled \"{agent}\" ({role})"), None)
+        }
+        "AgentRevoke" => ("Agent revoked".to_string(), None),
+        "NodeRevoke" => ("Node revoked".to_string(), None),
+        "AdminAdmit" => ("Admin key admitted".to_string(), None),
+        "AdminRetire" => ("Admin key retired".to_string(), None),
+        "GrantRevoke" => ("Capability grant revoked".to_string(), None),
         // ── Share events ────────────────────────────────────────
         "SharePropose" => ("Sent share proposal".to_string(), None),
         "ShareDecide" => ("Decided share proposal".to_string(), None),

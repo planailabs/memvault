@@ -109,6 +109,30 @@ pub fn unpack_tag_cid(key: &[u8]) -> Result<&[u8], StoreError> {
     Ok(&key[cid_start..])
 }
 
+/// Extract the packed `wall_ns` from a tag index key (the 8 bytes preceding
+/// the cid). Lets callers recover a block's index time without reading the
+/// block body (sigchain blocks carry no `wall_ns` in their content).
+pub fn unpack_tag_ts(key: &[u8]) -> Result<u64, StoreError> {
+    if key.len() < 4 {
+        return Err(StoreError::KeyEncoding("tag key too short".into()));
+    }
+    let scope_len = u16::from_be_bytes([key[0], key[1]]) as usize;
+    let offset = 2 + scope_len;
+    if key.len() < offset + 2 {
+        return Err(StoreError::KeyEncoding(
+            "tag key too short for label".into(),
+        ));
+    }
+    let label_len = u16::from_be_bytes([key[offset], key[offset + 1]]) as usize;
+    let ts_start = offset + 2 + label_len;
+    if key.len() < ts_start + 8 {
+        return Err(StoreError::KeyEncoding("tag key too short for ts".into()));
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&key[ts_start..ts_start + 8]);
+    Ok(u64::from_be_bytes(b))
+}
+
 /// Pack an author index key: [peer_id_len:u16][peer_id][wall_ns:u64][cid]
 pub fn pack_author_key(peer_id: &[u8], wall_ns: u64, cid: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(2 + peer_id.len() + 8 + cid.len());

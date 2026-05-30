@@ -30,6 +30,15 @@ pub enum OpKind {
     TokenRedeem,
     SharePropose,
     ShareDecide,
+    // Cluster sigchain / membership events (admin-signed security trail).
+    ClusterGenesis,
+    NodeAttest,
+    AgentEnroll,
+    AgentRevoke,
+    NodeRevoke,
+    AdminAdmit,
+    AdminRetire,
+    GrantRevoke,
     Other(String),
 }
 
@@ -76,15 +85,16 @@ pub fn query_audit(
     let before = query.before_ns.unwrap_or(u64::MAX);
     let limit = query.limit.unwrap_or(100);
 
-    // "Token redeemed" audit records are signed TokenConsumption sigchain
-    // blocks (tag `sigchain/token_redeem`). They don't carry the generic
-    // envelope shape the parser below expects, so decode them by type here
-    // and key them by CID. The time/author scan then SKIPS these CIDs (they
-    // would otherwise come back as Other("unknown")), and we merge the typed
+    // Sigchain blocks (admin-signed membership/security events: genesis,
+    // node/agent attestations, revocations, admin admissions, token
+    // redemptions) are NOT generic Signed<T> envelopes — their content has no
+    // `payload`/`tags`/`wall_ns`, so the parser below would classify every one
+    // as Other("unknown"). Decode them by type here (keyed by CID, with the
+    // index timestamp), SKIP them in the time/author scan, and merge the typed
     // records in afterwards.
-    let redeem_records = token_redeem_records(store, after, limit)?;
-    let redeem_cids: std::collections::HashSet<Vec<u8>> =
-        redeem_records.keys().cloned().collect();
+    let sigchain_records = sigchain_records(store, after)?;
+    let sigchain_cids: std::collections::HashSet<Vec<u8>> =
+        sigchain_records.keys().cloned().collect();
 
     let cids = if let Some(author) = &query.author {
         store.query_by_author(author, after, limit)?
@@ -96,7 +106,7 @@ pub fn query_audit(
 
     let mut records = Vec::new();
     for cid in cids {
-        if redeem_cids.contains(&cid) {
+        if sigchain_cids.contains(&cid) {
             continue;
         }
         if let Some(data) = store.get_block(&cid)? {
@@ -121,18 +131,18 @@ pub fn query_audit(
         }
     }
 
-    // Merge in the typed token-redeem records, honouring the op_kind filter
-    // (doc_id never matches these). Then sort newest-first and cap to limit
-    // so the merged set stays consistent with the per-scan ordering.
-    let want_redeem = query
-        .op_kind
-        .as_ref()
-        .map(|k| k == &OpKind::TokenRedeem)
-        .unwrap_or(true);
-    if query.doc_id.is_none() && want_redeem {
-        for (_cid, rec) in redeem_records {
+    // Merge in the typed sigchain records, honouring the op_kind / author /
+    // time filters (doc_id never matches these). Then sort newest-first and
+    // cap to limit so the merged set stays consistent with the scan ordering.
+    if query.doc_id.is_none() {
+        for (_cid, rec) in sigchain_records {
             if rec.wall_ns < after || rec.wall_ns > before {
                 continue;
+            }
+            if let Some(filter_kind) = &query.op_kind {
+                if &rec.op_kind != filter_kind {
+                    continue;
+                }
             }
             if let Some(filter_author) = &query.author {
                 if &rec.author != filter_author {
@@ -148,63 +158,125 @@ pub fn query_audit(
     Ok(records)
 }
 
-/// Decode the `sigchain/token_redeem` blocks (signed `TokenConsumption`
-/// records) into audit rows keyed by block CID. Each row links the redeemed
-/// token to the attestation block minted for it, and best-effort resolves
-/// whether that attestation is a node or agent attestation.
-fn token_redeem_records(
+/// The admin-signed sigchain block labels (under tag scope `sigchain`) that
+/// represent cluster membership / security events worth surfacing in the
+/// audit log. Each maps to a meaningful `OpKind` below.
+const SIGCHAIN_LABELS: &[&str] = &[
+    "admin_genesis",
+    "node_att",
+    "agent_att",
+    "agent_rev",
+    "node_rev",
+    "admin_admission",
+    "admin_retirement",
+    "grant_revocation",
+    "token_redeem",
+];
+
+/// Decode the cluster sigchain blocks into audit rows keyed by block CID.
+/// These blocks carry no envelope-style `wall_ns`, so the index timestamp
+/// (from the tag key) is used for ordering. Best-effort: a block that fails
+/// to decode is simply skipped (it won't appear, rather than as "unknown").
+fn sigchain_records(
     store: &MemvaultStore,
     after: u64,
-    limit: usize,
 ) -> Result<std::collections::HashMap<Vec<u8>, AuditRecord>, QueryError> {
     let mut out = std::collections::HashMap::new();
-    let cids = store
-        .query_by_tag("sigchain", "token_redeem", after, limit)
-        .unwrap_or_default();
-    for cid in cids {
-        let Some(data) = store.get_block(&cid)? else {
-            continue;
-        };
-        let Ok(tc) = serde_ipld_dagcbor::from_slice::<memvault_auth::TokenConsumption>(&data) else {
-            continue;
-        };
-        let att_cid = tc.issued_attestation.to_bytes();
-        // Best-effort: classify the minted attestation for nicer display.
-        let att_type = match store.get_block(&att_cid) {
-            Ok(Some(b)) => {
-                if serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&b).is_ok() {
-                    "node"
-                } else if serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&b)
-                    .is_ok()
-                {
-                    "agent"
-                } else {
-                    "unknown"
-                }
+    for &label in SIGCHAIN_LABELS {
+        let entries = store
+            .query_by_tag_with_ts("sigchain", label, after, 1000)
+            .unwrap_or_default();
+        for (ts, cid) in entries {
+            let Some(data) = store.get_block(&cid)? else {
+                continue;
+            };
+            if let Some(rec) = sigchain_record(store, label, cid, ts, &data) {
+                out.insert(rec.cid.clone(), rec);
             }
-            _ => "unknown",
-        };
-        let tags = vec![
-            ("token".to_string(), hex::encode(tc.token_cid.to_bytes())),
-            ("attestation".to_string(), hex::encode(&att_cid)),
-            ("att_type".to_string(), att_type.to_string()),
-        ];
-        out.insert(
-            cid.clone(),
-            AuditRecord {
-                cid,
-                op_kind: OpKind::TokenRedeem,
-                author: tc.consumer.0.clone(),
-                agent_attestation: None,
-                wall_ns: tc.consumed_at_ns,
-                doc_id: None,
-                entity_id: None,
-                attachment_cid: None,
-                tags,
-            },
-        );
+        }
     }
     Ok(out)
+}
+
+/// Build one audit row for a sigchain block of the given `label`.
+fn sigchain_record(
+    store: &MemvaultStore,
+    label: &str,
+    cid: Vec<u8>,
+    ts: u64,
+    data: &[u8],
+) -> Option<AuditRecord> {
+    let mk = |op_kind: OpKind, author: Vec<u8>, tags: Vec<(String, String)>| AuditRecord {
+        cid: cid.clone(),
+        op_kind,
+        author,
+        agent_attestation: None,
+        wall_ns: ts,
+        doc_id: None,
+        entity_id: None,
+        attachment_cid: None,
+        tags,
+    };
+    let role_str = |r: &memvault_auth::Role| format!("{r:?}").to_lowercase();
+    match label {
+        "token_redeem" => {
+            let tc = serde_ipld_dagcbor::from_slice::<memvault_auth::TokenConsumption>(data).ok()?;
+            let att_cid = tc.issued_attestation.to_bytes();
+            // Best-effort: classify the minted attestation for nicer display.
+            let att_type = match store.get_block(&att_cid) {
+                Ok(Some(b)) => {
+                    if serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&b).is_ok() {
+                        "node"
+                    } else if serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&b)
+                        .is_ok()
+                    {
+                        "agent"
+                    } else {
+                        "unknown"
+                    }
+                }
+                _ => "unknown",
+            };
+            Some(mk(
+                OpKind::TokenRedeem,
+                tc.consumer.0.clone(),
+                vec![
+                    ("token".to_string(), hex::encode(tc.token_cid.to_bytes())),
+                    ("attestation".to_string(), hex::encode(&att_cid)),
+                    ("att_type".to_string(), att_type.to_string()),
+                ],
+            ))
+        }
+        "node_att" => {
+            let na = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(data).ok()?;
+            Some(mk(
+                OpKind::NodeAttest,
+                na.member.0.clone(),
+                vec![
+                    ("member".to_string(), hex::encode(&na.member.0)),
+                    ("role".to_string(), role_str(&na.role)),
+                ],
+            ))
+        }
+        "agent_att" => {
+            let aa = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(data).ok()?;
+            Some(mk(
+                OpKind::AgentEnroll,
+                aa.agent_pubkey.to_vec(),
+                vec![
+                    ("agent".to_string(), aa.agent_id.0.clone()),
+                    ("role".to_string(), role_str(&aa.role)),
+                ],
+            ))
+        }
+        "admin_genesis" => Some(mk(OpKind::ClusterGenesis, Vec::new(), Vec::new())),
+        "agent_rev" => Some(mk(OpKind::AgentRevoke, Vec::new(), Vec::new())),
+        "node_rev" => Some(mk(OpKind::NodeRevoke, Vec::new(), Vec::new())),
+        "admin_admission" => Some(mk(OpKind::AdminAdmit, Vec::new(), Vec::new())),
+        "admin_retirement" => Some(mk(OpKind::AdminRetire, Vec::new(), Vec::new())),
+        "grant_revocation" => Some(mk(OpKind::GrantRevoke, Vec::new(), Vec::new())),
+        _ => None,
+    }
 }
 
 pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {

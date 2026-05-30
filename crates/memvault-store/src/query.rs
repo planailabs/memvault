@@ -35,6 +35,36 @@ impl MemvaultStore {
         Ok(results)
     }
 
+    /// Like [`query_by_tag`], but also returns each entry's packed index
+    /// `wall_ns` as `(wall_ns, cid)`. Useful for blocks whose content carries
+    /// no timestamp (e.g. sigchain blocks) so callers can still order them.
+    pub fn query_by_tag_with_ts(
+        &self,
+        scope: &str,
+        label: &str,
+        after_ns: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TAG)?;
+
+        let start = keys::pack_tag_prefix(scope, label, after_ns);
+        let end = keys::pack_tag_prefix_end(scope, label);
+
+        let mut results = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())?;
+        for entry in range {
+            let (key, _) = entry?;
+            let ts = keys::unpack_tag_ts(key.value())?;
+            let cid = keys::unpack_tag_cid(key.value())?;
+            results.push((ts, cid.to_vec()));
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
     /// List unique labels under a tag scope, up to `limit` results.
     ///
     /// Scans the BY_TAG index for all entries with the given scope and
