@@ -116,9 +116,10 @@ pub async fn get_entity(
 ) -> Result<Json<EntityResponse>, ApiError> {
     let entity_id = parse_entity_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Read)?;
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let entity = state
         .client
-        .get_entity(&entity_id)
+        .get_entity_ex(&entity_id, include_retracted)
         .await?
         .ok_or_else(|| ApiError::not_found("Entity not found"))?;
 

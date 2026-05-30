@@ -115,6 +115,89 @@ pub trait MemvaultClient: Send + Sync {
     /// Resolve a node_id (tag_label like "entity:<hex>") to a human-readable label.
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>>;
 
+    // -- Retraction-aware reads (auditor/admin "see retracted" view) --
+    //
+    // Each mirrors a read method above but takes `include_retracted`. When
+    // false they are identical to the base method. When true, retracted
+    // entries are NOT filtered out — the caller (an HTTP handler resolving the
+    // requester's role, or the web UI's "show retracted" toggle) decides.
+    // Default impls ignore the flag (= filtered behaviour); `LocalClient` and
+    // the HTTP client override them to honour it.
+    async fn get_doc_ex(&self, id: &DocId, include_retracted: bool) -> Result<Option<Document>> {
+        let _ = include_retracted;
+        self.get_doc(id).await
+    }
+    async fn list_docs_ex(
+        &self,
+        tag_filter: Option<(String, String)>,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<DocSummary>> {
+        let _ = include_retracted;
+        self.list_docs(tag_filter, limit, bucket).await
+    }
+    async fn get_entity_ex(
+        &self,
+        id: &EntityId,
+        include_retracted: bool,
+    ) -> Result<Option<Entity>> {
+        let _ = include_retracted;
+        self.get_entity(id).await
+    }
+    async fn list_entities_ex(
+        &self,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<Entity>> {
+        let _ = include_retracted;
+        self.list_entities(limit, bucket).await
+    }
+    async fn search_ex(
+        &self,
+        query: &str,
+        limit: usize,
+        include_retracted: bool,
+    ) -> Result<Vec<SearchHit>> {
+        let _ = include_retracted;
+        self.search(query, limit).await
+    }
+    async fn search_unified_ex(
+        &self,
+        query: &str,
+        limit: usize,
+        include_retracted: bool,
+    ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        let _ = include_retracted;
+        self.search_unified(query, limit).await
+    }
+    async fn list_all_ex(
+        &self,
+        view_name: Option<&str>,
+        limit: usize,
+        include_retracted: bool,
+    ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
+        let _ = include_retracted;
+        self.list_all(view_name, limit).await
+    }
+    async fn view_members_ex(
+        &self,
+        view_name: &str,
+        include_retracted: bool,
+    ) -> Result<Vec<String>> {
+        let _ = include_retracted;
+        self.view_members(view_name).await
+    }
+    async fn resolve_label_ex(
+        &self,
+        node_id: &str,
+        include_retracted: bool,
+    ) -> Result<Option<String>> {
+        let _ = include_retracted;
+        self.resolve_label(node_id).await
+    }
+
     /// Resolve the legacy bucket (used only for adoption of pre-bucket data).
     /// Errors if no `BucketRole::Legacy` bucket is configured.
     async fn legacy_bucket_id(&self) -> Result<BucketId>;

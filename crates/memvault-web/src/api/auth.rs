@@ -190,6 +190,37 @@ impl FromRequestParts<Arc<AppState>> for RequireAuth {
     }
 }
 
+/// Resolve the verified caller's cluster [`Role`] from their claims, via the
+/// same attestation lookup used during JWT verification (the per-request hook
+/// when set, else the daemon's LocalClient sigchain scan). `None` when the
+/// attestation can't be resolved.
+pub fn caller_role(
+    state: &Arc<AppState>,
+    claims: &AgentTokenClaims,
+) -> Option<memvault_auth::Role> {
+    let decoded = hex::decode(&claims.sub).ok()?;
+    let sub: [u8; 32] = decoded.try_into().ok()?;
+    let att = if let Some(lookup) = &state.agent_attestation_lookup {
+        lookup(&sub)?
+    } else {
+        let lc = crate::ui::state::local_client().ok()?;
+        memvault_api::sigchain::find_agent_attestation(&lc, &sub)
+            .ok()
+            .flatten()?
+    };
+    Some(att.role)
+}
+
+/// Whether the caller may see retracted entries. Auditor (the read-only
+/// observability role) and Admin bypass retraction filtering; everyone else
+/// gets the normal filtered view.
+pub fn caller_sees_retracted(state: &Arc<AppState>, claims: &AgentTokenClaims) -> bool {
+    matches!(
+        caller_role(state, claims),
+        Some(memvault_auth::Role::Auditor) | Some(memvault_auth::Role::Admin)
+    )
+}
+
 /// Returns 403 Forbidden when the JWT lacks the required scope (vs 401 for
 /// missing/invalid auth).
 #[derive(Debug)]

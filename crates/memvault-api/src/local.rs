@@ -40,8 +40,8 @@ macro_rules! dual_impl {
                 |_| crate::error::ApiError::Other("index lock".into()))? }; }
             macro_rules! idx_write { () => { $self.index.try_write().map_err(
                 |_| crate::error::ApiError::Other("index lock".into()))? }; }
-            macro_rules! get_doc    { ($id:expr) => { $self.get_doc_sync($id) }; }
-            macro_rules! get_entity { ($id:expr) => { $self.get_entity_sync($id) }; }
+            macro_rules! get_doc    { ($id:expr) => { $self.get_doc_sync($id, false) }; }
+            macro_rules! get_entity { ($id:expr) => { $self.get_entity_sync($id, false) }; }
             $body
         }
 
@@ -50,8 +50,8 @@ macro_rules! dual_impl {
         pub async fn $async_name(&$self $(, $pname: $pty)*) -> $ret {
             macro_rules! idx_read  { () => { $self.index.read().await }; }
             macro_rules! idx_write { () => { $self.index.write().await }; }
-            macro_rules! get_doc    { ($id:expr) => { $self.get_doc_async($id).await }; }
-            macro_rules! get_entity { ($id:expr) => { $self.get_entity_async($id).await }; }
+            macro_rules! get_doc    { ($id:expr) => { $self.get_doc_async($id, false).await }; }
+            macro_rules! get_entity { ($id:expr) => { $self.get_entity_async($id, false).await }; }
             $body
         }
     };
@@ -1918,14 +1918,16 @@ impl LocalClient {
     // ── dual_impl! generated method pairs ────────────────────────────
 
     dual_impl! {
-        /// Reconstruct a document from the blockstore.
+        /// Reconstruct a document from the blockstore. When
+        /// `include_retracted` is true the retraction gate is skipped
+        /// (auditor/admin view).
         (get_doc_sync, get_doc_async)
-        fn(&self, id: &DocId) -> Result<Option<Document>>
+        fn(&self, id: &DocId, include_retracted: bool) -> Result<Option<Document>>
         {
             let node_id = format!("doc:{}", hex::encode(id.0));
             {
                 let idx = idx_read!();
-                if idx.is_retracted(&node_id) {
+                if !include_retracted && idx.is_retracted(&node_id) {
                     return Ok(None);
                 }
             }
@@ -1955,14 +1957,16 @@ impl LocalClient {
     }
 
     dual_impl! {
-        /// Reconstruct an entity from the blockstore.
+        /// Reconstruct an entity from the blockstore. When
+        /// `include_retracted` is true the retraction gate is skipped
+        /// (auditor/admin view).
         (get_entity_sync, get_entity_async)
-        fn(&self, id: &EntityId) -> Result<Option<Entity>>
+        fn(&self, id: &EntityId, include_retracted: bool) -> Result<Option<Entity>>
         {
             let node_id = format!("entity:{}", hex::encode(id.0));
             {
                 let idx = idx_read!();
-                if idx.is_retracted(&node_id) {
+                if !include_retracted && idx.is_retracted(&node_id) {
                     return Ok(None);
                 }
             }
@@ -2949,7 +2953,7 @@ impl LocalClient {
             Some(c) => c,
             None => return Ok(None),
         };
-        let Some(doc) = self.get_doc_async(doc_id).await? else {
+        let Some(doc) = self.get_doc_async(doc_id, false).await? else {
             return Ok(None);
         };
         let _ = self.extract_doc_and_cache(doc_id, &head_cid, &doc.body, &doc.frontmatter);
@@ -3417,7 +3421,15 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn get_doc(&self, id: &DocId) -> Result<Option<Document>> {
-        self.get_doc_async(id).await
+        self.get_doc_async(id, false).await
+    }
+
+    async fn get_doc_ex(
+        &self,
+        id: &DocId,
+        include_retracted: bool,
+    ) -> Result<Option<Document>> {
+        self.get_doc_async(id, include_retracted).await
     }
 
     async fn edit_doc(&self, id: &DocId, patch: TextPatch) -> Result<Vec<u8>> {
@@ -3436,7 +3448,7 @@ impl MemvaultClient for LocalClient {
 
         // After the edit lands, re-extract the doc body so cached links
         // track the new head.
-        if let Ok(Some(doc)) = self.get_doc_async(id).await {
+        if let Ok(Some(doc)) = self.get_doc_async(id, false).await {
             let _ = self.extract_doc_and_cache(id, &cid_bytes, &doc.body, &doc.frontmatter);
         }
 
@@ -3453,6 +3465,16 @@ impl MemvaultClient for LocalClient {
         tag_filter: Option<(String, String)>,
         limit: usize,
         bucket: Option<&BucketId>,
+    ) -> Result<Vec<DocSummary>> {
+        self.list_docs_ex(tag_filter, limit, bucket, false).await
+    }
+
+    async fn list_docs_ex(
+        &self,
+        tag_filter: Option<(String, String)>,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
     ) -> Result<Vec<DocSummary>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
@@ -3498,11 +3520,13 @@ impl MemvaultClient for LocalClient {
                             {
                                 if seen_docs.insert(doc_id.clone()) {
                                     let node_id = format!("doc:{}", hex::encode(doc_id.0));
-                                    let idx = self.index.read().await;
-                                    if idx.is_retracted(&node_id) {
-                                        continue;
+                                    if !include_retracted {
+                                        let idx = self.index.read().await;
+                                        if idx.is_retracted(&node_id) {
+                                            continue;
+                                        }
+                                        drop(idx);
                                     }
-                                    drop(idx);
                                     let title = dc
                                         .get("frontmatter")
                                         .and_then(|fm| fm.get("title"))
@@ -3780,7 +3804,15 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>> {
-        self.get_entity_async(id).await
+        self.get_entity_async(id, false).await
+    }
+
+    async fn get_entity_ex(
+        &self,
+        id: &EntityId,
+        include_retracted: bool,
+    ) -> Result<Option<Entity>> {
+        self.get_entity_async(id, include_retracted).await
     }
 
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>> {
@@ -3799,6 +3831,15 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
+        self.list_entities_ex(limit, bucket, false).await
+    }
+
+    async fn list_entities_ex(
+        &self,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<Entity>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
@@ -3830,7 +3871,7 @@ impl MemvaultClient for LocalClient {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&id_bytes);
             let entity_id = EntityId(arr);
-            if let Ok(Some(entity)) = self.get_entity(&entity_id).await {
+            if let Ok(Some(entity)) = self.get_entity_ex(&entity_id, include_retracted).await {
                 entities.push(entity);
             }
         }
@@ -3979,8 +4020,17 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_ex(query, limit, false).await
+    }
+
+    async fn search_ex(
+        &self,
+        query: &str,
+        limit: usize,
+        include_retracted: bool,
+    ) -> Result<Vec<SearchHit>> {
         let idx = self.index.read().await;
-        let hits = idx.search(query, limit * 2);
+        let hits = idx.search_ex(query, limit * 2, include_retracted);
         drop(idx);
 
         // Post-filter: only return hits from accessible buckets.
@@ -4008,8 +4058,17 @@ impl MemvaultClient for LocalClient {
         query: &str,
         limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        self.search_unified_ex(query, limit, false).await
+    }
+
+    async fn search_unified_ex(
+        &self,
+        query: &str,
+        limit: usize,
+        include_retracted: bool,
+    ) -> Result<Vec<memvault_query::UnifiedHit>> {
         let idx = self.index.read().await;
-        let hits = idx.search_unified(query, limit * 2);
+        let hits = idx.search_unified_ex(query, limit * 2, include_retracted);
         drop(idx);
 
         let buckets = self.store.list_buckets().unwrap_or_default();
@@ -4032,18 +4091,35 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
+        self.view_members_ex(view_name, false).await
+    }
+
+    async fn view_members_ex(
+        &self,
+        view_name: &str,
+        include_retracted: bool,
+    ) -> Result<Vec<String>> {
         let view = self
             .get_view(view_name)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("view '{view_name}' not found")))?;
         let idx = self.index.read().await;
-        Ok(idx.members_of_view(&view.tags))
+        Ok(idx.members_of_view_ex(&view.tags, include_retracted))
     }
 
     async fn list_all(
         &self,
         view_name: Option<&str>,
         limit: usize,
+    ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
+        self.list_all_ex(view_name, limit, false).await
+    }
+
+    async fn list_all_ex(
+        &self,
+        view_name: Option<&str>,
+        limit: usize,
+        include_retracted: bool,
     ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
         let view_tags = if let Some(name) = view_name {
             let view = self
@@ -4055,7 +4131,7 @@ impl MemvaultClient for LocalClient {
             None
         };
         let idx = self.index.read().await;
-        let all = idx.list_all(view_tags.as_deref(), limit * 2);
+        let all = idx.list_all_ex(view_tags.as_deref(), limit * 2, include_retracted);
         drop(idx);
 
         let buckets = self.store.list_buckets().unwrap_or_default();
@@ -4077,8 +4153,16 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
+        self.resolve_label_ex(node_id, false).await
+    }
+
+    async fn resolve_label_ex(
+        &self,
+        node_id: &str,
+        include_retracted: bool,
+    ) -> Result<Option<String>> {
         let idx = self.index.read().await;
-        Ok(idx.resolve_label(node_id))
+        Ok(idx.resolve_label_ex(node_id, include_retracted))
     }
 
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>> {

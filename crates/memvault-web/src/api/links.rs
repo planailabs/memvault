@@ -151,12 +151,13 @@ pub async fn get_node(
         )
     })?;
     crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Read)?;
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
 
     match node_ref {
         NodeRef::Entity(eid) => {
             let entity = state
                 .client
-                .get_entity(&eid)
+                .get_entity_ex(&eid, include_retracted)
                 .await?
                 .ok_or_else(|| ApiError::not_found("Entity not found"))?;
             Ok(Json(serde_json::json!({
@@ -176,7 +177,7 @@ pub async fn get_node(
         NodeRef::Doc(did) => {
             let doc = state
                 .client
-                .get_doc(&did)
+                .get_doc_ex(&did, include_retracted)
                 .await?
                 .ok_or_else(|| ApiError::not_found("Document not found"))?;
             Ok(Json(serde_json::json!({
@@ -207,7 +208,11 @@ pub async fn list_nodes(
     Query(params): Query<ListNodesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = params.limit.unwrap_or(100);
-    let items = state.client.list_all(params.view.as_deref(), limit).await?;
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    let items = state
+        .client
+        .list_all_ex(params.view.as_deref(), limit, include_retracted)
+        .await?;
     let items = crate::api::auth::filter_readable(&auth.claims, items, |(id, _, _, _)| id.clone())?;
     Ok(Json(serde_json::json!({
         "count": items.len(),

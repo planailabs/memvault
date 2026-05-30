@@ -259,13 +259,31 @@ impl TextIndex {
     // ── Queries ────────────────────────────────────────────────────
 
     pub fn members_of_view(&self, required_tags: &[(String, String)]) -> Vec<String> {
+        self.members_of_view_ex(required_tags, false)
+    }
+
+    /// As [`members_of_view`], but when `include_retracted` is true the
+    /// retracted-node filter is skipped (auditor/admin view).
+    pub fn members_of_view_ex(
+        &self,
+        required_tags: &[(String, String)],
+        include_retracted: bool,
+    ) -> Vec<String> {
         if required_tags.is_empty() {
-            return self.unified.keys().cloned().collect();
+            if include_retracted {
+                return self.unified.keys().cloned().collect();
+            }
+            return self
+                .unified
+                .keys()
+                .filter(|id| !self.retracted.contains(id.as_str()))
+                .cloned()
+                .collect();
         }
         self.unified
             .iter()
             .filter(|(id, entry)| {
-                !self.retracted.contains(id.as_str())
+                (include_retracted || !self.retracted.contains(id.as_str()))
                     && required_tags.iter().all(|(scope, label)| {
                         entry.tags.iter().any(|(s, l)| s == scope && l == label)
                     })
@@ -279,10 +297,21 @@ impl TextIndex {
         view_tags: Option<&[(String, String)]>,
         limit: usize,
     ) -> Vec<(String, String, String, Vec<(String, String)>)> {
+        self.list_all_ex(view_tags, limit, false)
+    }
+
+    /// As [`list_all`], but when `include_retracted` is true retracted nodes
+    /// are included (auditor/admin view).
+    pub fn list_all_ex(
+        &self,
+        view_tags: Option<&[(String, String)]>,
+        limit: usize,
+        include_retracted: bool,
+    ) -> Vec<(String, String, String, Vec<(String, String)>)> {
         self.unified
             .iter()
             .filter(|(id, entry)| {
-                if self.retracted.contains(id.as_str()) {
+                if !include_retracted && self.retracted.contains(id.as_str()) {
                     return false;
                 }
                 if let Some(tags) = view_tags {
@@ -306,7 +335,13 @@ impl TextIndex {
     }
 
     pub fn resolve_label(&self, node_id: &str) -> Option<String> {
-        if self.retracted.contains(node_id) {
+        self.resolve_label_ex(node_id, false)
+    }
+
+    /// As [`resolve_label`], but when `include_retracted` is true a retracted
+    /// node's label still resolves (auditor/admin view).
+    pub fn resolve_label_ex(&self, node_id: &str, include_retracted: bool) -> Option<String> {
+        if !include_retracted && self.retracted.contains(node_id) {
             return None;
         }
         self.unified.get(node_id).map(|e| e.label.clone())
@@ -314,12 +349,18 @@ impl TextIndex {
 
     /// Legacy doc-only search. Returns SearchHit with DocId.
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
-        self.search_filtered(query, None, limit)
+        self.search_filtered(query, None, limit, false)
+    }
+
+    /// As [`search`], but when `include_retracted` is true retracted docs are
+    /// included (auditor/admin view).
+    pub fn search_ex(&self, query: &str, limit: usize, include_retracted: bool) -> Vec<SearchHit> {
+        self.search_filtered(query, None, limit, include_retracted)
     }
 
     pub fn search_query(&self, query: &SearchQuery) -> Vec<SearchHit> {
         let limit = if query.limit == 0 { 10 } else { query.limit };
-        self.search_filtered(&query.text, query.tag_filter.as_ref(), limit)
+        self.search_filtered(&query.text, query.tag_filter.as_ref(), limit, false)
     }
 
     fn search_filtered(
@@ -327,6 +368,7 @@ impl TextIndex {
         query: &str,
         tag_filter: Option<&(String, String)>,
         limit: usize,
+        include_retracted: bool,
     ) -> Vec<SearchHit> {
         let query_lower = query.to_lowercase();
         let terms: Vec<&str> = query_lower.split_whitespace().collect();
@@ -339,7 +381,7 @@ impl TextIndex {
             if entry.node_type != "doc" {
                 continue;
             }
-            if self.retracted.contains(node_id) {
+            if !include_retracted && self.retracted.contains(node_id) {
                 continue;
             }
             if let Some((scope, label)) = tag_filter {
@@ -387,6 +429,17 @@ impl TextIndex {
 
     /// Unified search across all indexed nodes.
     pub fn search_unified(&self, query: &str, limit: usize) -> Vec<UnifiedHit> {
+        self.search_unified_ex(query, limit, false)
+    }
+
+    /// As [`search_unified`], but when `include_retracted` is true retracted
+    /// nodes are included in the results (auditor/admin view).
+    pub fn search_unified_ex(
+        &self,
+        query: &str,
+        limit: usize,
+        include_retracted: bool,
+    ) -> Vec<UnifiedHit> {
         let query_lower = query.to_lowercase();
         let terms: Vec<&str> = query_lower.split_whitespace().collect();
         if terms.is_empty() {
@@ -395,7 +448,7 @@ impl TextIndex {
 
         let mut hits: Vec<UnifiedHit> = Vec::new();
         for (node_id, entry) in &self.unified {
-            if self.retracted.contains(node_id.as_str()) {
+            if !include_retracted && self.retracted.contains(node_id.as_str()) {
                 continue;
             }
             let text_lower = entry.text.to_lowercase();

@@ -30,7 +30,11 @@ pub async fn search(
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchHitResponse>>, ApiError> {
     let limit = params.limit.unwrap_or(20);
-    let hits = state.client.search(&params.q, limit).await?;
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    let hits = state
+        .client
+        .search_ex(&params.q, limit, include_retracted)
+        .await?;
 
     let results: Vec<SearchHitResponse> = hits
         .into_iter()

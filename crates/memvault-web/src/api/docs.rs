@@ -94,9 +94,10 @@ pub async fn list_docs(
         crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Read)?;
     }
 
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let docs = state
         .client
-        .list_docs(tag_filter, limit, bucket_id.as_ref())
+        .list_docs_ex(tag_filter, limit, bucket_id.as_ref(), include_retracted)
         .await?;
 
     let results: Vec<DocSummaryResponse> = docs
@@ -170,9 +171,10 @@ pub async fn get_doc(
     let doc_id = parse_doc_id(&id)?;
     crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Read)?;
 
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let doc = state
         .client
-        .get_doc(&doc_id)
+        .get_doc_ex(&doc_id, include_retracted)
         .await?
         .ok_or_else(|| ApiError::not_found("Document not found"))?;
 

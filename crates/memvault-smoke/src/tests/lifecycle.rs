@@ -377,6 +377,46 @@ async fn retraction_workflow() {
 }
 
 #[tokio::test]
+async fn auditor_bypasses_retraction() {
+    let node = TestNode::new();
+    let doc = Document::new(DocId::random(), "secret then retracted".into(), Default::default());
+    let id = doc.id.clone();
+    node.client
+        .put_doc(doc, vec![], Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    let node_id = format!("doc:{}", hex::encode(id.0));
+    node.client.retract_node(&node_id, "mistake").await.unwrap();
+
+    // Default (filtered) view: the retracted doc is hidden.
+    assert!(
+        node.client.get_doc(&id).await.unwrap().is_none(),
+        "retracted doc should be hidden from the default view"
+    );
+    let listed = node.client.list_docs(None, 100, None).await.unwrap();
+    assert!(
+        !listed.iter().any(|d| d.id == id),
+        "retracted doc should not appear in the default list"
+    );
+
+    // Auditor/admin bypass (include_retracted = true): the doc reappears.
+    assert!(
+        node.client.get_doc_ex(&id, true).await.unwrap().is_some(),
+        "include_retracted should surface the retracted doc"
+    );
+    let listed_ex = node
+        .client
+        .list_docs_ex(None, 100, None, true)
+        .await
+        .unwrap();
+    assert!(
+        listed_ex.iter().any(|d| d.id == id),
+        "include_retracted should include the retracted doc in the list"
+    );
+}
+
+#[tokio::test]
 async fn status_counts_accurate() {
     let node = TestNode::new();
 

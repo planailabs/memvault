@@ -35,6 +35,7 @@ impl NoteRow {
 async fn list_notes(
     view: Option<String>,
     bucket_hex: Option<String>,
+    show_retracted: bool,
 ) -> Result<Vec<NoteRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
@@ -51,7 +52,7 @@ async fn list_notes(
     // If a view is active, use list_all (view-filtered) and filter to docs only.
     if let Some(ref view_name) = view {
         let items = client
-            .list_all(Some(view_name), 500)
+            .list_all_ex(Some(view_name), 500, show_retracted)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         return Ok(items
@@ -69,7 +70,7 @@ async fn list_notes(
     }
 
     let docs = client
-        .list_docs(None, 500, bucket_id.as_ref())
+        .list_docs_ex(None, 500, bucket_id.as_ref(), show_retracted)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(docs
@@ -90,17 +91,32 @@ pub fn NoteList() -> Element {
     use_topbar(&t!("notes-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
     let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
+    // "Show retracted" toggle — includes retracted notes in the list. The
+    // embedded UI runs as the daemon identity, so this is an explicit opt-in
+    // (mirrors the auditor/admin bypass available to API callers).
+    let mut show_retracted = use_signal(|| false);
     let notes = use_server_future(move || {
         let v = active_view.read().name.clone();
         let b = active_bucket.read().id.clone();
-        async move { list_notes(v, b).await }
+        let r = *show_retracted.read();
+        async move { list_notes(v, b, r).await }
     })?;
 
     rsx! {
         div { class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4",
             PageHeader { class: "mb-0", {t!("notes-title")} }
-            Link { to: Route::NoteForm {}, class: "btn btn-md btn-primary",
-                {t!("notes-new")}
+            div { class: "flex items-center gap-3",
+                label { class: "flex items-center gap-2 text-sm text-fg-muted cursor-pointer",
+                    input {
+                        r#type: "checkbox",
+                        checked: show_retracted(),
+                        onchange: move |e| show_retracted.set(e.checked()),
+                    }
+                    "Show retracted"
+                }
+                Link { to: Route::NoteForm {}, class: "btn btn-md btn-primary",
+                    {t!("notes-new")}
+                }
             }
         }
         {match &*notes.read() {
