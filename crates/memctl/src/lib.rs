@@ -581,6 +581,7 @@ mod native {
         AgentHost,
         Auditor,
         Service,
+        Node,
     }
 
     impl From<RoleArg> for memvault_auth::Role {
@@ -590,6 +591,7 @@ mod native {
                 RoleArg::AgentHost => Self::AgentHost,
                 RoleArg::Auditor => Self::Auditor,
                 RoleArg::Service => Self::Service,
+                RoleArg::Node => Self::Node,
             }
         }
     }

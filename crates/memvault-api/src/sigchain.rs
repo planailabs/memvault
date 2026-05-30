@@ -834,7 +834,8 @@ fn role_privilege(role: &memvault_auth::Role) -> u8 {
         Service => 0,
         Auditor => 1,
         AgentHost => 2,
-        Admin => 3,
+        Node => 3,
+        Admin => 4,
     }
 }
 

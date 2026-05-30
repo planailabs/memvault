@@ -50,6 +50,7 @@ async fn issue_token(role: String, label: String, max_uses: u32) -> Result<Strin
         "Admin" => Role::Admin,
         "AgentHost" => Role::AgentHost,
         "Auditor" => Role::Auditor,
+        "Node" => Role::Node,
         _ => Role::Service,
     };
     let label = if label.is_empty() { None } else { Some(label) };
@@ -178,6 +179,7 @@ pub fn TokenManagement() -> Element {
                                         onchange: move |e: Event<FormData>| new_role.set(e.value()),
                                         option { value: "Service", {t!("tokens-role-service")} }
                                         option { value: "AgentHost", {t!("tokens-role-agent-host")} }
+                                        option { value: "Node", {t!("tokens-role-node")} }
                                         option { value: "Auditor", {t!("tokens-role-auditor")} }
                                         option { value: "Admin", {t!("tokens-role-admin")} }
                                     }

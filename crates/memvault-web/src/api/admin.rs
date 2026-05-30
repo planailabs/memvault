@@ -153,6 +153,7 @@ fn parse_role(s: &str) -> Result<memvault_auth::Role, ApiError> {
         "agent_host" => Ok(memvault_auth::Role::AgentHost),
         "auditor" => Ok(memvault_auth::Role::Auditor),
         "service" => Ok(memvault_auth::Role::Service),
+        "node" => Ok(memvault_auth::Role::Node),
         _ => Err(ApiError::bad_request(format!("Unknown role: {s}"))),
     }
 }

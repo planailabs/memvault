@@ -214,6 +214,7 @@ tokens-status-active = Active
 tokens-status-revoked = Revoked
 tokens-role-service = Service
 tokens-role-agent-host = Agent Host
+tokens-role-node = Node
 tokens-role-auditor = Auditor
 tokens-role-admin = Admin
 
