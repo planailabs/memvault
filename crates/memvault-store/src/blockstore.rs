@@ -72,4 +72,75 @@ impl MemvaultStore {
         txn.commit()?;
         Ok(removed)
     }
+
+    /// Delete every block tagged under the `sigchain` scope (node/agent
+    /// attestations + revocations — the cluster membership chain). Returns the
+    /// number of blocks removed. This only removes the BLOCKS rows; callers
+    /// should follow with `clear_secondary_indexes` + a reindex of the
+    /// remaining blocks to drop the now-dangling secondary-index entries.
+    ///
+    /// Destructive: this "unclusters" the node — afterwards it holds no
+    /// membership attestations.
+    pub fn delete_sigchain_blocks(&self) -> Result<usize, StoreError> {
+        let labels = self.query_unique_labels("sigchain", usize::MAX)?;
+        let mut cids: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        for label in &labels {
+            for cid in self.query_by_tag("sigchain", label, 0, usize::MAX)? {
+                cids.insert(cid);
+            }
+        }
+        let mut count = 0usize;
+        for cid in &cids {
+            if self.delete_block(cid)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod uncluster_tests {
+    use crate::MemvaultStore;
+    use crate::insert::EnvelopeMeta;
+    use tempfile::TempDir;
+
+    fn meta(tags: Vec<(&str, &str)>) -> EnvelopeMeta {
+        EnvelopeMeta {
+            author: vec![1, 2, 3],
+            tags: tags
+                .into_iter()
+                .map(|(s, l)| (s.to_string(), l.to_string()))
+                .collect(),
+            wall_ns: 100,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn delete_sigchain_blocks_removes_only_sigchain() {
+        let dir = TempDir::new().unwrap();
+        let s = MemvaultStore::open(dir.path().join("db.redb")).unwrap();
+
+        // Two sigchain blocks + one ordinary doc block.
+        s.insert_envelope(b"cid_att", b"{}", &meta(vec![("sigchain", "node_att")]))
+            .unwrap();
+        s.insert_envelope(b"cid_rev", b"{}", &meta(vec![("sigchain", "node_rev")]))
+            .unwrap();
+        s.insert_envelope(b"cid_doc", b"{}", &meta(vec![("doc", "abcd")]))
+            .unwrap();
+
+        let removed = s.delete_sigchain_blocks().unwrap();
+        assert_eq!(removed, 2, "both sigchain blocks removed");
+
+        assert!(s.get_block(b"cid_att").unwrap().is_none());
+        assert!(s.get_block(b"cid_rev").unwrap().is_none());
+        assert!(
+            s.get_block(b"cid_doc").unwrap().is_some(),
+            "non-sigchain block preserved"
+        );
+
+        // Idempotent: a second run removes nothing.
+        assert_eq!(s.delete_sigchain_blocks().unwrap(), 0);
+    }
 }

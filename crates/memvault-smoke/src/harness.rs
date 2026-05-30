@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 use memvault_api::{EventBus, LocalClient};
 use memvault_core::ClusterId;
-use memvault_query::{QuotaManager, TextIndex};
+use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
 
 /// A test node: owns a tempdir, store, and client.
@@ -32,7 +32,7 @@ impl TestNode {
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut peer_id);
         store.set_local_peer_id(&peer_id).unwrap();
 
-        let mut client = LocalClient::new(
+        let client = LocalClient::new(
             Arc::clone(&store),
             Arc::new(RwLock::new(QuotaManager::default())),
             Arc::new(EventBus::new(64)),

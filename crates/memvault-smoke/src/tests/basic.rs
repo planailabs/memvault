@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use memvault_api::{EventBus, LocalClient, MemvaultClient};
 use memvault_core::{DocId, Visibility};
 use memvault_doc::Document;
-use memvault_query::{QuotaManager, TextIndex};
+use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
 
 fn open_temp_store(dir: &tempfile::TempDir, name: &str) -> Arc<MemvaultStore> {

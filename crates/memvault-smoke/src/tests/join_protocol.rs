@@ -687,7 +687,7 @@ async fn rebuild_retags_sigchain_blocks() {
         sigchain,
     };
     use memvault_core::ClusterId;
-    use memvault_query::{QuotaManager, TextIndex};
+    use memvault_query::QuotaManager;
     use std::sync::Arc;
 
     // Build a LocalClient with admin + node keys so we can mint

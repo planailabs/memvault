@@ -17,7 +17,7 @@ mod native {
     use memvault_api::{EventBus, LocalClient, MemvaultClient};
     use memvault_core::{ClusterId, DocId, EntityId, Visibility};
     use memvault_doc::{Edge, Entity};
-    use memvault_query::{QuotaManager, TextIndex};
+    use memvault_query::QuotaManager;
     use memvault_store::MemvaultStore;
 
     // Re-export for convenience
@@ -164,6 +164,14 @@ mod native {
         Peers,
         /// Rebuild all indexes from blockstore, repair VFS tree (re-link orphaned directories)
         RepairIndex,
+        /// DESTRUCTIVE: remove all sigchain blocks (node/agent attestations +
+        /// revocations), unclustering this node. Requires --force. Back up the
+        /// redb first (e.g. `memctl export-blocks`).
+        Uncluster {
+            /// Required. Without it the command only prints what it would do.
+            #[arg(long)]
+            force: bool,
+        },
         /// Diff blocks between two stores (semantic, deserialized)
         DiffBlocks {
             /// Path to first redb database
@@ -1685,6 +1693,52 @@ mod native {
                 client.save_index(&cache_path).await?;
                 println!("  Index cache saved to {}", cache_path.display());
                 println!("Rebuild complete (blockstore v{}).", memvault_api::rebuild::BLOCKSTORE_VERSION);
+            }
+            Commands::Uncluster { force } => {
+                let store = make_store()?;
+                // Count sigchain blocks up front (for the summary / dry run).
+                let labels = store.query_unique_labels("sigchain", usize::MAX)?;
+                let mut sig_count = 0usize;
+                for label in &labels {
+                    sig_count += store.query_by_tag("sigchain", label, 0, usize::MAX)?.len();
+                }
+
+                if !force {
+                    println!(
+                        "Uncluster (dry run): would remove {sig_count} sigchain block(s) —"
+                    );
+                    println!(
+                        "  node/agent attestations + revocations (the cluster membership chain)."
+                    );
+                    println!();
+                    println!(
+                        "This is DESTRUCTIVE and cannot be undone. Back up the blockstore first:"
+                    );
+                    println!("    memctl export-blocks --output ./memvault-backup");
+                    println!();
+                    println!("Re-run with --force to proceed.");
+                } else {
+                    println!("Removing {sig_count} sigchain block(s)...");
+                    let removed = store.delete_sigchain_blocks()?;
+                    println!("  Removed {removed} block(s). Rebuilding secondary indexes...");
+                    // Drop the now-dangling sigchain index entries and rebuild
+                    // the secondary indexes from the remaining blocks.
+                    store.clear_secondary_indexes()?;
+                    let blocks = store.iter_blocks()?;
+                    let mut reindexed = 0usize;
+                    for (cid, data) in &blocks {
+                        if store.reindex_block(cid, data).unwrap_or(false) {
+                            reindexed += 1;
+                        }
+                    }
+                    println!("  Reindexed {reindexed} remaining block(s).");
+                    println!(
+                        "Uncluster complete — this node now holds no membership attestations."
+                    );
+                    println!(
+                        "Tip: run `memctl repair-index` to also rebuild the search index."
+                    );
+                }
             }
             Commands::RenewAttestation { peer_id } => {
                 println!(

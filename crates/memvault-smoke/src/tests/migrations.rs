@@ -11,7 +11,7 @@ use memvault_api::MemvaultClient;
 use memvault_core::tags::Tag;
 use memvault_core::*;
 use memvault_doc::{BucketRole, Document, Entity, Op, TextPatch};
-use memvault_query::{QuotaManager, TextIndex};
+use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
 use memvault_store::insert::EnvelopeMeta;
 use tokio::sync::RwLock;
@@ -608,7 +608,7 @@ fn token_string_prefix_unchanged() {
 #[tokio::test]
 async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
     use memvault_api::{EventBus, LocalClient, MemvaultClient};
-    use memvault_query::{QuotaManager, TextIndex};
+    use memvault_query::QuotaManager;
     use tokio::sync::RwLock;
 
     let dir = tempfile::tempdir().unwrap();

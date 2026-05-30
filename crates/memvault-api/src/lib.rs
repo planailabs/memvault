@@ -132,7 +132,7 @@ pub async fn connect(
     opts: ConnectOptions,
 ) -> std::result::Result<Box<dyn MemvaultClient>, anyhow::Error> {
     if let Some(db_path) = &opts.db {
-        use memvault_query::{QuotaManager, TextIndex};
+        use memvault_query::QuotaManager;
         use memvault_store::MemvaultStore;
         use std::sync::Arc;
         use tokio::sync::RwLock;

@@ -6,7 +6,7 @@ use memvault_api::{EventBus, LocalClient, MemvaultClient};
 use memvault_core::classification::Classification;
 use memvault_core::{BucketId, ClusterId, DocId, Visibility};
 use memvault_doc::{BucketRole, Document};
-use memvault_query::{QuotaManager, TextIndex};
+use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
 use tokio::sync::RwLock;
 
