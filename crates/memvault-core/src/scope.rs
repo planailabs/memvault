@@ -8,7 +8,35 @@
 //! scope can only ever narrow visibility, never widen it (ACL is a separate,
 //! non-negotiable layer).
 
-use memvault_core::BucketId;
+use crate::BucketId;
+
+/// Derive the opaque, fixed-width (32-byte) `scope_id` digest for a partition
+/// coordinate. The one-byte domain tag keeps the three partition kinds in
+/// disjoint key spaces even if a view_cid and bucket_id happened to collide.
+fn scope_digest(tag: u8, parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[tag]);
+    for p in parts {
+        hasher.update(p);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// `scope_id` for a per-bucket partition.
+pub fn bucket_scope_id(bucket_id: &BucketId) -> [u8; 32] {
+    scope_digest(b'b', &[&bucket_id.0])
+}
+
+/// `scope_id` for a per-view (fan-out across buckets) partition.
+/// `view_cid` is the view block's CID bytes (stable identity of the view).
+pub fn view_scope_id(view_cid: &[u8]) -> [u8; 32] {
+    scope_digest(b'v', &[view_cid])
+}
+
+/// `scope_id` for a per-view×bucket partition.
+pub fn view_bucket_scope_id(view_cid: &[u8], bucket_id: &BucketId) -> [u8; 32] {
+    scope_digest(b'x', &[view_cid, &bucket_id.0])
+}
 
 /// Which buckets a query spans.
 ///
@@ -181,6 +209,24 @@ mod tests {
         assert!(!sel.is_empty_set());
         assert!(BucketSelector::Only(vec![]).is_empty_set());
         assert!(BucketSelector::Accessible.explicit().is_none());
+    }
+
+    #[test]
+    fn scope_ids_are_disjoint_and_fixed_width() {
+        let b = BucketId([3u8; 32]);
+        let vcid = b"view-cid-bytes";
+        let s_b = bucket_scope_id(&b);
+        let s_v = view_scope_id(vcid);
+        let s_vb = view_bucket_scope_id(vcid, &b);
+        assert_eq!(s_b.len(), 32);
+        // All three domains differ for the same inputs.
+        assert_ne!(s_b, s_v);
+        assert_ne!(s_b, s_vb);
+        assert_ne!(s_v, s_vb);
+        // Deterministic.
+        assert_eq!(s_vb, view_bucket_scope_id(vcid, &b));
+        // Different bucket → different id.
+        assert_ne!(s_b, bucket_scope_id(&BucketId([4u8; 32])));
     }
 
     #[test]

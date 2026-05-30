@@ -5,6 +5,7 @@ pub mod codec;
 pub mod envelope;
 pub mod error;
 pub mod ids;
+pub mod scope;
 pub mod tags;
 pub mod tags_lint;
 pub mod time;
@@ -21,6 +22,10 @@ pub use envelope::Signed;
 pub use error::{Error, Result};
 pub use bucket::{BucketBinding, BucketDecl, BucketRole};
 pub use ids::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId};
+pub use scope::{
+    BucketSelector, QueryScope, RetractionMode, bucket_scope_id, view_bucket_scope_id,
+    view_scope_id,
+};
 pub use tags::{Tag, TagPattern};
 pub use tags_lint::lint_tags;
 pub use time::{LamportClock, wall_ns};

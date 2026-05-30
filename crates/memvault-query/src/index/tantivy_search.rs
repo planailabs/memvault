@@ -5,11 +5,12 @@
 
 use std::path::Path;
 
+use memvault_core::RetractionMode;
 use tantivy::{
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
     collector::TopDocs,
     query::QueryParser,
-    schema::{Field, NumericOptions, STORED, STRING, Schema, TEXT},
+    schema::{Field, NumericOptions, STORED, STRING, Schema, TEXT, Value},
 };
 
 use crate::error::QueryError;
@@ -29,6 +30,10 @@ pub struct TantivyIndex {
     f_tags: Field,
     f_wall_ns: Field,
     f_bucket_id: Field,
+    /// 0 = active, 1 = retracted. Retraction flips this flag (re-add) instead
+    /// of deleting the doc, so admins/auditors can still surface retracted
+    /// content via `RetractionMode`.
+    f_retracted: Field,
 }
 
 /// Unified search hit across all node types.
@@ -57,6 +62,10 @@ impl TantivyIndex {
             NumericOptions::default().set_stored().set_indexed(),
         );
         let f_bucket_id = schema_builder.add_text_field("bucket_id", STRING | STORED);
+        let f_retracted = schema_builder.add_u64_field(
+            "retracted",
+            NumericOptions::default().set_stored().set_indexed(),
+        );
         let schema = schema_builder.build();
 
         std::fs::create_dir_all(path).map_err(|e| QueryError::Other(e.to_string()))?;
@@ -88,6 +97,7 @@ impl TantivyIndex {
             f_tags,
             f_wall_ns,
             f_bucket_id,
+            f_retracted,
         })
     }
 
@@ -113,6 +123,7 @@ impl TantivyIndex {
         }
         doc.add_u64(self.f_wall_ns, wall_ns);
         doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
+        doc.add_u64(self.f_retracted, 0);
 
         self.writer
             .add_document(doc)
@@ -143,6 +154,7 @@ impl TantivyIndex {
         }
         doc.add_u64(self.f_wall_ns, wall_ns);
         doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
+        doc.add_u64(self.f_retracted, 0);
 
         self.writer
             .add_document(doc)
@@ -184,6 +196,7 @@ impl TantivyIndex {
         }
         doc.add_u64(self.f_wall_ns, wall_ns);
         doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
+        doc.add_u64(self.f_retracted, 0);
 
         self.writer
             .add_document(doc)
@@ -202,21 +215,73 @@ impl TantivyIndex {
         Ok(())
     }
 
-    /// Search the index with optional bucket filter.
+    /// Search the index with an optional single-bucket filter (active only).
+    /// Thin back-compat wrapper over [`search_scoped`].
     pub fn search_filtered(
         &self,
         query_text: &str,
         bucket_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<TantivyHit>, QueryError> {
+        let buckets: Vec<&str> = bucket_id.into_iter().collect();
+        self.search_scoped(
+            query_text,
+            &buckets,
+            &[],
+            RetractionMode::ActiveOnly,
+            limit,
+        )
+    }
+
+    /// Scoped full-text search: the `(buckets, view_tags, retraction)` triplet
+    /// is pushed natively into the Tantivy query.
+    ///
+    /// - `bucket_ids`: hex bucket ids; empty = no bucket clause (all buckets).
+    ///   Multiple ids are OR-ed — this is how a single query spans the set of
+    ///   buckets an agent has access to.
+    /// - `view_tags`: `(scope, label)` pairs AND-ed in (a view is a tag
+    ///   conjunction); empty = no view filter.
+    /// - `retraction`: `ActiveOnly` adds `retracted:0`, `RetractedOnly` adds
+    ///   `retracted:1`, `IncludeRetracted` adds no clause.
+    pub fn search_scoped(
+        &self,
+        query_text: &str,
+        bucket_ids: &[&str],
+        view_tags: &[(String, String)],
+        retraction: RetractionMode,
+        limit: usize,
+    ) -> Result<Vec<TantivyHit>, QueryError> {
         let searcher = self.reader.searcher();
 
-        // Build query: if bucket filter is set, AND it with the text query
-        let effective_query = if let Some(bid) = bucket_id {
-            format!("bucket_id:\"{bid}\" AND ({query_text})")
-        } else {
+        let mut clauses: Vec<String> = Vec::new();
+        if !bucket_ids.is_empty() {
+            let ors = bucket_ids
+                .iter()
+                .map(|b| format!("bucket_id:\"{b}\""))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            clauses.push(format!("({ors})"));
+        }
+        for (scope, label) in view_tags {
+            clauses.push(format!("tags:\"{scope}:{label}\""));
+        }
+        match retraction {
+            RetractionMode::ActiveOnly => clauses.push("retracted:0".to_string()),
+            RetractionMode::RetractedOnly => clauses.push("retracted:1".to_string()),
+            RetractionMode::IncludeRetracted => {}
+        }
+
+        let query_text = query_text.trim();
+        let effective_query = if clauses.is_empty() {
             query_text.to_string()
+        } else if query_text.is_empty() {
+            clauses.join(" AND ")
+        } else {
+            format!("{} AND ({})", clauses.join(" AND "), query_text)
         };
+        if effective_query.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let query_parser = QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
         let query = query_parser
@@ -253,7 +318,7 @@ impl TantivyIndex {
         Ok(hits)
     }
 
-    /// Search across all node types (unified search).
+    /// Search across all node types (unified search), active only.
     pub fn search_unified(
         &self,
         query_text: &str,
@@ -270,11 +335,71 @@ impl TantivyIndex {
         Ok(())
     }
 
-    /// Remove by node_id (e.g. "doc:abcd", "entity:1234").
-    pub fn retract(&mut self, node_id: &str) -> Result<(), QueryError> {
+    /// Mark a node retracted by node_id (e.g. "doc:abcd"). Flips the
+    /// `retracted` flag (delete + re-add) rather than deleting, so the node
+    /// stays searchable under `RetractionMode::{IncludeRetracted,RetractedOnly}`.
+    /// Returns true if a matching doc was found. Caller must `commit()`.
+    pub fn retract(&mut self, node_id: &str) -> Result<bool, QueryError> {
+        self.set_retracted(node_id, true)
+    }
+
+    /// Clear the retracted flag for a node_id. Caller must `commit()`.
+    pub fn unretract(&mut self, node_id: &str) -> Result<bool, QueryError> {
+        self.set_retracted(node_id, false)
+    }
+
+    /// Flip a node's `retracted` flag by re-indexing its stored fields.
+    fn set_retracted(&mut self, node_id: &str, retracted: bool) -> Result<bool, QueryError> {
+        // Collect the existing doc(s) for this node_id from committed state.
+        let docs: Vec<TantivyDocument> = {
+            let searcher = self.reader.searcher();
+            let qp = QueryParser::for_index(&self.index, vec![self.f_node_id]);
+            let q = qp
+                .parse_query(&format!("node_id:\"{node_id}\""))
+                .map_err(|e| QueryError::Other(format!("query parse: {e}")))?;
+            let top = searcher
+                .search(&q, &TopDocs::with_limit(16))
+                .map_err(|e| QueryError::Other(format!("search: {e}")))?;
+            let mut out = Vec::new();
+            for (_, addr) in top {
+                if let Ok(d) = searcher.doc::<TantivyDocument>(addr) {
+                    out.push(d);
+                }
+            }
+            out
+        };
+        if docs.is_empty() {
+            return Ok(false);
+        }
+        let flag = u64::from(retracted);
+        // Delete the old copies, then re-add with the flipped flag. Adds that
+        // follow the delete in the same commit survive it.
         let term = tantivy::Term::from_field_text(self.f_node_id, node_id);
         self.writer.delete_term(term);
-        Ok(())
+        for d in docs {
+            let mut nd = TantivyDocument::default();
+            nd.add_text(self.f_cid, self.get_text_field(&d, self.f_cid));
+            nd.add_text(self.f_node_id, self.get_text_field(&d, self.f_node_id));
+            nd.add_text(self.f_node_type, self.get_text_field(&d, self.f_node_type));
+            nd.add_text(self.f_body, self.get_text_field(&d, self.f_body));
+            nd.add_text(self.f_label, self.get_text_field(&d, self.f_label));
+            for v in d.get_all(self.f_tags) {
+                if let Some(s) = v.as_str() {
+                    nd.add_text(self.f_tags, s);
+                }
+            }
+            let wall_ns = d
+                .get_first(self.f_wall_ns)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            nd.add_u64(self.f_wall_ns, wall_ns);
+            nd.add_text(self.f_bucket_id, self.get_text_field(&d, self.f_bucket_id));
+            nd.add_u64(self.f_retracted, flag);
+            self.writer
+                .add_document(nd)
+                .map_err(|e| QueryError::Other(e.to_string()))?;
+        }
+        Ok(true)
     }
 
     /// Get the number of documents in the index.
@@ -412,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retract() {
+    fn test_retract_flips_flag_not_delete() {
         let (_dir, mut idx) = make_index();
         idx.add_document(
             "cid_r1",
@@ -427,9 +552,96 @@ mod tests {
         idx.commit().unwrap();
         assert_eq!(idx.num_docs(), 1);
 
-        idx.retract("doc:r1").unwrap();
+        assert!(idx.retract("doc:r1").unwrap());
         idx.commit().unwrap();
-        assert_eq!(idx.num_docs(), 0);
+        // Doc still present (flag flipped, not deleted).
+        assert_eq!(idx.num_docs(), 1);
+
+        // Active-only search no longer finds it.
+        let active = idx
+            .search_scoped("content", &[], &[], RetractionMode::ActiveOnly, 10)
+            .unwrap();
+        assert_eq!(active.len(), 0);
+        // Retracted-only finds it.
+        let retr = idx
+            .search_scoped("content", &[], &[], RetractionMode::RetractedOnly, 10)
+            .unwrap();
+        assert_eq!(retr.len(), 1);
+        // Include-retracted finds it.
+        let incl = idx
+            .search_scoped("content", &[], &[], RetractionMode::IncludeRetracted, 10)
+            .unwrap();
+        assert_eq!(incl.len(), 1);
+
+        // Unretract restores active visibility.
+        assert!(idx.unretract("doc:r1").unwrap());
+        idx.commit().unwrap();
+        let active = idx
+            .search_scoped("content", &[], &[], RetractionMode::ActiveOnly, 10)
+            .unwrap();
+        assert_eq!(active.len(), 1);
+    }
+
+    #[test]
+    fn test_search_scoped_multi_bucket_or() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document("c1", "doc:1", "shared note", "A", &[], Some("baaa"), 1)
+            .unwrap();
+        idx.add_document("c2", "doc:2", "shared note", "B", &[], Some("bbbb"), 2)
+            .unwrap();
+        idx.add_document("c3", "doc:3", "shared note", "C", &[], Some("cccc"), 3)
+            .unwrap();
+        idx.commit().unwrap();
+
+        // Union of two of three buckets.
+        let hits = idx
+            .search_scoped("shared", &["baaa", "bbbb"], &[], RetractionMode::ActiveOnly, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        // All buckets (empty filter).
+        let all = idx
+            .search_scoped("shared", &[], &[], RetractionMode::ActiveOnly, 10)
+            .unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_search_scoped_view_tags_and() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document(
+            "c1",
+            "doc:1",
+            "alpha note",
+            "A",
+            &[("proj".into(), "x".into()), ("kind".into(), "note".into())],
+            None,
+            1,
+        )
+        .unwrap();
+        idx.add_document(
+            "c2",
+            "doc:2",
+            "alpha note",
+            "B",
+            &[("proj".into(), "y".into())],
+            None,
+            2,
+        )
+        .unwrap();
+        idx.commit().unwrap();
+
+        // View = {proj:x} → only doc:1.
+        let hits = idx
+            .search_scoped(
+                "alpha",
+                &[],
+                &[("proj".into(), "x".into())],
+                RetractionMode::ActiveOnly,
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node_id, "doc:1");
     }
 
     #[test]

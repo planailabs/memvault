@@ -21,13 +21,16 @@ pub mod otel;
 pub mod quotas;
 pub mod rotation;
 pub mod rpc;
-pub mod scope;
 pub mod subscription;
 pub mod tokens;
 pub mod types;
 pub mod vfs;
 
 pub use client::MemvaultClient;
+/// The query-scope triplet types live in `memvault-core` (so `memvault-query`
+/// can share them); re-exported here for API-layer convenience.
+pub use memvault_core::scope;
+pub use memvault_core::{BucketSelector, QueryScope, RetractionMode};
 pub use ed25519_dalek;
 pub use error::{ApiError, Result};
 #[cfg(feature = "http-client")]
