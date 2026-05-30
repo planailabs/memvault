@@ -47,7 +47,11 @@ struct IndexedEntry {
 /// so retracted nodes — with their labels/tags — remain visible under
 /// `RetractionMode::{IncludeRetracted,RetractedOnly}`. Old v5 caches dropped
 /// retracted entries, so they must be rebuilt.
-pub const INDEX_FORMAT_VERSION: u32 = 6;
+///
+/// v7: `populate` resolves each node's bucket from the authoritative BY_BUCKET
+/// index instead of envelope-parse inference (which missed most docs, leaving
+/// the Tantivy index nearly empty). Bump forces stale v6 indexes to rebuild.
+pub const INDEX_FORMAT_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize)]
 struct IndexSnapshot {

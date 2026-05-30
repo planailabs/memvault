@@ -2045,6 +2045,21 @@ impl LocalClient {
             let mut entity_count = 0usize;
             let mut attachment_count = 0usize;
 
+            // Reliable cid→bucket map from the authoritative BY_BUCKET index.
+            // Envelope-parse-based inference (inferred_*_bucket) misses nodes
+            // whose bucket_id lives only in the store index, not the envelope
+            // body — which would skip them here and leave the search index
+            // empty even though the blockstore is full.
+            let mut cid_bucket: std::collections::HashMap<Vec<u8>, [u8; 32]> =
+                std::collections::HashMap::new();
+            for (bid, _) in self.store.list_buckets().unwrap_or_default() {
+                if let Ok(arr) = <[u8; 32]>::try_from(bid.as_slice()) {
+                    for cid in self.store.query_by_bucket(&bid, 0, usize::MAX).unwrap_or_default() {
+                        cid_bucket.entry(cid).or_insert(arr);
+                    }
+                }
+            }
+
             // Index documents
             let doc_labels = self
                 .store
@@ -2058,8 +2073,13 @@ impl LocalClient {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&id_bytes);
                 let doc_id = DocId(arr);
-                // Skip docs without a bucket — they are unbucketed foreign data.
-                let bucket_hex = match self.inferred_doc_bucket(&doc_id) {
+                // Resolve the bucket via BY_BUCKET (reliable); skip only docs
+                // that are in no bucket at all (truly unbucketed/foreign).
+                let doc_cids = self
+                    .store
+                    .query_by_tag("doc", label, 0, usize::MAX)
+                    .unwrap_or_default();
+                let bucket_hex = match doc_cids.iter().find_map(|c| cid_bucket.get(c)) {
                     Some(b) => hex::encode(b),
                     None => continue,
                 };
@@ -2093,8 +2113,12 @@ impl LocalClient {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&id_bytes);
                 let eid = EntityId(arr);
-                // Skip entities without a bucket — they are unbucketed foreign data.
-                let bucket_hex = match self.inferred_entity_bucket(&eid) {
+                // Resolve via BY_BUCKET (reliable); skip only truly-unbucketed.
+                let entity_cids = self
+                    .store
+                    .query_by_tag("entity", label, 0, usize::MAX)
+                    .unwrap_or_default();
+                let bucket_hex = match entity_cids.iter().find_map(|c| cid_bucket.get(c)) {
                     Some(b) => hex::encode(b),
                     None => continue,
                 };
@@ -2118,11 +2142,16 @@ impl LocalClient {
                 .store
                 .iter_blocks()
                 .map_err(|e| ApiError::Serialization(e.to_string()))?;
-            for (_, data) in &blocks {
+            for (cid, data) in &blocks {
                 if let Some(view) = memvault_store::EnvelopeView::parse(data) {
                     if view.str_field("kind") == Some("attachment") {
-                        // Skip attachments without a bucket.
-                        let bucket_hex = match view.get_as::<Vec<u8>>("bucket_id") {
+                        // Bucket from the envelope body, falling back to the
+                        // BY_BUCKET map keyed by the envelope's own cid. Skip
+                        // only if neither resolves (truly unbucketed).
+                        let bucket_hex = match view
+                            .get_as::<Vec<u8>>("bucket_id")
+                            .or_else(|| cid_bucket.get(cid).map(|b| b.to_vec()))
+                        {
                             Some(b) => hex::encode(b),
                             None => continue,
                         };
@@ -2805,23 +2834,32 @@ impl LocalClient {
     }
 
     /// Whether a node passes the bucket filter given the known set and the
-    /// effective explicit set (`None` = all known buckets).
+    /// effective explicit set (`None` = no narrowing / all accessible).
     fn node_passes_bucket(
         &self,
         node_id: &str,
         known: &std::collections::HashSet<[u8; 32]>,
         eff: &Option<std::collections::HashSet<[u8; 32]>>,
     ) -> bool {
-        if known.is_empty() {
-            return true; // pre-genesis: no bucket scoping yet
-        }
-        let arr: Option<[u8; 32]> = self
-            .inferred_bucket_for_node_id(node_id)
-            .and_then(|b| b.try_into().ok());
-        match (arr, eff) {
-            (Some(a), None) => known.contains(&a),
-            (Some(a), Some(set)) => set.contains(&a),
-            (None, _) => false,
+        match eff {
+            // Accessible: the search index only holds this node's own bucketed
+            // content (populate keys on BY_BUCKET), so don't drop anything —
+            // ACL is enforced separately at the handler layer. Dropping here on
+            // envelope-parse-based bucket inference (which is unreliable) was
+            // hiding most results.
+            None => true,
+            Some(set) => {
+                if set.is_empty() {
+                    return false;
+                }
+                if known.is_empty() {
+                    return true; // pre-genesis: no bucket scoping yet
+                }
+                self.inferred_bucket_for_node_id(node_id)
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    .map(|a| set.contains(&a))
+                    .unwrap_or(false)
+            }
         }
     }
 
