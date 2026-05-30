@@ -144,6 +144,13 @@ pub fn FileExplorer() -> Element {
         let f = filters.read();
         async move { list_files(f.view, f.bucket, f.show_retracted).await }
     })?;
+    // Re-fetch on in-place scope change (use_server_future only re-runs on
+    // remount, not on signal change).
+    use_effect(move || {
+        let _ = filters.read();
+        let mut r = files;
+        r.restart();
+    });
     let mut grid_view = use_signal(|| false);
 
     rsx! {

@@ -101,6 +101,14 @@ pub fn NoteList() -> Element {
         let f = filters.read();
         async move { list_notes(f.view, f.bucket, f.show_retracted).await }
     })?;
+    // `use_server_future` fetches on mount/SSR but isn't reactive to in-place
+    // signal changes — it only re-runs on remount (route change). Re-fetch
+    // when the scope (view/bucket/retracted/epoch) changes while on the page.
+    use_effect(move || {
+        let _ = filters.read();
+        let mut r = notes;
+        r.restart();
+    });
 
     rsx! {
         div { class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4",

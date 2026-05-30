@@ -556,6 +556,13 @@ pub fn GraphExplorer() -> Element {
         let f = filters.read();
         async move { list_graph_nodes(f.view, f.bucket, f.show_retracted).await }
     })?;
+    // Re-fetch on in-place scope change (use_server_future only re-runs on
+    // remount, not on signal change).
+    use_effect(move || {
+        let _ = filters.read();
+        let mut r = nodes_res;
+        r.restart();
+    });
 
     match &*nodes_res.read() {
         Some(Ok(nodes)) => {
