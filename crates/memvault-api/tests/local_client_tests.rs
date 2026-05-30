@@ -15,7 +15,6 @@ use rand::RngCore;
 fn make_client() -> (tempfile::TempDir, Arc<LocalClient>) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
-    let index = Arc::new(RwLock::new(TextIndex::new()));
     let quotas = Arc::new(RwLock::new(QuotaManager::default()));
     let event_bus = Arc::new(EventBus::new(64));
     // Use proper 32-byte IDs so bucket auto-bind works correctly.
@@ -25,7 +24,6 @@ fn make_client() -> (tempfile::TempDir, Arc<LocalClient>) {
     cluster_id[..9].copy_from_slice(b"cluster-1");
     let client = Arc::new(LocalClient::new(
         store,
-        index,
         quotas,
         event_bus,
         peer_id.to_vec(),
@@ -252,7 +250,6 @@ async fn quota_manager_integration() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
-    let index = Arc::new(RwLock::new(TextIndex::new()));
     let quotas = Arc::new(RwLock::new(QuotaManager::new(AgentQuota {
         max_docs: 2,
         max_bytes: 1_000_000,
@@ -261,7 +258,6 @@ async fn quota_manager_integration() {
     let event_bus = Arc::new(EventBus::new(64));
     let _client = Arc::new(LocalClient::new(
         store,
-        index,
         quotas.clone(),
         event_bus,
         b"peer-1".to_vec(),
@@ -385,7 +381,6 @@ async fn bucket_bind_to_cluster() {
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
         store,
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         b"peer-1".to_vec(),
@@ -424,7 +419,6 @@ async fn bucket_attach_flips_private() {
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
         store,
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         b"peer-1".to_vec(),
@@ -612,7 +606,6 @@ async fn bucket_bind_exclusive_to_one_cluster() {
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
         store,
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         b"peer-1".to_vec(),
@@ -660,7 +653,6 @@ async fn bucket_bind_idempotent_same_cluster() {
     let store = Arc::new(MemvaultStore::open(dir.path().join("test.redb")).unwrap());
     let client = Arc::new(LocalClient::new(
         store,
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         b"peer-1".to_vec(),
@@ -953,14 +945,12 @@ fn bare_client(dir: &tempfile::TempDir, name: &[u8]) -> Arc<LocalClient> {
     // lock — the very limitation the shared keystore exists to bypass).
     let redb_name = format!("redb-{}", String::from_utf8_lossy(name));
     let store = Arc::new(MemvaultStore::open(dir.path().join(redb_name)).unwrap());
-    let index = Arc::new(RwLock::new(TextIndex::new()));
     let quotas = Arc::new(RwLock::new(QuotaManager::default()));
     let event_bus = Arc::new(EventBus::new(64));
     let mut peer_id = [0u8; 32];
     peer_id[..name.len().min(32)].copy_from_slice(&name[..name.len().min(32)]);
     Arc::new(LocalClient::new(
         store,
-        index,
         quotas,
         event_bus,
         peer_id.to_vec(),
@@ -1161,14 +1151,12 @@ fn admitted_admin_key_activates_live_from_keystore() {
 fn client_with_cluster(dir: &tempfile::TempDir, name: &[u8], cluster: &[u8; 32]) -> Arc<LocalClient> {
     let redb_name = format!("redb-{}", String::from_utf8_lossy(name));
     let store = Arc::new(MemvaultStore::open(dir.path().join(redb_name)).unwrap());
-    let index = Arc::new(RwLock::new(TextIndex::new()));
     let quotas = Arc::new(RwLock::new(QuotaManager::default()));
     let event_bus = Arc::new(EventBus::new(64));
     let mut peer_id = [0u8; 32];
     peer_id[..name.len().min(32)].copy_from_slice(&name[..name.len().min(32)]);
     Arc::new(LocalClient::new(
         store,
-        index,
         quotas,
         event_bus,
         peer_id.to_vec(),

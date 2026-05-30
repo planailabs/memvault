@@ -90,7 +90,6 @@ mod inner {
         let client = Arc::new(
             memvault_api::LocalClient::open(
                 store,
-                Arc::new(RwLock::new(memvault_query::TextIndex::new())),
                 Arc::new(RwLock::new(memvault_query::QuotaManager::new(
                     Default::default(),
                 ))),

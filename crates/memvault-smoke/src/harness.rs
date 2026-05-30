@@ -34,7 +34,6 @@ impl TestNode {
 
         let mut client = LocalClient::new(
             Arc::clone(&store),
-            Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::default())),
             Arc::new(EventBus::new(64)),
             peer_id,

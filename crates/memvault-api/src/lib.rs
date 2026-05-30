@@ -80,7 +80,7 @@ impl ClientArgs {
     /// authenticated with a JWT issued from the loaded agent identity.
     pub async fn connect(&self) -> std::result::Result<Box<dyn MemvaultClient>, anyhow::Error> {
         if let Some(db_path) = &self.db {
-            use memvault_query::{QuotaManager, TextIndex};
+            use memvault_query::QuotaManager;
             use memvault_store::MemvaultStore;
             use std::sync::Arc;
             use tokio::sync::RwLock;
@@ -91,7 +91,6 @@ impl ClientArgs {
             let store = Arc::new(MemvaultStore::open(db_path)?);
             let client = LocalClient::open(
                 store,
-                Arc::new(RwLock::new(TextIndex::new())),
                 Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
                 Arc::new(EventBus::new(64)),
                 vec![0u8; 32],
@@ -144,7 +143,6 @@ pub async fn connect(
         let store = Arc::new(MemvaultStore::open(db_path)?);
         let client = LocalClient::open(
             store,
-            Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
             Arc::new(EventBus::new(64)),
             vec![0u8; 32],

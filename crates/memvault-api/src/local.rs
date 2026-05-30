@@ -10,7 +10,8 @@ use memvault_attach::{self, AttachmentManifest};
 use memvault_auth::TokenRole;
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility, cid_from_bytes};
 use memvault_doc::{Document, Edge, Entity, Op, TextPatch};
-use memvault_query::{AuditQuery, AuditRecord, QuotaManager, SearchHit, TextIndex, query_audit};
+use memvault_core::RetractionMode;
+use memvault_query::{AuditQuery, AuditRecord, QuotaManager, SearchHit, TantivyIndex, query_audit};
 use memvault_store::{EnvelopeMeta, MemvaultStore};
 
 use crate::client::MemvaultClient;
@@ -247,7 +248,7 @@ pub(crate) struct WriteSigner<'a> {
 /// LocalClient implements MemvaultClient by calling directly into the store.
 pub struct LocalClient {
     store: Arc<MemvaultStore>,
-    index: Arc<RwLock<TextIndex>>,
+    index: Arc<RwLock<TantivyIndex>>,
     quotas: Arc<RwLock<QuotaManager>>,
     event_bus: Arc<EventBus>,
     peer_id: Vec<u8>,
@@ -316,7 +317,6 @@ pub struct LocalClient {
 impl LocalClient {
     pub fn new(
         store: Arc<MemvaultStore>,
-        index: Arc<RwLock<TextIndex>>,
         quotas: Arc<RwLock<QuotaManager>>,
         event_bus: Arc<EventBus>,
         peer_id: Vec<u8>,
@@ -328,7 +328,50 @@ impl LocalClient {
         // environment problem (the same directory already holds redb).
         let keystore = crate::keystore_open::open_token_keystore(store.dir().join("identity"))
             .unwrap_or_else(|e| panic!("open token keystore beside {:?}: {e}", store.dir()));
-        Self::with_keystore(store, index, quotas, event_bus, peer_id, cluster_id, keystore)
+        Self::with_keystore(store, quotas, event_bus, peer_id, cluster_id, keystore)
+    }
+
+    /// Open (or reuse) the Tantivy search index for a store. The index dir is
+    /// sited next to the *redb file* (`<redb>.tantivy`), unique per store.
+    ///
+    /// Tantivy takes an exclusive writer lock on its directory, so two
+    /// `LocalClient` handles over the *same* store (e.g. an agent-bound client
+    /// built off `Arc::clone(&store)`) must share one `TantivyIndex` rather
+    /// than each opening their own. A process-global registry keyed by the
+    /// index dir returns the same `Arc<RwLock<TantivyIndex>>` for a given
+    /// store — one physical index per store, matching reality.
+    fn open_index(store: &MemvaultStore) -> Arc<RwLock<TantivyIndex>> {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        use std::sync::{Mutex, OnceLock};
+        static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<RwLock<TantivyIndex>>>>> =
+            OnceLock::new();
+
+        let dir = store.path().with_extension("tantivy");
+        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = map.get(&dir) {
+            return existing.clone();
+        }
+
+        // Version guard: a schema/format bump (INDEX_FORMAT_VERSION) makes an
+        // existing on-disk index incompatible (stale field handles). Wipe and
+        // recreate when the marker doesn't match, so the rebuild repopulates.
+        let ver_file = store.path().with_extension("tantivy.version");
+        let cur = memvault_query::INDEX_FORMAT_VERSION.to_string();
+        let stale = std::fs::read_to_string(&ver_file)
+            .map(|v| v.trim() != cur)
+            .unwrap_or(false);
+        if stale {
+            tracing::info!("tantivy index format changed; wiping {dir:?} for rebuild");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        let idx = TantivyIndex::open(&dir)
+            .unwrap_or_else(|e| panic!("open tantivy index at {dir:?}: {e}"));
+        let _ = std::fs::write(&ver_file, &cur);
+        let shared = Arc::new(RwLock::new(idx));
+        map.insert(dir, shared.clone());
+        shared
     }
 
     /// Construct with an explicitly-provided keystore (the daemon/CLI share
@@ -337,13 +380,13 @@ impl LocalClient {
     /// has the issuer peer_id + cluster_id.
     pub fn with_keystore(
         store: Arc<MemvaultStore>,
-        index: Arc<RwLock<TextIndex>>,
         quotas: Arc<RwLock<QuotaManager>>,
         event_bus: Arc<EventBus>,
         peer_id: Vec<u8>,
         cluster_id: Vec<u8>,
         keystore: std::sync::Arc<memvault_keystore::KeyStore>,
     ) -> Self {
+        let index = Self::open_index(&store);
         // Record node identity (issuer peer_id + cluster_id) so keystore-only
         // tooling can mint tokens without opening redb.
         if peer_id.iter().any(|&b| b != 0) && !keystore.contains(b"peerid") {
@@ -393,13 +436,12 @@ impl LocalClient {
     /// version is outdated.  This is the recommended entry point.
     pub fn open(
         store: Arc<MemvaultStore>,
-        index: Arc<RwLock<TextIndex>>,
         quotas: Arc<RwLock<QuotaManager>>,
         event_bus: Arc<EventBus>,
         peer_id: Vec<u8>,
         cluster_id: Vec<u8>,
     ) -> Result<Self> {
-        let client = Self::new(store, index, quotas, event_bus, peer_id, cluster_id);
+        let client = Self::new(store, quotas, event_bus, peer_id, cluster_id);
         if let Err(e) = client.rebuild_if_needed() {
             tracing::warn!("blockstore rebuild error on open: {e}");
         }
@@ -1884,25 +1926,27 @@ impl LocalClient {
         &self,
         cache_path: &std::path::Path,
     ) -> Result<(usize, usize, usize)> {
-        if let Some(loaded) = TextIndex::load(cache_path) {
-            let mut idx = self.index.write().await;
-            *idx = loaded;
-            let count = idx.len();
-            tracing::info!("loaded text index from cache ({count} entries)");
-            return Ok((count, 0, 0));
+        // The Tantivy index persists itself on disk (beside the blockstore at
+        // `<dir>/tantivy/`) and was opened at construction with a version
+        // guard (`open_index`). So "load" just means: if it already holds
+        // documents, it's loaded; otherwise rebuild from the blockstore.
+        let _ = cache_path; // legacy JSON cache path — no longer used
+        let existing = { self.index.read().await.num_docs() as usize };
+        if existing > 0 {
+            tracing::info!("tantivy index already populated ({existing} docs)");
+            return Ok((existing, 0, 0));
         }
-        tracing::info!("text index cache missing or stale, rebuilding from blockstore...");
-        // A full text-index rebuild invalidates the derived scope member-sets;
+        tracing::info!("tantivy index empty, rebuilding from blockstore...");
+        // A full index rebuild invalidates the derived scope member-sets;
         // drop them so they rebuild lazily against fresh state.
         if let Err(e) = self.store.scope_clear_all() {
             tracing::warn!("failed to clear scope member-sets on rebuild: {e}");
         }
         let counts = self.populate_index().await?;
-        let idx = self.index.read().await;
-        if let Err(e) = idx.save(cache_path) {
-            tracing::warn!("failed to save text index cache: {e}");
-        } else {
-            tracing::info!("saved text index cache to {}", cache_path.display());
+        {
+            let mut idx = self.index.write().await;
+            idx.commit()
+                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
         Ok(counts)
     }
@@ -2009,15 +2053,23 @@ impl LocalClient {
                 arr.copy_from_slice(&id_bytes);
                 let doc_id = DocId(arr);
                 // Skip docs without a bucket — they are unbucketed foreign data.
-                if self.inferred_doc_bucket(&doc_id).is_none() {
-                    continue;
-                }
+                let bucket_hex = match self.inferred_doc_bucket(&doc_id) {
+                    Some(b) => hex::encode(b),
+                    None => continue,
+                };
                 if let Ok(Some(doc)) = get_doc!(&doc_id) {
                     let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
                     // Recover creation-time tags from the envelope metadata.
                     let creation_tags = self.extract_creation_tags("doc", label);
                     let mut idx = idx_write!();
-                    idx.index_doc(doc_id, &doc.body, title, creation_tags);
+                    let _ = idx.index_doc(
+                        &doc_id,
+                        &doc.body,
+                        title,
+                        &creation_tags,
+                        Some(&bucket_hex),
+                        0,
+                    );
                     doc_count += 1;
                 }
             }
@@ -2036,13 +2088,21 @@ impl LocalClient {
                 arr.copy_from_slice(&id_bytes);
                 let eid = EntityId(arr);
                 // Skip entities without a bucket — they are unbucketed foreign data.
-                if self.inferred_entity_bucket(&eid).is_none() {
-                    continue;
-                }
+                let bucket_hex = match self.inferred_entity_bucket(&eid) {
+                    Some(b) => hex::encode(b),
+                    None => continue,
+                };
                 if let Ok(Some(entity)) = get_entity!(&eid) {
                     let creation_tags = self.extract_creation_tags("entity", label);
                     let mut idx = idx_write!();
-                    idx.index_entity(&eid, &entity.kind, &entity.props, creation_tags);
+                    let _ = idx.index_entity(
+                        &eid,
+                        &entity.kind,
+                        &entity.props,
+                        &creation_tags,
+                        Some(&bucket_hex),
+                        0,
+                    );
                     entity_count += 1;
                 }
             }
@@ -2056,9 +2116,10 @@ impl LocalClient {
                 if let Some(view) = memvault_store::EnvelopeView::parse(data) {
                     if view.str_field("kind") == Some("attachment") {
                         // Skip attachments without a bucket.
-                        if view.field("bucket_id").and_then(|v| v.as_array()).is_none() {
-                            continue;
-                        }
+                        let bucket_hex = match view.get_as::<Vec<u8>>("bucket_id") {
+                            Some(b) => hex::encode(b),
+                            None => continue,
+                        };
                         let manifest_cid: Option<Vec<u8>> = view.get_as("manifest_cid");
                         let filename = view.str_field("filename");
                         let mime_type = view
@@ -2074,7 +2135,15 @@ impl LocalClient {
                             let att_tags: Vec<(String, String)> =
                                 view.get_as("tags").unwrap_or_default();
                             let mut idx = idx_write!();
-                            idx.index_attachment(&mcid, filename, mime_type, text.as_deref(), att_tags);
+                            let _ = idx.index_attachment(
+                                &mcid,
+                                filename,
+                                mime_type,
+                                text.as_deref(),
+                                &att_tags,
+                                Some(&bucket_hex),
+                                0,
+                            );
                             attachment_count += 1;
                         }
                     }
@@ -2107,10 +2176,10 @@ impl LocalClient {
                                         .get("remove")
                                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                                         .unwrap_or_default();
-                                    idx.apply_tag_update(target, &add, &remove);
+                                    let _ = idx.apply_tag_update(target, &add, &remove);
                                 }
                                 "retraction" => {
-                                    idx.retract_node(target);
+                                    let _ = idx.retract(target);
                                 }
                                 _ => {} // extraction annotations handled during attachment indexing
                             }
@@ -2129,13 +2198,13 @@ impl LocalClient {
                             .unwrap_or_default();
                         if !node_id.is_empty() {
                             let mut idx = idx_write!();
-                            idx.apply_tag_update(node_id, &add, &remove);
+                            let _ = idx.apply_tag_update(node_id, &add, &remove);
                         }
                     } else if kind == Some("node_retraction") {
                         let node_id = val.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
                         if !node_id.is_empty() {
                             let mut idx = idx_write!();
-                            idx.retract_node(node_id);
+                            let _ = idx.retract(node_id);
                         }
                     }
                 }
@@ -2145,10 +2214,12 @@ impl LocalClient {
         }
     }
 
-    /// Save the current TextIndex to a cache file.
-    pub async fn save_index(&self, cache_path: &std::path::Path) -> Result<()> {
-        let idx = self.index.read().await;
-        idx.save(cache_path)
+    /// Commit pending writes to the on-disk Tantivy index. (The `cache_path`
+    /// argument is retained for API compatibility but unused — Tantivy manages
+    /// its own directory.)
+    pub async fn save_index(&self, _cache_path: &std::path::Path) -> Result<()> {
+        let mut idx = self.index.write().await;
+        idx.commit()
             .map_err(|e| ApiError::Serialization(e.to_string()))
     }
 
@@ -2564,8 +2635,8 @@ impl LocalClient {
         crate::rebuild::rebuild_if_needed(self)
     }
 
-    /// Access the text index (for direct queries in local backend).
-    pub fn index_ref(&self) -> &Arc<RwLock<TextIndex>> {
+    /// Access the search index (for direct queries in local backend).
+    pub fn index_ref(&self) -> &Arc<RwLock<TantivyIndex>> {
         &self.index
     }
 
@@ -3711,9 +3782,19 @@ impl MemvaultClient for LocalClient {
             .get("title")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let bucket_hex = self.inferred_doc_bucket(&doc.id).map(hex::encode);
         {
             let mut idx = self.index.write().await;
-            idx.index_doc(doc.id.clone(), &doc.body, title.as_deref(), tags.clone());
+            let _ = idx.index_doc(
+                &doc.id,
+                &doc.body,
+                title.as_deref(),
+                &tags,
+                bucket_hex.as_deref(),
+                memvault_core::wall_ns(),
+            );
+            idx.commit()
+                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
         let doc_node_id = format!("doc:{}", hex::encode(doc.id.0));
         self.sync_node_scopes(&doc_node_id).await;
@@ -3955,13 +4036,18 @@ impl MemvaultClient for LocalClient {
         // Index for unified search (includes extracted text if available).
         {
             let mut idx = self.index.write().await;
-            idx.index_attachment(
+            let bucket_hex = meta.bucket_id.as_deref().map(hex::encode);
+            let _ = idx.index_attachment(
                 &manifest_cid_bytes,
                 filename,
                 mime_type,
                 extracted_text.as_deref(),
-                tags.clone(),
+                &tags,
+                bucket_hex.as_deref(),
+                meta.wall_ns,
             );
+            idx.commit()
+                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
         let file_node_id = format!("file:{}", hex::encode(&manifest_cid_bytes));
         self.sync_node_scopes(&file_node_id).await;
@@ -4105,9 +4191,19 @@ impl MemvaultClient for LocalClient {
         tracing::info!(entity_id = %hex::encode(entity_id.0), kind = %entity.kind, "entity created");
 
         // Index for unified search
+        let bucket_hex = self.inferred_entity_bucket(&entity_id).map(hex::encode);
         {
             let mut idx = self.index.write().await;
-            idx.index_entity(&entity_id, &entity.kind, &entity.props, tags.clone());
+            let _ = idx.index_entity(
+                &entity_id,
+                &entity.kind,
+                &entity.props,
+                &tags,
+                bucket_hex.as_deref(),
+                memvault_core::wall_ns(),
+            );
+            idx.commit()
+                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
         let entity_node_id = format!("entity:{}", hex::encode(entity_id.0));
         self.sync_node_scopes(&entity_node_id).await;
@@ -4346,7 +4442,26 @@ impl MemvaultClient for LocalClient {
         include_retracted: bool,
     ) -> Result<Vec<SearchHit>> {
         let idx = self.index.read().await;
-        let hits = idx.search_ex(query, limit * 2, include_retracted);
+        let mode = RetractionMode::from_include_flag(include_retracted);
+        let hits: Vec<SearchHit> = idx
+            .search_unified_mode(query, mode, limit * 2)
+            .into_iter()
+            .filter(|h| h.node_type == "doc")
+            .filter_map(|h| {
+                let hex_str = h.node_id.strip_prefix("doc:")?;
+                let bytes = hex::decode(hex_str).ok()?;
+                if bytes.len() != 32 {
+                    return None;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(SearchHit {
+                    doc_id: DocId(arr),
+                    score: h.score,
+                    snippet: h.snippet,
+                })
+            })
+            .collect();
         drop(idx);
 
         // Post-filter: only return hits from accessible buckets.
@@ -4384,7 +4499,8 @@ impl MemvaultClient for LocalClient {
         include_retracted: bool,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
         let idx = self.index.read().await;
-        let hits = idx.search_unified_ex(query, limit * 2, include_retracted);
+        let mode = RetractionMode::from_include_flag(include_retracted);
+        let hits = idx.search_unified_mode(query, mode, limit * 2);
         drop(idx);
 
         let buckets = self.store.list_buckets().unwrap_or_default();
@@ -4420,7 +4536,8 @@ impl MemvaultClient for LocalClient {
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("view '{view_name}' not found")))?;
         let idx = self.index.read().await;
-        Ok(idx.members_of_view_ex(&view.tags, include_retracted))
+        let mode = RetractionMode::from_include_flag(include_retracted);
+        Ok(idx.members_of_view_mode(&view.tags, mode))
     }
 
     async fn list_all(
@@ -4447,7 +4564,12 @@ impl MemvaultClient for LocalClient {
             None
         };
         let idx = self.index.read().await;
-        let all = idx.list_all_ex(view_tags.as_deref(), limit * 2, include_retracted);
+        let mode = RetractionMode::from_include_flag(include_retracted);
+        let all: Vec<(String, String, String, Vec<(String, String)>)> = idx
+            .list_all_mode(view_tags.as_deref(), mode, limit * 2)
+            .into_iter()
+            .map(|(id, ty, label, tags, _retracted)| (id, ty, label, tags))
+            .collect();
         drop(idx);
 
         let buckets = self.store.list_buckets().unwrap_or_default();
@@ -4504,7 +4626,8 @@ impl MemvaultClient for LocalClient {
         include_retracted: bool,
     ) -> Result<Option<String>> {
         let idx = self.index.read().await;
-        Ok(idx.resolve_label_ex(node_id, include_retracted))
+        let mode = RetractionMode::from_include_flag(include_retracted);
+        Ok(idx.resolve_label_mode(node_id, mode))
     }
 
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>> {
@@ -4543,7 +4666,9 @@ impl MemvaultClient for LocalClient {
         // visible to admins/auditors under IncludeRetracted/RetractedOnly).
         {
             let mut idx = self.index.write().await;
-            idx.retract_node(node_id);
+            let _ = idx.retract(node_id);
+            idx.commit()
+                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
         self.sync_node_scopes(node_id).await;
 
@@ -4603,7 +4728,9 @@ impl MemvaultClient for LocalClient {
         self.store_tag_update(node_id, &tags, &[])?;
         {
             let mut idx = self.index.write().await;
-            idx.apply_tag_update(node_id, &tags, &[]);
+            let _ = idx.apply_tag_update(node_id, &tags, &[]);
+            idx.commit()
+                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
         self.sync_node_scopes(node_id).await;
         tracing::debug!(node_id, tag_count = tags.len(), "tags added");
@@ -4614,7 +4741,9 @@ impl MemvaultClient for LocalClient {
         self.store_tag_update(node_id, &[], &tags)?;
         {
             let mut idx = self.index.write().await;
-            idx.apply_tag_update(node_id, &[], &tags);
+            let _ = idx.apply_tag_update(node_id, &[], &tags);
+            idx.commit()
+                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
         self.sync_node_scopes(node_id).await;
         tracing::debug!(node_id, tag_count = tags.len(), "tags removed");

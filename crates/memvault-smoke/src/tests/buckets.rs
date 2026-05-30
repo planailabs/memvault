@@ -379,7 +379,6 @@ async fn private_bucket_attach_after_genesis() {
 
     let pre_client = LocalClient::new(
         Arc::clone(&store),
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         peer_id.to_vec(),
@@ -436,7 +435,6 @@ async fn private_bucket_attach_after_genesis() {
     // The constructor auto-binds unbound buckets.
     let post_client = LocalClient::new(
         Arc::clone(&store),
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         peer_id.to_vec(),
@@ -513,7 +511,6 @@ async fn attach_also_binds_unbound_bucket() {
     // Create bucket on pre-genesis node.
     let pre_client = LocalClient::new(
         Arc::clone(&store),
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         peer_id.to_vec(),
@@ -546,7 +543,6 @@ async fn attach_also_binds_unbound_bucket() {
     // the bucket shows both is_attached=true and cluster_id=Some.
     let post_client = LocalClient::new(
         Arc::clone(&store),
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(EventBus::new(64)),
         peer_id.to_vec(),

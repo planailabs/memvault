@@ -110,7 +110,6 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
 
         let client = memvault_api::LocalClient::new(
             Arc::clone(&store),
-            Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::default())),
             Arc::new(memvault_api::EventBus::new(64)),
             vec![9u8; 32],
@@ -168,7 +167,6 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
 
         let pre_client = memvault_api::LocalClient::new(
             Arc::clone(&store),
-            Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::default())),
             Arc::new(memvault_api::EventBus::new(64)),
             vec![9u8; 32],
@@ -218,7 +216,6 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
     let reopened_store = Arc::new(MemvaultStore::open(&db_path).unwrap());
     let post_client = memvault_api::LocalClient::new(
         Arc::clone(&reopened_store),
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::default())),
         Arc::new(memvault_api::EventBus::new(64)),
         reopened_store.get_local_peer_id().unwrap().unwrap(),
@@ -622,7 +619,6 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
         let store = Arc::new(MemvaultStore::open(&db_path).unwrap());
         let client = LocalClient::new(
             Arc::clone(&store),
-            Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::default())),
             Arc::new(EventBus::new(64)),
             vec![0u8; 32], // zero peer_id
@@ -667,7 +663,6 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
 
         let client = LocalClient::new(
             Arc::clone(&store),
-            Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::default())),
             Arc::new(EventBus::new(64)),
             vec![1u8; 32],

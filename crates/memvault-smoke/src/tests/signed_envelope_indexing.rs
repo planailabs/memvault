@@ -226,7 +226,6 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
     // Build a separate agent-bound client off the same store.
     let agent_client = memvault_api::LocalClient::new(
         Arc::clone(&node.store),
-        Arc::new(tokio::sync::RwLock::new(memvault_query::TextIndex::new())),
         Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
         Arc::new(memvault_api::EventBus::new(64)),
         node.client.peer_id().to_vec(),
@@ -317,7 +316,6 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
     // Build a separate agent-bound client off the same store.
     let agent_client = memvault_api::LocalClient::new(
         Arc::clone(&node.store),
-        Arc::new(tokio::sync::RwLock::new(memvault_query::TextIndex::new())),
         Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
         Arc::new(memvault_api::EventBus::new(64)),
         node.client.peer_id().to_vec(),

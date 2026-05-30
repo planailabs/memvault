@@ -686,7 +686,6 @@ mod native {
             .unwrap_or_else(|| vec![0u8; 32]);
         let client = LocalClient::open(
             store,
-            Arc::new(RwLock::new(TextIndex::new())),
             Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
             event_bus,
             peer_id,

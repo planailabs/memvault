@@ -3,9 +3,10 @@
 //! Promoted to primary search engine in B4. Indexes docs, entities, and files
 //! with BM25 scoring and native bucket filtering.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use memvault_core::RetractionMode;
+use memvault_core::{DocId, EntityId, RetractionMode};
 use tantivy::{
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
     collector::TopDocs,
@@ -235,6 +236,91 @@ impl TantivyIndex {
             .reload()
             .map_err(|e| QueryError::Other(e.to_string()))?;
         Ok(())
+    }
+
+    // ── Node-typed convenience indexers (TextIndex-shaped + bucket/wall) ──
+    //
+    // These mirror the old `TextIndex::index_*` signatures (deriving node_id /
+    // label / body the same way) but additionally thread the bucket id and
+    // wall-clock time into the native fields, so callers only add two args.
+
+    /// Index a document. node_id = "doc:<hex>"; cid surrogate = the hex id.
+    pub fn index_doc(
+        &mut self,
+        doc_id: &DocId,
+        body: &str,
+        title: Option<&str>,
+        tags: &[(String, String)],
+        bucket_id: Option<&str>,
+        wall_ns: u64,
+    ) -> Result<(), QueryError> {
+        let id_hex = hex::encode(doc_id.0);
+        let node_id = format!("doc:{id_hex}");
+        let label = title.unwrap_or("Untitled");
+        self.add_document(&id_hex, &node_id, body, label, tags, bucket_id, wall_ns)
+    }
+
+    /// Index a graph entity. node_id = "entity:<hex>"; label from name/title.
+    pub fn index_entity(
+        &mut self,
+        entity_id: &EntityId,
+        kind: &str,
+        props: &BTreeMap<String, serde_json::Value>,
+        tags: &[(String, String)],
+        bucket_id: Option<&str>,
+        wall_ns: u64,
+    ) -> Result<(), QueryError> {
+        let id_hex = hex::encode(entity_id.0);
+        let node_id = format!("entity:{id_hex}");
+        let label = props
+            .get("name")
+            .or_else(|| props.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(kind)
+            .to_string();
+        let mut parts: Vec<String> = Vec::new();
+        for (k, v) in props {
+            parts.push(k.clone());
+            match v {
+                serde_json::Value::String(s) => parts.push(s.clone()),
+                other => parts.push(other.to_string()),
+            }
+        }
+        self.add_entity(
+            &id_hex,
+            &node_id,
+            kind,
+            &label,
+            &parts.join(" "),
+            tags,
+            bucket_id,
+            wall_ns,
+        )
+    }
+
+    /// Index a file/attachment. node_id = "file:<manifest_hex>".
+    pub fn index_attachment(
+        &mut self,
+        manifest_cid: &[u8],
+        filename: Option<&str>,
+        mime_type: &str,
+        extracted_text: Option<&str>,
+        tags: &[(String, String)],
+        bucket_id: Option<&str>,
+        wall_ns: u64,
+    ) -> Result<(), QueryError> {
+        let cid_hex = hex::encode(manifest_cid);
+        let node_id = format!("file:{cid_hex}");
+        self.add_attachment(
+            &cid_hex,
+            &node_id,
+            filename.unwrap_or("unnamed file"),
+            mime_type,
+            extracted_text,
+            tags,
+            bucket_id,
+            wall_ns,
+        )
     }
 
     /// Search the index with an optional single-bucket filter (active only).

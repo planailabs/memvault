@@ -703,7 +703,6 @@ async fn rebuild_retags_sigchain_blocks() {
     let client = Arc::new({
         let c = LocalClient::new(
             Arc::clone(&store),
-            Arc::new(tokio::sync::RwLock::new(TextIndex::new())),
             Arc::new(tokio::sync::RwLock::new(QuotaManager::default())),
             Arc::new(EventBus::new(64)),
             peer_id,

@@ -40,9 +40,6 @@ async fn enroll_agent_then_write_and_verify_authorship() {
         let c = memvault_api::LocalClient::new(
             std::sync::Arc::clone(&node.store),
             std::sync::Arc::new(tokio::sync::RwLock::new(
-                memvault_query::TextIndex::new(),
-            )),
-            std::sync::Arc::new(tokio::sync::RwLock::new(
                 memvault_query::QuotaManager::default(),
             )),
             std::sync::Arc::new(memvault_api::EventBus::new(64)),
@@ -124,7 +121,6 @@ async fn enroll_agent_then_write_and_verify_authorship() {
     let agent_pk_bytes = agent.verifying_key.to_bytes();
     let agent_client = memvault_api::LocalClient::new(
         std::sync::Arc::clone(&node.store),
-        std::sync::Arc::new(tokio::sync::RwLock::new(memvault_query::TextIndex::new())),
         std::sync::Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
         std::sync::Arc::new(memvault_api::EventBus::new(64)),
         node.client.peer_id().to_vec(),

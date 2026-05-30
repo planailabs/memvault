@@ -22,7 +22,6 @@ fn open_temp_store(dir: &tempfile::TempDir, name: &str) -> Arc<MemvaultStore> {
 fn make_client(store: Arc<MemvaultStore>) -> LocalClient {
     let client = LocalClient::new(
         store,
-        Arc::new(RwLock::new(TextIndex::new())),
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
         Arc::new(EventBus::new(64)),
         vec![0u8; 32],
@@ -112,33 +111,9 @@ async fn put_sync_search_retract() {
         })
         .unwrap_or_default();
 
-    // Create clients for nodes 2 and 3 with their own indexes.
-    let index2 = Arc::new(RwLock::new(TextIndex::new()));
-    let index3 = Arc::new(RwLock::new(TextIndex::new()));
-
-    // Index the document text on nodes 2 and 3.
-    {
-        let mut idx = index2.write().await;
-        idx.index_doc(
-            doc_id.clone(),
-            "Quantum entanglement enables instantaneous correlation between distant particles.",
-            Some("Quantum Physics Note"),
-            tags_val.clone(),
-        );
-    }
-    {
-        let mut idx = index3.write().await;
-        idx.index_doc(
-            doc_id.clone(),
-            "Quantum entanglement enables instantaneous correlation between distant particles.",
-            Some("Quantum Physics Note"),
-            tags_val.clone(),
-        );
-    }
-
+    // Create clients for nodes 2 and 3 (each opens its own Tantivy index).
     let client2 = LocalClient::new(
         Arc::clone(&store2),
-        index2,
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
         Arc::new(EventBus::new(64)),
         vec![1u8; 32],
@@ -146,12 +121,25 @@ async fn put_sync_search_retract() {
     );
     let client3 = LocalClient::new(
         Arc::clone(&store3),
-        index3,
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),
         Arc::new(EventBus::new(64)),
         vec![2u8; 32],
         vec![0u8; 32],
     );
+
+    // Index the synced document text into each node's own search index.
+    for client in [&client2, &client3] {
+        let mut idx = client.index_ref().write().await;
+        let _ = idx.index_doc(
+            &doc_id,
+            "Quantum entanglement enables instantaneous correlation between distant particles.",
+            Some("Quantum Physics Note"),
+            &tags_val,
+            None,
+            0,
+        );
+        idx.commit().unwrap();
+    }
 
     // Nodes 2 and 3 can find the document via search.
     let hits2 = client2.search("quantum", 10).await.unwrap();

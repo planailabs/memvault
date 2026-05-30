@@ -17,6 +17,7 @@ pub use audit::retraction::{is_retracted, retract};
 
 pub use index::effective_tags::effective_tags;
 pub use index::search::{INDEX_FORMAT_VERSION, SearchHit, SearchQuery, TextIndex, UnifiedHit};
+pub use index::tantivy_search::{TantivyHit, TantivyIndex};
 
 pub use quotas::{AgentQuota, BucketQuota, BucketUsage, QuotaExceeded, QuotaManager};
 
