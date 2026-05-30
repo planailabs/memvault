@@ -68,3 +68,22 @@ pub const BUCKET_TRUST: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bu
 /// Local node identity: fixed key "peer_id" -> peer_id bytes.
 /// Written at genesis or first daemon start; verified against the swarm's PeerId.
 pub const LOCAL_IDENTITY: TableDefinition<&str, &[u8]> = TableDefinition::new("local_identity");
+
+// ── Scoped-index member-sets (Phase 2 of scoped-indexes) ───────────
+
+/// Materialized scope membership: key = scope_id ‖ node_id_bytes,
+/// value = packed(retracted_byte:1, wall_ns:8).
+///
+/// `scope_id` is an opaque, fixed-width digest derived by the caller from a
+/// partition coordinate — per-bucket (`b`), per-view (`v`), or per-view×bucket
+/// (`vb`). Keying by `(scope_id, node_id)` makes membership insert / remove /
+/// retraction-flip O(1); ordering is applied at read time (the multi-bucket
+/// merge sorts by `wall_ns` regardless), and counts come from SCOPE_REGISTRY.
+pub const SCOPE_MEMBERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("scope_members");
+
+/// Scope partition registry: key = scope_id, value = packed registry entry
+/// (kind, active_count, retracted_count, built_ns, view_cid?, bucket_id?).
+/// Lets us enumerate live partitions (for ingest-time maintenance), answer
+/// counts in O(1), and know which view×bucket partitions have been lazily
+/// built already.
+pub const SCOPE_REGISTRY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("scope_registry");

@@ -15,6 +15,7 @@ pub mod insert;
 pub mod keys;
 pub mod query;
 pub mod retracted;
+pub mod scope_members;
 pub mod rotation_state;
 pub mod tables;
 
@@ -73,6 +74,9 @@ impl MemvaultStore {
             txn.open_table(tables::BUCKET_TRUST)?;
             // Identity table
             txn.open_table(tables::LOCAL_IDENTITY)?;
+            // Scoped-index member-sets (scoped-indexes Phase 2)
+            txn.open_table(tables::SCOPE_MEMBERS)?;
+            txn.open_table(tables::SCOPE_REGISTRY)?;
         }
         txn.commit()?;
 
