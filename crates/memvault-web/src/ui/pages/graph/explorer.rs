@@ -527,21 +527,36 @@ impl Viewport {
 
 // ── Components ─────────────────────────────────────────────────────────
 
+/// A stable key derived from the current node set, so `GraphView` re-mounts
+/// (and rebuilds its physics sim) whenever the loaded nodes change — e.g. after
+/// a bucket / view / retracted change.
+fn node_set_key(nodes: &[NodeSummary]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    nodes.len().hash(&mut h);
+    for n in nodes {
+        n.id.hash(&mut h);
+    }
+    h.finish()
+}
+
 #[component]
 pub fn GraphExplorer() -> Element {
     use_topbar(&t!("graph-title"));
-    let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
-    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
-    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
+    let filters = crate::ui::filters::use_filters();
     let nodes_res = use_server_future(move || {
-        let v = active_view.read().name.clone();
-        let b = active_bucket.read().id.clone();
-        let r = show_retracted().0;
-        async move { list_graph_nodes(v, b, r).await }
+        let f = filters.read();
+        async move { list_graph_nodes(f.view, f.bucket, f.show_retracted).await }
     })?;
 
     match &*nodes_res.read() {
-        Some(Ok(nodes)) => rsx! { GraphView { initial_nodes: nodes.clone() } },
+        Some(Ok(nodes)) => {
+            // Re-mount GraphView when the node set changes (e.g. after a
+            // bucket/view/retracted change) — otherwise its physics-sim signal,
+            // seeded once at mount, keeps showing the previous data.
+            let key = node_set_key(nodes);
+            rsx! { GraphView { key: "{key}", initial_nodes: nodes.clone() } }
+        }
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
         None => rsx! { p { class: "text-fg-muted", {t!("graph-loading")} } },
     }

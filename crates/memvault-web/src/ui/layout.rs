@@ -18,6 +18,9 @@ pub fn Layout() -> Element {
     use_context_provider::<ActiveViewSignal>(|| Signal::new(ActiveView::default()));
     use_context_provider::<ActiveBucketSignal>(|| Signal::new(ActiveBucket::default()));
     use_context_provider::<ShowRetractedSignal>(|| Signal::new(ShowRetracted::default()));
+    use_context_provider::<super::filters::FilterEpochSignal>(|| {
+        Signal::new(super::filters::FilterEpoch::default())
+    });
     let _event_bus = use_event_bus_provider();
 
     rsx! {

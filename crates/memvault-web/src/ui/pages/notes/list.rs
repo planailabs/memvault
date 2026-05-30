@@ -89,15 +89,10 @@ async fn list_notes(
 #[component]
 pub fn NoteList() -> Element {
     use_topbar(&t!("notes-title"));
-    let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
-    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
-    // Global "show retracted" toggle, driven from the top bar.
-    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
+    let filters = crate::ui::filters::use_filters();
     let notes = use_server_future(move || {
-        let v = active_view.read().name.clone();
-        let b = active_bucket.read().id.clone();
-        let r = show_retracted().0;
-        async move { list_notes(v, b, r).await }
+        let f = filters.read();
+        async move { list_notes(f.view, f.bucket, f.show_retracted).await }
     })?;
 
     rsx! {
