@@ -21,6 +21,7 @@ pub mod otel;
 pub mod quotas;
 pub mod rotation;
 pub mod rpc;
+pub mod scope;
 pub mod subscription;
 pub mod tokens;
 pub mod types;
