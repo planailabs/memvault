@@ -36,6 +36,28 @@ pub struct TantivyIndex {
     f_retracted: Field,
 }
 
+/// All stored fields of an indexed node — used to read/rewrite a doc by
+/// node_id (Tantivy has no in-place update, so tag/retraction changes are
+/// delete + re-add of the full stored field set).
+struct StoredFields {
+    cid: String,
+    node_id: String,
+    node_type: String,
+    body: String,
+    label: String,
+    /// Tags as "scope:label" strings (the on-disk form).
+    tags: Vec<String>,
+    wall_ns: u64,
+    bucket_id: String,
+    retracted: u64,
+}
+
+/// Split a stored "scope:label" tag into a `(scope, label)` pair on the first
+/// colon. Returns `None` if there's no colon.
+fn split_tag(t: &str) -> Option<(String, String)> {
+    t.split_once(':').map(|(s, l)| (s.to_string(), l.to_string()))
+}
+
 /// Unified search hit across all node types.
 #[derive(Debug, Clone)]
 pub struct TantivyHit {
@@ -407,6 +429,202 @@ impl TantivyIndex {
         self.reader.searcher().num_docs()
     }
 
+    // ── Node-addressed accessors / mutations (TextIndex parity) ────
+
+    /// Fetch a node's full stored field set by node_id (first match).
+    fn read_fields(&self, node_id: &str) -> Option<StoredFields> {
+        let searcher = self.reader.searcher();
+        let qp = QueryParser::for_index(&self.index, vec![self.f_node_id]);
+        let q = qp.parse_query(&format!("node_id:\"{node_id}\"")).ok()?;
+        let top = searcher.search(&q, &TopDocs::with_limit(1)).ok()?;
+        let (_, addr) = top.first()?;
+        let d: TantivyDocument = searcher.doc(*addr).ok()?;
+        Some(self.fields_of(&d))
+    }
+
+    /// Extract a `StoredFields` from a retrieved document.
+    fn fields_of(&self, d: &TantivyDocument) -> StoredFields {
+        let mut tags = Vec::new();
+        for v in d.get_all(self.f_tags) {
+            if let Some(s) = v.as_str() {
+                tags.push(s.to_string());
+            }
+        }
+        StoredFields {
+            cid: self.get_text_field(d, self.f_cid),
+            node_id: self.get_text_field(d, self.f_node_id),
+            node_type: self.get_text_field(d, self.f_node_type),
+            body: self.get_text_field(d, self.f_body),
+            label: self.get_text_field(d, self.f_label),
+            tags,
+            wall_ns: d.get_first(self.f_wall_ns).and_then(|v| v.as_u64()).unwrap_or(0),
+            bucket_id: self.get_text_field(d, self.f_bucket_id),
+            retracted: d.get_first(self.f_retracted).and_then(|v| v.as_u64()).unwrap_or(0),
+        }
+    }
+
+    /// (Re)write a node from a `StoredFields`, replacing any existing copies.
+    /// Caller must `commit()`.
+    fn write_fields(&mut self, f: &StoredFields) -> Result<(), QueryError> {
+        let term = tantivy::Term::from_field_text(self.f_node_id, &f.node_id);
+        self.writer.delete_term(term);
+        let mut nd = TantivyDocument::default();
+        nd.add_text(self.f_cid, &f.cid);
+        nd.add_text(self.f_node_id, &f.node_id);
+        nd.add_text(self.f_node_type, &f.node_type);
+        nd.add_text(self.f_body, &f.body);
+        nd.add_text(self.f_label, &f.label);
+        for t in &f.tags {
+            nd.add_text(self.f_tags, t);
+        }
+        nd.add_u64(self.f_wall_ns, f.wall_ns);
+        nd.add_text(self.f_bucket_id, &f.bucket_id);
+        nd.add_u64(self.f_retracted, f.retracted);
+        self.writer
+            .add_document(nd)
+            .map_err(|e| QueryError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Whether a node is currently flagged retracted.
+    pub fn is_retracted(&self, node_id: &str) -> bool {
+        self.read_fields(node_id).map(|f| f.retracted != 0).unwrap_or(false)
+    }
+
+    /// A node's effective tags as `(scope, label)` pairs.
+    pub fn get_tags(&self, node_id: &str) -> Vec<(String, String)> {
+        self.read_fields(node_id)
+            .map(|f| f.tags.iter().filter_map(|t| split_tag(t)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Add/remove tags on a node (delete + re-add; Tantivy has no in-place
+    /// update). No-op if the node isn't present. Caller must `commit()`.
+    pub fn apply_tag_update(
+        &mut self,
+        node_id: &str,
+        add: &[(String, String)],
+        remove: &[(String, String)],
+    ) -> Result<(), QueryError> {
+        let Some(mut f) = self.read_fields(node_id) else {
+            return Ok(());
+        };
+        let remove_set: std::collections::HashSet<String> =
+            remove.iter().map(|(s, l)| format!("{s}:{l}")).collect();
+        f.tags.retain(|t| !remove_set.contains(t));
+        for (s, l) in add {
+            let t = format!("{s}:{l}");
+            if !f.tags.contains(&t) {
+                f.tags.push(t);
+            }
+        }
+        self.write_fields(&f)
+    }
+
+    /// Resolve a node's label, honouring the retraction mode.
+    pub fn resolve_label_mode(&self, node_id: &str, mode: RetractionMode) -> Option<String> {
+        let f = self.read_fields(node_id)?;
+        if !mode.admits(f.retracted != 0) {
+            return None;
+        }
+        Some(f.label)
+    }
+
+    /// Collect stored fields for all docs matching the given filter clauses
+    /// (joined with AND); empty clauses ⇒ all docs.
+    fn collect_rows(&self, clauses: &[String], limit: usize) -> Vec<StoredFields> {
+        let searcher = self.reader.searcher();
+        let want = if limit == 0 { usize::MAX } else { limit };
+        let collector = TopDocs::with_limit(want.min(self.num_docs() as usize + 1).max(1));
+        let results = if clauses.is_empty() {
+            searcher.search(&tantivy::query::AllQuery, &collector)
+        } else {
+            let qp = QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
+            match qp.parse_query(&clauses.join(" AND ")) {
+                Ok(q) => searcher.search(&q, &collector),
+                Err(_) => return Vec::new(),
+            }
+        };
+        let Ok(top) = results else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (_, addr) in top {
+            if let Ok(d) = searcher.doc::<TantivyDocument>(addr) {
+                out.push(self.fields_of(&d));
+            }
+        }
+        out
+    }
+
+    /// Build the filter clauses for a `(view_tags, retraction)` pair.
+    fn mode_clauses(view_tags: &[(String, String)], mode: RetractionMode) -> Vec<String> {
+        let mut clauses: Vec<String> = view_tags
+            .iter()
+            .map(|(s, l)| format!("tags:\"{s}:{l}\""))
+            .collect();
+        match mode {
+            RetractionMode::ActiveOnly => clauses.push("retracted:0".to_string()),
+            RetractionMode::RetractedOnly => clauses.push("retracted:1".to_string()),
+            RetractionMode::IncludeRetracted => {}
+        }
+        clauses
+    }
+
+    /// Node ids of all members of a view (tag conjunction) under a mode.
+    pub fn members_of_view_mode(
+        &self,
+        view_tags: &[(String, String)],
+        mode: RetractionMode,
+    ) -> Vec<String> {
+        let clauses = Self::mode_clauses(view_tags, mode);
+        self.collect_rows(&clauses, 0)
+            .into_iter()
+            .map(|f| f.node_id)
+            .collect()
+    }
+
+    /// List all nodes (optionally view-filtered) under a mode, with the
+    /// retracted flag. Returns `(node_id, node_type, label, tags, retracted)`.
+    #[allow(clippy::type_complexity)]
+    pub fn list_all_mode(
+        &self,
+        view_tags: Option<&[(String, String)]>,
+        mode: RetractionMode,
+        limit: usize,
+    ) -> Vec<(String, String, String, Vec<(String, String)>, bool)> {
+        let clauses = Self::mode_clauses(view_tags.unwrap_or(&[]), mode);
+        self.collect_rows(&clauses, limit)
+            .into_iter()
+            .map(|f| {
+                let tags = f.tags.iter().filter_map(|t| split_tag(t)).collect();
+                (f.node_id, f.node_type, f.label, tags, f.retracted != 0)
+            })
+            .collect()
+    }
+
+    /// Unified search honouring the retraction mode; returns `UnifiedHit`s.
+    pub fn search_unified_mode(
+        &self,
+        query: &str,
+        mode: RetractionMode,
+        limit: usize,
+    ) -> Vec<crate::index::search::UnifiedHit> {
+        let hits = self
+            .search_scoped(query, &[], &[], mode, limit)
+            .unwrap_or_default();
+        hits.into_iter()
+            .map(|h| crate::index::search::UnifiedHit {
+                node_id: h.node_id,
+                node_type: h.node_type,
+                label: h.label,
+                score: h.score,
+                snippet: h.snippet,
+                match_contexts: Vec::new(),
+            })
+            .collect()
+    }
+
     /// Schema accessor.
     pub fn schema(&self) -> &Schema {
         &self.schema
@@ -603,6 +821,77 @@ mod tests {
             .search_scoped("shared", &[], &[], RetractionMode::ActiveOnly, 10)
             .unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_node_accessors_and_tag_update() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document(
+            "c1",
+            "doc:1",
+            "body text",
+            "Label",
+            &[("a".into(), "x".into()), ("b".into(), "y".into())],
+            Some("bkt"),
+            10,
+        )
+        .unwrap();
+        idx.commit().unwrap();
+
+        // get_tags
+        let mut tags = idx.get_tags("doc:1");
+        tags.sort();
+        assert_eq!(tags, vec![("a".to_string(), "x".to_string()), ("b".to_string(), "y".to_string())]);
+        // is_retracted
+        assert!(!idx.is_retracted("doc:1"));
+        // resolve_label_mode
+        assert_eq!(idx.resolve_label_mode("doc:1", RetractionMode::ActiveOnly).as_deref(), Some("Label"));
+
+        // apply_tag_update: remove b:y, add c:z
+        idx.apply_tag_update("doc:1", &[("c".into(), "z".into())], &[("b".into(), "y".into())]).unwrap();
+        idx.commit().unwrap();
+        let mut tags = idx.get_tags("doc:1");
+        tags.sort();
+        assert_eq!(tags, vec![("a".to_string(), "x".to_string()), ("c".to_string(), "z".to_string())]);
+        // bucket + body preserved across the rewrite
+        let hit = idx.search_scoped("body", &["bkt"], &[], RetractionMode::ActiveOnly, 10).unwrap();
+        assert_eq!(hit.len(), 1);
+    }
+
+    #[test]
+    fn test_members_and_list_modes() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document("c1", "doc:1", "alpha", "A", &[("kind".into(), "note".into())], None, 1).unwrap();
+        idx.add_document("c2", "doc:2", "beta", "B", &[("kind".into(), "note".into())], None, 2).unwrap();
+        idx.add_document("c3", "doc:3", "gamma", "C", &[("kind".into(), "memo".into())], None, 3).unwrap();
+        idx.commit().unwrap();
+
+        // members of view {kind:note}
+        let mut m = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::ActiveOnly);
+        m.sort();
+        assert_eq!(m, vec!["doc:1".to_string(), "doc:2".to_string()]);
+
+        // list all (no view) active
+        let all = idx.list_all_mode(None, RetractionMode::ActiveOnly, 100);
+        assert_eq!(all.len(), 3);
+
+        // retract doc:2, then modes
+        idx.retract("doc:2").unwrap();
+        idx.commit().unwrap();
+        let active = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::ActiveOnly);
+        assert_eq!(active, vec!["doc:1".to_string()]);
+        let only = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::RetractedOnly);
+        assert_eq!(only, vec!["doc:2".to_string()]);
+        let incl = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::IncludeRetracted);
+        assert_eq!(incl.len(), 2);
+        // resolve_label of retracted node: hidden under ActiveOnly, shown under IncludeRetracted
+        assert!(idx.resolve_label_mode("doc:2", RetractionMode::ActiveOnly).is_none());
+        assert_eq!(idx.resolve_label_mode("doc:2", RetractionMode::IncludeRetracted).as_deref(), Some("B"));
+
+        // search_unified_mode returns UnifiedHit
+        let hits = idx.search_unified_mode("alpha", RetractionMode::ActiveOnly, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node_id, "doc:1");
     }
 
     #[test]
