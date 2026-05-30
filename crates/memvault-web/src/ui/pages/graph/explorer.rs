@@ -383,10 +383,10 @@ async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
 
 // ── Kind palette ──────────────────────────────────────────────────────
 //
-// Every kind maps to a `PillVariant`. SVG fills/strokes/halos derive
-// from that variant, so the graph reuses the same palette the rest of
-// the app uses for status pills — no per-kind hashes, no decorative use
-// of the brand color outside of the project kind.
+// Known kinds map to a `PillVariant` and reuse the same status palette
+// the rest of the app uses. Kinds outside that set fall back to a
+// deterministic hashed hue, so unrecognized node types still get a
+// distinct, stable color instead of all collapsing onto the muted swatch.
 
 /// Display kind for a node: the entity kind for entities, the node_type
 /// ("doc"/"file") otherwise.
@@ -398,41 +398,68 @@ fn display_kind_for<'a>(node_type: &'a str, kind: &'a str) -> &'a str {
     }
 }
 
-/// `PillVariant` (and by extension the SVG palette) for a display-kind.
-fn kind_variant(display_kind: &str) -> PillVariant {
-    match display_kind {
+/// `PillVariant` for a display-kind that has a dedicated mapping, or
+/// `None` for kinds outside the known set (which fall back to a hashed
+/// hue in the SVG palette).
+fn kind_variant_opt(display_kind: &str) -> Option<PillVariant> {
+    Some(match display_kind {
         "person" => PillVariant::Info,
         "project" => PillVariant::Accent,
         "concept" => PillVariant::Ok,
         "doc" | "document" => PillVariant::Warn,
         "file" | "attachment" => PillVariant::Muted,
-        _ => PillVariant::Muted,
-    }
+        _ => return None,
+    })
 }
 
-/// SVG `(fill, stroke)` CSS-var pair for a display-kind.
-fn kind_svg_palette(display_kind: &str) -> (&'static str, &'static str) {
-    match kind_variant(display_kind) {
-        PillVariant::Info => ("rgb(var(--c-info-soft))", "rgb(var(--c-info))"),
-        PillVariant::Accent => ("rgb(var(--c-brand-soft))", "rgb(var(--c-brand))"),
-        PillVariant::Ok => ("rgb(var(--c-success-soft))", "rgb(var(--c-success))"),
-        PillVariant::Warn => ("rgb(var(--c-warn-soft))", "rgb(var(--c-warn-strong))"),
-        PillVariant::Bad => ("rgb(var(--c-danger-soft))", "rgb(var(--c-danger))"),
-        PillVariant::Muted => ("rgb(var(--c-surface-2))", "rgb(var(--c-fg-faint))"),
+/// `PillVariant` for a display-kind; unknown kinds fall back to `Muted`
+/// for `Pill`/`Dot` components, which can only render a fixed variant.
+fn kind_variant(display_kind: &str) -> PillVariant {
+    kind_variant_opt(display_kind).unwrap_or(PillVariant::Muted)
+}
+
+/// Deterministic HSL color from a string hash. Picks a hue on the color
+/// wheel, keeps saturation/lightness in a pleasant range. Used for kinds
+/// outside the known palette so they still get a distinct, stable hue.
+fn hash_color(s: &str) -> String {
+    let mut h: u32 = 0;
+    for b in s.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    let hue = h % 360;
+    format!("hsl({hue}, 55%, 55%)")
+}
+
+/// SVG `(fill, stroke)` pair for a display-kind. Known kinds reuse the
+/// status palette; unknown kinds get a deterministic hashed hue.
+fn kind_svg_palette(display_kind: &str) -> (String, String) {
+    match kind_variant_opt(display_kind) {
+        Some(PillVariant::Info) => ("rgb(var(--c-info-soft))".into(), "rgb(var(--c-info))".into()),
+        Some(PillVariant::Accent) => ("rgb(var(--c-brand-soft))".into(), "rgb(var(--c-brand))".into()),
+        Some(PillVariant::Ok) => ("rgb(var(--c-success-soft))".into(), "rgb(var(--c-success))".into()),
+        Some(PillVariant::Warn) => ("rgb(var(--c-warn-soft))".into(), "rgb(var(--c-warn-strong))".into()),
+        Some(PillVariant::Bad) => ("rgb(var(--c-danger-soft))".into(), "rgb(var(--c-danger))".into()),
+        Some(PillVariant::Muted) => ("rgb(var(--c-surface-2))".into(), "rgb(var(--c-fg-faint))".into()),
+        None => {
+            let c = hash_color(display_kind);
+            (c.clone(), c)
+        }
     }
 }
 
 /// Full-saturation halo color for a display-kind. Opacity is applied at
 /// the use site so the same color drives both the field halo (low α) and
-/// the brand "selected" emphasis (higher α via the brand variant).
-fn kind_halo_color(display_kind: &str) -> &'static str {
-    match kind_variant(display_kind) {
-        PillVariant::Info => "rgb(var(--c-info))",
-        PillVariant::Accent => "rgb(var(--c-brand))",
-        PillVariant::Ok => "rgb(var(--c-success))",
-        PillVariant::Warn => "rgb(var(--c-warn))",
-        PillVariant::Bad => "rgb(var(--c-danger))",
-        PillVariant::Muted => "rgb(var(--c-fg-faint))",
+/// the brand "selected" emphasis (higher α via the brand variant). Unknown
+/// kinds use their hashed hue.
+fn kind_halo_color(display_kind: &str) -> String {
+    match kind_variant_opt(display_kind) {
+        Some(PillVariant::Info) => "rgb(var(--c-info))".into(),
+        Some(PillVariant::Accent) => "rgb(var(--c-brand))".into(),
+        Some(PillVariant::Ok) => "rgb(var(--c-success))".into(),
+        Some(PillVariant::Warn) => "rgb(var(--c-warn))".into(),
+        Some(PillVariant::Bad) => "rgb(var(--c-danger))".into(),
+        Some(PillVariant::Muted) => "rgb(var(--c-fg-faint))".into(),
+        None => hash_color(display_kind),
     }
 }
 
