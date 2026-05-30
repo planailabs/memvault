@@ -36,7 +36,7 @@ fn test_node_attestation(admin: &SigningKey, node: &SigningKey) -> NodeAttestati
     let mut att = NodeAttestation {
         cluster_id: ClusterId([0u8; 32]),
         member: PeerId(node.verifying_key().as_bytes().to_vec()),
-        role: Role::AgentHost,
+        role: Role::Node,
         not_after_ns: u64::MAX,
         issued_via: AttestationOrigin::Direct,
         signature: [0u8; 64],

@@ -66,7 +66,8 @@ fn issue_token_ex(
     let mut token = JoinToken {
         issuer: admin_peer_id.clone(),
         cluster_id: cluster_id.clone(),
-        role: Role::AgentHost,
+        // /join/1.0 only admits `Role::Node` tokens as peer nodes.
+        role: Role::Node,
         initial_grants: vec![],
         not_before_ns: now_ns.saturating_sub(60_000_000_000),
         not_after_ns: now_ns + 3600 * 1_000_000_000,
@@ -245,7 +246,7 @@ async fn join_protocol_promotes_peer_to_attested() {
 
     let att = attested.expect("attestation present");
     assert_eq!(att.cluster_id.0, cluster_id.0, "cluster_id matches");
-    assert_eq!(att.role, Role::AgentHost, "role matches token");
+    assert_eq!(att.role, Role::Node, "role matches token");
 
     // Signature must verify against admin pubkey (the pin).
     let admin_vk =
@@ -797,7 +798,8 @@ async fn join_bundles_admin_node_attestation() {
     let mut admin_self_att = memvault_auth::NodeAttestation {
         cluster_id: cluster_id.clone(),
         member: memvault_core::PeerId(admin_node_pubkey.to_vec()),
-        role: Role::AgentHost,
+        // Matches `bootstrap_cluster_trust`: the genesis node is `Role::Node`.
+        role: Role::Node,
         not_after_ns: u64::MAX,
         issued_via: memvault_auth::AttestationOrigin::Direct,
         signature: [0u8; 64],

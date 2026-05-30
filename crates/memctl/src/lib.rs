@@ -292,8 +292,9 @@ mod native {
         NodeAttest {
             /// Hex-encoded peer ed25519 pubkey (32 bytes / 64 hex chars).
             peer_pubkey: String,
-            /// Role to grant the peer (default: agent-host).
-            #[arg(long, value_enum, default_value = "agent-host")]
+            /// Role to grant the peer. Node attestations must be `node`;
+            /// other roles are rejected.
+            #[arg(long, value_enum, default_value = "node")]
             role: RoleArg,
         },
         /// Agent operations (enroll / list / show)

@@ -133,7 +133,11 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
         let mut node_att = NodeAttestation {
             cluster_id,
             member: memvault_core::PeerId(node_pubkey_bytes.to_vec()),
-            role: Role::AgentHost,
+            // The genesis daemon is a cluster peer node, not an agent — its
+            // self-attestation must carry `Role::Node` so it satisfies the
+            // node-trust gates (`scan_trusted_nodes` / `peer_is_trusted_node`).
+            // Agents it hosts get their own AgentAttestations via enrollment.
+            role: Role::Node,
             not_after_ns: u64::MAX,
             issued_via: AttestationOrigin::Direct,
             signature: [0u8; 64],

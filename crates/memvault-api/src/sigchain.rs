@@ -991,6 +991,17 @@ pub fn scan_trusted_nodes(
                 continue;
             }
         };
+        // Only `Role::Node` attestations establish node trust. Agent roles
+        // (AgentHost/Auditor/Service) belong on AgentAttestations, not node
+        // attestations; a non-Node node attestation is not a peer node.
+        if att.role != memvault_auth::Role::Node {
+            tracing::warn!(
+                member = %hex::encode(&att.member.0),
+                role = ?att.role,
+                "skipping node attestation: role is not Node"
+            );
+            continue;
+        }
         // Multi-admin: accept if ANY known cluster admin key verifies it.
         if !admin_keys.iter().any(|k| att.verify_signature(k).is_ok()) {
             tracing::warn!(

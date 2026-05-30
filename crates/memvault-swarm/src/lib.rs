@@ -729,6 +729,12 @@ fn peer_is_trusted_node(
         else {
             continue;
         };
+        // Only `Role::Node` attestations confer node (block-serving) trust.
+        // A node attestation carrying any other role is not a peer node and
+        // must not be served the cluster's blocks.
+        if att.role != memvault_auth::Role::Node {
+            continue;
+        }
         if att.cluster_id.0 != join_config.cluster_id {
             continue;
         }
@@ -1233,6 +1239,17 @@ fn build_join_response(
     // Cluster_id must match ours.
     if token.cluster_id.0 != join_config.cluster_id {
         return refuse(JoinRefuseReason::TokenInvalidSignature);
+    }
+
+    // Role gate: /join/1.0 mints a NodeAttestation, which confers full P2P
+    // sync rights (see `peer_is_trusted_node`). Only `Role::Node` tokens may
+    // become nodes — agent roles (AgentHost/Auditor/Service) must go through
+    // `agent enroll`, which mints a node-signed AgentAttestation instead, and
+    // `Admin` is admitted via the separate `admit_as_admin` POP path. Without
+    // this gate a limited app-level token could be redeemed here to become a
+    // fully-trusted replicating peer.
+    if token.role != memvault_auth::Role::Node {
+        return refuse(JoinRefuseReason::RoleNotAllowed);
     }
 
     // Verify the libp2p peer's PeerId derives from the claimed pubkey.

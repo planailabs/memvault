@@ -1248,6 +1248,14 @@ impl LocalClient {
         role: memvault_auth::Role,
     ) -> Result<Vec<u8>> {
         use ed25519_dalek::Signer;
+        // Node attestations confer peer (block-serving) trust and must carry
+        // `Role::Node`; the node-trust gates reject any other role. Reject
+        // up front rather than mint an attestation that will never be trusted.
+        if role != memvault_auth::Role::Node {
+            return Err(ApiError::Other(format!(
+                "node attestations must use role 'node', got {role:?}"
+            )));
+        }
         let admin_sk = self
             .admin_signing_key()
             .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
