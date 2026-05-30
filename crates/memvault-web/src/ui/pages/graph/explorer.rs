@@ -60,6 +60,7 @@ struct EdgeDetail {
 async fn list_graph_nodes(
     view: Option<String>,
     bucket_hex: Option<String>,
+    show_retracted: bool,
 ) -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
@@ -76,7 +77,7 @@ async fn list_graph_nodes(
     // If a view is active, get all nodes matching the view.
     if let Some(ref view_name) = view {
         let items = client
-            .list_all(Some(view_name), 200)
+            .list_all_ex(Some(view_name), 200, show_retracted)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         let mut nodes = Vec::new();
@@ -86,7 +87,7 @@ async fn list_graph_nodes(
                 if let Some(memvault_core::NodeRef::Entity(eid)) =
                     memvault_core::NodeRef::from_tag_label(id)
                 {
-                    if let Ok(Some(e)) = client.get_entity(&eid).await {
+                    if let Ok(Some(e)) = client.get_entity_ex(&eid, show_retracted).await {
                         if e.kind == memvault_core::VFS_DIR_KIND {
                             continue;
                         }
@@ -123,7 +124,7 @@ async fn list_graph_nodes(
 
     // Load entities
     let entities = client
-        .list_entities(200, bucket_id.as_ref())
+        .list_entities_ex(200, bucket_id.as_ref(), show_retracted)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -182,7 +183,7 @@ async fn list_graph_nodes(
         let (node_type, kind, label) = match &node_ref {
             memvault_core::NodeRef::Doc(did) => {
                 let title = client
-                    .get_doc(did)
+                    .get_doc_ex(did, show_retracted)
                     .await
                     .ok()
                     .flatten()
@@ -212,7 +213,7 @@ async fn list_graph_nodes(
             }
             memvault_core::NodeRef::Entity(eid) => {
                 // Skip vfs:dir entities that appear as edge targets.
-                if let Ok(Some(e)) = client.get_entity(eid).await {
+                if let Ok(Some(e)) = client.get_entity_ex(eid, show_retracted).await {
                     if e.kind == memvault_core::VFS_DIR_KIND {
                         continue;
                     }
@@ -243,7 +244,10 @@ async fn list_graph_nodes(
 }
 
 #[server]
-async fn get_node_detail(node_id: String) -> Result<NodeDetail, ServerFnError> {
+async fn get_node_detail(
+    node_id: String,
+    show_retracted: bool,
+) -> Result<NodeDetail, ServerFnError> {
     let client = crate::ui::state::client()?;
 
     let node_ref = memvault_core::NodeRef::from_tag_label(&node_id)
@@ -252,7 +256,7 @@ async fn get_node_detail(node_id: String) -> Result<NodeDetail, ServerFnError> {
     // Get properties + basic info
     let (kind, label, props) = match &node_ref {
         memvault_core::NodeRef::Entity(id) => {
-            if let Ok(Some(entity)) = client.get_entity(id).await {
+            if let Ok(Some(entity)) = client.get_entity_ex(id, show_retracted).await {
                 let label = entity
                     .props
                     .get("name")
@@ -266,7 +270,7 @@ async fn get_node_detail(node_id: String) -> Result<NodeDetail, ServerFnError> {
             }
         }
         memvault_core::NodeRef::Doc(id) => {
-            let label = if let Ok(Some(doc)) = client.get_doc(id).await {
+            let label = if let Ok(Some(doc)) = client.get_doc_ex(id, show_retracted).await {
                 doc.frontmatter
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -318,7 +322,7 @@ async fn get_node_detail(node_id: String) -> Result<NodeDetail, ServerFnError> {
 }
 
 #[server]
-async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
+async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let node_ref = memvault_core::NodeRef::from_tag_label(&id)
         .ok_or_else(|| ServerFnError::new("Invalid node ID"))?;
@@ -334,7 +338,7 @@ async fn expand_node(id: String) -> Result<Vec<NodeSummary>, ServerFnError> {
             let other_id = other.tag_label();
             // Try to get entity details for entity nodes
             if let memvault_core::NodeRef::Entity(eid) = other {
-                if let Ok(Some(entity)) = client.get_entity(eid).await {
+                if let Ok(Some(entity)) = client.get_entity_ex(eid, show_retracted).await {
                     let label = entity
                         .props
                         .get("name")
@@ -528,10 +532,12 @@ pub fn GraphExplorer() -> Element {
     use_topbar(&t!("graph-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
     let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let nodes_res = use_server_future(move || {
         let v = active_view.read().name.clone();
         let b = active_bucket.read().id.clone();
-        async move { list_graph_nodes(v, b).await }
+        let r = *show_retracted.read();
+        async move { list_graph_nodes(v, b, r).await }
     })?;
 
     match &*nodes_res.read() {
@@ -543,6 +549,7 @@ pub fn GraphExplorer() -> Element {
 
 #[component]
 fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     // Build the simulation graph structure without running physics.
     // Physics only runs client-side in use_effect below.
     let mut sim = use_signal(|| {
@@ -868,7 +875,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                     selected.set(Some(click_id.clone()));
                                                     let nid = click_id.clone();
                                                     spawn(async move {
-                                                        if let Ok(d) = get_node_detail(nid).await {
+                                                        if let Ok(d) = get_node_detail(nid, *show_retracted.read()).await {
                                                             detail.set(Some(d));
                                                         }
                                                     });
@@ -1086,7 +1093,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                     selected.set(Some(click_id.clone()));
                                                     let nid = click_id.clone();
                                                     spawn(async move {
-                                                        if let Ok(d) = get_node_detail(nid).await {
+                                                        if let Ok(d) = get_node_detail(nid, *show_retracted.read()).await {
                                                             detail.set(Some(d));
                                                         }
                                                     });
@@ -1103,7 +1110,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 move |_| {
                                                     let eid = eid.clone();
                                                     spawn(async move {
-                                                        if let Ok(neighbors) = expand_node(eid).await {
+                                                        if let Ok(neighbors) = expand_node(eid, *show_retracted.read()).await {
                                                             let mut s = sim.write();
                                                             for neighbor in &neighbors {
                                                                 s.add_node(neighbor.id.clone(), neighbor.kind.clone(), neighbor.label.clone());

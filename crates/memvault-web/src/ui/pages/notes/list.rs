@@ -91,10 +91,8 @@ pub fn NoteList() -> Element {
     use_topbar(&t!("notes-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
     let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
-    // "Show retracted" toggle — includes retracted notes in the list. The
-    // embedded UI runs as the daemon identity, so this is an explicit opt-in
-    // (mirrors the auditor/admin bypass available to API callers).
-    let mut show_retracted = use_signal(|| false);
+    // Global "show retracted" toggle, driven from the top bar.
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let notes = use_server_future(move || {
         let v = active_view.read().name.clone();
         let b = active_bucket.read().id.clone();
@@ -105,18 +103,8 @@ pub fn NoteList() -> Element {
     rsx! {
         div { class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4",
             PageHeader { class: "mb-0", {t!("notes-title")} }
-            div { class: "flex items-center gap-3",
-                label { class: "flex items-center gap-2 text-sm text-fg-muted cursor-pointer",
-                    input {
-                        r#type: "checkbox",
-                        checked: show_retracted(),
-                        onchange: move |e| show_retracted.set(e.checked()),
-                    }
-                    "Show retracted"
-                }
-                Link { to: Route::NoteForm {}, class: "btn btn-md btn-primary",
-                    {t!("notes-new")}
-                }
+            Link { to: Route::NoteForm {}, class: "btn btn-md btn-primary",
+                {t!("notes-new")}
             }
         }
         {match &*notes.read() {

@@ -33,6 +33,11 @@ pub struct ActiveBucket {
 /// Shared signal for the active bucket.
 pub type ActiveBucketSignal = Signal<ActiveBucket>;
 
+/// Global "show retracted" toggle (top bar). When true, every UI read passes
+/// `include_retracted` so retracted entries are shown. Pages read this signal
+/// in their data-fetch closures so flipping it re-fetches.
+pub type ShowRetractedSignal = Signal<bool>;
+
 /// Set the topbar title for the current page.
 pub fn use_topbar(title: &str) {
     let mut meta = use_context::<Signal<TopbarMeta>>();
@@ -95,6 +100,7 @@ pub fn Topbar() -> Element {
     let mut palette_open = use_context::<PaletteOpen>();
     let mut active_view = use_context::<ActiveViewSignal>();
     let mut active_bucket = use_context::<ActiveBucketSignal>();
+    let mut show_retracted = use_context::<ShowRetractedSignal>();
     let views_res = use_server_future(fetch_views)?;
     let buckets_res = use_server_future(fetch_buckets)?;
 
@@ -132,6 +138,17 @@ pub fn Topbar() -> Element {
                 h1 { class: "text-lg font-semibold text-fg-strong truncate", "{title}" }
 
                 div { class: "flex items-center gap-1 ml-auto",
+                    // Global "show retracted" toggle — applies to every UI read.
+                    label {
+                        class: "flex items-center gap-1.5 text-sm text-fg-muted cursor-pointer mr-1 whitespace-nowrap",
+                        title: "Include retracted entries in all lists, search, and detail views",
+                        input {
+                            r#type: "checkbox",
+                            checked: show_retracted(),
+                            onchange: move |e| show_retracted.set(e.checked()),
+                        }
+                        "Retracted"
+                    }
                     // Bucket selector
                     select {
                         class: "input input-sm text-sm w-auto",

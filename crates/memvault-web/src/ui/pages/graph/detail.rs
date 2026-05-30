@@ -28,7 +28,7 @@ struct EdgeData {
 }
 
 #[server]
-async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
+async fn get_entity_detail(id: String, show_retracted: bool) -> Result<EntityData, ServerFnError> {
     let client = crate::ui::state::client()?;
     let hex_id = id.strip_prefix("entity:").unwrap_or(&id);
     let bytes = hex::decode(hex_id).map_err(|_| ServerFnError::new("Invalid entity ID"))?;
@@ -40,7 +40,7 @@ async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
     let entity_id = memvault_core::EntityId(arr);
 
     let entity = client
-        .get_entity(&entity_id)
+        .get_entity_ex(&entity_id, show_retracted)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Entity not found"))?;
@@ -80,9 +80,11 @@ async fn get_entity_detail(id: String) -> Result<EntityData, ServerFnError> {
 #[component]
 pub fn EntityDetail(id: ReadSignal<String>) -> Element {
     use_topbar(&t!("entity-title"));
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let entity = use_server_future(move || {
         let id = id.read().clone();
-        async move { get_entity_detail(id).await }
+        let r = *show_retracted.read();
+        async move { get_entity_detail(id, r).await }
     })?;
 
     match &*entity.read() {

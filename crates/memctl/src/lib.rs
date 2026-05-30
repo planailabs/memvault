@@ -2254,15 +2254,17 @@ mod native {
                 memvault_api::agent_identity::write_identity_dir(&identity_dir, &agent_sk)
                     .map_err(|e| anyhow::anyhow!("write identity dir: {e}"))?;
 
-                // Ensure the agent's default bucket exists now, so its first
-                // write has a home (rather than lazily on first use).
-                let bucket = client
-                    .ensure_agent_bucket_for_pubkey(&agent_pubkey, &agent_id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("ensure agent bucket: {e}"))?;
-
                 println!("Agent enrolled successfully.");
-                println!("  Bucket:       {}", hex::encode(bucket.0));
+                // Ensure the agent's default data bucket — only for AgentHost
+                // agents (writers). Auditor / Service / Admin agents don't get
+                // an auto-created data bucket.
+                if result.attestation.role == memvault_auth::AgentRole::AgentHost {
+                    let bucket = client
+                        .ensure_agent_bucket_for_pubkey(&agent_pubkey, &agent_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("ensure agent bucket: {e}"))?;
+                    println!("  Bucket:       {}", hex::encode(bucket.0));
+                }
                 println!("  Agent ID:     {agent_id}");
                 println!("  Cluster:      {}", hex::encode(client.cluster_id()));
                 println!("  Identity dir: {}", identity_dir.display());

@@ -59,12 +59,12 @@ impl AttachmentInfo {
 }
 
 #[server]
-async fn get_note(id: String) -> Result<NoteData, ServerFnError> {
+async fn get_note(id: String, show_retracted: bool) -> Result<NoteData, ServerFnError> {
     let client = crate::ui::state::client()?;
     let doc_id =
         crate::api::docs::parse_doc_id(&id).map_err(|e| ServerFnError::new(format!("{e}")))?;
     let doc = client
-        .get_doc(&doc_id)
+        .get_doc_ex(&doc_id, show_retracted)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Document not found"))?;
@@ -234,9 +234,11 @@ fn provenance_pill_variant(prov: &str) -> PillVariant {
 #[component]
 pub fn NoteDetail(id: String) -> Element {
     use_topbar(&t!("notes-detail-title"));
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let note = use_server_future(move || {
         let id = id.clone();
-        async move { get_note(id).await }
+        let r = *show_retracted.read();
+        async move { get_note(id, r).await }
     })?;
 
     match &*note.read() {

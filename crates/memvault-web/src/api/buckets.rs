@@ -194,6 +194,12 @@ pub async fn ensure_agent_bucket(
     if pubkey.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // Only AgentHost agents (writers) get a data bucket; Auditor / Service /
+    // Admin agents don't.
+    if crate::api::auth::caller_role(&state, &auth.claims) != Some(memvault_auth::AgentRole::AgentHost)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let bucket_id = state
         .client
         .ensure_agent_bucket_for_pubkey(&pubkey, &req.agent_id)

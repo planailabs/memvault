@@ -20,11 +20,15 @@ struct SearchHit {
 }
 
 #[server]
-async fn search_docs(query: String, limit: usize) -> Result<Vec<SearchHit>, ServerFnError> {
+async fn search_docs(
+    query: String,
+    limit: usize,
+    show_retracted: bool,
+) -> Result<Vec<SearchHit>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let q_lower = query.to_lowercase();
     let hits = client
-        .search(&query, limit)
+        .search_ex(&query, limit, show_retracted)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -33,7 +37,7 @@ async fn search_docs(query: String, limit: usize) -> Result<Vec<SearchHit>, Serv
         let doc_id = hex::encode(h.doc_id.0);
 
         // Fetch title from the document.
-        let title = if let Ok(Some(doc)) = client.get_doc(&h.doc_id).await {
+        let title = if let Ok(Some(doc)) = client.get_doc_ex(&h.doc_id, show_retracted).await {
             doc.frontmatter
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -124,6 +128,7 @@ pub fn SearchPage() -> Element {
     let mut query = use_signal(String::new);
     let mut results = use_signal(|| None::<Result<Vec<SearchHit>, String>>);
     let mut searching = use_signal(|| false);
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
 
     let do_search = move |e: Event<FormData>| {
         e.prevent_default();
@@ -132,9 +137,10 @@ pub fn SearchPage() -> Element {
             results.set(None);
             return;
         }
+        let r = *show_retracted.read();
         searching.set(true);
         spawn(async move {
-            match search_docs(q, 50).await {
+            match search_docs(q, 50, r).await {
                 Ok(hits) => results.set(Some(Ok(hits))),
                 Err(e) => results.set(Some(Err(e.to_string()))),
             }

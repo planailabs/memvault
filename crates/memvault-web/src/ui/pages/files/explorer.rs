@@ -39,13 +39,16 @@ impl FileRow {
 }
 
 #[server]
-async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError> {
+async fn list_files(
+    view: Option<String>,
+    show_retracted: bool,
+) -> Result<Vec<FileRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
     // If a view is active, use list_all filtered to files.
     if let Some(ref view_name) = view {
         let items = client
-            .list_all(Some(view_name), 500)
+            .list_all_ex(Some(view_name), 500, show_retracted)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         return Ok(items
@@ -124,9 +127,11 @@ async fn list_files(view: Option<String>) -> Result<Vec<FileRow>, ServerFnError>
 pub fn FileExplorer() -> Element {
     use_topbar(&t!("files-title"));
     let active_view = use_context::<crate::ui::topbar::ActiveViewSignal>();
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let files = use_server_future(move || {
         let v = active_view.read().name.clone();
-        async move { list_files(v).await }
+        let r = *show_retracted.read();
+        async move { list_files(v, r).await }
     })?;
     let mut grid_view = use_signal(|| false);
 

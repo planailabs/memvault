@@ -17,12 +17,15 @@ struct PaletteResult {
 }
 
 #[server]
-async fn palette_search(query: String) -> Result<Vec<PaletteResult>, ServerFnError> {
+async fn palette_search(
+    query: String,
+    show_retracted: bool,
+) -> Result<Vec<PaletteResult>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
     // Unified search across docs, entities, and attachments.
     let hits = client
-        .search_unified(&query, 15)
+        .search_unified_ex(&query, 15, show_retracted)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -80,6 +83,7 @@ pub fn CommandPalette() -> Element {
     let mut query = use_signal(String::new);
     let mut results = use_signal(Vec::<PaletteResult>::new);
     let mut searching = use_signal(|| false);
+    let show_retracted = use_context::<crate::ui::topbar::ShowRetractedSignal>();
     let _navigator = use_navigator();
 
     // Keyboard shortcut: Cmd/Ctrl + K.
@@ -131,9 +135,10 @@ pub fn CommandPalette() -> Element {
             results.set(Vec::new());
             return;
         }
+        let sr = *show_retracted.read();
         searching.set(true);
         spawn(async move {
-            if let Ok(r) = palette_search(q).await {
+            if let Ok(r) = palette_search(q, sr).await {
                 results.set(r);
             }
             searching.set(false);
@@ -152,6 +157,7 @@ pub fn CommandPalette() -> Element {
             return;
         }
 
+        let sr = *show_retracted.read();
         spawn(async move {
             // Wait 500ms, then check if this is still the latest keystroke.
             #[cfg(target_arch = "wasm32")]
@@ -167,7 +173,7 @@ pub fn CommandPalette() -> Element {
                 return; // a newer keystroke superseded us
             }
             searching.set(true);
-            if let Ok(r) = palette_search(q).await {
+            if let Ok(r) = palette_search(q, sr).await {
                 results.set(r);
             }
             searching.set(false);
