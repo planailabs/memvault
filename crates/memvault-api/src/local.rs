@@ -312,6 +312,11 @@ pub struct LocalClient {
     /// here so it lives as long as the client.
     keystore_watch: std::sync::OnceLock<memvault_keystore::WatchHandle>,
     start_time: std::time::Instant,
+    /// Set when the Tantivy index has uncommitted writes. Writes set it instead
+    /// of committing per-op; the next index read flushes one commit (batches
+    /// write bursts, esp. bulk creates). The blockstore is authoritative, so a
+    /// crash with uncommitted index writes is recoverable via `repair-index`.
+    index_dirty: std::sync::atomic::AtomicBool,
 }
 
 impl LocalClient {
@@ -417,6 +422,7 @@ impl LocalClient {
             keystore,
             keystore_watch: std::sync::OnceLock::new(),
             start_time: std::time::Instant::now(),
+            index_dirty: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Auto-bind any unbound buckets to the cluster (handles the case where
@@ -2640,6 +2646,31 @@ impl LocalClient {
         &self.index
     }
 
+    /// Record that the index has an uncommitted write (a write deferred its
+    /// commit). The next index read flushes it.
+    fn mark_index_dirty(&self) {
+        self.index_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Commit any pending index write. Called before every index read so
+    /// read-your-writes holds while write bursts (esp. bulk creates) batch
+    /// into a single commit.
+    pub(crate) async fn flush_index(&self) {
+        if self
+            .index_dirty
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let mut idx = self.index.write().await;
+            if let Err(e) = idx.commit() {
+                tracing::warn!("tantivy flush commit failed: {e}");
+                // Retry on a later read.
+                self.index_dirty
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+
     // ── Scoped indexes (scoped-indexes Phases 3/4) ─────────────────
     //
     // Listings/search are computed from the live TextIndex (the source of
@@ -2656,6 +2687,7 @@ impl LocalClient {
         node_id: &str,
         scope: &memvault_core::QueryScope,
     ) -> Result<bool> {
+        self.flush_index().await;
         // Retraction.
         let retracted = { self.index.read().await.is_retracted(node_id) };
         if !scope.retraction.admits(retracted) {
@@ -2799,6 +2831,7 @@ impl LocalClient {
         scope: &memvault_core::QueryScope,
         limit: usize,
     ) -> Result<Vec<crate::types::NodeSummary>> {
+        self.flush_index().await;
         let view_tags = match &scope.view {
             Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
             None => None,
@@ -2849,6 +2882,7 @@ impl LocalClient {
         query: &str,
         limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        self.flush_index().await;
         let view_tags = match &scope.view {
             Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
             None => None,
@@ -2957,6 +2991,7 @@ impl LocalClient {
         if self.store.scope_is_registered(&vbsid).unwrap_or(false) {
             return Ok(());
         }
+        self.flush_index().await;
         let (members, retracted_set): (Vec<String>, std::collections::HashSet<String>) = {
             let idx = self.index.read().await;
             let all = idx
@@ -3000,7 +3035,9 @@ impl LocalClient {
     }
 
     /// As [`sync_node_scopes`] but with a precomputed view list (avoids a
-    /// `list_views` scan per node during bulk rebuilds).
+    /// `list_views` scan per node during bulk rebuilds). Reads the node's
+    /// current tags/retracted from the index, so the caller must have flushed
+    /// any pending index write first.
     pub(crate) async fn sync_node_scopes_with(
         &self,
         node_id: &str,
@@ -3016,6 +3053,33 @@ impl LocalClient {
         if !exists {
             return;
         }
+        self.update_view_partitions(node_id, &tags, retracted, views);
+    }
+
+    /// Member-set maintenance for a freshly-created node using explicit state
+    /// (tags from the write, retracted=false) — does NOT read the Tantivy
+    /// index, so the write's commit can stay deferred (enables batching on the
+    /// bulk-create hot path). The node's bucket is resolved from the
+    /// blockstore (already written), not the index.
+    pub(crate) async fn sync_node_created(&self, node_id: &str, tags: &[(String, String)]) {
+        let views = self.list_views().await.unwrap_or_default();
+        let views: Vec<(Vec<u8>, Vec<(String, String)>)> = views
+            .into_iter()
+            .map(|v| (hex::decode(&v.cid).unwrap_or_default(), v.tags))
+            .collect();
+        self.update_view_partitions(node_id, tags, false, &views);
+    }
+
+    /// Update every registered view×bucket partition's membership for a node,
+    /// given its tags + retracted state. The node's bucket is inferred from the
+    /// blockstore (no index read).
+    fn update_view_partitions(
+        &self,
+        node_id: &str,
+        tags: &[(String, String)],
+        retracted: bool,
+        views: &[(Vec<u8>, Vec<(String, String)>)],
+    ) {
         let bucket: Option<[u8; 32]> = self
             .inferred_bucket_for_node_id(node_id)
             .and_then(|b| b.try_into().ok());
@@ -3878,11 +3942,10 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 memvault_core::wall_ns(),
             );
-            idx.commit()
-                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
+        self.mark_index_dirty();
         let doc_node_id = format!("doc:{}", hex::encode(doc.id.0));
-        self.sync_node_scopes(&doc_node_id).await;
+        self.sync_node_created(&doc_node_id, &tags).await;
 
         self.event_bus.publish(MemvaultEvent::DocCreated {
             doc_id: doc.id.clone(),
@@ -4123,11 +4186,10 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 meta.wall_ns,
             );
-            idx.commit()
-                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
+        self.mark_index_dirty();
         let file_node_id = format!("file:{}", hex::encode(&manifest_cid_bytes));
-        self.sync_node_scopes(&file_node_id).await;
+        self.sync_node_created(&file_node_id, &tags).await;
 
         self.event_bus.publish(MemvaultEvent::FileAttached {
             doc_id: DocId([0; 32]), // No doc association in new system
@@ -4279,11 +4341,10 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 memvault_core::wall_ns(),
             );
-            idx.commit()
-                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
+        self.mark_index_dirty();
         let entity_node_id = format!("entity:{}", hex::encode(entity_id.0));
-        self.sync_node_scopes(&entity_node_id).await;
+        self.sync_node_created(&entity_node_id, &tags).await;
 
         self.event_bus.publish(MemvaultEvent::EntityCreated {
             entity_id: entity_id.clone(),
@@ -4513,6 +4574,7 @@ impl MemvaultClient for LocalClient {
         limit: usize,
         include_retracted: bool,
     ) -> Result<Vec<SearchHit>> {
+        self.flush_index().await;
         let idx = self.index.read().await;
         let mode = RetractionMode::from_include_flag(include_retracted);
         let hits: Vec<SearchHit> = idx
@@ -4570,6 +4632,7 @@ impl MemvaultClient for LocalClient {
         limit: usize,
         include_retracted: bool,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        self.flush_index().await;
         let idx = self.index.read().await;
         let mode = RetractionMode::from_include_flag(include_retracted);
         let hits = idx.search_unified_mode(query, mode, limit * 2);
@@ -4607,6 +4670,7 @@ impl MemvaultClient for LocalClient {
             .get_view(view_name)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("view '{view_name}' not found")))?;
+        self.flush_index().await;
         let idx = self.index.read().await;
         let mode = RetractionMode::from_include_flag(include_retracted);
         Ok(idx.members_of_view_mode(&view.tags, mode))
@@ -4635,6 +4699,7 @@ impl MemvaultClient for LocalClient {
         } else {
             None
         };
+        self.flush_index().await;
         let idx = self.index.read().await;
         let mode = RetractionMode::from_include_flag(include_retracted);
         let all: Vec<(String, String, String, Vec<(String, String)>)> = idx
@@ -4713,6 +4778,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
+        self.flush_index().await;
         let idx = self.index.read().await;
         Ok(idx.resolve_label_mode(node_id, RetractionMode::ActiveOnly))
     }
@@ -4751,12 +4817,16 @@ impl MemvaultClient for LocalClient {
 
         // Flag retracted in the in-memory index (entry retained so it stays
         // visible to admins/auditors under IncludeRetracted/RetractedOnly).
+        // Flush any deferred create first: retract() finds + rewrites the doc
+        // via the committed searcher, so the target must be committed.
+        self.flush_index().await;
         {
             let mut idx = self.index.write().await;
             let _ = idx.retract(node_id);
-            idx.commit()
-                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
+        self.mark_index_dirty();
+        // Flush again so sync_node_scopes sees the retraction.
+        self.flush_index().await;
         self.sync_node_scopes(node_id).await;
 
         Ok(())
@@ -4813,12 +4883,15 @@ impl MemvaultClient for LocalClient {
 
     async fn add_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()> {
         self.store_tag_update(node_id, &tags, &[])?;
+        // Flush deferred creates: apply_tag_update rewrites the doc via the
+        // committed searcher, so the target must be committed first.
+        self.flush_index().await;
         {
             let mut idx = self.index.write().await;
             let _ = idx.apply_tag_update(node_id, &tags, &[]);
-            idx.commit()
-                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
+        self.mark_index_dirty();
+        self.flush_index().await;
         self.sync_node_scopes(node_id).await;
         tracing::debug!(node_id, tag_count = tags.len(), "tags added");
         Ok(())
@@ -4826,12 +4899,13 @@ impl MemvaultClient for LocalClient {
 
     async fn remove_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()> {
         self.store_tag_update(node_id, &[], &tags)?;
+        self.flush_index().await;
         {
             let mut idx = self.index.write().await;
             let _ = idx.apply_tag_update(node_id, &[], &tags);
-            idx.commit()
-                .map_err(|e| ApiError::Other(format!("tantivy commit: {e}")))?;
         }
+        self.mark_index_dirty();
+        self.flush_index().await;
         self.sync_node_scopes(node_id).await;
         tracing::debug!(node_id, tag_count = tags.len(), "tags removed");
         Ok(())
