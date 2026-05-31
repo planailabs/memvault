@@ -4079,8 +4079,13 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 memvault_core::wall_ns(),
             );
+            // Commit immediately so the write is durable and searchable —
+            // store-based navigation never flushes the index, so a deferred
+            // commit would be lost on restart and the rebuild would skip it.
+            if let Err(e) = idx.commit() {
+                tracing::warn!("tantivy commit after index write failed: {e}");
+            }
         }
-        self.mark_index_dirty();
         let doc_node_id = format!("doc:{}", hex::encode(doc.id.0));
         self.sync_node_created(&doc_node_id, &tags).await;
 
@@ -4323,8 +4328,10 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 meta.wall_ns,
             );
+            if let Err(e) = idx.commit() {
+                tracing::warn!("tantivy commit after index write failed: {e}");
+            }
         }
-        self.mark_index_dirty();
         let file_node_id = format!("file:{}", hex::encode(&manifest_cid_bytes));
         self.sync_node_created(&file_node_id, &tags).await;
 
@@ -4478,8 +4485,13 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 memvault_core::wall_ns(),
             );
+            // Commit immediately so the write is durable and searchable —
+            // store-based navigation never flushes the index, so a deferred
+            // commit would be lost on restart and the rebuild would skip it.
+            if let Err(e) = idx.commit() {
+                tracing::warn!("tantivy commit after index write failed: {e}");
+            }
         }
-        self.mark_index_dirty();
         let entity_node_id = format!("entity:{}", hex::encode(entity_id.0));
         self.sync_node_created(&entity_node_id, &tags).await;
 

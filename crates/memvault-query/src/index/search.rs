@@ -56,7 +56,11 @@ struct IndexedEntry {
 /// indexes every doc/entity/file (best-effort bucket) so the full corpus is
 /// searchable; `Accessible` scope no longer drops on bucket inference. v7
 /// could still leave the index empty when docs weren't in BY_BUCKET.
-pub const INDEX_FORMAT_VERSION: u32 = 8;
+///
+/// v9: live writes commit immediately instead of deferring (deferred index
+/// writes were lost on restart since store-based navigation never flushed the
+/// index). Bump wipes the stale index so the current corpus is re-indexed.
+pub const INDEX_FORMAT_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize)]
 struct IndexSnapshot {
