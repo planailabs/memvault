@@ -178,6 +178,20 @@ pkgs.testers.nixosTest {
         node_b.log(node_b.succeed("tail -200 /tmp/daemon.log"))
         node_b.log("--- node_b last export log ---")
         node_b.log(node_b.succeed("cat /tmp/export.log || true"))
+        node_b.log("--- node_b grants on writer's bucket (via reader's JWT) ---")
+        rc, out = node_b.execute(
+            "memctl --url http://localhost:8401 "
+            "--identity-dir /var/lib/memvault/agents/reader "
+            f"grant list {writer_bucket} 2>&1"
+        )
+        node_b.log(f"(rc={rc})\n{out}")
+        node_b.log("--- node_a grants on writer's bucket (via writer's JWT) ---")
+        rc, out = node_a.execute(
+            "memctl --url http://localhost:8401 "
+            "--identity-dir /var/lib/memvault/agents/writer "
+            f"grant list {writer_bucket} 2>&1"
+        )
+        node_a.log(f"(rc={rc})\n{out}")
         raise Exception(
             "node_b's reader agent never observed the doc within 180s"
         )
