@@ -183,5 +183,11 @@
             tar czf $out/memctl.tar.gz memctl
           '';
         };
+
+        checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # Multi-node cluster sync — two NixOS VMs form one cluster and
+          # verify a document put on node_a syncs to node_b.
+          sync = pkgs.callPackage ./tests/sync.nix { };
+        };
       });
 }
