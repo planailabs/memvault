@@ -92,7 +92,7 @@
           pkgs.libiconv
         ];
 
-        inherit (pkgs) memctl dioxus-cli-patched;
+        inherit (pkgs) memctl memvault-mcp dioxus-cli-patched;
 
         # Standalone unpacked MacOSX SDK so cargo-zigbuild can satisfy
         # `-framework CoreFoundation` etc when cross-compiling Apple targets
@@ -139,6 +139,7 @@
         packages = {
           default = memctl;
           memctl = memctl;
+          memvault-mcp = memvault-mcp;
           dioxus-cli-patched = dioxus-cli-patched;
           macosx-sdk = macosx-sdk;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {

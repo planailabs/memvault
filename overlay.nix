@@ -24,4 +24,8 @@ in
     inherit gitSha dioxus-cli-patched;
     slim = true;
   };
+
+  # MCP server: standalone Rust binary that fronts a memvault cluster
+  # over the Model Context Protocol (stdio).
+  memvault-mcp = prev.callPackage ./nix/memvault-mcp.nix { };
 }
