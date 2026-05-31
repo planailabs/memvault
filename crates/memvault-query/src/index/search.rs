@@ -60,7 +60,13 @@ struct IndexedEntry {
 /// v9: live writes commit immediately instead of deferring (deferred index
 /// writes were lost on restart since store-based navigation never flushed the
 /// index). Bump wipes the stale index so the current corpus is re-indexed.
-pub const INDEX_FORMAT_VERSION: u32 = 9;
+///
+/// v10: blocks arriving via RBSR sync (`reindex_block`) or external seeding are
+/// now bridged into the full-text index via the store index notifier +
+/// `flush_index` reindex queue — previously they only updated redb's secondary
+/// indexes, so synced/seeded docs were invisible to search and the scoped table
+/// view. Bump wipes indexes left empty/partial by that gap so they repopulate.
+pub const INDEX_FORMAT_VERSION: u32 = 10;
 
 #[derive(Serialize, Deserialize)]
 struct IndexSnapshot {

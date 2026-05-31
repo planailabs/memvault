@@ -1703,3 +1703,59 @@ async fn scoped_search_finds_bucketed_doc() {
         "doc must be searchable when scoped to its bucket"
     );
 }
+
+/// A block that arrives via RBSR sync (or external seeding) — i.e. through
+/// `reindex_block`, not an inline-indexing `put_doc` — must still become
+/// searchable. The store's index notifier queues it; the next search flushes
+/// the queue and indexes it. Regression: synced docs used to land in redb
+/// (counts/graph updated) but never reached the Tantivy index, so search and
+/// the scoped table view stayed empty.
+#[tokio::test]
+async fn synced_block_becomes_searchable() {
+    let (_dir_a, client_a) = make_client();
+    let (_dir_b, client_b) = make_client();
+
+    // Node B bridges synced/seeded blocks into its full-text index.
+    client_b.install_sigchain_notifier();
+
+    // Create a doc on A (inline-indexed there only).
+    let doc_id = DocId::random();
+    let mut fm = BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("Synced Note"));
+    let doc = Document::new(
+        doc_id.clone(),
+        "quantum entanglement teleportation".to_string(),
+        fm,
+    );
+    let cid = client_a
+        .put_doc(
+            doc,
+            vec![("ns".into(), "test".into())],
+            Visibility::Internal,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // B hasn't seen it yet.
+    assert!(
+        client_b.search("quantum", 10).await.unwrap().is_empty(),
+        "node B should not find the doc before sync"
+    );
+
+    // Simulate RBSR sync: copy the raw block, then reindex (fires the notifier).
+    let block = client_a.store().get_block(&cid).unwrap().unwrap();
+    client_b.store().put_block(&cid, &block).unwrap();
+    assert!(
+        client_b.store().reindex_block(&cid, &block).unwrap(),
+        "reindex_block should recognize the envelope"
+    );
+
+    // The next search flushes the reindex queue → the synced doc is found.
+    let hits = client_b.search("quantum", 10).await.unwrap();
+    assert!(
+        !hits.is_empty(),
+        "synced doc must be searchable on node B after reindex_block"
+    );
+    assert_eq!(hits[0].doc_id, doc_id, "search must return the synced doc");
+}

@@ -71,6 +71,87 @@ enum ExtractionResult {
     Unsupported,
 }
 
+/// A reconstructed node ready to be written into the Tantivy index. Produced by
+/// `LocalClient::prepare_reindex` (no index lock held) and applied by
+/// `flush_index` under the index write lock, so reconstruction and indexing
+/// don't contend for the same lock.
+enum PreparedIndex {
+    Doc {
+        id: DocId,
+        body: String,
+        title: Option<String>,
+        tags: Vec<(String, String)>,
+        bucket_hex: Option<String>,
+    },
+    Entity {
+        id: EntityId,
+        kind: String,
+        props: std::collections::BTreeMap<String, serde_json::Value>,
+        tags: Vec<(String, String)>,
+        bucket_hex: Option<String>,
+    },
+    Attachment {
+        manifest_cid: Vec<u8>,
+        filename: Option<String>,
+        mime: String,
+        text: Option<String>,
+        tags: Vec<(String, String)>,
+        bucket_hex: Option<String>,
+    },
+}
+
+impl PreparedIndex {
+    /// Write this node into the index. `index_*` replace by node id, so
+    /// re-applying an already-indexed node is idempotent.
+    fn apply(self, idx: &mut TantivyIndex) {
+        match self {
+            PreparedIndex::Doc {
+                id,
+                body,
+                title,
+                tags,
+                bucket_hex,
+            } => {
+                let _ = idx.index_doc(
+                    &id,
+                    &body,
+                    title.as_deref(),
+                    &tags,
+                    bucket_hex.as_deref(),
+                    0,
+                );
+            }
+            PreparedIndex::Entity {
+                id,
+                kind,
+                props,
+                tags,
+                bucket_hex,
+            } => {
+                let _ = idx.index_entity(&id, &kind, &props, &tags, bucket_hex.as_deref(), 0);
+            }
+            PreparedIndex::Attachment {
+                manifest_cid,
+                filename,
+                mime,
+                text,
+                tags,
+                bucket_hex,
+            } => {
+                let _ = idx.index_attachment(
+                    &manifest_cid,
+                    filename.as_deref(),
+                    &mime,
+                    text.as_deref(),
+                    &tags,
+                    bucket_hex.as_deref(),
+                    0,
+                );
+            }
+        }
+    }
+}
+
 /// Describes the entity an extraction request is about — either an attachment
 /// (immutable manifest) or a document (mutable head snapshot). Both flow
 /// through the same extractor registry; only the annotation target differs.
@@ -316,7 +397,19 @@ pub struct LocalClient {
     /// of committing per-op; the next index read flushes one commit (batches
     /// write bursts, esp. bulk creates). The blockstore is authoritative, so a
     /// crash with uncommitted index writes is recoverable via `repair-index`.
-    index_dirty: std::sync::atomic::AtomicBool,
+    /// `Arc` so the store's index notifier (a `'static` closure owned by the
+    /// store) can flag a flush when a synced/seeded block needs indexing.
+    index_dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// node_ids (`doc:<hex>` / `entity:<hex>` / `file:<hex>`) whose backing
+    /// blocks entered the store via a path that does **not** index inline —
+    /// RBSR sync (`reindex_block`) and external seeding both go through
+    /// `insert_envelope`/`reindex_block`, which only maintain redb's secondary
+    /// indexes, not the Tantivy full-text index. The store's index notifier
+    /// (installed by `install_sigchain_notifier`) records them here; the next
+    /// `flush_index` reconstructs and indexes them, keeping the search index
+    /// consistent with the authoritative blockstore. `Arc` so the notifier
+    /// closure can hold it.
+    reindex_pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl LocalClient {
@@ -422,7 +515,8 @@ impl LocalClient {
             keystore,
             keystore_watch: std::sync::OnceLock::new(),
             start_time: std::time::Instant::now(),
-            index_dirty: std::sync::atomic::AtomicBool::new(false),
+            index_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reindex_pending: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
 
         // Auto-bind any unbound buckets to the cluster (handles the case where
@@ -1250,6 +1344,8 @@ impl LocalClient {
     /// Call this once at daemon startup, before sync begins.
     pub fn install_sigchain_notifier(&self) {
         let bus = Arc::clone(&self.event_bus);
+        let pending = Arc::clone(&self.reindex_pending);
+        let dirty = Arc::clone(&self.index_dirty);
         self.store
             .set_index_notifier(std::sync::Arc::new(move |scope, label, cid| {
                 if scope == "sigchain" {
@@ -1257,6 +1353,28 @@ impl LocalClient {
                         label: label.to_string(),
                         cid: cid.to_vec(),
                     });
+                }
+                // Bridge blocks that enter the store without inline full-text
+                // indexing — RBSR sync (`reindex_block`) and external seeding —
+                // into the Tantivy index. The notifier fires once per tag; map
+                // the node-kind tag to a node_id and queue it for the next
+                // `flush_index` (which reconstructs from the blockstore and
+                // indexes). Without this, synced docs/entities/files land in
+                // redb (so counts and the graph update) but never become
+                // searchable or appear in the scoped table view.
+                let node_id = match scope {
+                    "doc" => Some(format!("doc:{label}")),
+                    "entity" => Some(format!("entity:{label}")),
+                    // Attachments carry the `_manifest` reverse tag whose label
+                    // is the hex manifest CID — the file node's surrogate id.
+                    "_manifest" => Some(format!("file:{label}")),
+                    _ => None,
+                };
+                if let Some(node_id) = node_id {
+                    if let Ok(mut p) = pending.lock() {
+                        p.insert(node_id);
+                    }
+                    dirty.store(true, std::sync::atomic::Ordering::Release);
                 }
             }));
     }
@@ -2682,21 +2800,125 @@ impl LocalClient {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Commit any pending index write. Called before every index read so
-    /// read-your-writes holds while write bursts (esp. bulk creates) batch
-    /// into a single commit.
+    /// Commit any pending index write, and full-text index any blocks that
+    /// entered the store without inline indexing (RBSR sync / external
+    /// seeding). Called before every index read so read-your-writes holds and
+    /// synced data becomes searchable on the next query.
     pub(crate) async fn flush_index(&self) {
-        if self
+        if !self
             .index_dirty
             .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
-            let mut idx = self.index.write().await;
-            if let Err(e) = idx.commit() {
-                tracing::warn!("tantivy flush commit failed: {e}");
-                // Retry on a later read.
-                self.index_dirty
-                    .store(true, std::sync::atomic::Ordering::Release);
-            }
+            return;
+        }
+        // Drain the queue and reconstruct each node *before* taking the index
+        // write lock: reconstruction (`get_doc_sync`/`get_entity_sync`) reads
+        // the index via `try_read`, which would fail/deadlock against a held
+        // write lock.
+        let pending: Vec<String> = {
+            let mut q = self
+                .reindex_pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            q.drain().collect()
+        };
+        let prepared: Vec<PreparedIndex> = pending
+            .iter()
+            .filter_map(|node_id| self.prepare_reindex(node_id))
+            .collect();
+
+        let mut idx = self.index.write().await;
+        for p in prepared {
+            p.apply(&mut idx);
+        }
+        if let Err(e) = idx.commit() {
+            tracing::warn!("tantivy flush commit failed: {e}");
+            // Retry on a later read. The in-memory writer already holds any
+            // adds applied above; only the commit needs to land.
+            self.index_dirty
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Reconstruct a queued node from the blockstore into an applicable index
+    /// write. Returns `None` if the node is unknown or can't be rebuilt. Does
+    /// **not** touch the index write lock (uses `*_sync` getters that only
+    /// `try_read` the index), so it is safe to call before acquiring it.
+    fn prepare_reindex(&self, node_id: &str) -> Option<PreparedIndex> {
+        let decode32 = |hex_id: &str| -> Option<[u8; 32]> {
+            let bytes = hex::decode(hex_id).ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        };
+
+        if let Some(hex_id) = node_id.strip_prefix("doc:") {
+            let id = DocId(decode32(hex_id)?);
+            // include_retracted = true: the index retains retracted entries
+            // (flag-only), so a synced doc is indexed regardless of retraction.
+            let doc = self.get_doc_sync(&id, true).ok().flatten()?;
+            let title = doc
+                .frontmatter
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let tags = self.extract_creation_tags("doc", hex_id);
+            let bucket_hex = self.inferred_doc_bucket(&id).map(hex::encode);
+            Some(PreparedIndex::Doc {
+                id,
+                body: doc.body,
+                title,
+                tags,
+                bucket_hex,
+            })
+        } else if let Some(hex_id) = node_id.strip_prefix("entity:") {
+            let id = EntityId(decode32(hex_id)?);
+            let entity = self.get_entity_sync(&id, true).ok().flatten()?;
+            let tags = self.extract_creation_tags("entity", hex_id);
+            let bucket_hex = self.inferred_entity_bucket(&id).map(hex::encode);
+            Some(PreparedIndex::Entity {
+                id,
+                kind: entity.kind,
+                props: entity.props,
+                tags,
+                bucket_hex,
+            })
+        } else if let Some(hex_id) = node_id.strip_prefix("file:") {
+            // The file node's surrogate id is the hex manifest CID. Recover the
+            // attachment envelope via the `_manifest` reverse tag.
+            let manifest_cid = hex::decode(hex_id).ok()?;
+            let env_cids = self
+                .store
+                .query_by_tag("_manifest", hex_id, 0, usize::MAX)
+                .ok()?;
+            let (filename, mime, tags, bucket_hex) = env_cids.iter().rev().find_map(|cid| {
+                let data = self.store.get_block(cid).ok()??;
+                let view = memvault_store::EnvelopeView::parse(&data)?;
+                if view.str_field("kind") != Some("attachment") {
+                    return None;
+                }
+                let filename = view.str_field("filename").map(|s| s.to_string());
+                let mime = view
+                    .str_field("mime_type")
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let tags: Vec<(String, String)> = view.get_as("tags").unwrap_or_default();
+                let bucket_hex = view.get_as::<Vec<u8>>("bucket_id").map(hex::encode);
+                Some((filename, mime, tags, bucket_hex))
+            })?;
+            // Cached extraction only (no re-extraction on the read path).
+            let text = self.load_cached_extraction(&manifest_cid).and_then(|r| match r {
+                ExtractionResult::Ok { text, .. } => Some(text),
+                _ => None,
+            });
+            Some(PreparedIndex::Attachment {
+                manifest_cid,
+                filename,
+                mime,
+                text,
+                tags,
+                bucket_hex,
+            })
+        } else {
+            None
         }
     }
 
