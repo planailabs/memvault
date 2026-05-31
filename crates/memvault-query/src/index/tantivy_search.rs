@@ -67,7 +67,10 @@ pub struct TantivyHit {
     pub node_type: String,
     pub label: String,
     pub score: f32,
+    /// Body prefix (first ~200 chars) — a cheap fallback display.
     pub snippet: String,
+    /// Full indexed body text, for match-centered snippet/context generation.
+    pub body: String,
 }
 
 impl TantivyIndex {
@@ -407,11 +410,8 @@ impl TantivyIndex {
                 let node_id = self.get_text_field(&retrieved, self.f_node_id);
                 let node_type = self.get_text_field(&retrieved, self.f_node_type);
                 let label = self.get_text_field(&retrieved, self.f_label);
-                let snippet: String = self
-                    .get_text_field(&retrieved, self.f_body)
-                    .chars()
-                    .take(200)
-                    .collect();
+                let body = self.get_text_field(&retrieved, self.f_body);
+                let snippet: String = body.chars().take(200).collect();
 
                 hits.push(TantivyHit {
                     cid,
@@ -420,6 +420,7 @@ impl TantivyIndex {
                     label,
                     score,
                     snippet,
+                    body,
                 });
             }
         }
@@ -703,14 +704,27 @@ impl TantivyIndex {
                 Vec::new()
             }
         };
+        // Build match-centered snippets + context excerpts from the full body
+        // (like the pre-Tantivy TextIndex did), instead of a flat body prefix.
+        let query_lower = query.to_lowercase();
+        let terms: Vec<&str> = query_lower.split_whitespace().collect();
         hits.into_iter()
-            .map(|h| crate::index::search::UnifiedHit {
-                node_id: h.node_id,
-                node_type: h.node_type,
-                label: h.label,
-                score: h.score,
-                snippet: h.snippet,
-                match_contexts: Vec::new(),
+            .map(|h| {
+                let snippet = if h.body.is_empty() {
+                    h.snippet
+                } else {
+                    crate::index::search::extract_snippet(&h.body, &terms)
+                };
+                let match_contexts =
+                    crate::index::search::extract_match_contexts(&h.body, &terms, 3);
+                crate::index::search::UnifiedHit {
+                    node_id: h.node_id,
+                    node_type: h.node_type,
+                    label: h.label,
+                    score: h.score,
+                    snippet,
+                    match_contexts,
+                }
             })
             .collect()
     }
@@ -1098,5 +1112,38 @@ mod tests {
         assert!(types.contains(&"doc"));
         assert!(types.contains(&"entity"));
         assert!(types.contains(&"file"));
+    }
+
+    #[test]
+    fn test_unified_mode_returns_match_centered_snippets() {
+        let (_dir, mut idx) = make_index();
+        // Long body with the query term buried well past the old 200-char
+        // prefix cutoff, so a flat prefix snippet would miss it.
+        let prefix = "lorem ipsum dolor sit amet ".repeat(20);
+        let body = format!("{prefix} the quantum entanglement breakthrough changed everything");
+        idx.add_document("c1", "doc:1", &body, "Physics Notes", &[], None, 100)
+            .unwrap();
+        idx.commit().unwrap();
+
+        let hits = idx.search_unified_mode("quantum", RetractionMode::ActiveOnly, 10);
+        assert_eq!(hits.len(), 1);
+        let h = &hits[0];
+        // Snippet is centered on the match, not the body prefix.
+        assert!(
+            h.snippet.to_lowercase().contains("quantum"),
+            "snippet should contain the matched term, got: {:?}",
+            h.snippet
+        );
+        // Context excerpts are populated (regression: used to be empty).
+        assert!(
+            !h.match_contexts.is_empty(),
+            "match_contexts should be non-empty"
+        );
+        assert!(
+            h.match_contexts
+                .iter()
+                .any(|c| c.to_lowercase().contains("quantum")),
+            "a context excerpt should contain the matched term"
+        );
     }
 }

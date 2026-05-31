@@ -643,7 +643,7 @@ impl Default for TextIndex {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-fn extract_match_contexts(body: &str, terms: &[&str], max: usize) -> Vec<String> {
+pub(crate) fn extract_match_contexts(body: &str, terms: &[&str], max: usize) -> Vec<String> {
     let body_lower = body.to_lowercase();
     let mut positions: Vec<usize> = Vec::new();
     for term in terms {
@@ -678,7 +678,7 @@ fn extract_match_contexts(body: &str, terms: &[&str], max: usize) -> Vec<String>
     contexts
 }
 
-fn extract_snippet(body: &str, terms: &[&str]) -> String {
+pub(crate) fn extract_snippet(body: &str, terms: &[&str]) -> String {
     let body_lower = body.to_lowercase();
     let mut earliest_pos = body.len();
     for term in terms {
