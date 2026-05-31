@@ -59,6 +59,22 @@ fn split_tag(t: &str) -> Option<(String, String)> {
     t.split_once(':').map(|(s, l)| (s.to_string(), l.to_string()))
 }
 
+/// Backslash-escape regex metacharacters so a raw query term can be embedded
+/// in a `.*<term>.*` substring pattern for `RegexQuery` (tantivy-fst syntax).
+fn regex_escape(s: &str) -> String {
+    const SPECIAL: &[char] = &[
+        '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\',
+    ];
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if SPECIAL.contains(&c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Unified search hit across all node types.
 #[derive(Debug, Clone)]
 pub struct TantivyHit {
@@ -362,42 +378,96 @@ impl TantivyIndex {
         retraction: RetractionMode,
         limit: usize,
     ) -> Result<Vec<TantivyHit>, QueryError> {
+        use tantivy::Term;
+        use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+
         let searcher = self.reader.searcher();
 
-        let mut clauses: Vec<String> = Vec::new();
+        // ── Filter clauses (all MUST): bucket set, view tags, retraction ──
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
         if !bucket_ids.is_empty() {
-            let ors = bucket_ids
+            let subs: Vec<(Occur, Box<dyn Query>)> = bucket_ids
                 .iter()
-                .map(|b| format!("bucket_id:\"{b}\""))
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            clauses.push(format!("({ors})"));
+                .map(|b| {
+                    let t = Term::from_field_text(self.f_bucket_id, b);
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>,
+                    )
+                })
+                .collect();
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(subs))));
         }
         for (scope, label) in view_tags {
-            clauses.push(format!("tags:\"{scope}:{label}\""));
+            let t = Term::from_field_text(self.f_tags, &format!("{scope}:{label}"));
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(t, IndexRecordOption::Basic)),
+            ));
         }
         match retraction {
-            RetractionMode::ActiveOnly => clauses.push("retracted:0".to_string()),
-            RetractionMode::RetractedOnly => clauses.push("retracted:1".to_string()),
+            RetractionMode::ActiveOnly => clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.f_retracted, 0),
+                    IndexRecordOption::Basic,
+                )),
+            )),
+            RetractionMode::RetractedOnly => clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.f_retracted, 1),
+                    IndexRecordOption::Basic,
+                )),
+            )),
             RetractionMode::IncludeRetracted => {}
         }
 
+        // ── Match clause: whole-word (BM25, title-boosted) OR substring ──
+        // The whole-word parsed query scores via BM25 and boosts the label
+        // (title / entity name / filename) 3× so title hits rank first — like
+        // the pre-Tantivy TextIndex. Per-term `RegexQuery` over the body/label
+        // term dictionaries restores substring matching ("messag" → "messaging",
+        // which also covers as-you-type prefixes); whole-token Tantivy queries
+        // drop those. Both run over the existing index — no reindex needed.
         let query_text = query_text.trim();
-        let effective_query = if clauses.is_empty() {
-            query_text.to_string()
-        } else if query_text.is_empty() {
-            clauses.join(" AND ")
-        } else {
-            format!("{} AND ({})", clauses.join(" AND "), query_text)
-        };
-        if effective_query.is_empty() {
+        if !query_text.is_empty() {
+            let mut match_subs: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+            let mut parser =
+                QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
+            parser.set_field_boost(self.f_label, 3.0);
+            if let Ok(q) = parser.parse_query(query_text) {
+                match_subs.push((Occur::Should, q));
+            }
+
+            // Substring recall via regex over the term dictionaries. Skip
+            // 1-char terms (`.*a.*` matches almost everything and is costly);
+            // whole-word handles those.
+            for term in query_text.to_lowercase().split_whitespace() {
+                if term.chars().count() < 2 {
+                    continue;
+                }
+                let pattern = format!(".*{}.*", regex_escape(term));
+                for field in [self.f_body, self.f_label] {
+                    if let Ok(rq) = RegexQuery::from_pattern(&pattern, field) {
+                        match_subs.push((Occur::Should, Box::new(rq)));
+                    }
+                }
+            }
+
+            if match_subs.is_empty() {
+                return Ok(Vec::new());
+            }
+            clauses.push((Occur::Must, Box::new(BooleanQuery::new(match_subs))));
+        } else if clauses.is_empty() {
+            // No filters and no query — nothing to search.
             return Ok(Vec::new());
         }
 
-        let query_parser = QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
-        let query = query_parser
-            .parse_query(&effective_query)
-            .map_err(|e| QueryError::Other(format!("query parse: {e}")))?;
+        let query = BooleanQuery::new(clauses);
 
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(limit))
@@ -1040,11 +1110,13 @@ mod tests {
     #[test]
     fn test_score_ordering() {
         let (_dir, mut idx) = make_index();
+        // Titles deliberately omit "rust" so this isolates body term-frequency
+        // ordering (the label-boost path is covered by test_label_boost).
         idx.add_document(
             "cid_a",
             "doc:a",
             "rust programming language",
-            "Rust Intro",
+            "Intro Doc",
             &[],
             None,
             100,
@@ -1054,7 +1126,7 @@ mod tests {
             "cid_b",
             "doc:b",
             "rust rust rust is amazing for rust developers",
-            "All About Rust",
+            "Guide Doc",
             &[],
             None,
             200,
@@ -1066,6 +1138,42 @@ mod tests {
         assert_eq!(hits.len(), 2);
         // Higher TF for "rust" in doc:b should score higher
         assert_eq!(hits[0].node_id, "doc:b");
+    }
+
+    #[test]
+    fn test_substring_matching() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document("c1", "doc:1", "scalable messaging pipeline", "Notes", &[], None, 1)
+            .unwrap();
+        idx.commit().unwrap();
+
+        // Whole word matches.
+        assert_eq!(idx.search_unified("messaging", None, 10).unwrap().len(), 1);
+        // Partial / prefix matches (regression: whole-token Tantivy dropped these).
+        assert_eq!(idx.search_unified("messag", None, 10).unwrap().len(), 1, "prefix");
+        assert_eq!(
+            idx.search_unified("essagin", None, 10).unwrap().len(),
+            1,
+            "mid-word substring"
+        );
+        // A non-substring still misses.
+        assert_eq!(idx.search_unified("zzqq", None, 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_label_boost() {
+        let (_dir, mut idx) = make_index();
+        // doc:title has the term only in its title; doc:body only in its body.
+        idx.add_document("c1", "doc:title", "general notes here", "kubernetes", &[], None, 1)
+            .unwrap();
+        idx.add_document("c2", "doc:body", "kubernetes orchestration details", "Notes", &[], None, 2)
+            .unwrap();
+        idx.commit().unwrap();
+
+        let hits = idx.search_unified("kubernetes", None, 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        // The title (label) match is boosted 3×, so it ranks first.
+        assert_eq!(hits[0].node_id, "doc:title");
     }
 
     #[test]
