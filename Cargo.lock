@@ -5137,6 +5137,7 @@ dependencies = [
  "memvault-swarm",
  "memvault-web",
  "rand 0.8.6",
+ "rustls",
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",

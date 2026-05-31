@@ -1100,6 +1100,13 @@ mod native {
 
     /// Run the memctl CLI with the given parsed arguments.
     pub async fn run(cli: Cli) -> Result<()> {
+        // Install the rustls ring crypto provider once for the process
+        // before any reqwest::Client is constructed. The workspace uses
+        // reqwest's `rustls-no-provider` so the picker is per-binary —
+        // without this, HTTP-mode commands (`memctl --url … import-docs`)
+        // panic on first request.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
         let client_args = cli.client;
 

@@ -48,6 +48,9 @@ futures = "0.3"
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["serde"] }
 dirs = "6"
+# The workspace's reqwest uses `rustls-no-provider` so each binary picks
+# its own crypto backend; install the ring provider at memctl startup.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 axum = { version = "0.8", optional = true }
 
 [dev-dependencies]
