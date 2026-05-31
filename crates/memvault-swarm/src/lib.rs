@@ -895,9 +895,14 @@ enum SyncSigchainVerdict {
     },
     /// Sigchain block validated successfully. Caller wraps `label`
     /// + `signer_pubkey` into the canonical `AsSigchain` meta.
+    /// `extra_tags` lets a per-type validator add lookup-side tags the
+    /// receiver needs but that aren't transmitted on the wire (e.g.
+    /// `("grant", <bucket_hex>)` so `list_bucket_grants` finds the
+    /// block after sync).
     Accept {
         label: &'static str,
         signer_pubkey: Vec<u8>,
+        extra_tags: Vec<(String, String)>,
     },
 }
 
@@ -924,6 +929,7 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
             return SyncSigchainVerdict::Accept {
                 label: "admin_admission",
                 signer_pubkey: adm.admitting_pubkey.to_vec(),
+                extra_tags: Vec::new(),
             };
         }
     }
@@ -941,6 +947,7 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
             return SyncSigchainVerdict::Accept {
                 label: "admin_retirement",
                 signer_pubkey: ret.retiring_pubkey.to_vec(),
+                extra_tags: Vec::new(),
             };
         }
     }
@@ -959,6 +966,7 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
             return SyncSigchainVerdict::Accept {
                 label: "node_att",
                 signer_pubkey: att.member.0.clone(),
+                extra_tags: Vec::new(),
             };
         }
     }
@@ -974,6 +982,7 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
         return SyncSigchainVerdict::Accept {
             label: "agent_att",
             signer_pubkey: att.node_pubkey.to_vec(),
+            extra_tags: Vec::new(),
         };
     }
 
@@ -987,6 +996,7 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
         return SyncSigchainVerdict::Accept {
             label: "agent_rev",
             signer_pubkey: rev.node_pubkey.to_vec(),
+            extra_tags: Vec::new(),
         };
     }
 
@@ -1006,6 +1016,7 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
             return SyncSigchainVerdict::Accept {
                 label: "node_rev",
                 signer_pubkey: rev.admin_pubkey.to_vec(),
+                extra_tags: Vec::new(),
             };
         }
     }
@@ -1023,6 +1034,42 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
             return SyncSigchainVerdict::Accept {
                 label: "grant_revocation",
                 signer_pubkey: rev.admin_pubkey.to_vec(),
+                extra_tags: Vec::new(),
+            };
+        }
+    }
+
+    // Grant: admin/owner-agent/node-signed. Verify the self-signature
+    // against the embedded admin_pubkey; defer the "issuer is
+    // authorised for this bucket" check to ACL evaluation
+    // (`acl::check_bucket_access` runs `grant_signature_authentic` +
+    // `grant_issuer_authorized` per-lookup against the receiver's
+    // current admin set / bucket owner). Without this, grant blocks
+    // arriving via sync fell through to `NotSigchain` and were stored
+    // without their `("grant", <bucket_hex>)` lookup tag — so
+    // `list_bucket_grants` returned empty even though the bytes were
+    // in the blockstore. Add that tag through `extra_tags` so the
+    // bucket-scoped lookup matches.
+    if let Ok(grant) = serde_ipld_dagcbor::from_slice::<memvault_auth::Grant>(bytes) {
+        if grant.admin_pubkey.iter().any(|&b| b != 0) {
+            if grant.verify_admin_signature().is_err() {
+                return SyncSigchainVerdict::Drop {
+                    reason: "grant: bad self-signature",
+                };
+            }
+            // Grants must scope exactly one bucket (enforced server-side
+            // by both the issue + submit paths).
+            let extra_tags = match grant.bucket_scopes.as_slice() {
+                [bid] => vec![
+                    ("grant".to_string(), hex::encode(bid.0)),
+                    ("kind".to_string(), "grant".to_string()),
+                ],
+                _ => Vec::new(),
+            };
+            return SyncSigchainVerdict::Accept {
+                label: "grant",
+                signer_pubkey: grant.admin_pubkey.to_vec(),
+                extra_tags,
             };
         }
     }
@@ -1044,6 +1091,7 @@ fn vet_sync_block(
         SyncSigchainVerdict::Accept {
             label,
             signer_pubkey,
+            extra_tags,
         } => {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1052,9 +1100,11 @@ fn vet_sync_block(
             let author = author_peer_pubkey
                 .map(|p| p.to_vec())
                 .unwrap_or(signer_pubkey);
+            let mut tags = vec![("sigchain".to_string(), label.to_string())];
+            tags.extend(extra_tags);
             SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
                 author,
-                tags: vec![("sigchain".to_string(), label.to_string())],
+                tags,
                 wall_ns: now_ns,
                 cluster_id: Some(join_config.cluster_id.to_vec()),
                 ..Default::default()
