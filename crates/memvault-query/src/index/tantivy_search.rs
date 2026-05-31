@@ -59,6 +59,22 @@ fn split_tag(t: &str) -> Option<(String, String)> {
     t.split_once(':').map(|(s, l)| (s.to_string(), l.to_string()))
 }
 
+/// True if the query uses Tantivy query syntax (boolean operators, phrases,
+/// field scoping, required/excluded terms, wildcards) and should be handled by
+/// the `QueryParser` alone — not augmented with substring regex, which would
+/// mangle the operators. Plain word queries return false (and get substring
+/// matching). `AND`/`OR`/`NOT` are recognized only as uppercase standalone
+/// tokens (Tantivy's grammar); lowercase `and`/`or` are ordinary words.
+fn is_advanced_query(q: &str) -> bool {
+    if q.contains([
+        '"', '(', ')', '+', '-', ':', '*', '?', '~', '^', '[', ']', '{', '}',
+    ]) {
+        return true;
+    }
+    q.split_whitespace()
+        .any(|t| matches!(t, "AND" | "OR" | "NOT"))
+}
+
 /// Backslash-escape regex metacharacters so a raw query term can be embedded
 /// in a `.*<term>.*` substring pattern for `RegexQuery` (tantivy-fst syntax).
 fn regex_escape(s: &str) -> String {
@@ -428,10 +444,17 @@ impl TantivyIndex {
         // ── Match clause: whole-word (BM25, title-boosted) OR substring ──
         // The whole-word parsed query scores via BM25 and boosts the label
         // (title / entity name / filename) 3× so title hits rank first — like
-        // the pre-Tantivy TextIndex. Per-term `RegexQuery` over the body/label
-        // term dictionaries restores substring matching ("messag" → "messaging",
-        // which also covers as-you-type prefixes); whole-token Tantivy queries
-        // drop those. Both run over the existing index — no reindex needed.
+        // the pre-Tantivy TextIndex.
+        //
+        // Query syntax: Tantivy's `QueryParser` handles the full grammar —
+        // boolean `AND`/`OR`/`NOT`, required/excluded `+`/`-`, `"phrases"`,
+        // `field:value`, and `prefix*`. For such *advanced* queries we use the
+        // parsed query ALONE: substring expansion would split operators (`OR`,
+        // `AND`) into `.*or.*`/`.*and.*` regex clauses that swamp the boolean
+        // logic. For *plain* queries (no operator syntax) we additionally add
+        // per-term `RegexQuery` over the body/label term dictionaries to restore
+        // substring matching ("messag" → "messaging", incl. as-you-type
+        // prefixes). Both run over the existing index — no reindex needed.
         let query_text = query_text.trim();
         if !query_text.is_empty() {
             let mut match_subs: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -439,21 +462,29 @@ impl TantivyIndex {
             let mut parser =
                 QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
             parser.set_field_boost(self.f_label, 3.0);
-            if let Ok(q) = parser.parse_query(query_text) {
-                match_subs.push((Occur::Should, q));
-            }
-
-            // Substring recall via regex over the term dictionaries. Skip
-            // 1-char terms (`.*a.*` matches almost everything and is costly);
-            // whole-word handles those.
-            for term in query_text.to_lowercase().split_whitespace() {
-                if term.chars().count() < 2 {
-                    continue;
+            let advanced = is_advanced_query(query_text);
+            let parsed_ok = match parser.parse_query(query_text) {
+                Ok(q) => {
+                    match_subs.push((Occur::Should, q));
+                    true
                 }
-                let pattern = format!(".*{}.*", regex_escape(term));
-                for field in [self.f_body, self.f_label] {
-                    if let Ok(rq) = RegexQuery::from_pattern(&pattern, field) {
-                        match_subs.push((Occur::Should, Box::new(rq)));
+                Err(_) => false,
+            };
+
+            // Substring recall for plain queries (and as a fallback when an
+            // advanced query fails to parse — e.g. an unbalanced quote — so a
+            // typo doesn't kill the search). Skip 1-char terms (`.*a.*` matches
+            // ~everything and is costly) and bare boolean operator words.
+            if !advanced || !parsed_ok {
+                for term in query_text.to_lowercase().split_whitespace() {
+                    if term.chars().count() < 2 || matches!(term, "and" | "or" | "not") {
+                        continue;
+                    }
+                    let pattern = format!(".*{}.*", regex_escape(term));
+                    for field in [self.f_body, self.f_label] {
+                        if let Ok(rq) = RegexQuery::from_pattern(&pattern, field) {
+                            match_subs.push((Occur::Should, Box::new(rq)));
+                        }
                     }
                 }
             }
@@ -1158,6 +1189,26 @@ mod tests {
         );
         // A non-substring still misses.
         assert_eq!(idx.search_unified("zzqq", None, 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_boolean_operators() {
+        let (_dir, mut idx) = make_index();
+        idx.add_document("c1", "doc:1", "dopamine pathways", "A", &[], None, 1)
+            .unwrap();
+        idx.add_document("c2", "doc:2", "serotonin reuptake", "B", &[], None, 2)
+            .unwrap();
+        idx.add_document("c3", "doc:3", "dopamine and serotonin balance", "C", &[], None, 3)
+            .unwrap();
+        idx.commit().unwrap();
+
+        let n = |q: &str| idx.search_unified(q, None, 10).unwrap().len();
+        // OR = union (all three), AND = intersection (only doc:3), NOT excludes.
+        assert_eq!(n("dopamine OR serotonin"), 3, "OR union");
+        assert_eq!(n("dopamine AND serotonin"), 1, "AND intersection");
+        assert_eq!(n("dopamine NOT serotonin"), 1, "NOT excludes");
+        // A plain (non-operator) query still does substring matching.
+        assert_eq!(n("dopamin"), 2, "plain substring still works");
     }
 
     #[test]
