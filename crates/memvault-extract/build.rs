@@ -41,11 +41,18 @@ fn main() {
         emit_rerun_if_changed(input);
     }
 
-    // Always use the workspace-root target dir for the guest WASM,
-    // ignoring CARGO_TARGET_DIR. The Procfile sets per-node target dirs
-    // (e.g. target/node_a, target/node_b) to avoid lock conflicts, but
-    // the guest WASM is a shared prebuilt artifact in the default target/.
-    let target_dir = workspace_root.join("target");
+    // Build the guest WASM in its OWN target directory under
+    // `<workspace>/target/extract-guest/`, NOT the workspace-root
+    // `target/`. Using the same target dir as the outer build deadlocks
+    // when this build.rs runs while that outer build is still holding
+    // its `target/` lock — the nested `cargo build` blocks on the same
+    // lock forever (observed in NixOS sandbox builds; see the sync
+    // NixOS test). A dedicated sub-target sidesteps the race.
+    //
+    // The Procfile previously sliced per-node target dirs for the same
+    // reason; this is the same fix applied to the build-script-spawned
+    // wasm compile.
+    let target_dir = workspace_root.join("target").join("extract-guest");
     let wasm_path = target_dir.join("wasm32-unknown-unknown/release/memvault_extract_guest.wasm");
 
     if should_rebuild_wasm(&wasm_path, &inputs) {
