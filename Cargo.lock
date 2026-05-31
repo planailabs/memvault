@@ -5384,6 +5384,7 @@ dependencies = [
  "rand 0.8.6",
  "reqwest 0.13.4",
  "rmcp",
+ "rustls",
  "schemars",
  "serde",
  "serde_ipld_dagcbor",

@@ -49,6 +49,13 @@ pub enum Command {
 /// Run the memvault MCP server with the given CLI arguments — or, if a
 /// subcommand was provided, dispatch to that instead.
 pub async fn run(cli: Cli) -> Result<()> {
+    // Install the rustls ring crypto provider once for the process
+    // before any reqwest::Client is constructed. The workspace pins
+    // reqwest with the `rustls-no-provider` feature so the picker is
+    // per-binary — without this, HTTPS calls (e.g. `mcp enroll
+    // --server https://…`) panic on the first request.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if let Some(command) = cli.command {
         return match command {
             Command::Enroll(args) => enroll::run(args).await,
