@@ -429,12 +429,29 @@ pub fn enroll_remote_agent(
     // Decode + verify the token.
     let token = memvault_auth::decode_token_string(token_str)
         .map_err(|e| ApiError::Other(format!("decode token: {e}")))?;
-    let admin_vk = client
-        .admin_verifying_key()
-        .ok_or_else(|| ApiError::Other("no admin pubkey on this node".into()))?;
-    token
-        .verify_signature(&admin_vk)
-        .map_err(|_| ApiError::Other("token signature does not verify".into()))?;
+    // Verify the token signature against any admin verifying key the
+    // cluster has ever known (anchor + admitted + retired). On a peer
+    // node that joined via `cluster-join`, the local keystore pins the
+    // admin pubkey but holds no admin SECRET — so the singular
+    // `admin_verifying_key()` (which returns a held signing key's
+    // pubkey) is None, while the plural `admin_verifying_keys()` returns
+    // exactly the pinned anchor we need to verify the token against.
+    let admin_keys = client.admin_verifying_keys();
+    if admin_keys.is_empty() {
+        return Err(ApiError::Other("no admin pubkey on this node".into()));
+    }
+    let mut signature_verified = false;
+    for vk in &admin_keys {
+        if token.verify_signature(vk).is_ok() {
+            signature_verified = true;
+            break;
+        }
+    }
+    if !signature_verified {
+        return Err(ApiError::Other(
+            "token signature does not verify against any known admin key".into(),
+        ));
+    }
     let now_ns = memvault_core::wall_ns();
     token
         .verify_time_bounds(now_ns)
