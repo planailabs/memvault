@@ -6,7 +6,6 @@ use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant,
 use serde::{Deserialize, Serialize};
 
 use crate::ui::components::cid_display::CidDisplay;
-use crate::ui::components::sandboxed_content::SandboxedContent;
 use crate::ui::topbar::use_topbar;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -298,35 +297,22 @@ fn FileView(data: FileData) -> Element {
                 }
             }
 
-            // Extracted text (rendered in sandboxed iframe for isolation)
+            // Extracted text is plain text (no HTML), so render it directly in
+            // a <pre>. Dioxus escapes text node children, so there's no
+            // injection risk and no need for an isolating sandbox iframe.
             if let Some(text) = &data.extracted_text {
                 Card {
                     div { class: "p-5",
                         SectionHeading { {t!("file-section-text")} }
-                        SandboxedContent {
-                            html: format!("<pre style=\"white-space:pre-wrap;word-break:break-word;margin:0;font-size:0.8125rem;color:rgba(0,0,0,0.6)\">{}</pre>", html_escape_text(text)),
-                            class: "mt-2 max-h-[400px] overflow-y-auto".to_string(),
+                        pre {
+                            class: "mt-2 max-h-[400px] overflow-y-auto whitespace-pre-wrap break-words text-[0.8125rem] text-fg-muted m-0",
+                            "{text}"
                         }
                     }
                 }
             }
         }
     }
-}
-
-fn html_escape_text(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 #[server]
