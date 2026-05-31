@@ -39,7 +39,7 @@ test:
 # Standalone memctl binaries (x86_64-linux + aarch64-darwin) as downloadable
 # CI artifacts. The multi-target dx build lives in xzar.sh.
 artifact:memctl:
-  stage: test
+  stage: deploy
   tags:
     - nix-image
   script:
