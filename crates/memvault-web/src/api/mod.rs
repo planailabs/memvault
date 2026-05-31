@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::middleware::from_fn;
 use axum::routing::{delete, get, post};
 
 use crate::AppState;
@@ -129,5 +130,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/events", get(events::events_stream))
         .route("/metrics", get(ops::metrics))
         .route("/health", get(ops::health))
+        // CSRF defence: cookie-bearing cross-origin POSTs/PUTs/DELETEs are
+        // refused. Bearer-token clients (memctl, curl scripts) keep working
+        // because they don't set Origin and don't carry a session cookie.
+        .layer(from_fn(auth::origin_guard))
         .with_state(state)
 }

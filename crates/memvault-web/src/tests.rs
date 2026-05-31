@@ -731,3 +731,126 @@ async fn test_download_attachment() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"file-content-here");
 }
+
+// ── Session cookie + CSRF guard ─────────────────────────────────────────
+//
+// Browser-style auth: the web UI hits the API with the `memvault_session`
+// cookie instead of `Authorization: Bearer …`, and state-changing requests
+// must carry a matching `Origin` header so cross-origin pages can't ride the
+// cookie. Bearer-only clients (memctl, curl) keep working because they don't
+// set Origin or the cookie.
+
+#[tokio::test]
+async fn test_session_cookie_authorizes_reads() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_session_cookie_with_matching_origin_authorizes_writes() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "via cookie", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("host", "memvault.local:8401")
+                .header("origin", "http://memvault.local:8401")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_csrf_blocks_cross_origin_cookie_write() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "csrf attempt", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("host", "memvault.local:8401")
+                .header("origin", "https://evil.example.com")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_csrf_blocks_cookie_write_without_origin() {
+    // No Origin header AND a session cookie present → CSRF-shaped; reject.
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "no-origin", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_bearer_writes_without_origin_still_pass() {
+    // memctl / curl callers: no cookie, no Origin — must keep working.
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "from cli", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}

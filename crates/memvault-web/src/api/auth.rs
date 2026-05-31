@@ -1,10 +1,15 @@
 //! Bearer JWT authentication middleware.
 //!
 //! Every request to /api/v1/* (except `/auth/session-token`, which serves the
-//! web UI) carries `Authorization: Bearer <jwt>` where `<jwt>` is an
-//! ed25519-signed token (see `memvault_auth::jwt`) issued by an agent
-//! identity. The token embeds the agent's `NodeAttestation` inline,
-//! so verification is stateless:
+//! web UI) carries an ed25519-signed agent JWT (see `memvault_auth::jwt`) on
+//! one of:
+//!
+//! - `Authorization: Bearer <jwt>` — used by `memctl --url …` and other
+//!   CLI / agent callers.
+//! - the `memvault_session` cookie — set by `GET /auth/session-token` so
+//!   the browser-hosted web UI never has to touch the JWT directly.
+//!
+//! Verification is stateless either way:
 //!
 //! 1. Verify attestation signature against the cluster admin's pubkey.
 //! 2. Verify JWT signature against the agent's pubkey from the attestation.
@@ -12,11 +17,20 @@
 //!
 //! Handlers can require a particular scope via the `RequireAuth` extractor's
 //! `claims.has_scope(...)` once the request is in scope.
+//!
+//! State-changing requests are additionally gated by [`origin_guard`], a
+//! cheap CSRF check that matches the `Origin` header's host against the
+//! request `Host` (so cookie-bearing cross-origin POSTs are rejected without
+//! affecting Bearer-token clients that don't set `Origin`).
 
 use axum::extract::FromRequestParts;
-use axum::http::StatusCode;
+use axum::http::header::HeaderMap;
 use axum::http::request::Parts;
+use axum::http::{Method, Request, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum_extra::extract::CookieJar;
+use axum_extra::extract::cookie::{Cookie, Expiration, SameSite};
 
 use std::sync::Arc;
 
@@ -24,28 +38,61 @@ use memvault_auth::jwt::AgentTokenClaims;
 
 use crate::AppState;
 
+/// Name of the HttpOnly cookie that carries the web UI's session JWT.
+/// Kept stable so reverse proxies / log scrapers can recognise it.
+pub const SESSION_COOKIE: &str = "memvault_session";
+
+/// Session TTL for browser-issued JWTs (web UI).
+const SESSION_TTL_SECS: i64 = 3600;
+
+/// Build the `memvault_session` cookie for a freshly-minted session JWT.
+/// Extracted so tests can assert the same flags the browser will see.
+fn session_cookie(token: String) -> Cookie<'static> {
+    let mut c = Cookie::build((SESSION_COOKIE, token))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .build();
+    c.set_max_age(Some(time::Duration::seconds(SESSION_TTL_SECS)));
+    // Expiration belt-and-braces for clients that mis-handle Max-Age.
+    c.set_expires(Expiration::DateTime(
+        time::OffsetDateTime::now_utc() + time::Duration::seconds(SESSION_TTL_SECS),
+    ));
+    c
+}
+
 /// Issues a fresh JWT for the daemon's built-in web-ui agent identity.
-/// Returns the token + its expiry so the WASM client can renew before it lapses.
+///
+/// Two outputs:
+/// - JSON body `{ token, ttl_secs, api_base }` for any caller that wants the
+///   bare JWT (e.g. a programmatic client that prefers `Authorization: Bearer`).
+/// - `Set-Cookie: memvault_session=…; HttpOnly; SameSite=Strict; Path=/` so
+///   the browser carries the token on every subsequent request — including
+///   server-function calls — without the WASM client ever touching it.
 ///
 /// The web UI is served by the same process as the API, so the daemon trusts
 /// the UI agent unconditionally (its identity is auto-generated at daemon
-/// start). Cross-origin / external clients should issue tokens from their own
-/// agent identities, not via this endpoint.
+/// start). [`origin_guard`] still gates this endpoint, so a cross-origin page
+/// can't silently steal a session by polling it.
 pub async fn get_session_token(
+    jar: CookieJar,
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> Result<axum::Json<serde_json::Value>, axum::http::StatusCode> {
-    let identity = crate::ui::state::ui_agent_identity()
-        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+) -> Result<(CookieJar, axum::Json<serde_json::Value>), StatusCode> {
+    let identity =
+        crate::ui::state::ui_agent_identity().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let token = identity
-        .issue_jwt("read write admin", 3600)
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .issue_jwt("read write admin", SESSION_TTL_SECS as u64)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     // Don't expose state in the response — keep it minimal.
     let _ = state.client.status().await.ok();
-    Ok(axum::Json(serde_json::json!({
+
+    let jar = jar.add(session_cookie(token.clone()));
+    let body = axum::Json(serde_json::json!({
         "token": token,
-        "ttl_secs": 3600,
+        "ttl_secs": SESSION_TTL_SECS,
         "api_base": "/api/v1",
-    })))
+    }));
+    Ok((jar, body))
 }
 
 /// Extracted auth context: the verified JWT claims.
@@ -73,18 +120,37 @@ impl IntoResponse for AuthRejection {
     }
 }
 
+/// Extract a session JWT from either `Authorization: Bearer …` or the
+/// `memvault_session` cookie, in that order. Returns `None` when neither
+/// is present.
+fn extract_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(bearer) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
+        return Some(bearer.to_string());
+    }
+    let raw = headers.get("cookie")?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some((name, value)) = pair.split_once('=') {
+            if name == SESSION_COOKIE {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 async fn verify_bearer(
     parts: &mut Parts,
     state: &Arc<AppState>,
 ) -> Result<AgentTokenClaims, AuthRejection> {
-    let header = parts
-        .headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AuthRejection("missing authorization header".into()))?;
-    let token = header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| AuthRejection("expected Bearer scheme".into()))?;
+    let token = extract_token(&parts.headers).ok_or_else(|| {
+        AuthRejection("missing Authorization header or session cookie".into())
+    })?;
+    let token = token.as_str();
     // The web auth path normally runs against the daemon's LocalClient
     // (set via `ui::state::set_client` at bootstrap), but tests/headless
     // hosts can install a per-request lookup via
@@ -420,4 +486,82 @@ where
         }
     }
     Ok(out)
+}
+
+/// Cheap, browser-side CSRF defence: on non-safe methods, require the
+/// request `Origin` (when present) to share its host:port with the
+/// request `Host` header — i.e. it came from a page served by this same
+/// daemon (or whatever reverse proxy is fronting it, since proxies
+/// forward `Host` verbatim).
+///
+/// Policy:
+/// - Safe methods (`GET`/`HEAD`/`OPTIONS`) → pass through. Idempotent
+///   reads can't be turned into a CSRF write.
+/// - `Origin` present → its authority must equal the `Host` authority.
+/// - `Origin` absent + session cookie present → reject. A real browser
+///   would have set `Origin`; absence suggests the request was crafted
+///   to dodge the check.
+/// - `Origin` absent + cookie absent → pass through. This is the
+///   `memctl --url … import-docs` / scripted-`curl` path; those callers
+///   present a Bearer token and the existing JWT verification gates them.
+///
+/// `Set-Cookie` SameSite=Strict on the session cookie is the primary
+/// protection; this guard catches the residual case where SameSite is
+/// disabled / unsupported and adds defence in depth for the reverse-proxy
+/// scenario where `Host` is the public hostname and `Origin` is whatever
+/// the browser was looking at when it made the request.
+pub async fn origin_guard(
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if matches!(
+        *req.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        return Ok(next.run(req).await);
+    }
+    let headers = req.headers();
+    let origin = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let has_session_cookie = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .map(|c| {
+            c.split(';')
+                .any(|p| p.trim().starts_with(&format!("{SESSION_COOKIE}=")))
+        })
+        .unwrap_or(false);
+
+    if let Some(origin) = origin {
+        let Some(host) = host else {
+            // Origin present but no Host — malformed; refuse.
+            return Err(StatusCode::FORBIDDEN);
+        };
+        // Origin's authority is everything after `scheme://` up to the
+        // next `/`. Match against the verbatim `Host` header.
+        let origin_authority = origin
+            .splitn(2, "://")
+            .nth(1)
+            .unwrap_or("")
+            .split('/')
+            .next()
+            .unwrap_or("");
+        if origin_authority != host {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(next.run(req).await);
+    }
+
+    if has_session_cookie {
+        // Cookie auth path with no Origin → CSRF-shaped.
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(next.run(req).await)
 }

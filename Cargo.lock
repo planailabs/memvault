@@ -441,6 +441,7 @@ dependencies = [
  "axum",
  "axum-core",
  "bytes",
+ "cookie",
  "futures-util",
  "headers",
  "http",
@@ -5528,6 +5529,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "axum-extra",
  "chrono",
  "dioxus",
  "dioxus-i18n",
@@ -5552,6 +5554,7 @@ dependencies = [
  "serde_ipld_dagcbor",
  "serde_json",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tokio-stream",
  "tower",
