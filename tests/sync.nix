@@ -8,43 +8,12 @@
 { pkgs, ... }:
 
 let
-  # A rust toolchain that knows about wasm32 — memvault-extract's build.rs
-  # nests a `cargo build --target wasm32-unknown-unknown` for the guest
-  # crate, so nixpkgs' default rustc (no wasm std) isn't enough.
-  toolchainWasm = pkgs.rust-bin.stable.latest.default.override {
-    targets = [ "wasm32-unknown-unknown" ];
-  };
-
-  rustPlatformWasm = pkgs.makeRustPlatform {
-    cargo = toolchainWasm;
-    rustc = toolchainWasm;
-  };
-
-  # API-only memctl build — skips the dx fullstack/WASM client and just
-  # compiles the native daemon (memvault-web/server, axum, dioxus SSR).
-  # memvault-web/build.rs shells out to `npm run tailwind:build`, so
-  # nodejs + tailwindcss must be on PATH; memvault-extract/build.rs
-  # nests a wasm32 cargo invocation, so the wasm target must be in the
-  # toolchain.
-  memctl-test = rustPlatformWasm.buildRustPackage {
-    pname = "memctl-test";
-    version = "0.1.0";
-    src = ./..;
-    cargoLock = {
-      lockFile = ../Cargo.lock;
-      outputHashes = import ../extra-hashes.nix;
-    };
-    cargoBuildFlags = [ "-p" "memctl" ];
-    doCheck = false;
-    nativeBuildInputs = [
-      pkgs.pkg-config
-      pkgs.nodejs
-      pkgs.tailwindcss_3
-    ];
-    buildInputs = [ pkgs.openssl ];
-
-    meta.mainProgram = "memctl";
-  };
+  # Use the shared slim memctl from the overlay rather than redeclaring
+  # the derivation here. `pkgs.memctl-slim` skips the dx fullstack /
+  # WASM client pipeline but still serves the API + SSR routes the
+  # daemon needs — adequate for the HTTP integration paths this test
+  # exercises.
+  memctl-test = pkgs.memctl-slim;
 
   commonNode = { pkgs, ... }: {
     environment.systemPackages = [
