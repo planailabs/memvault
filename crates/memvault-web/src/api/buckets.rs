@@ -239,6 +239,146 @@ pub struct SubmitGrantRequest {
     pub grant_cbor_hex: String,
 }
 
+/// GET /api/v1/buckets/{id}/grants — list active grants on a bucket.
+pub async fn list_grants(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<memvault_api::GrantInfo>>, ApiError> {
+    let bucket_bytes =
+        hex::decode(&id).map_err(|_| ApiError::bad_request("invalid bucket id hex"))?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| ApiError::bad_request("bucket id must be 32 bytes"))?;
+    let grants = state
+        .client
+        .bucket_grants_list(&memvault_core::BucketId(bucket_arr))
+        .await
+        .map_err(|e| ApiError::internal(format!("list grants: {e}")))?;
+    Ok(Json(grants))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeGrantRequest {
+    #[serde(default = "default_revoke_reason")]
+    pub reason: String,
+}
+fn default_revoke_reason() -> String {
+    "revoked via API".into()
+}
+
+/// POST /api/v1/grants/{cid}/revoke — revoke a previously-issued grant.
+pub async fn revoke_grant(
+    _auth: RequireAdmin,
+    State(state): State<Arc<AppState>>,
+    Path(grant_cid_hex): Path<String>,
+    Json(req): Json<RevokeGrantRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let grant_cid = hex::decode(&grant_cid_hex)
+        .map_err(|_| ApiError::bad_request("invalid grant cid hex"))?;
+    let rev_cid = state
+        .client
+        .revoke_grant(&grant_cid, &req.reason)
+        .await
+        .map_err(|e| ApiError::internal(format!("revoke grant: {e}")))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "revocation_cid": hex::encode(rev_cid) })),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum IssueGrantAudience {
+    Cluster { cluster_id: String },
+    Peer { peer_id: String },
+    Agent { agent_id: String },
+    Role { role: String },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IssueGrantRequest {
+    pub audience: IssueGrantAudience,
+    /// "read" | "write" | "admin" | "egress"
+    pub actions: Vec<String>,
+    pub ttl_secs: u64,
+}
+
+/// POST /api/v1/buckets/{id}/issue-grant — sign and publish a grant.
+///
+/// The daemon picks the best signing authority it holds for this bucket
+/// (admin / owner-agent / node key) and stores the resulting grant block,
+/// which then propagates via the normal sigchain sync.
+pub async fn issue_grant(
+    _auth: RequireAdmin,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<IssueGrantRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let bucket_bytes =
+        hex::decode(&id).map_err(|_| ApiError::bad_request("invalid bucket id hex"))?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| ApiError::bad_request("bucket id must be 32 bytes"))?;
+    let bucket_id = memvault_core::BucketId(bucket_arr);
+
+    let audience = match req.audience {
+        IssueGrantAudience::Cluster { cluster_id } => {
+            let bytes = hex::decode(&cluster_id)
+                .map_err(|_| ApiError::bad_request("cluster_id hex"))?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| ApiError::bad_request("cluster_id must be 32 bytes"))?;
+            memvault_auth::GrantAudience::Cluster(memvault_core::ClusterId(arr))
+        }
+        IssueGrantAudience::Peer { peer_id } => {
+            let bytes = hex::decode(&peer_id)
+                .map_err(|_| ApiError::bad_request("peer_id hex"))?;
+            memvault_auth::GrantAudience::Peer(memvault_core::PeerId(bytes))
+        }
+        IssueGrantAudience::Agent { agent_id } => {
+            memvault_auth::GrantAudience::Agent(memvault_core::AgentId(agent_id))
+        }
+        IssueGrantAudience::Role { role } => {
+            let parsed = match role.as_str() {
+                "agent-host" | "agenthost" => memvault_auth::AgentRole::AgentHost,
+                "auditor" => memvault_auth::AgentRole::Auditor,
+                "service" => memvault_auth::AgentRole::Service,
+                "admin" => memvault_auth::AgentRole::Admin,
+                other => {
+                    return Err(ApiError::bad_request(format!(
+                        "unknown role: {other}"
+                    )));
+                }
+            };
+            memvault_auth::GrantAudience::Role(parsed)
+        }
+    };
+
+    let actions: Vec<memvault_auth::Action> = req
+        .actions
+        .iter()
+        .map(|a| match a.as_str() {
+            "read" => Ok(memvault_auth::Action::Read),
+            "write" => Ok(memvault_auth::Action::Write),
+            "admin" => Ok(memvault_auth::Action::Admin),
+            "egress" => Ok(memvault_auth::Action::Egress),
+            other => Err(ApiError::bad_request(format!("unknown action: {other}"))),
+        })
+        .collect::<Result<_, _>>()?;
+
+    let cid = state
+        .client
+        .bucket_grant(&bucket_id, audience, actions, req.ttl_secs)
+        .await
+        .map_err(|e| ApiError::internal(format!("issue grant: {e}")))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "grant_cid": hex::encode(cid) })),
+    ))
+}
+
 /// POST /api/v1/buckets/{id}/grants — submit an externally-signed grant.
 ///
 /// The daemon validates and stores; it does not sign. The submitter must

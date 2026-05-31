@@ -63,10 +63,17 @@ pkgs.testers.nixosTest {
     ))
 
     node_a.log("Enrolling writer agent on node_a")
-    node_a.succeed(
+    writer_enroll_out = node_a.succeed(
         f"memctl agent enroll --token '{writer_token}' --agent-id writer"
     )
     node_a.succeed("test -f /var/lib/memvault/agents/writer/private_key.pem")
+    bucket_match = re.search(r"Bucket:\s*([0-9a-f]{64})", writer_enroll_out)
+    assert bucket_match, (
+        "could not parse writer bucket id from enroll output:\n"
+        + writer_enroll_out
+    )
+    writer_bucket = bucket_match.group(1)
+    node_a.log(f"Writer bucket = {writer_bucket}")
 
     node_a.log("Issuing node-join token for node_b")
     node_token = last_token(node_a.succeed(
@@ -74,29 +81,21 @@ pkgs.testers.nixosTest {
         "--ttl 86400 --max-uses 1"
     ))
 
-    # ── 2. node_b joins the cluster, then receives writer's identity ────
-    # Using the SAME agent identity on both nodes (rather than enrolling
-    # a separate reader agent on node_b) sidesteps cross-bucket ACL: a
-    # second agent gets its own auto-created bucket and has no Read grant
-    # on writer's. With the same identity, both nodes share the bucket
-    # and grants writer was enrolled with on node_a. Writer's attestation
-    # block syncs to node_b on its own via the libp2p sigchain replication
-    # the test is exercising; we ship the private key + identity metadata
-    # out of band (NixOS test driver, base64-tunnelled through the bash
-    # shells the same way it shares regular commands).
+    node_a.log("Issuing reader-agent token (to be redeemed on node_b)")
+    reader_token = last_token(node_a.succeed(
+        "memctl token issue --agent-role agent-host --label reader "
+        "--ttl 86400 --max-uses 1"
+    ))
+
+    # ── 2. node_b joins the cluster and enrols its reader agent ─────
     node_b.log("Joining cluster on node_b")
     node_b.succeed(f"memctl cluster-join '{node_token}'")
 
-    node_b.log("Mirroring writer identity from node_a → node_b")
-    writer_tar_b64 = node_a.succeed(
-        "tar -C /var/lib/memvault/agents -czf - writer | base64 -w0"
-    ).strip()
-    node_b.succeed("mkdir -p /var/lib/memvault/agents")
+    node_b.log("Enrolling reader agent on node_b")
     node_b.succeed(
-        f"echo '{writer_tar_b64}' | base64 -d "
-        "| tar -C /var/lib/memvault/agents -xzf -"
+        f"memctl agent enroll --token '{reader_token}' --agent-id reader"
     )
-    node_b.succeed("test -f /var/lib/memvault/agents/writer/private_key.pem")
+    node_b.succeed("test -f /var/lib/memvault/agents/reader/private_key.pem")
 
     # ── 3. Start daemons on both nodes ──────────────────────────────
     # `--url http://localhost:8401` (distinct from the literal default
@@ -130,14 +129,33 @@ pkgs.testers.nixosTest {
     node_id = m.group(1)
     node_a.log(f"Doc imported with id={node_id}")
 
-    # ── 5. Poll until node_b can export the doc through the writer agent
-    # (same identity as on node_a — see comment above for why).
+    # ── 4b. Grant reader Read on writer's bucket (via HTTP, signed by
+    # the daemon's admin authority on node_a). Crucially, the resulting
+    # grant block must propagate via the sigchain so node_b can use it
+    # for ACL evaluation — exercising that propagation is the whole
+    # point of the test.
+    node_a.log(
+        f"Issuing read grant on writer's bucket {writer_bucket} for "
+        f"audience=reader"
+    )
+    grant_cid = node_a.succeed(
+        "memctl --url http://localhost:8401 "
+        "--identity-dir /var/lib/memvault/agents/writer "
+        f"grant create {writer_bucket} "
+        "--agent reader --actions read --ttl 86400"
+    ).strip().splitlines()[-1].strip()
+    assert re.fullmatch(r"[0-9a-f]+", grant_cid), \
+        f"unexpected grant create output: {grant_cid!r}"
+    node_a.log(f"Grant published with cid={grant_cid}")
+
+    # ── 5. Poll until node_b's reader agent can export the doc through
+    # the sync'd grant.
     synced = False
     for attempt in range(180):
         node_b.execute("rm -rf /tmp/export && mkdir -p /tmp/export")
         rc, _ = node_b.execute(
             "memctl --url http://localhost:8401 "
-            "--identity-dir /var/lib/memvault/agents/writer "
+            "--identity-dir /var/lib/memvault/agents/reader "
             "export --output /tmp/export "
             ">/tmp/export.log 2>&1"
         )

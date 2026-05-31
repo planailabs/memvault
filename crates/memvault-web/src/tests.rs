@@ -467,6 +467,24 @@ impl MemvaultClient for MockClient {
     ) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
     }
+
+    async fn bucket_grant(
+        &self,
+        _bucket_id: &memvault_core::BucketId,
+        _audience: memvault_auth::GrantAudience,
+        _actions: Vec<memvault_auth::Action>,
+        _ttl_secs: u64,
+    ) -> memvault_api::Result<Vec<u8>> {
+        Ok(vec![0u8; 32])
+    }
+
+    async fn revoke_grant(
+        &self,
+        _grant_cid: &[u8],
+        _reason: &str,
+    ) -> memvault_api::Result<Vec<u8>> {
+        Ok(vec![0u8; 32])
+    }
 }
 
 /// Build the test agent's AgentAttestation. The JWT verifier calls our

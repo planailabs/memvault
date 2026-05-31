@@ -254,6 +254,9 @@ mod native {
         /// Bucket operations (new / list / show / rename / attach / archive / bind)
         #[command(subcommand)]
         Bucket(BucketCommands),
+        /// Bucket-grant management (create / list / revoke).
+        #[command(subcommand)]
+        Grant(GrantCommands),
         /// Run a standalone memvault cluster node with P2P networking + API
         ///
         /// A cluster node participates in gossip, bitswap, and serves the REST API.
@@ -553,6 +556,50 @@ mod native {
             bucket_id: String,
             /// Cluster ID (hex)
             cluster_id: String,
+        },
+    }
+
+    /// Bucket-grant subcommands. Grants are signed by the local node's
+    /// authority for the bucket (admin / owner-agent / node key); the
+    /// resulting grant block syncs via the sigchain.
+    #[derive(Subcommand, Debug)]
+    pub enum GrantCommands {
+        /// Issue (create + sign + publish) a grant on a bucket.
+        Create {
+            /// Bucket ID (hex, 64 chars)
+            bucket_id: String,
+            /// Audience: target agent by id (the agent's identity dir name).
+            #[arg(long, conflicts_with_all = ["role", "peer", "cluster"])]
+            agent: Option<String>,
+            /// Audience: all agents holding a given role
+            /// (agent-host, auditor, service, admin).
+            #[arg(long, conflicts_with_all = ["agent", "peer", "cluster"])]
+            role: Option<String>,
+            /// Audience: a specific peer (hex-encoded libp2p peer bytes).
+            #[arg(long, conflicts_with_all = ["agent", "role", "cluster"])]
+            peer: Option<String>,
+            /// Audience: a whole cluster id (hex, 64 chars).
+            #[arg(long, conflicts_with_all = ["agent", "role", "peer"])]
+            cluster: Option<String>,
+            /// Comma-separated actions: read,write,admin,egress.
+            #[arg(long, default_value = "read")]
+            actions: String,
+            /// TTL in seconds. Default ~1 year.
+            #[arg(long, default_value = "31536000")]
+            ttl: u64,
+        },
+        /// List active grants scoped to a bucket.
+        List {
+            /// Bucket ID (hex)
+            bucket_id: String,
+        },
+        /// Revoke a grant by its CID.
+        Revoke {
+            /// Grant CID (hex)
+            grant_cid: String,
+            /// Reason for revocation (audit trail).
+            #[arg(short, long, default_value = "revoked via memctl")]
+            reason: String,
         },
     }
 
@@ -1972,6 +2019,112 @@ mod native {
                 let client = connect().connect().await?;
                 client.bucket_bind(&bid, &cid).await?;
                 println!("Bucket bound to cluster.");
+            }
+            Commands::Grant(GrantCommands::Create {
+                bucket_id,
+                agent,
+                role,
+                peer,
+                cluster,
+                actions,
+                ttl,
+            }) => {
+                let bucket_bytes = hex::decode(&bucket_id)?;
+                let bucket_arr: [u8; 32] = bucket_bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+                let bid = memvault_core::BucketId(bucket_arr);
+
+                let audience = match (agent, role, peer, cluster) {
+                    (Some(a), None, None, None) => memvault_auth::GrantAudience::Agent(
+                        memvault_core::AgentId(a),
+                    ),
+                    (None, Some(r), None, None) => {
+                        let parsed = match r.as_str() {
+                            "agent-host" | "agenthost" => memvault_auth::AgentRole::AgentHost,
+                            "auditor" => memvault_auth::AgentRole::Auditor,
+                            "service" => memvault_auth::AgentRole::Service,
+                            "admin" => memvault_auth::AgentRole::Admin,
+                            other => anyhow::bail!("unknown role: {other}"),
+                        };
+                        memvault_auth::GrantAudience::Role(parsed)
+                    }
+                    (None, None, Some(p), None) => {
+                        let bytes = hex::decode(&p)?;
+                        memvault_auth::GrantAudience::Peer(memvault_core::PeerId(bytes))
+                    }
+                    (None, None, None, Some(c)) => {
+                        let bytes = hex::decode(&c)?;
+                        let arr: [u8; 32] = bytes
+                            .try_into()
+                            .map_err(|_| anyhow::anyhow!("cluster id must be 32 bytes"))?;
+                        memvault_auth::GrantAudience::Cluster(memvault_core::ClusterId(arr))
+                    }
+                    _ => anyhow::bail!(
+                        "exactly one of --agent / --role / --peer / --cluster must be given"
+                    ),
+                };
+
+                let actions: Vec<memvault_auth::Action> = actions
+                    .split(',')
+                    .map(|a| match a.trim() {
+                        "read" => Ok(memvault_auth::Action::Read),
+                        "write" => Ok(memvault_auth::Action::Write),
+                        "admin" => Ok(memvault_auth::Action::Admin),
+                        "egress" => Ok(memvault_auth::Action::Egress),
+                        other => Err(anyhow::anyhow!("unknown action: {other}")),
+                    })
+                    .collect::<anyhow::Result<_>>()?;
+
+                let client = connect().connect().await?;
+                let cid = client.bucket_grant(&bid, audience, actions, ttl).await?;
+                println!("{}", hex::encode(cid));
+            }
+            Commands::Grant(GrantCommands::List { bucket_id }) => {
+                let bucket_bytes = hex::decode(&bucket_id)?;
+                let bucket_arr: [u8; 32] = bucket_bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+                let bid = memvault_core::BucketId(bucket_arr);
+                let client = connect().connect().await?;
+                let grants = client.bucket_grants_list(&bid).await?;
+                if grants.is_empty() {
+                    println!("(no grants)");
+                } else {
+                    for g in grants {
+                        let audience = match &g.audience {
+                            memvault_auth::GrantAudience::Cluster(c) => {
+                                format!("cluster={}", hex::encode(c.0))
+                            }
+                            memvault_auth::GrantAudience::Peer(p) => {
+                                format!("peer={}", hex::encode(&p.0))
+                            }
+                            memvault_auth::GrantAudience::Agent(a) => {
+                                format!("agent={}", a.0)
+                            }
+                            memvault_auth::GrantAudience::Role(r) => {
+                                format!("role={r:?}")
+                            }
+                        };
+                        let actions = g
+                            .actions
+                            .iter()
+                            .map(|a| format!("{a:?}").to_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        println!(
+                            "{}\t{audience}\tactions={actions}\tnot_after_ns={}",
+                            hex::encode(&g.cid),
+                            g.not_after_ns
+                        );
+                    }
+                }
+            }
+            Commands::Grant(GrantCommands::Revoke { grant_cid, reason }) => {
+                let cid_bytes = hex::decode(&grant_cid)?;
+                let client = connect().connect().await?;
+                let rev_cid = client.revoke_grant(&cid_bytes, &reason).await?;
+                println!("{}", hex::encode(rev_cid));
             }
             Commands::Daemon {
                 listen,

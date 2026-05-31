@@ -5849,6 +5849,22 @@ impl MemvaultClient for LocalClient {
     ) -> Result<BucketId> {
         LocalClient::ensure_agent_bucket_for_pubkey(self, agent_pubkey, name_hint).await
     }
+
+    async fn bucket_grant(
+        &self,
+        bucket_id: &BucketId,
+        audience: memvault_auth::GrantAudience,
+        actions: Vec<memvault_auth::Action>,
+        ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        // Reuse the existing signed-and-stored grant path; `pick_grant_signer`
+        // inside picks admin / owner-agent / node key for us.
+        LocalClient::issue_bucket_grant(self, bucket_id, audience, actions, ttl_secs).await
+    }
+
+    async fn revoke_grant(&self, grant_cid: &[u8], reason: &str) -> Result<Vec<u8>> {
+        LocalClient::revoke_bucket_grant(self, grant_cid, reason).await
+    }
 }
 
 /// Project an active/retracted count pair onto a retraction mode for reporting.

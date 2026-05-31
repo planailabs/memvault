@@ -889,10 +889,102 @@ impl MemvaultClient for HttpApiClient {
         Ok(())
     }
 
-    async fn bucket_grants_list(&self, _bucket_id: &BucketId) -> Result<Vec<GrantInfo>> {
-        Err(ApiError::Other(
-            "bucket_grants_list is not available over HTTP".into(),
-        ))
+    async fn bucket_grants_list(&self, bucket_id: &BucketId) -> Result<Vec<GrantInfo>> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/buckets/{}/grants",
+                hex::encode(bucket_id.0)
+            )))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        resp.json::<Vec<GrantInfo>>().await.map_err(map_reqwest)
+    }
+
+    async fn revoke_grant(&self, grant_cid: &[u8], reason: &str) -> Result<Vec<u8>> {
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            revocation_cid: String,
+        }
+        let body = serde_json::json!({ "reason": reason });
+        let resp = self
+            .client
+            .post(self.url(&format!(
+                "/grants/{}/revoke",
+                hex::encode(grant_cid)
+            )))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        let parsed: Resp = resp.json().await.map_err(map_reqwest)?;
+        hex::decode(parsed.revocation_cid)
+            .map_err(|e| ApiError::Other(format!("decode revocation_cid: {e}")))
+    }
+
+    async fn bucket_grant(
+        &self,
+        bucket_id: &BucketId,
+        audience: memvault_auth::GrantAudience,
+        actions: Vec<memvault_auth::Action>,
+        ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        let audience_json = match audience {
+            memvault_auth::GrantAudience::Cluster(c) => serde_json::json!({
+                "kind": "cluster",
+                "cluster_id": hex::encode(c.0),
+            }),
+            memvault_auth::GrantAudience::Peer(p) => serde_json::json!({
+                "kind": "peer",
+                "peer_id": hex::encode(&p.0),
+            }),
+            memvault_auth::GrantAudience::Agent(a) => serde_json::json!({
+                "kind": "agent",
+                "agent_id": a.0,
+            }),
+            memvault_auth::GrantAudience::Role(r) => serde_json::json!({
+                "kind": "role",
+                "role": format!("{r:?}").to_lowercase(),
+            }),
+        };
+        let actions_json: Vec<&str> = actions
+            .iter()
+            .map(|a| match a {
+                memvault_auth::Action::Read => "read",
+                memvault_auth::Action::Write => "write",
+                memvault_auth::Action::Admin => "admin",
+                memvault_auth::Action::Egress => "egress",
+            })
+            .collect();
+        let body = serde_json::json!({
+            "audience": audience_json,
+            "actions": actions_json,
+            "ttl_secs": ttl_secs,
+        });
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            grant_cid: String,
+        }
+        let resp = self
+            .client
+            .post(self.url(&format!(
+                "/buckets/{}/issue-grant",
+                hex::encode(bucket_id.0)
+            )))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        let parsed: Resp = resp.json().await.map_err(map_reqwest)?;
+        hex::decode(parsed.grant_cid)
+            .map_err(|e| ApiError::Other(format!("decode grant_cid: {e}")))
     }
 
     async fn share_get_proposal(

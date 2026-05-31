@@ -317,6 +317,31 @@ pub trait MemvaultClient: Send + Sync {
     /// List capability grants scoped to a bucket.
     async fn bucket_grants_list(&self, bucket_id: &BucketId) -> Result<Vec<GrantInfo>>;
 
+    /// Issue (sign + publish) a capability grant on a bucket. Returns the
+    /// stored grant block CID.
+    ///
+    /// The implementation picks the best signing authority the local node
+    /// holds for the bucket (admin key, owner-agent key, or node key) —
+    /// callers do not pass a signer. HTTP clients route this through the
+    /// `POST /api/v1/buckets/{id}/issue-grant` endpoint, which signs
+    /// server-side using the daemon's own keys.
+    async fn bucket_grant(
+        &self,
+        bucket_id: &BucketId,
+        audience: memvault_auth::GrantAudience,
+        actions: Vec<memvault_auth::Action>,
+        ttl_secs: u64,
+    ) -> Result<Vec<u8>>;
+
+    /// Revoke a previously-issued grant by its CID. Returns the
+    /// revocation block CID. Signed with the same authority that signed
+    /// the original grant (admin / owner-agent / node).
+    async fn revoke_grant(
+        &self,
+        grant_cid: &[u8],
+        reason: &str,
+    ) -> Result<Vec<u8>>;
+
     // -- Sharing --
 
     /// List share proposals received by this cluster.
