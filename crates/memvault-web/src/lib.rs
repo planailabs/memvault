@@ -72,6 +72,12 @@ mod server_router {
         pub revoked_nodes: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
         /// Operational metrics.
         pub metrics: Arc<memvault_api::metrics::Metrics>,
+        /// Extra Origins accepted by the CSRF guard ([`api::auth::origin_guard`]).
+        /// Same-origin (`Origin` host == `Host`) is always accepted; this
+        /// list adds the reverse-proxy hostnames the operator wants to
+        /// expose the daemon under (e.g.
+        /// `["https://memvault.example.com"]`).
+        pub allowed_origins: Vec<String>,
         /// Optional injectable lookup for `AgentAttestation` by agent
         /// pubkey. Production wires this to the sigchain scan via
         /// [`memvault_api::sigchain::find_agent_attestation`]; tests
@@ -137,13 +143,17 @@ mod server_router {
     /// Call this instead of manual axum::serve when running under dx serve.
     /// This function does NOT return — it runs the server forever.
     pub fn serve_app(state: Arc<AppState>) {
+        use axum::middleware::from_fn_with_state;
         use dioxus::server::{DioxusRouterExt, ServeConfig};
 
         dioxus::serve(move || {
             let state = Arc::clone(&state);
             async move {
+                let origin_layer =
+                    from_fn_with_state(Arc::clone(&state), super::api::auth::origin_guard);
                 let router = axum::Router::new()
                     .serve_dioxus_application(ServeConfig::new(), super::ui::app::App)
+                    .layer(origin_layer)
                     .nest("/api/v1", super::api::routes(state));
                 Ok(router)
             }
@@ -157,14 +167,21 @@ mod server_router {
     /// from `DIOXUS_PUBLIC_PATH`. The caller must ensure that directory contains
     /// the WASM client assets before calling this.
     pub fn build_fullstack_router(state: Arc<AppState>) -> Router<()> {
+        use axum::middleware::from_fn_with_state;
         use dioxus::server::{DioxusRouterExt, ServeConfig};
 
-        // API routes
-        let api = Router::new().nest("/api/v1", super::api::routes(state));
+        let origin_layer = from_fn_with_state(Arc::clone(&state), super::api::auth::origin_guard);
 
-        // Dioxus fullstack: server fns + SSR + static assets (same as main.rs)
-        let dioxus =
-            Router::new().serve_dioxus_application(ServeConfig::new(), super::ui::app::App);
+        // API routes
+        let api = Router::new().nest("/api/v1", super::api::routes(Arc::clone(&state)));
+
+        // Dioxus fullstack: server fns + SSR + static assets. Apply the
+        // same Origin/CSRF guard on the server-function POST endpoints so
+        // a cross-origin browser can't ride the session cookie through
+        // them.
+        let dioxus = Router::new()
+            .serve_dioxus_application(ServeConfig::new(), super::ui::app::App)
+            .layer(origin_layer);
 
         api.merge(dioxus)
     }

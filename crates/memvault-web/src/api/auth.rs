@@ -256,6 +256,50 @@ impl FromRequestParts<Arc<AppState>> for RequireAuth {
     }
 }
 
+/// Richer auth view aimed at server functions and pages that want
+/// `{ agent_id, role, scopes }` without re-deriving it from raw
+/// `AgentTokenClaims`. Mechanically reuses the same JWT validation
+/// (Bearer or session cookie) as [`RequireAuth`].
+///
+/// Today, with one `ui_agent` per node, this is effectively just a
+/// convenience over `RequireAuth { claims }` + [`caller_role`]. It
+/// becomes load-bearing once we wire per-user auth (option B / C of the
+/// auth plan) — the same struct then carries the human-identity view
+/// without every server function having to know how to extract it.
+#[derive(Clone)]
+pub struct SessionAuth {
+    pub claims: AgentTokenClaims,
+    pub role: Option<memvault_auth::AgentRole>,
+}
+
+impl SessionAuth {
+    /// The agent_id the issuing identity announced (the `iss` JWT claim).
+    pub fn agent_id(&self) -> &str {
+        &self.claims.iss
+    }
+    /// Hex-encoded agent ed25519 pubkey (the `sub` JWT claim).
+    pub fn agent_pubkey_hex(&self) -> &str {
+        &self.claims.sub
+    }
+    /// Iterator over space-separated scopes.
+    pub fn scopes(&self) -> impl Iterator<Item = &str> {
+        self.claims.scope.split(' ').filter(|s| !s.is_empty())
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for SessionAuth {
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let claims = verify_bearer(parts, state).await?;
+        let role = caller_role(state, &claims);
+        Ok(SessionAuth { claims, role })
+    }
+}
+
 /// Resolve the verified caller's cluster [`Role`] from their claims, via the
 /// same attestation lookup used during JWT verification (the per-request hook
 /// when set, else the daemon's LocalClient sigchain scan). `None` when the
@@ -488,16 +532,46 @@ where
     Ok(out)
 }
 
+/// Strip the trailing slash from a configured allowed origin. Browsers
+/// always serialise `Origin` without a trailing slash, but operators
+/// often paste `https://memvault.example.com/` from a URL bar.
+fn normalise_origin(s: &str) -> &str {
+    s.trim_end_matches('/')
+}
+
+/// Match an incoming `Origin` against the daemon's policy:
+///   1. same-origin: Origin's authority equals the `Host` header, OR
+///   2. exact match against any entry in [`AppState::allowed_origins`]
+///      (after stripping a trailing slash).
+fn origin_allowed(origin: &str, host: Option<&str>, allow_list: &[String]) -> bool {
+    if let Some(host) = host {
+        let origin_authority = origin
+            .splitn(2, "://")
+            .nth(1)
+            .unwrap_or("")
+            .split('/')
+            .next()
+            .unwrap_or("");
+        if origin_authority == host {
+            return true;
+        }
+    }
+    let origin_norm = normalise_origin(origin);
+    allow_list
+        .iter()
+        .any(|allowed| normalise_origin(allowed) == origin_norm)
+}
+
 /// Cheap, browser-side CSRF defence: on non-safe methods, require the
-/// request `Origin` (when present) to share its host:port with the
-/// request `Host` header — i.e. it came from a page served by this same
-/// daemon (or whatever reverse proxy is fronting it, since proxies
-/// forward `Host` verbatim).
+/// request `Origin` (when present) to either share its host:port with
+/// the request `Host` header — i.e. it came from a page served by this
+/// same daemon — or appear in [`AppState::allowed_origins`] (the
+/// reverse-proxy / extra-hostname escape hatch).
 ///
 /// Policy:
 /// - Safe methods (`GET`/`HEAD`/`OPTIONS`) → pass through. Idempotent
 ///   reads can't be turned into a CSRF write.
-/// - `Origin` present → its authority must equal the `Host` authority.
+/// - `Origin` present → must satisfy [`origin_allowed`].
 /// - `Origin` absent + session cookie present → reject. A real browser
 ///   would have set `Origin`; absence suggests the request was crafted
 ///   to dodge the check.
@@ -511,6 +585,7 @@ where
 /// scenario where `Host` is the public hostname and `Origin` is whatever
 /// the browser was looking at when it made the request.
 pub async fn origin_guard(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -539,20 +614,7 @@ pub async fn origin_guard(
         .unwrap_or(false);
 
     if let Some(origin) = origin {
-        let Some(host) = host else {
-            // Origin present but no Host — malformed; refuse.
-            return Err(StatusCode::FORBIDDEN);
-        };
-        // Origin's authority is everything after `scheme://` up to the
-        // next `/`. Match against the verbatim `Host` header.
-        let origin_authority = origin
-            .splitn(2, "://")
-            .nth(1)
-            .unwrap_or("")
-            .split('/')
-            .next()
-            .unwrap_or("");
-        if origin_authority != host {
+        if !origin_allowed(&origin, host.as_deref(), &state.allowed_origins) {
             return Err(StatusCode::FORBIDDEN);
         }
         return Ok(next.run(req).await);

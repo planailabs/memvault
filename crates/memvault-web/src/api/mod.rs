@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::middleware::from_fn;
+use axum::middleware::from_fn_with_state;
 use axum::routing::{delete, get, post};
 
 use crate::AppState;
@@ -30,6 +30,7 @@ use crate::AppState;
 /// All node IDs use "type:hex" format: entity:<hex>, doc:<hex>, file:<hex>.
 /// Legacy /docs and /entities endpoints accept both raw hex and type:hex.
 pub fn routes(state: Arc<AppState>) -> Router {
+    let origin_layer = from_fn_with_state(Arc::clone(&state), auth::origin_guard);
     Router::new()
         // ── Nodes (unified) ────────────────────────────────────────
         // The primary API for all node types. Uses type:hex IDs everywhere.
@@ -133,6 +134,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
         // CSRF defence: cookie-bearing cross-origin POSTs/PUTs/DELETEs are
         // refused. Bearer-token clients (memctl, curl scripts) keep working
         // because they don't set Origin and don't carry a session cookie.
-        .layer(from_fn(auth::origin_guard))
+        .layer(origin_layer)
         .with_state(state)
 }

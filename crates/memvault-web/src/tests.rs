@@ -521,6 +521,13 @@ fn ensure_test_env() {
 }
 
 fn test_app_state(client: Arc<dyn MemvaultClient>) -> Arc<AppState> {
+    test_app_state_with(client, Vec::new())
+}
+
+fn test_app_state_with(
+    client: Arc<dyn MemvaultClient>,
+    allowed_origins: Vec<String>,
+) -> Arc<AppState> {
     ensure_test_env();
     Arc::new(AppState {
         client,
@@ -531,6 +538,7 @@ fn test_app_state(client: Arc<dyn MemvaultClient>) -> Arc<AppState> {
         revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
         agent_attestation_lookup: Some(test_agent_lookup()),
+        allowed_origins,
     })
 }
 
@@ -846,6 +854,37 @@ async fn test_bearer_writes_without_origin_still_pass() {
                 .method("POST")
                 .uri("/api/v1/docs")
                 .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_allowed_origins_list_admits_proxy_host() {
+    // Reverse-proxy case: the browser sees the proxy URL as the Origin
+    // but `Host` (as seen by the daemon) is `127.0.0.1:8401`. Same-origin
+    // would refuse; the explicit allow-list admits it.
+    let state = test_app_state_with(
+        Arc::new(MockClient::new()),
+        vec!["https://memvault.example.com".into()],
+    );
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "via proxy", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("host", "127.0.0.1:8401")
+                .header("origin", "https://memvault.example.com")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),

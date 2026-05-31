@@ -54,6 +54,20 @@ in
       '';
     };
 
+    allowedOrigins = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "https://memvault.example.com" ];
+      description = ''
+        Extra HTTP `Origin` values the CSRF guard accepts. The daemon
+        already accepts same-origin requests (where the request `Origin`
+        matches `Host`), so this list is only needed when a reverse
+        proxy rewrites the public hostname — then the browser's `Origin`
+        is the proxy's URL but `Host` (as the daemon sees it) is the
+        upstream's. Listing the proxy URL here closes the gap.
+      '';
+    };
+
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -81,6 +95,8 @@ in
       environment = {
         MEMVAULT_DATA_DIR = stateDir;
         MEMVAULT_API_PORT = toString cfg.apiPort;
+      } // lib.optionalAttrs (cfg.allowedOrigins != [ ]) {
+        MEMVAULT_ALLOWED_ORIGINS = lib.concatStringsSep "," cfg.allowedOrigins;
       };
 
       serviceConfig = {

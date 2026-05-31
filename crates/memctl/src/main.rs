@@ -115,6 +115,16 @@ fn main() {
             let client_arc =
                 memvault_web::ui::state::client().expect("failed to initialize memvault client");
 
+            let allowed_origins: Vec<String> = std::env::var("MEMVAULT_ALLOWED_ORIGINS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let app_state = Arc::new(memvault_web::AppState {
                 client: client_arc,
                 event_bus,
@@ -124,6 +134,7 @@ fn main() {
                 revoked_nodes: Arc::clone(&trust.trust_state.revoked_nodes),
                 metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                 agent_attestation_lookup: None,
+                allowed_origins,
             });
 
             // Sync `fn main()` — no tokio runtime yet. Defer the watcher

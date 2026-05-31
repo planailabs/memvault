@@ -2061,6 +2061,17 @@ mod native {
                     let client_arc = local_client
                         as std::sync::Arc<dyn memvault_api::MemvaultClient>;
 
+                    let allowed_origins: Vec<String> =
+                        std::env::var("MEMVAULT_ALLOWED_ORIGINS")
+                            .ok()
+                            .map(|v| {
+                                v.split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
                     let app_state = std::sync::Arc::new(memvault_web::AppState {
                         client: client_arc,
                         event_bus: std::sync::Arc::clone(&event_bus_shared),
@@ -2070,6 +2081,7 @@ mod native {
                         revoked_nodes: std::sync::Arc::clone(&trust.trust_state.revoked_nodes),
                         metrics: std::sync::Arc::new(memvault_api::metrics::Metrics::new()),
                         agent_attestation_lookup: None,
+                        allowed_origins,
                     });
 
                     // Start the web server. Use fullstack (SSR + UI) if assets
