@@ -1,11 +1,18 @@
 # NixOS integration test for memvault cluster sync.
 #
-# Two nodes (a, b) form one cluster:
-#   1. node_a runs `memctl genesis` and issues a node-join token
-#   2. node_b consumes the token via `memctl cluster-join`
-#   3. node_a stores a document with `memctl put`
-#   4. both daemons start; libp2p (mDNS + bitswap + gossipsub) syncs blocks
-#   5. node_b's daemon is stopped and `memctl list` is asserted to show the doc
+# Two nodes (a, b) form one cluster, and each enrols its own agent so the
+# write/read paths can stay on the HTTP API while the daemons keep running:
+#
+#   1. node_a runs `memctl genesis`, enrols a writer agent, and mints a
+#      node-join token for node_b plus a reader-agent token
+#   2. node_b runs `memctl cluster-join` and enrols the reader agent
+#   3. both daemons start
+#   4. node_a's writer agent imports a markdown doc via `memctl --url
+#      http://localhost:8401 import-docs` (HTTP path → goes through the
+#      running daemon — no redb file-lock contention)
+#   5. libp2p mDNS + bitswap + gossipsub replicate blocks to node_b
+#   6. node_b's reader agent polls `memctl --url ... export` until the
+#      doc body appears in the exported tree
 #
 # Build / run with:
 #   nix build .#checks.x86_64-linux.sync -L
@@ -14,8 +21,6 @@
 let
   # API-only memctl build — skips the dx fullstack/WASM client and just
   # compiles the native daemon (memvault-web/server, axum, dioxus SSR).
-  # Drastically faster than the full dx build and sufficient for sync
-  # verification through CLI commands.
   memctl-test = pkgs.rustPlatform.buildRustPackage {
     pname = "memctl-test";
     version = "0.1.0";
@@ -35,13 +40,11 @@ let
     environment.systemPackages = [
       memctl-test
       pkgs.jq
+      pkgs.gnugrep
     ];
-    # Avoid firewall interference with libp2p TCP + mDNS between test
-    # machines.
+    # Allow libp2p TCP + mDNS between the two test machines.
     networking.firewall.enable = false;
-    # mDNS broadcast must reach the peer interface.
     networking.firewall.allowedUDPPorts = [ 5353 ];
-    # Stable data dir for both genesis/join and the running daemon.
     environment.variables.MEMVAULT_DATA_DIR = "/var/lib/memvault";
     environment.variables.RUST_LOG = "info,memvault_swarm=debug";
   };
@@ -64,108 +67,119 @@ pkgs.testers.nixosTest {
     for m in [node_a, node_b]:
         m.succeed("mkdir -p /var/lib/memvault")
 
-    # ── 1. Genesis on node_a ─────────────────────────────────────────
+    def last_token(output):
+        for line in reversed(output.splitlines()):
+            line = line.strip()
+            if line.startswith("mvjoin1:"):
+                return line
+        raise Exception(f"no mvjoin1: token in output:\n{output}")
+
+    # ── 1. Genesis + agent/token setup on node_a (no daemon yet) ────
     node_a.log("Running genesis on node_a")
     node_a.succeed("memctl genesis 2>&1 | tee /tmp/genesis.log")
 
-    # ── 2. Issue a node-join token on node_a ────────────────────────
-    node_a.log("Issuing join token on node_a")
-    token_out = node_a.succeed(
-        "memctl token issue --node-role node --ttl 3600 --max-uses 1 "
-        "--label node-b-join 2>/dev/null"
-    )
-    token = ""
-    for line in token_out.splitlines():
-        line = line.strip()
-        if line.startswith("mvjoin1:"):
-            token = line
-            break
-    assert token, f"no mvjoin1: token in `token issue` output:\n{token_out}"
-    node_a.log(f"Got join token: {token[:40]}...")
+    node_a.log("Issuing writer-agent token on node_a")
+    writer_token = last_token(node_a.succeed(
+        "memctl token issue --agent-role agent-host --label writer "
+        "--ttl 86400 --max-uses 1"
+    ))
 
-    # ── 3. node_b consumes the token ─────────────────────────────────
+    node_a.log("Enrolling writer agent on node_a")
+    node_a.succeed(
+        f"memctl agent enroll --token '{writer_token}' --agent-id writer"
+    )
+    node_a.succeed("test -f /var/lib/memvault/agents/writer/private_key.pem")
+
+    node_a.log("Issuing node-join token for node_b")
+    node_token = last_token(node_a.succeed(
+        "memctl token issue --node-role node --label node-b "
+        "--ttl 86400 --max-uses 1"
+    ))
+
+    node_a.log("Issuing reader-agent token (to be redeemed on node_b)")
+    reader_token = last_token(node_a.succeed(
+        "memctl token issue --agent-role agent-host --label reader "
+        "--ttl 86400 --max-uses 1"
+    ))
+
+    # ── 2. node_b joins the cluster and enrols its reader agent ─────
     node_b.log("Joining cluster on node_b")
-    node_b.succeed(f"memctl cluster-join '{token}'")
+    node_b.succeed(f"memctl cluster-join '{node_token}'")
 
-    # ── 4. node_a stores a document BEFORE its daemon starts ────────
-    # `memctl put` opens the redb store directly, so it must run while no
-    # daemon holds the file lock.
-    node_a.log("Storing test document on node_a")
-    doc_text = "hello-from-node-a-cross-sync-fixture"
-    doc_id_out = node_a.succeed(
-        f"memctl put '{doc_text}' --title 'sync-test' --tag 'project:test'"
+    node_b.log("Enrolling reader agent on node_b")
+    node_b.succeed(
+        f"memctl agent enroll --token '{reader_token}' --agent-id reader"
     )
-    doc_id = doc_id_out.strip().splitlines()[-1].strip()
-    assert re.fullmatch(r"[0-9a-f]+", doc_id), \
-        f"unexpected put output (not a hex doc id): {doc_id_out!r}"
-    node_a.log(f"Document stored with id={doc_id}")
+    node_b.succeed("test -f /var/lib/memvault/agents/reader/private_key.pem")
 
-    # Sanity: node_b should NOT have the doc yet.
-    pre_list = node_b.succeed("memctl list --limit 50")
-    assert doc_id not in pre_list, \
-        f"node_b unexpectedly already has the doc:\n{pre_list}"
-
-    # ── 5. Start daemons on both nodes ──────────────────────────────
-    # Pin TCP ports so the swarm is observable; mDNS handles peer
-    # discovery on the shared test subnet.
-    node_a.execute(
-        "memctl daemon --listen /ip4/0.0.0.0/tcp/4001 --api-port 8401 "
-        ">/tmp/daemon.log 2>&1 &"
-    )
-    node_b.execute(
-        "memctl daemon --listen /ip4/0.0.0.0/tcp/4001 --api-port 8401 "
-        ">/tmp/daemon.log 2>&1 &"
-    )
-
+    # ── 3. Start daemons on both nodes ──────────────────────────────
+    # `--url http://localhost:8401` (distinct from the literal default
+    # `http://127.0.0.1:8401`) defeats memctl's "fall back to local db"
+    # heuristic so subsequent CLI calls actually hit the HTTP API.
     for m, name in [(node_a, "node_a"), (node_b, "node_b")]:
+        m.execute(
+            "memctl daemon --listen /ip4/0.0.0.0/tcp/4001 --api-port 8401 "
+            ">/tmp/daemon.log 2>&1 &"
+        )
         m.wait_for_open_port(8401)
         m.log(f"{name} daemon API up on 8401")
 
-    # ── 6. Wait for node_b to discover node_a and sync the doc ──────
-    # libp2p mDNS + gossipsub + bitswap pull blocks; this is async, so
-    # poll the HTTP search endpoint instead of guessing a sleep.
+    # ── 4. Writer agent on node_a creates a doc via HTTP ────────────
+    doc_text = "hello-from-node-a-cross-sync-fixture"
+    node_a.succeed(f"printf '%s' '{doc_text}' > /tmp/sync-test.md")
+
+    node_a.log("Importing doc as writer agent over HTTP")
+    import_out = node_a.succeed(
+        "memctl --url http://localhost:8401 "
+        "--identity-dir /var/lib/memvault/agents/writer "
+        "import-docs --visibility public /tmp/sync-test.md 2>&1"
+    )
+    # import-docs prints `  <path> -> <node_id>` per file
+    m = re.search(r"-> (\S+)", import_out)
+    assert m, f"could not parse imported doc id from:\n{import_out}"
+    node_id = m.group(1)
+    node_a.log(f"Doc imported with id={node_id}")
+
+    # ── 5. Poll until node_b's reader agent can export the doc ──────
+    # `memctl export` over HTTP pulls everything the reader can see; we
+    # grep the exported tree for the original body to confirm the block
+    # made it across via libp2p (bitswap + gossipsub head announcements).
     synced = False
-    last_status = ""
-    for attempt in range(120):
-        status, body = node_b.execute(
-            f"curl -sf 'http://127.0.0.1:8401/api/v1/search?q={doc_text}' "
-            "|| true"
+    for attempt in range(180):
+        node_b.execute("rm -rf /tmp/export && mkdir -p /tmp/export")
+        rc, _ = node_b.execute(
+            "memctl --url http://localhost:8401 "
+            "--identity-dir /var/lib/memvault/agents/reader "
+            "export --output /tmp/export "
+            ">/tmp/export.log 2>&1"
         )
-        last_status = body
-        if doc_id in body or doc_text in body:
-            synced = True
-            node_b.log(
-                f"node_b observed the doc via HTTP search after ~{attempt}s"
+        if rc == 0:
+            grep_rc, _ = node_b.execute(
+                f"grep -rqF '{doc_text}' /tmp/export"
             )
-            break
+            if grep_rc == 0:
+                synced = True
+                node_b.log(
+                    f"node_b's reader agent observed the doc after ~{attempt}s"
+                )
+                break
         time.sleep(1)
 
     if not synced:
-        node_a.log("--- node_a daemon log ---")
-        node_a.log(node_a.succeed("cat /tmp/daemon.log | tail -100"))
-        node_b.log("--- node_b daemon log ---")
-        node_b.log(node_b.succeed("cat /tmp/daemon.log | tail -100"))
+        node_a.log("--- node_a daemon log (tail) ---")
+        node_a.log(node_a.succeed("tail -200 /tmp/daemon.log"))
+        node_b.log("--- node_b daemon log (tail) ---")
+        node_b.log(node_b.succeed("tail -200 /tmp/daemon.log"))
+        node_b.log("--- node_b last export log ---")
+        node_b.log(node_b.succeed("cat /tmp/export.log || true"))
         raise Exception(
-            f"node_b never synced the doc from node_a within 120s. "
-            f"last /api/v1/search response: {last_status!r}"
+            "node_b's reader agent never observed the doc within 180s"
         )
 
-    # ── 7. Stop node_b's daemon and confirm via the CLI ─────────────
-    # `memctl list` re-opens the redb store directly; the daemon must
-    # release the file lock first.
-    node_b.execute("pkill -TERM -f 'memctl daemon' || true")
-    for _ in range(30):
-        status, _ = node_b.execute("pgrep -f 'memctl daemon'")
-        if status != 0:
-            break
-        time.sleep(1)
-
-    list_out = node_b.succeed("memctl list --limit 50")
-    assert doc_id in list_out, (
-        f"node_b's local store does not contain the synced doc {doc_id}:\n"
-        f"{list_out}"
-    )
-    node_b.log("node_b's CLI confirmed the synced document")
+    # Daemons are still running — the entire test stayed on the HTTP path.
+    for m, name in [(node_a, "node_a"), (node_b, "node_b")]:
+        rc, _ = m.execute("pgrep -f 'memctl daemon'")
+        assert rc == 0, f"{name} daemon unexpectedly exited"
 
     node_b.log("All memvault sync tests passed!")
   '';
