@@ -1650,3 +1650,56 @@ async fn scoped_list_detail_level_enriches_entries() {
         other => panic!("expected Entity detail, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn scoped_search_finds_bucketed_doc() {
+    // A doc created in a bucket must be searchable under Accessible scope and
+    // under its own bucket (this is the path the web search page exercises).
+    use memvault_core::QueryScope;
+
+    let (_dir, client) = make_client();
+    let bucket = client
+        .bucket_create(
+            "b",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+
+    client
+        .put_doc(
+            Document::new(DocId::random(), "findme zebra".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+
+    // Accessible scope.
+    let hits = client
+        .search_scoped(&QueryScope::all(), "zebra", 10)
+        .await
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.node_type == "doc"),
+        "bucketed doc must be searchable under Accessible scope"
+    );
+
+    // Scoped to its own bucket.
+    let scoped = client
+        .search_scoped(
+            &QueryScope::all().with_bucket(Some(bucket.clone())),
+            "zebra",
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(
+        scoped.iter().any(|h| h.node_type == "doc"),
+        "doc must be searchable when scoped to its bucket"
+    );
+}

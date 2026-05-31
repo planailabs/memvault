@@ -2073,16 +2073,18 @@ impl LocalClient {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&id_bytes);
                 let doc_id = DocId(arr);
-                // Resolve the bucket via BY_BUCKET (reliable); skip only docs
-                // that are in no bucket at all (truly unbucketed/foreign).
+                // Best-effort bucket: BY_BUCKET (reliable) → envelope inference
+                // → none. Index the doc regardless so it's searchable; the
+                // stored bucket_id only matters for explicit bucket scoping.
                 let doc_cids = self
                     .store
                     .query_by_tag("doc", label, 0, usize::MAX)
                     .unwrap_or_default();
-                let bucket_hex = match doc_cids.iter().find_map(|c| cid_bucket.get(c)) {
-                    Some(b) => hex::encode(b),
-                    None => continue,
-                };
+                let bucket_hex = doc_cids
+                    .iter()
+                    .find_map(|c| cid_bucket.get(c))
+                    .map(hex::encode)
+                    .or_else(|| self.inferred_doc_bucket(&doc_id).map(hex::encode));
                 if let Ok(Some(doc)) = get_doc!(&doc_id) {
                     let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
                     // Recover creation-time tags from the envelope metadata.
@@ -2093,7 +2095,7 @@ impl LocalClient {
                         &doc.body,
                         title,
                         &creation_tags,
-                        Some(&bucket_hex),
+                        bucket_hex.as_deref(),
                         0,
                     );
                     doc_count += 1;
@@ -2113,15 +2115,16 @@ impl LocalClient {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&id_bytes);
                 let eid = EntityId(arr);
-                // Resolve via BY_BUCKET (reliable); skip only truly-unbucketed.
+                // Best-effort bucket (BY_BUCKET → inference → none); index regardless.
                 let entity_cids = self
                     .store
                     .query_by_tag("entity", label, 0, usize::MAX)
                     .unwrap_or_default();
-                let bucket_hex = match entity_cids.iter().find_map(|c| cid_bucket.get(c)) {
-                    Some(b) => hex::encode(b),
-                    None => continue,
-                };
+                let bucket_hex = entity_cids
+                    .iter()
+                    .find_map(|c| cid_bucket.get(c))
+                    .map(hex::encode)
+                    .or_else(|| self.inferred_entity_bucket(&eid).map(hex::encode));
                 if let Ok(Some(entity)) = get_entity!(&eid) {
                     let creation_tags = self.extract_creation_tags("entity", label);
                     let mut idx = idx_write!();
@@ -2130,7 +2133,7 @@ impl LocalClient {
                         &entity.kind,
                         &entity.props,
                         &creation_tags,
-                        Some(&bucket_hex),
+                        bucket_hex.as_deref(),
                         0,
                     );
                     entity_count += 1;
@@ -2145,16 +2148,13 @@ impl LocalClient {
             for (cid, data) in &blocks {
                 if let Some(view) = memvault_store::EnvelopeView::parse(data) {
                     if view.str_field("kind") == Some("attachment") {
-                        // Bucket from the envelope body, falling back to the
-                        // BY_BUCKET map keyed by the envelope's own cid. Skip
-                        // only if neither resolves (truly unbucketed).
-                        let bucket_hex = match view
+                        // Best-effort bucket: envelope body → BY_BUCKET map
+                        // (keyed by the envelope's own cid) → none. Index
+                        // regardless so the file is searchable.
+                        let bucket_hex = view
                             .get_as::<Vec<u8>>("bucket_id")
                             .or_else(|| cid_bucket.get(cid).map(|b| b.to_vec()))
-                        {
-                            Some(b) => hex::encode(b),
-                            None => continue,
-                        };
+                            .map(hex::encode);
                         let manifest_cid: Option<Vec<u8>> = view.get_as("manifest_cid");
                         let filename = view.str_field("filename");
                         let mime_type = view
@@ -2176,7 +2176,7 @@ impl LocalClient {
                                 mime_type,
                                 text.as_deref(),
                                 &att_tags,
-                                Some(&bucket_hex),
+                                bucket_hex.as_deref(),
                                 0,
                             );
                             attachment_count += 1;

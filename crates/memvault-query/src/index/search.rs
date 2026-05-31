@@ -51,7 +51,12 @@ struct IndexedEntry {
 /// v7: `populate` resolves each node's bucket from the authoritative BY_BUCKET
 /// index instead of envelope-parse inference (which missed most docs, leaving
 /// the Tantivy index nearly empty). Bump forces stale v6 indexes to rebuild.
-pub const INDEX_FORMAT_VERSION: u32 = 7;
+///
+/// v8: `populate` no longer SKIPS nodes whose bucket can't be resolved — it
+/// indexes every doc/entity/file (best-effort bucket) so the full corpus is
+/// searchable; `Accessible` scope no longer drops on bucket inference. v7
+/// could still leave the index empty when docs weren't in BY_BUCKET.
+pub const INDEX_FORMAT_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize)]
 struct IndexSnapshot {
