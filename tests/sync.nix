@@ -1,27 +1,32 @@
 # NixOS integration test for memvault cluster sync.
 #
 # Two nodes (a, b) form one cluster, and each enrols its own agent so the
-# write/read paths can stay on the HTTP API while the daemons keep running:
-#
-#   1. node_a runs `memctl genesis`, enrols a writer agent, and mints a
-#      node-join token for node_b plus a reader-agent token
-#   2. node_b runs `memctl cluster-join` and enrols the reader agent
-#   3. both daemons start
-#   4. node_a's writer agent imports a markdown doc via `memctl --url
-#      http://localhost:8401 import-docs` (HTTP path → goes through the
-#      running daemon — no redb file-lock contention)
-#   5. libp2p mDNS + bitswap + gossipsub replicate blocks to node_b
-#   6. node_b's reader agent polls `memctl --url ... export` until the
-#      doc body appears in the exported tree
+# write/read paths can stay on the HTTP API while the daemons keep running.
 #
 # Build / run with:
 #   nix build .#checks.x86_64-linux.sync -L
 { pkgs, ... }:
 
 let
+  # A rust toolchain that knows about wasm32 — memvault-extract's build.rs
+  # nests a `cargo build --target wasm32-unknown-unknown` for the guest
+  # crate, so nixpkgs' default rustc (no wasm std) isn't enough.
+  toolchainWasm = pkgs.rust-bin.stable.latest.default.override {
+    targets = [ "wasm32-unknown-unknown" ];
+  };
+
+  rustPlatformWasm = pkgs.makeRustPlatform {
+    cargo = toolchainWasm;
+    rustc = toolchainWasm;
+  };
+
   # API-only memctl build — skips the dx fullstack/WASM client and just
   # compiles the native daemon (memvault-web/server, axum, dioxus SSR).
-  memctl-test = pkgs.rustPlatform.buildRustPackage {
+  # memvault-web/build.rs shells out to `npm run tailwind:build`, so
+  # nodejs + tailwindcss must be on PATH; memvault-extract/build.rs
+  # nests a wasm32 cargo invocation, so the wasm target must be in the
+  # toolchain.
+  memctl-test = rustPlatformWasm.buildRustPackage {
     pname = "memctl-test";
     version = "0.1.0";
     src = ./..;
@@ -31,8 +36,13 @@ let
     };
     cargoBuildFlags = [ "-p" "memctl" ];
     doCheck = false;
-    nativeBuildInputs = [ pkgs.pkg-config ];
+    nativeBuildInputs = [
+      pkgs.pkg-config
+      pkgs.nodejs
+      pkgs.tailwindcss_3
+    ];
     buildInputs = [ pkgs.openssl ];
+
     meta.mainProgram = "memctl";
   };
 
@@ -40,7 +50,6 @@ let
     environment.systemPackages = [
       memctl-test
       pkgs.jq
-      pkgs.gnugrep
     ];
     # Allow libp2p TCP + mDNS between the two test machines.
     networking.firewall.enable = false;
@@ -134,16 +143,12 @@ pkgs.testers.nixosTest {
         "--identity-dir /var/lib/memvault/agents/writer "
         "import-docs --visibility public /tmp/sync-test.md 2>&1"
     )
-    # import-docs prints `  <path> -> <node_id>` per file
     m = re.search(r"-> (\S+)", import_out)
     assert m, f"could not parse imported doc id from:\n{import_out}"
     node_id = m.group(1)
     node_a.log(f"Doc imported with id={node_id}")
 
     # ── 5. Poll until node_b's reader agent can export the doc ──────
-    # `memctl export` over HTTP pulls everything the reader can see; we
-    # grep the exported tree for the original body to confirm the block
-    # made it across via libp2p (bitswap + gossipsub head announcements).
     synced = False
     for attempt in range(180):
         node_b.execute("rm -rf /tmp/export && mkdir -p /tmp/export")

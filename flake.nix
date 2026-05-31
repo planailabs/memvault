@@ -2,6 +2,9 @@
   description = "memvault — local-first, peer-to-peer knowledge base";
 
   inputs = {
+    # Include git submodules (e.g. plan-ai-design) in the flake source.
+    self.submodules = true;
+
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
