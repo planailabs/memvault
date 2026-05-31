@@ -1759,3 +1759,29 @@ async fn synced_block_becomes_searchable() {
     );
     assert_eq!(hits[0].doc_id, doc_id, "search must return the synced doc");
 }
+
+/// With deferred (batched) index commits enabled, a live write isn't committed
+/// inline — but the read path (`search` calls `flush_index`) still lands it, so
+/// the doc is searchable. Guards the async-commit mode used by long-running
+/// hosts (daemon / web server) via `set_defer_index_commits`.
+#[tokio::test]
+async fn deferred_commit_is_searchable_after_read() {
+    let (_dir, client) = make_client();
+    client.set_defer_index_commits(true);
+
+    let doc_id = DocId::random();
+    let mut fm = BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("Deferred"));
+    let doc = Document::new(doc_id.clone(), "holographic interferometry".to_string(), fm);
+    client
+        .put_doc(doc, vec![], Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    // The deferred write is flushed by the read path.
+    let hits = client.search("holographic", 10).await.unwrap();
+    assert!(
+        hits.iter().any(|h| h.doc_id == doc_id),
+        "deferred write must be searchable after a read flushes it"
+    );
+}

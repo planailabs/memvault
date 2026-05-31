@@ -410,6 +410,15 @@ pub struct LocalClient {
     /// consistent with the authoritative blockstore. `Arc` so the notifier
     /// closure can hold it.
     reindex_pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// When set, live writes (`put_doc`/`add_entity`/`upload_file`) defer their
+    /// Tantivy commit (mark dirty) instead of committing inline — batching
+    /// write bursts into fewer commits. A periodic flusher (`start_index_flusher`)
+    /// plus the read-path `flush_index` land the commit. Long-running hosts
+    /// (daemon, web server) enable it and run a flusher; short-lived CLI
+    /// invocations leave it off so a write-then-exit process commits before it
+    /// dies (otherwise the deferred write would be lost, since `load_or_rebuild`
+    /// skips a non-empty index on the next start).
+    defer_index_commits: std::sync::atomic::AtomicBool,
 }
 
 impl LocalClient {
@@ -517,6 +526,7 @@ impl LocalClient {
             start_time: std::time::Instant::now(),
             index_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reindex_pending: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            defer_index_commits: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Auto-bind any unbound buckets to the cluster (handles the case where
@@ -2800,6 +2810,45 @@ impl LocalClient {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
+    /// Enable/disable deferred (batched) index commits. See the
+    /// `defer_index_commits` field. Long-running hosts enable this and run
+    /// [`Self::start_index_flusher`]; short-lived CLI invocations leave it off.
+    pub fn set_defer_index_commits(&self, defer: bool) {
+        self.defer_index_commits
+            .store(defer, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Land a just-written index op: commit it now, or mark the index dirty for
+    /// the next flush, per [`Self::set_defer_index_commits`].
+    fn commit_or_defer(&self, idx: &mut TantivyIndex) {
+        if self
+            .defer_index_commits
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.mark_index_dirty();
+        } else if let Err(e) = idx.commit() {
+            tracing::warn!("tantivy commit after index write failed: {e}");
+        }
+    }
+
+    /// Spawn a background task that commits deferred index writes about once a
+    /// second. Bounds how long a deferred live write — or a synced/seeded block
+    /// queued by the index notifier — stays uncommitted, so a long-running host
+    /// makes recent writes durable + searchable without waiting for the next
+    /// index read. Dropping the returned handle does **not** stop the task
+    /// (tokio detaches it); call on a tokio runtime.
+    pub fn start_index_flusher(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let client = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                client.flush_index().await;
+            }
+        })
+    }
+
     /// Commit any pending index write, and full-text index any blocks that
     /// entered the store without inline indexing (RBSR sync / external
     /// seeding). Called before every index read so read-your-writes holds and
@@ -4258,6 +4307,28 @@ impl LocalClient {
 
 }
 
+impl Drop for LocalClient {
+    fn drop(&mut self) {
+        // Commit-on-close backstop: land any deferred index write on a clean
+        // teardown so it's durable + searchable next start without waiting for
+        // the periodic flusher. Best-effort and synchronous: `try_write` never
+        // blocks (Drop may run on an async runtime thread), and Drop is skipped
+        // on hard kills (SIGKILL / process::exit), so `start_index_flusher`
+        // remains the real durability bound. Commits the already-applied
+        // writer; it does not drain the reindex queue (the flusher does, ~1s).
+        if self
+            .index_dirty
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            if let Ok(mut idx) = self.index.try_write() {
+                if let Err(e) = idx.commit() {
+                    tracing::warn!("tantivy commit on drop failed: {e}");
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl MemvaultClient for LocalClient {
     async fn put_doc(
@@ -4301,12 +4372,8 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 memvault_core::wall_ns(),
             );
-            // Commit immediately so the write is durable and searchable —
-            // store-based navigation never flushes the index, so a deferred
-            // commit would be lost on restart and the rebuild would skip it.
-            if let Err(e) = idx.commit() {
-                tracing::warn!("tantivy commit after index write failed: {e}");
-            }
+            // Commit now, or defer to the batched flusher (long-running hosts).
+            self.commit_or_defer(&mut idx);
         }
         let doc_node_id = format!("doc:{}", hex::encode(doc.id.0));
         self.sync_node_created(&doc_node_id, &tags).await;
@@ -4550,9 +4617,8 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 meta.wall_ns,
             );
-            if let Err(e) = idx.commit() {
-                tracing::warn!("tantivy commit after index write failed: {e}");
-            }
+            // Commit now, or defer to the batched flusher (long-running hosts).
+            self.commit_or_defer(&mut idx);
         }
         let file_node_id = format!("file:{}", hex::encode(&manifest_cid_bytes));
         self.sync_node_created(&file_node_id, &tags).await;
@@ -4707,12 +4773,8 @@ impl MemvaultClient for LocalClient {
                 bucket_hex.as_deref(),
                 memvault_core::wall_ns(),
             );
-            // Commit immediately so the write is durable and searchable —
-            // store-based navigation never flushes the index, so a deferred
-            // commit would be lost on restart and the rebuild would skip it.
-            if let Err(e) = idx.commit() {
-                tracing::warn!("tantivy commit after index write failed: {e}");
-            }
+            // Commit now, or defer to the batched flusher (long-running hosts).
+            self.commit_or_defer(&mut idx);
         }
         let entity_node_id = format!("entity:{}", hex::encode(entity_id.0));
         self.sync_node_created(&entity_node_id, &tags).await;

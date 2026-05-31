@@ -228,3 +228,48 @@ pub fn bootstrap_cluster_trust(client: &Arc<LocalClient>) -> Result<ClusterTrust
         trust_state,
     })
 }
+
+/// Background tasks + trust handles owned by a long-running memvault host.
+/// Returned by [`start_host_services`]. Hold it for the host's lifetime: the
+/// `JoinHandle`s keep the sigchain watcher and index flusher running (tokio
+/// detaches a task when its handle drops, so dropping these does not stop the
+/// tasks — but holding them documents ownership and allows an explicit abort).
+pub struct HostServices {
+    /// Cluster trust bootstrap result (`admin_pubkey` + live trust state),
+    /// used to build the web `AppState`.
+    pub trust: ClusterTrustBootstrap,
+    /// Sigchain watcher task — applies attestations/revocations arriving via
+    /// local writes and RBSR sync.
+    pub sigchain_watcher: tokio::task::JoinHandle<()>,
+    /// Periodic Tantivy index flusher — commits deferred (batched) index
+    /// writes within ~1s so a long-running host stays durable + searchable.
+    pub index_flusher: tokio::task::JoinHandle<()>,
+}
+
+/// Wire the services every long-running memvault host needs (the daemon, the
+/// `memvault-web` server, and `memctl daemon` all share this): bootstrap
+/// cluster trust + install the store→index notifier, spawn the sigchain
+/// watcher, enable deferred (batched) Tantivy commits, and start the periodic
+/// index flusher.
+///
+/// Must be called from within a tokio runtime (it spawns tasks), after the
+/// node signing key is installed (a precondition of [`bootstrap_cluster_trust`]).
+/// Short-lived CLI invocations do **not** call this — they keep inline commits
+/// so a write-then-exit process is durable without a flusher.
+pub fn start_host_services(client: &Arc<LocalClient>) -> Result<HostServices> {
+    let trust = bootstrap_cluster_trust(client)?;
+    let sigchain_watcher = sigchain::spawn_sigchain_watcher(
+        Arc::clone(client),
+        trust.admin_pubkey,
+        trust.trust_state.clone(),
+    );
+    // Long-running host: batch Tantivy commits (defer + periodic flush) instead
+    // of committing per write; the flusher and read/drop paths land the tail.
+    client.set_defer_index_commits(true);
+    let index_flusher = client.start_index_flusher();
+    Ok(HostServices {
+        trust,
+        sigchain_watcher,
+        index_flusher,
+    })
+}

@@ -2045,16 +2045,15 @@ mod native {
                         .map_err(|e| anyhow::anyhow!("node signing key: {e}"))?;
                     client.set_node_signing_key(node_sk);
                     let local_client = std::sync::Arc::new(client);
-                    let trust = memvault_api::bootstrap::bootstrap_cluster_trust(&local_client)
-                        .map_err(|e| anyhow::anyhow!("cluster trust bootstrap: {e}"))?;
 
-                    // Inside `pub async fn run` driven by the caller's
-                    // tokio runtime — spawn the watcher onto it.
-                    let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
-                        std::sync::Arc::clone(&local_client),
-                        trust.admin_pubkey,
-                        trust.trust_state.clone(),
-                    );
+                    // Inside `pub async fn run` driven by the caller's tokio
+                    // runtime — start the shared host services (trust
+                    // bootstrap, sigchain watcher, batched index commits +
+                    // flusher) on it.
+                    let trust = memvault_api::bootstrap::start_host_services(&local_client)
+                        .map_err(|e| anyhow::anyhow!("memvault host services: {e}"))?
+                        .trust;
+
                     memvault_web::init_ui_agent(&local_client, &data_dir)
                         .map_err(|e| anyhow::anyhow!("init ui agent: {e}"))?;
 

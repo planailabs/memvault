@@ -38,23 +38,18 @@ fn main() {
                             return Ok(router);
                         }
                     }
-                    let trust = match memvault_api::bootstrap::bootstrap_cluster_trust(
+                    // Inside dioxus::serve's async closure, a tokio runtime is
+                    // active — start the shared host services (trust bootstrap,
+                    // sigchain watcher, batched index commits + flusher) on it.
+                    let trust = match memvault_api::bootstrap::start_host_services(
                         &local_client,
                     ) {
-                        Ok(t) => t,
+                        Ok(services) => services.trust,
                         Err(e) => {
-                            eprintln!("memvault: API routes NOT mounted (trust bootstrap: {e})");
+                            eprintln!("memvault: API routes NOT mounted (host services: {e})");
                             return Ok(router);
                         }
                     };
-
-                    // Inside dioxus::serve's async closure, a tokio runtime
-                    // is active — spawn the watcher onto it.
-                    let _watcher = memvault_api::sigchain::spawn_sigchain_watcher(
-                        Arc::clone(&local_client),
-                        trust.admin_pubkey,
-                        trust.trust_state.clone(),
-                    );
 
                     if let Err(e) = memvault_web::init_ui_agent(&local_client, &data_dir) {
                         eprintln!("memvault: API routes NOT mounted (ui agent: {e})");
