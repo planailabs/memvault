@@ -1,0 +1,278 @@
+diff --git a/src/build/assets.rs b/src/build/assets.rs
+index 6d305f0..f8c6c90 100644
+--- a/src/build/assets.rs
++++ b/src/build/assets.rs
+@@ -844,22 +844,45 @@ pub(crate) async fn extract_symbols_from_file(path: impl AsRef<Path>) -> Result<
+     file.sync_all()
+         .context("Failed to sync file after writing assets")?;
+ 
+-    // If the file is a macos binary, we need to re-sign the modified binary
++    // If the file is a macos binary, we need to re-sign the modified binary.
++    // Try Apple's native codesign first, then fall back to rcodesign for
++    // cross-compilation from non-macOS hosts.
+     if obj_format == object::BinaryFormat::MachO && !assets.is_empty() {
+-        // Spawn the codesign command to re-sign the binary
+-        let output = tokio::process::Command::new("codesign")
++        match tokio::process::Command::new("codesign")
+             .arg("--force")
+             .arg("--sign")
+-            .arg("-") // Sign with an empty identity
++            .arg("-")
+             .arg(path)
+             .output()
+             .await
+-            .context("Failed to run codesign - is `codesign` in your path?")?;
+-        if !output.status.success() {
+-            bail!(
+-                "Failed to re-sign the binary with codesign after finalizing the assets: {}",
+-                String::from_utf8_lossy(&output.stderr)
+-            );
++        {
++            Ok(output) if output.status.success() => {}
++            Ok(output) => {
++                bail!(
++                    "Failed to re-sign the binary with codesign after finalizing the assets: {}",
++                    String::from_utf8_lossy(&output.stderr)
++                );
++            }
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
++                // codesign not available — try rcodesign (cross-platform ad-hoc signing)
++                let output = tokio::process::Command::new("rcodesign")
++                    .arg("sign")
++                    .arg(path)
++                    .output()
++                    .await
++                    .context("Neither `codesign` nor `rcodesign` found — cannot ad-hoc re-sign MachO binary. \
++                              Install `rcodesign` (apple-codesign) for cross-platform signing.")?;
++                if !output.status.success() {
++                    bail!(
++                        "Failed to re-sign the binary with rcodesign after finalizing the assets: {}",
++                        String::from_utf8_lossy(&output.stderr)
++                    );
++                }
++            }
++            Err(e) => {
++                return Err(anyhow::anyhow!(e)
++                    .context("Failed to run codesign - is `codesign` in your path?"));
++            }
+         }
+     }
+ 
+diff --git a/src/build/request.rs b/src/build/request.rs
+index 652ffaa..68abe31 100644
+--- a/src/build/request.rs
++++ b/src/build/request.rs
+@@ -272,6 +272,10 @@ pub(crate) struct BuildRequest {
+     pub(crate) session_cache_dir: PathBuf,
+     pub(crate) raw_json_diagnostics: bool,
+     pub(crate) windows_subsystem: Option<String>,
++    /// Embed public assets into the server binary via rust-embed
++    pub(crate) embed_assets: bool,
++    /// Path to the public directory to embed (set from client's root_dir)
++    pub(crate) embed_dir: Option<PathBuf>,
+ }
+ 
+ /// dx can produce different "modes" of a build. A "regular" build is a "base" build. The Fat and Thin
+@@ -491,6 +495,7 @@ impl BuildRequest {
+         let mut features = args.features.clone();
+         let no_default_features = args.no_default_features;
+         let all_features = args.all_features;
++        let skip_platform_features = args.skip_platform_features;
+         let mut triple = args.target.clone();
+         let mut renderer = args.renderer;
+         let mut bundle_format = args.bundle;
+@@ -584,7 +589,7 @@ impl BuildRequest {
+             Platform::Unknown => {}
+ 
+             Platform::Web => {
+-                if main_package.features.contains_key("web") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("web") && renderer.is_none() {
+                     features.push("web".into());
+                 }
+                 renderer = renderer.or(Some(Renderer::Web));
+@@ -592,7 +597,7 @@ impl BuildRequest {
+                 triple = triple.or(Some("wasm32-unknown-unknown".parse()?));
+             }
+             Platform::MacOS => {
+-                if main_package.features.contains_key("desktop") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("desktop") && renderer.is_none() {
+                     features.push("desktop".into());
+                 }
+                 renderer = renderer.or(Some(Renderer::Webview));
+@@ -600,7 +605,7 @@ impl BuildRequest {
+                 triple = triple.or(Some(Triple::host()));
+             }
+             Platform::Windows => {
+-                if main_package.features.contains_key("desktop") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("desktop") && renderer.is_none() {
+                     features.push("desktop".into());
+                 }
+                 renderer = renderer.or(Some(Renderer::Webview));
+@@ -608,7 +613,7 @@ impl BuildRequest {
+                 triple = triple.or(Some(Triple::host()));
+             }
+             Platform::Linux => {
+-                if main_package.features.contains_key("desktop") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("desktop") && renderer.is_none() {
+                     features.push("desktop".into());
+                 }
+                 renderer = renderer.or(Some(Renderer::Webview));
+@@ -616,7 +621,7 @@ impl BuildRequest {
+                 triple = triple.or(Some(Triple::host()));
+             }
+             Platform::Ios => {
+-                if main_package.features.contains_key("mobile") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("mobile") && renderer.is_none() {
+                     features.push("mobile".into());
+                 }
+                 renderer = renderer.or(Some(Renderer::Webview));
+@@ -635,7 +640,7 @@ impl BuildRequest {
+                 }
+             }
+             Platform::Android => {
+-                if main_package.features.contains_key("mobile") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("mobile") && renderer.is_none() {
+                     features.push("mobile".into());
+                 }
+ 
+@@ -664,7 +669,7 @@ impl BuildRequest {
+                 }
+             }
+             Platform::Server => {
+-                if main_package.features.contains_key("server") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("server") && renderer.is_none() {
+                     features.push("server".into());
+                 }
+                 renderer = renderer.or(Some(Renderer::Server));
+@@ -672,7 +677,7 @@ impl BuildRequest {
+                 triple = triple.or(Some(Triple::host()));
+             }
+             Platform::Liveview => {
+-                if main_package.features.contains_key("liveview") && renderer.is_none() {
++                if !skip_platform_features && main_package.features.contains_key("liveview") && renderer.is_none() {
+                     features.push("liveview".into());
+                 }
+                 renderer = renderer.or(Some(Renderer::Liveview));
+@@ -704,12 +709,14 @@ impl BuildRequest {
+         };
+ 
+         // Add any features required to turn on the client
+-        if let Some(renderer) = renderer {
+-            if let Some(feature) =
+-                Self::feature_for_platform_and_renderer(main_package, &triple, renderer)
+-            {
+-                features.push(feature);
+-                features.dedup();
++        if !skip_platform_features {
++            if let Some(renderer) = renderer {
++                if let Some(feature) =
++                    Self::feature_for_platform_and_renderer(main_package, &triple, renderer)
++                {
++                    features.push(feature);
++                    features.dedup();
++                }
+             }
+         }
+ 
+@@ -907,6 +914,8 @@ impl BuildRequest {
+             apple_team_id: args.apple_team_id.clone(),
+             raw_json_diagnostics: args.raw_json_diagnostics,
+             windows_subsystem: args.windows_subsystem.clone(),
++            embed_assets: false,
++            embed_dir: None,
+         })
+     }
+ 
+@@ -1896,6 +1905,11 @@ impl BuildRequest {
+             ));
+         }
+ 
++        // Set DIOXUS_EMBED_DIR so rust-embed picks up the public assets at compile time
++        if let Some(ref embed_dir) = self.embed_dir {
++            env_vars.push(("DIOXUS_EMBED_DIR".into(), embed_dir.as_os_str().into()));
++        }
++
+         // Assemble the rustflags by peering into the `.cargo/config.toml` file
+         let rust_flags = self.rustflags.clone();
+ 
+diff --git a/src/cli/build.rs b/src/cli/build.rs
+index 1b7a5b2..0497e09 100644
+--- a/src/cli/build.rs
++++ b/src/cli/build.rs
+@@ -29,6 +29,13 @@ pub struct BuildArgs {
+     #[clap(long)]
+     pub(crate) fat_binary: bool,
+ 
++    /// Embed all public assets into the server binary using rust-embed [default: false]
++    ///
++    /// Produces a single self-contained server executable with no need for a separate public/ directory.
++    /// Only applies to fullstack builds. Forces sequential build (client must build first).
++    #[clap(long)]
++    pub(crate) embed: bool,
++
+     /// This flag only applies to fullstack builds. By default fullstack builds will run the server
+     /// and client builds in parallel. This flag will force the build to run the server build first, then the client build. [default: false]
+     ///
+@@ -47,8 +54,10 @@ pub struct BuildArgs {
+ 
+ impl BuildArgs {
+     pub(crate) fn force_sequential_build(&self) -> bool {
+-        self.force_sequential
+-            .unwrap_or_else(|| std::env::var("CI").is_ok())
++        self.embed
++            || self
++                .force_sequential
++                .unwrap_or_else(|| std::env::var("CI").is_ok())
+     }
+ }
+ 
+@@ -57,6 +66,7 @@ impl Anonymized for BuildArgs {
+         json! {{
+             "fullstack": self.fullstack,
+             "ssg": self.ssg,
++            "embed": self.embed,
+             "build_arguments": self.build_arguments.anonymized(),
+         }}
+     }
+@@ -143,6 +153,22 @@ impl CommandWithPlatformOverrides<BuildArgs> {
+             }
+         }
+ 
++        // Validate and wire up --embed: requires fullstack, sets embed_dir on server request
++        if self.shared.embed {
++            match server.as_mut() {
++                Some(server_req) => {
++                    server_req.embed_assets = true;
++                    server_req.embed_dir = Some(client.root_dir());
++                    server_req.features.push("embed".into());
++                }
++                None => {
++                    anyhow::bail!(
++                        "--embed requires a fullstack build (use --fullstack or enable the fullstack feature)"
++                    );
++                }
++            }
++        }
++
+         Ok(BuildTargets { client, server })
+     }
+ 
+diff --git a/src/cli/target.rs b/src/cli/target.rs
+index ea77d89..0ababd4 100644
+--- a/src/cli/target.rs
++++ b/src/cli/target.rs
+@@ -57,6 +57,14 @@ pub(crate) struct TargetArgs {
+     #[clap(long, help_heading = HELP_HEADING)]
+     pub(crate) no_default_features: bool,
+ 
++    /// Don't auto-add platform renderer features (e.g. "web", "desktop").
++    ///
++    /// By default, dx adds the platform-matching feature to the build. Use this
++    /// flag when your crate has multiple dioxus sub-apps and you want to control
++    /// features explicitly via --features.
++    #[clap(long, help_heading = HELP_HEADING)]
++    pub(crate) skip_platform_features: bool,
++
+     /// Include all features in the build
+     #[clap(long, help_heading = HELP_HEADING)]
+     pub(crate) all_features: bool,

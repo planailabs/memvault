@@ -1,0 +1,67 @@
+stages:
+  - build
+  - test
+  - deploy
+
+before_script:
+  # The custom executor mounts /cache for Cargo, but `ln -s /cache/cargo
+  # ~/.cargo` creates a broken symlink when the target directory has not been
+  # initialized yet. Cargo may tolerate a different CARGO_HOME during early
+  # shell setup while `dx build` later falls back to $HOME/.cargo and fails with
+  # "File exists" while trying to create the broken symlink path. Initialize the
+  # target first and export CARGO_HOME so every nested tool uses the same cache.
+  - mkdir -p /cache/cargo
+  - rm -rf ~/.cargo
+  - ln -s /cache/cargo ~/.cargo
+  - export CARGO_HOME="$HOME/.cargo"
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+
+build:
+  stage: build
+  tags:
+    - nix-image
+  script:
+    - bash prebuild.sh
+  timeout: 3h
+  resource_group: build-cache
+
+test:
+  stage: test
+  tags:
+    - nix-image
+  script:
+    - nix develop -c bash build-memvault.sh
+    - nix develop -c cargo test --workspace --locked
+  timeout: 3h
+
+# Standalone memctl binaries (x86_64-linux + aarch64-darwin) as downloadable
+# CI artifacts. The multi-target dx build lives in xzar.sh.
+artifact:memctl:
+  stage: test
+  tags:
+    - nix-image
+  script:
+    - nix develop -c bash xzar.sh
+  artifacts:
+    name: "memctl-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - artifacts/
+    expire_in: 1 month
+  timeout: 3h
+
+deploy:
+  stage: deploy
+  tags:
+    - nix-image
+  only:
+    - trunk
+  script:
+    # VM-backed flake checks are resource-heavy; run them serially so one
+    # test container cannot starve another.
+    - nix flake check -L --max-jobs 1
+    - ./docker-push.sh
+  timeout: 3h
+  environment: production
+  resource_group: production
