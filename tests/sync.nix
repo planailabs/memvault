@@ -107,11 +107,16 @@ pkgs.testers.nixosTest {
     node_a.succeed(f"printf '%s' '{doc_text}' > /tmp/sync-test.md")
 
     node_a.log("Importing doc as writer agent over HTTP")
-    import_out = node_a.succeed(
+    import_rc, import_out = node_a.execute(
         "memctl --url http://localhost:8401 "
         "--identity-dir /var/lib/memvault/agents/writer "
         "import-docs --visibility public /tmp/sync-test.md 2>&1"
     )
+    if import_rc != 0:
+        node_a.log(f"import-docs failed (rc={import_rc}):\n{import_out}")
+        node_a.log("--- node_a daemon log (tail) ---")
+        node_a.log(node_a.succeed("tail -200 /tmp/daemon.log"))
+        raise Exception(f"import-docs exited {import_rc}")
     m = re.search(r"-> (\S+)", import_out)
     assert m, f"could not parse imported doc id from:\n{import_out}"
     node_id = m.group(1)
