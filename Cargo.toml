@@ -1,5 +1,9 @@
 [workspace]
 members = ["crates/*"]
+# plan-ai-design is a submodule checked out here and is its own workspace root.
+# Exclude it so memvault's workspace doesn't try to absorb it (which would error
+# with "multiple workspace roots"); memvault-web depends on it by path instead.
+exclude = ["plan-ai-design"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -16,10 +20,3 @@ libp2p = { version = "0.56", default-features = false, features = ["tokio", "noi
 dioxus = { git = "https://github.com/mkg20001/dioxus.git", branch = "feat/embed" }
 dioxus-server = { git = "https://github.com/mkg20001/dioxus.git", branch = "feat/embed" }
 dioxus-i18n = { git = "https://github.com/mkg20001/dioxus-i18n.git", branch = "feat/dioxus-0.8" }
-
-# memvault-web depends on plan-ai-design by git URL (see its Cargo.toml) so the
-# same manifest works in both layouts. Standalone, redirect that URL to the
-# nested submodule checkout; in the parent workspace the parent redirects it to
-# the top-level plan-ai-design instead.
-[patch."ssh://git@git.plan.ai/plan-ai/design"]
-plan-ai-design = { path = "plan-ai-design" }
