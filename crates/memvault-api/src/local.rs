@@ -4093,9 +4093,19 @@ impl LocalClient {
         let bucket_hex = hex::encode(bucket_id.0);
         let meta = memvault_store::EnvelopeMeta {
             author: self.effective_author(),
+            // `("grant", <bucket_hex>)` is what `list_bucket_grants`
+            // queries by; `("kind", "grant")` is the kind index entry.
+            // `("sigchain", "grant")` is what makes the
+            // `install_sigchain_notifier` callback fire — without it the
+            // block lands in the local store but never triggers a
+            // gossipsub head announcement, so peers only learn about
+            // the grant on the next RBSR cycle (or never, if no other
+            // sigchain block is written before the RBSR partner pool
+            // turns over). Sister sigchain helpers tag the same way.
             tags: vec![
                 ("grant".to_string(), bucket_hex),
                 ("kind".to_string(), "grant".to_string()),
+                ("sigchain".to_string(), "grant".to_string()),
             ],
             wall_ns: now_ns,
             causal: vec![],
