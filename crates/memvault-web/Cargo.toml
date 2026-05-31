@@ -15,7 +15,7 @@ required-features = ["webui"]
 [features]
 default = ["web", "server"]
 web = ["webui", "dioxus/web", "dep:getrandom"]
-webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid", "dep:gloo-timers"]
+webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:serde-wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:pulldown-cmark", "dep:dioxus-i18n", "dep:unic-langid", "dep:gloo-timers"]
 embed = ["dioxus?/embed"]
 server = [
     "webui", "dioxus/server",
@@ -43,7 +43,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # UI dependencies (behind webui feature)
 dioxus = { version = "0.8.0-alpha.0", features = ["fullstack", "router"], optional = true }
 wasm-bindgen = { version = "=0.2.121", optional = true }
-web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "Event", "KeyboardEvent", "Window", "Location"], optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "Event", "KeyboardEvent", "Window", "Location", "Request", "RequestInit", "RequestCredentials", "Response", "Headers"], optional = true }
 js-sys = { version = "0.3", optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 pulldown-cmark = { version = "0.12", optional = true }

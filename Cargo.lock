@@ -5551,6 +5551,7 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.8.6",
  "serde",
+ "serde-wasm-bindgen",
  "serde_ipld_dagcbor",
  "serde_json",
  "thiserror 2.0.18",
@@ -5562,6 +5563,7 @@ dependencies = [
  "tracing",
  "unic-langid",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

@@ -91,6 +91,7 @@ pub async fn get_session_token(
         "token": token,
         "ttl_secs": SESSION_TTL_SECS,
         "api_base": "/api/v1",
+        "agent_id": identity.agent_id.0,
     }));
     Ok((jar, body))
 }

@@ -6,6 +6,7 @@ use dioxus_i18n::t;
 use super::cmd_k::{CommandPalette, PaletteOpen};
 use super::events::use_event_bus_provider;
 use super::navbar::Sidebar;
+use super::session::use_session_provider;
 use super::topbar::{
     ActiveBucket, ActiveBucketSignal, ActiveView, ActiveViewSignal, ShowRetracted,
     ShowRetractedSignal, Topbar, TopbarMeta,
@@ -22,6 +23,7 @@ pub fn Layout() -> Element {
         Signal::new(super::filters::FilterEpoch::default())
     });
     let _event_bus = use_event_bus_provider();
+    let _session = use_session_provider();
 
     rsx! {
         CommandPalette {}

@@ -197,6 +197,7 @@ pub fn Topbar() -> Element {
                     }
                 }
 
+                SessionBadge {}
                 LanguagePicker {}
                 ThemeToggle {}
 
@@ -230,4 +231,27 @@ async fn get_view_tags(name: String) -> Result<Option<Vec<(String, String)>>, Se
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(view.map(|v| v.tags))
+}
+
+/// "Logged in as <agent_id>" chip. Reads from the SessionSignal that
+/// Layout installs via use_session_provider().
+#[component]
+fn SessionBadge() -> Element {
+    use super::session::{SessionState, use_session};
+    let session = use_session();
+    let state = session.read().clone();
+
+    let (label, tone): (String, &'static str) = match state {
+        SessionState::Loading => ("…".to_string(), "text-fg-faint"),
+        SessionState::Active(info) => (info.agent_id, "text-fg-muted"),
+        SessionState::Failed(_) => ("session unavailable".to_string(), "text-warn"),
+    };
+
+    rsx! {
+        span {
+            class: "text-xs whitespace-nowrap px-2 py-1 rounded-md bg-surface-2 border border-line {tone}",
+            title: "Active session identity",
+            "{label}"
+        }
+    }
 }
