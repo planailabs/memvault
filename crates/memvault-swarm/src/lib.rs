@@ -106,7 +106,27 @@ pub async fn run_sync_loop(
     config: SyncConfig,
     mut join_config: JoinConfig,
 ) {
+    // Currently-connected peers (added on ConnectionEstablished, dropped
+    // on ConnectionClosed). Misnamed historically — it's not "we've
+    // synced with them", only "we're talking right now". `initial_sync_complete`
+    // below tracks the actual exchange.
     let mut synced_peers: HashSet<libp2p::PeerId> = HashSet::new();
+    // Per-peer initial-sync state. Populated on the first successful
+    // `BlockResponse` from a peer (proxy for "we exchanged data with
+    // them and didn't error out"). Reactive resync triggers off the
+    // *absence* of an entry here: if we see gossip / a request from a
+    // connected peer we haven't completed initial sync with, kick off
+    // another RBSR. Closes the window where the initial RBSR raced
+    // with a concurrent mint on either side.
+    let mut initial_sync_complete: HashSet<libp2p::PeerId> = HashSet::new();
+    // Peers whose last RBSR / block-exchange round trip explicitly
+    // failed (timeout, codec error, attestation refusal). Drained on
+    // the next successful exchange. On every local head_rx tick
+    // (i.e. after we mint a new block), we re-issue RBSR to everyone
+    // in (failed_sync_peers ∪ not-yet-initial-sync-complete) ∩ synced_peers
+    // so the freshly-minted block doesn't depend on the 5-minute periodic
+    // resync to reach those peers.
+    let mut failed_sync_peers: HashSet<libp2p::PeerId> = HashSet::new();
     // Track peer → cluster_id for visibility enforcement.
     let mut peer_clusters: HashMap<libp2p::PeerId, Vec<u8>> = HashMap::new();
     // Periodic resync timer to heal partial sync.
@@ -172,6 +192,8 @@ pub async fn run_sync_loop(
                     Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
                         tracing::info!(%peer_id, "peer disconnected");
                         synced_peers.remove(&peer_id);
+                        initial_sync_complete.remove(&peer_id);
+                        failed_sync_peers.remove(&peer_id);
                     }
 
                     // ── mDNS discovery ──
@@ -222,6 +244,19 @@ pub async fn run_sync_loop(
                         )
                     )) => {
                         handle_gossip_message(swarm, &store, propagation_source, &message);
+                        // Reactive RBSR: gossip from a connected peer
+                        // we haven't completed initial sync with means
+                        // the first RBSR either raced a concurrent mint
+                        // or didn't run at all. Re-issue now.
+                        if synced_peers.contains(&propagation_source)
+                            && !initial_sync_complete.contains(&propagation_source)
+                        {
+                            tracing::debug!(
+                                peer = %propagation_source,
+                                "gossip from unsynced peer — re-RBSRing"
+                            );
+                            request_remote_heads(swarm, &store, &config, propagation_source);
+                        }
                     }
 
                     // ── Block exchange: serve requests ──
@@ -237,6 +272,18 @@ pub async fn run_sync_loop(
                         )
                     )) => {
                         serve_block_request(swarm, &store, peer, channel, request, &config.cluster_id, &peer_clusters, &join_config);
+                        // Reactive RBSR (same rationale as the gossip
+                        // arm): activity from this peer means we should
+                        // exchange state with them if we haven't yet.
+                        if synced_peers.contains(&peer)
+                            && !initial_sync_complete.contains(&peer)
+                        {
+                            tracing::debug!(
+                                %peer,
+                                "block request from unsynced peer — re-RBSRing"
+                            );
+                            request_remote_heads(swarm, &store, &config, peer);
+                        }
                     }
 
                     // ── Block exchange: process responses ──
@@ -252,6 +299,16 @@ pub async fn run_sync_loop(
                         )
                     )) => {
                         handle_block_response(swarm, &store, peer, response, &join_config);
+                        // We got a response back — treat that as
+                        // initial-sync-complete with this peer.
+                        // BlockResponse doesn't distinguish RBSR vs
+                        // ad-hoc fetch, but any successful exchange is
+                        // strong enough evidence that we'd hear back
+                        // if a follow-up RBSR were needed.
+                        if synced_peers.contains(&peer) {
+                            initial_sync_complete.insert(peer);
+                            failed_sync_peers.remove(&peer);
+                        }
                     }
 
                     // ── Block exchange: errors ──
@@ -263,6 +320,10 @@ pub async fn run_sync_loop(
                         )
                     )) => {
                         tracing::warn!(%peer, %error, "block exchange outbound failure");
+                        if synced_peers.contains(&peer) {
+                            failed_sync_peers.insert(peer);
+                            initial_sync_complete.remove(&peer);
+                        }
                     }
                     Some(SwarmEvent::Behaviour(
                         StandaloneMemvaultBehaviourEvent::BlockExchange(
@@ -272,6 +333,10 @@ pub async fn run_sync_loop(
                         )
                     )) => {
                         tracing::warn!(%peer, %error, "block exchange inbound failure");
+                        if synced_peers.contains(&peer) {
+                            failed_sync_peers.insert(peer);
+                            initial_sync_complete.remove(&peer);
+                        }
                     }
 
                     // ── /join/1.0 server: incoming JoinRequest ──
@@ -329,6 +394,30 @@ pub async fn run_sync_loop(
                 match head {
                     Some(outbound) => {
                         publish_head(swarm, &config.cluster_id, outbound);
+                        // Post-mint reactive resync: every peer we
+                        // either know we failed with, or never finished
+                        // initial sync with, gets a fresh RBSR triggered
+                        // by *this* local mint. Without this, a peer that
+                        // raced its initial RBSR with our previous mint
+                        // would only learn about the new chain blocks on
+                        // the next 5-minute periodic resync — and the
+                        // chain of "first-RBSR raced minting" can keep
+                        // chaining if the next mint is also concurrent.
+                        let needs_resync: Vec<_> = synced_peers
+                            .iter()
+                            .filter(|p| {
+                                !initial_sync_complete.contains(p)
+                                    || failed_sync_peers.contains(p)
+                            })
+                            .copied()
+                            .collect();
+                        for peer in needs_resync {
+                            tracing::debug!(
+                                %peer,
+                                "post-mint resync of failed/incomplete peer"
+                            );
+                            request_remote_heads(swarm, &store, &config, peer);
+                        }
                     }
                     None => {
                         tracing::debug!("head announcement channel closed");
