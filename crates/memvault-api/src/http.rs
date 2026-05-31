@@ -640,13 +640,26 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        let nodes = resp
-            .as_array()
+        // The /nodes handler returns `{count, nodes: [...]}` (not a bare
+        // array). Fall back to a bare array for any older / alternate
+        // handler shape so this works against both.
+        let nodes_array = resp
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .or_else(|| resp.as_array());
+        let nodes = nodes_array
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| {
                         let node_id = v["node_id"].as_str()?.to_string();
-                        let node_type = v["type"].as_str().unwrap_or("").to_string();
+                        // /nodes handler emits `node_type`; older shape used
+                        // `type`. Accept either.
+                        let node_type = v
+                            .get("node_type")
+                            .and_then(|x| x.as_str())
+                            .or_else(|| v.get("type").and_then(|x| x.as_str()))
+                            .unwrap_or("")
+                            .to_string();
                         let label = v["label"].as_str().unwrap_or("").to_string();
                         let tags: Vec<(String, String)> = v
                             .get("tags")
