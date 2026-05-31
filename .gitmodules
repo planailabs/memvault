@@ -1,0 +1,3 @@
+[submodule "plan-ai-design"]
+	path = plan-ai-design
+	url = ../design
