@@ -123,7 +123,7 @@ pub async fn create_doc(
 ) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
     let vis = parse_visibility_str(req.visibility.as_deref());
 
-    let bucket_id = req.bucket.as_deref().and_then(|h| {
+    let bucket_id = match req.bucket.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
         if bytes.len() != 32 {
             return None;
@@ -131,11 +131,33 @@ pub async fn create_doc(
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
-    });
-
-    if let Some(bid) = &bucket_id {
-        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
-    }
+    }) {
+        Some(bid) => {
+            crate::api::auth::enforce_bucket_action(
+                &auth.claims,
+                &bid,
+                memvault_auth::Action::Write,
+            )?;
+            bid
+        }
+        None => {
+            // Auto-resolve to the caller's agent bucket — mirrors what
+            // memctl's local `put` path does via `resolve_target_bucket`.
+            // The HTTP write path used to 500 with "bucket required" here;
+            // matching the CLI behaviour means well-behaved clients like
+            // `memctl import-docs` (which doesn't thread bucket from the
+            // CLI) "just work".
+            let pubkey_bytes = hex::decode(&auth.claims.sub)
+                .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+            state
+                .client
+                .ensure_agent_bucket_for_pubkey(&pubkey_bytes, &auth.claims.iss)
+                .await
+                .map_err(|e| {
+                    ApiError::internal(format!("ensure agent bucket: {e}"))
+                })?
+        }
+    };
 
     let result = memvault_api::docs::create_doc(
         state.client.as_ref(),
@@ -145,7 +167,7 @@ pub async fn create_doc(
         req.tags.clone(),
         vis,
         req.vfs_path.as_deref(),
-        bucket_id.as_ref(),
+        Some(&bucket_id),
     )
     .await?;
     tracing::info!(doc_id = %result.node_id, "API: doc created");
