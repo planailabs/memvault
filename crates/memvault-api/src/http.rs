@@ -138,6 +138,13 @@ fn map_reqwest(e: reqwest::Error) -> ApiError {
     ApiError::Other(e.to_string())
 }
 
+/// Canonical CID-string path segment for a CID byte slice (falls back to hex
+/// for any non-CID bytes). The server accepts both forms; we emit the
+/// canonical one. See `standards/api-wire-conventions.md` §1b.
+fn cid_path(cid: &[u8]) -> String {
+    memvault_core::cid_string_from_bytes(cid).unwrap_or_else(|_| hex::encode(cid))
+}
+
 /// Decode a hex string into a fixed 32-byte array, if well-formed.
 fn hex32(s: &str) -> Option<[u8; 32]> {
     let bytes = hex::decode(s).ok()?;
@@ -270,7 +277,10 @@ impl MemvaultClient for HttpApiClient {
                 urlencoded(label)
             ));
         }
-        let resp: serde_json::Value = self
+        // `DocSummary` decodes directly (hex id, CID-string cid; see
+        // `standards/`). The old hand-parse decoded `id` as bare hex while the
+        // server sent a `doc:<hex>` label, silently dropping every row.
+        let docs = self
             .client
             .get(&url)
             .send()
@@ -281,30 +291,6 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        let docs = resp
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        let id_hex = v["id"].as_str()?;
-                        let id_bytes = hex::decode(id_hex).ok()?;
-                        if id_bytes.len() != 32 {
-                            return None;
-                        }
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&id_bytes);
-                        Some(DocSummary {
-                            id: DocId(arr),
-                            cid: hex::decode(v["cid"].as_str().unwrap_or("")).unwrap_or_default(),
-                            title: v["title"].as_str().map(String::from),
-                            tags: vec![],
-                            updated_ns: v["updated_ns"].as_u64().unwrap_or(0),
-                            attachment_count: 0,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         Ok(docs)
     }
 
@@ -341,18 +327,17 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        // The upload endpoint returns the node label ("attachment:<hex>"); the
-        // manifest cid is the hex after the type prefix (bare hex also works).
+        // `cid` is the canonical manifest CID string (accepts a "file:" label
+        // or bare hex too, for resilience).
         let raw = resp["cid"].as_str().unwrap_or_default();
-        let cid_hex = raw.rsplit(':').next().unwrap_or(raw);
-        Ok(hex::decode(cid_hex).unwrap_or_default())
+        let raw = raw.rsplit(':').next().unwrap_or(raw);
+        Ok(memvault_core::cid_bytes_lenient(raw).unwrap_or_default())
     }
 
     async fn read_file(&self, manifest_cid: &[u8]) -> Result<Vec<u8>> {
-        let cid_hex = hex::encode(manifest_cid);
         let resp = self
             .client
-            .get(self.url(&format!("/files/{cid_hex}")))
+            .get(self.url(&format!("/files/{}", cid_path(manifest_cid))))
             .send()
             .await
             .map_err(map_reqwest)?
@@ -375,7 +360,7 @@ impl MemvaultClient for HttpApiClient {
     async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>> {
         let resp: serde_json::Value = self
             .client
-            .get(self.url(&format!("/files/{}/extracted-text", hex::encode(manifest_cid))))
+            .get(self.url(&format!("/files/{}/extracted-text", cid_path(manifest_cid))))
             .send()
             .await
             .map_err(map_reqwest)?
@@ -389,7 +374,7 @@ impl MemvaultClient for HttpApiClient {
 
     async fn pin_file(&self, manifest_cid: &[u8]) -> Result<()> {
         self.client
-            .post(self.url(&format!("/files/{}/pin", hex::encode(manifest_cid))))
+            .post(self.url(&format!("/files/{}/pin", cid_path(manifest_cid))))
             .send()
             .await
             .map_err(map_reqwest)?
@@ -399,7 +384,7 @@ impl MemvaultClient for HttpApiClient {
     }
     async fn unpin_file(&self, manifest_cid: &[u8]) -> Result<()> {
         self.client
-            .delete(self.url(&format!("/files/{}/pin", hex::encode(manifest_cid))))
+            .delete(self.url(&format!("/files/{}/pin", cid_path(manifest_cid))))
             .send()
             .await
             .map_err(map_reqwest)?
@@ -424,7 +409,7 @@ impl MemvaultClient for HttpApiClient {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| {
-                        let cid = hex::decode(v["cid"].as_str()?).ok()?;
+                        let cid = memvault_core::cid_bytes_lenient(v["cid"].as_str()?).ok()?;
                         Some((cid, v["name"].as_str().unwrap_or_default().to_string()))
                     })
                     .collect()
@@ -434,10 +419,9 @@ impl MemvaultClient for HttpApiClient {
     }
 
     async fn get_file_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>> {
-        let cid_hex = hex::encode(manifest_cid);
         let resp = self
             .client
-            .get(self.url(&format!("/files/{cid_hex}/manifest")))
+            .get(self.url(&format!("/files/{}/manifest", cid_path(manifest_cid))))
             .send()
             .await
             .map_err(map_reqwest)?;

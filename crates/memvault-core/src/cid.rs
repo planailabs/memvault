@@ -52,6 +52,14 @@ pub fn cid_bytes_from_string(s: &str) -> Result<Vec<u8>> {
     Ok(cid_from_string(s)?.to_bytes())
 }
 
+/// Parse CID bytes from the canonical CID string, falling back to legacy bare
+/// hex. Used on the input side of the wire so canonical CID strings are
+/// preferred while older hex callers (and existing UI links) keep working.
+pub fn cid_bytes_lenient(s: &str) -> Result<Vec<u8>> {
+    cid_bytes_from_string(s)
+        .or_else(|_| hex::decode(s).map_err(|e| Error::Cid(format!("not a CID or hex: {e}"))))
+}
+
 /// Verify that a CID's hash matches the given data.
 ///
 /// Parses the CID from bytes, extracts the hash algorithm from the

@@ -1574,6 +1574,8 @@ mod tool_tests {
         assert_ok(&up);
         // The manifest cid is the node_id's hex ("attachment:<hex>"); the
         // separate "cid" field is the content cid.
+        // The manifest cid is the node_id's hex ("attachment:<hex>"); the MCP
+        // tool output cid layer is flipped to CID strings separately.
         let node_id = jget(&up, "node_id");
         let cid = node_id.rsplit(':').next().unwrap_or(&node_id).to_string();
         assert!(!cid.is_empty(), "upload_file must return a node id: {up}");

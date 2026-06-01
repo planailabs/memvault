@@ -44,12 +44,19 @@ proposal CIDs, rotation IDs. These are stored as `Vec<u8>` (the CID bytes).
 - **`PeerId`** is a libp2p peer id, i.e. a multihash of the node pubkey; its
   canonical string is base58btc (`12D3Koo…`). **FIX**: it is currently
   hex-encoded on a few admin endpoints; migrate to the peer-id string.
-- **FIX (current state):** much of the existing surface still hex-encodes CIDs
-  (`/docs/{id}`, `/files/{cid}`, `GetParams.cid`, `put_doc`/`upload_file`
-  returns, the `*Params.manifest_cid` MCP fields). Migrating CIDs to the
-  canonical string is a single coordinated change across those fields, params,
-  and route segments — do it together so the surface never mixes hex and CID
-  strings.
+- **Migration via accept-both / emit-canonical.** Flipping a CID surface from
+  hex to the canonical string is non-breaking when the server *accepts* both
+  (`memvault_core::cid_bytes_lenient`) while *emitting* the canonical CID
+  string, and the client emits the canonical string in paths
+  (`http::cid_path`). Existing hex callers and UI links keep working.
+  - **Done:** the file/manifest HTTP surface — `GET /files/{cid}`,
+    `/files/{cid}/manifest|pin|extracted-text`, `GET /pins`, the upload
+    response `cid`, and the `HttpApiClient` file methods.
+  - **Remaining:** the MCP tool cid I/O (`*Params.manifest_cid` decode and the
+    tool output `cid` fields still hex), the doc `cid` in `put`/`edit`/`retract`
+    and `doc_history`/`audit` outputs, and the `NodeRef::Attachment` `file:`
+    label (`tag_label`/`from_tag_label` still hex). `/docs/{id}` and
+    `GetParams.cid` are a `DocId` (opaque) — they stay hex (§1a), not a CID.
 
 ### 1c. Tags
 

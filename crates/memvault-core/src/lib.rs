@@ -13,8 +13,8 @@ pub mod vfs;
 pub mod visibility;
 
 pub use self::cid::{
-    cid_bytes_from_string, cid_from_bytes, cid_from_string, cid_from_value, cid_string_from_bytes,
-    cid_to_string, cid_with_codec, verify_cid,
+    cid_bytes_from_string, cid_bytes_lenient, cid_from_bytes, cid_from_string, cid_from_value,
+    cid_string_from_bytes, cid_to_string, cid_with_codec, verify_cid,
 };
 pub use self::cid::codec as cid_codec;
 pub use classification::Classification;
