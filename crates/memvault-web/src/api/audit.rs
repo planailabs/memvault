@@ -62,10 +62,17 @@ pub async fn query_audit(
         None
     };
 
+    // Parse op_kind from its canonical serde form (snake_case), e.g.
+    // "doc_create". Invalid values are ignored (no filter) rather than erroring.
+    let op_kind = params
+        .op_kind
+        .as_deref()
+        .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok());
+
     let query = AuditQuery {
         doc_id,
         author,
-        op_kind: None, // simplified: could parse from string
+        op_kind,
         after_ns: params.after_ns,
         before_ns: params.before_ns,
         limit: params.limit,
@@ -77,7 +84,13 @@ pub async fn query_audit(
         .into_iter()
         .map(|r| AuditRecordResponse {
             cid: hex::encode(&r.cid),
-            op_kind: format!("{:?}", r.op_kind),
+            // Canonical serde form (snake_case, e.g. "doc_create") so the HTTP
+            // client can round-trip it back into an OpKind — the old Debug
+            // form ("DocCreate") was not deserializable.
+            op_kind: serde_json::to_value(&r.op_kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
             author: hex::encode(&r.author),
             agent_attestation: r.agent_attestation.as_ref().map(hex::encode),
             wall_ns: r.wall_ns,

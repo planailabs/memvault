@@ -22,6 +22,31 @@ pub struct CreateBucketResponse {
     pub id: String,
 }
 
+/// Serialize a [`BucketInfo`] to the wire JSON shape.
+///
+/// Emits the *full* set of fields (the elaborate shape) so the HTTP client can
+/// reconstruct a complete `BucketInfo` — IDs and pubkeys are hex strings
+/// (consistent with the rest of the API; `BucketId`/`ClusterId` are byte
+/// newtypes that would otherwise serialize as raw arrays and fail to decode
+/// from hex), and the enum fields carry their canonical serde form.
+fn bucket_to_json(b: &memvault_api::types::BucketInfo) -> serde_json::Value {
+    serde_json::json!({
+        "id": hex::encode(b.id.0),
+        "name": b.name,
+        "description": b.description,
+        "owner_agent": b.owner_agent.as_ref().map(|a| &a.0),
+        "owner_agent_pubkey": b.owner_agent_pubkey.map(hex::encode),
+        "owner_node_pubkey": b.owner_node_pubkey.map(hex::encode),
+        "cluster_id": b.cluster_id.as_ref().map(|c| hex::encode(c.0)),
+        "is_attached": b.is_attached,
+        "default_visibility": b.default_visibility,
+        "default_classification": b.default_classification,
+        "role": b.role,
+        "envelope_count": b.envelope_count,
+        "created_ns": b.created_ns,
+    })
+}
+
 pub async fn list_buckets(
     _auth: RequireAuth,
     State(state): State<Arc<AppState>>,
@@ -31,21 +56,7 @@ pub async fn list_buckets(
         .bucket_list()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let result: Vec<serde_json::Value> = buckets
-        .iter()
-        .map(|b| {
-            serde_json::json!({
-                "id": hex::encode(b.id.0),
-                "name": b.name,
-                "description": b.description,
-                "owner_agent": b.owner_agent.as_ref().map(|a| &a.0),
-                "cluster_id": b.cluster_id.as_ref().map(|c| hex::encode(c.0)),
-                "is_attached": b.is_attached,
-                "envelope_count": b.envelope_count,
-                "created_ns": b.created_ns,
-            })
-        })
-        .collect();
+    let result: Vec<serde_json::Value> = buckets.iter().map(bucket_to_json).collect();
     Ok(Json(serde_json::json!(result)))
 }
 
@@ -61,16 +72,7 @@ pub async fn get_bucket(
     let bucket_id = memvault_core::BucketId(bucket_arr);
 
     match state.client.bucket_get(&bucket_id).await {
-        Ok(Some(b)) => Ok(Json(serde_json::json!({
-            "id": hex::encode(b.id.0),
-            "name": b.name,
-            "description": b.description,
-            "owner_agent": b.owner_agent.as_ref().map(|a| &a.0),
-            "cluster_id": b.cluster_id.as_ref().map(|c| hex::encode(c.0)),
-            "is_attached": b.is_attached,
-            "envelope_count": b.envelope_count,
-            "created_ns": b.created_ns,
-        }))),
+        Ok(Some(b)) => Ok(Json(bucket_to_json(&b))),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }

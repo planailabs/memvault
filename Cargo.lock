@@ -5552,6 +5552,7 @@ dependencies = [
  "plan-ai-design",
  "pulldown-cmark",
  "rand 0.8.6",
+ "rustls",
  "serde",
  "serde-wasm-bindgen",
  "serde_ipld_dagcbor",

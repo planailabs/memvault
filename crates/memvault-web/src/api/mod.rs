@@ -72,7 +72,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route("/docs/{id}/history", get(docs::doc_history))
         // ── Entities (type-specific, accepts raw hex or entity:hex)
-        .route("/entities", post(graph::create_entity))
+        .route("/entities", post(graph::create_entity).get(graph::list_entities))
+        .route("/traverse", get(graph::traverse))
         .route(
             "/entities/{id}",
             get(graph::get_entity).delete(graph::delete_entity),
@@ -81,6 +82,12 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/files", post(files::upload_file))
         .route("/files/{cid}", get(files::download_file))
         .route("/files/{cid}/manifest", get(files::file_manifest))
+        .route(
+            "/files/{cid}/pin",
+            post(files::pin_file).delete(files::unpin_file),
+        )
+        .route("/files/{cid}/extracted-text", get(files::extracted_text))
+        .route("/pins", get(files::list_pinned))
         // Backward compat: keep old /attachments routes working
         .route("/attachments", post(files::upload_file))
         .route("/attachments/{cid}", get(files::download_file))

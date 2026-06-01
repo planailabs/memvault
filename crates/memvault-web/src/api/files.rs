@@ -175,6 +175,55 @@ pub async fn file_manifest(
     }
 }
 
+/// POST /api/v1/files/:cid/pin — pin a file so it is never GC'd.
+pub async fn pin_file(
+    auth: RequireWrite,
+    State(state): State<Arc<AppState>>,
+    Path(cid_hex): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Write)?;
+    state.client.pin_file(&cid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /api/v1/files/:cid/pin — remove a pin.
+pub async fn unpin_file(
+    auth: RequireWrite,
+    State(state): State<Arc<AppState>>,
+    Path(cid_hex): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Write)?;
+    state.client.unpin_file(&cid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/files/:cid/extracted-text — extracted plain text, if any.
+pub async fn extracted_text(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(cid_hex): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
+    let text = state.client.read_extracted_text(&cid).await?;
+    Ok(Json(serde_json::json!({ "text": text })))
+}
+
+/// GET /api/v1/pins — list pinned files as [{ cid, name }].
+pub async fn list_pinned(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let pins = state.client.list_pinned().await?;
+    let result: Vec<serde_json::Value> = pins
+        .into_iter()
+        .map(|(cid, name)| serde_json::json!({ "cid": hex::encode(cid), "name": name }))
+        .collect();
+    Ok(Json(serde_json::json!(result)))
+}
+
 /// DELETE /api/v1/docs/:id/files/:name — detach file (no-op in new system)
 pub async fn detach_file(
     _auth: RequireWrite,

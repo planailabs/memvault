@@ -77,3 +77,17 @@ tower-http = { version = "0.6", features = ["cors"], optional = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 async-trait = "0.1"
+# Integration-test harness (tests/mcp_http_e2e.rs): a real TCP server backed by
+# an enrolled-agent LocalClient, exercised through HttpApiClient — the same
+# transport the openclaw memvault MCP uses.
+memvault-api = { path = "../memvault-api", features = ["http-client"] }
+memvault-store = { path = "../memvault-store" }
+memvault-query = { path = "../memvault-query" }
+memvault-auth = { path = "../memvault-auth" }
+memvault-doc = { path = "../memvault-doc" }
+ed25519-dalek = "2"
+serde_json = "1"
+hex = "0.4"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["multipart"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12"] }

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
-use memvault_core::EntityId;
+use axum::extract::{Path, Query, State};
+use memvault_core::{EntityId, NodeRef};
 use memvault_doc::Entity;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,8 @@ use crate::error::ApiError;
 pub struct ListEntitiesQuery {
     pub kind: Option<String>,
     pub limit: Option<usize>,
+    /// Optional bucket ID (hex) to scope the listing.
+    pub bucket: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +56,78 @@ pub struct EdgeResponse {
 pub struct UpdateEntityRequest {
     #[serde(default)]
     pub props: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+pub struct TraverseQuery {
+    /// Start node — "entity:<hex>", "doc:<hex>", or "attachment:<hex>".
+    pub from: String,
+    pub relation: Option<String>,
+    pub max_depth: Option<usize>,
+}
+
+/// GET /api/v1/traverse?from=<label>&relation=&max_depth=
+///
+/// Walks the graph from a node. Backs `MemvaultClient::traverse_from` and the
+/// `memvault_traverse` MCP tool over HTTP.
+pub async fn traverse(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TraverseQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let from = NodeRef::from_tag_label(&params.from)
+        .ok_or_else(|| ApiError::bad_request("Invalid from: expected 'type:hex'"))?;
+    crate::api::auth::enforce_node_action(&auth.claims, &params.from, memvault_auth::Action::Read)?;
+    let hits = state
+        .client
+        .traverse_from(&from, params.relation.as_deref(), params.max_depth.unwrap_or(2))
+        .await?;
+    let results: Vec<serde_json::Value> = hits
+        .into_iter()
+        .map(|h| {
+            serde_json::json!({
+                "node": h.node.tag_label(),
+                "depth": h.depth,
+                "path": h
+                    .path
+                    .iter()
+                    .map(|(eid, rel)| serde_json::json!([hex::encode(eid.0), rel]))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(Json(results))
+}
+
+/// GET /api/v1/entities?limit=&kind=&bucket=<hex>
+///
+/// Lists entities (full `kind` + `props`), optionally scoped to a bucket and
+/// filtered by kind. Backs `MemvaultClient::list_entities` (and thus the
+/// `memvault_list_entities` MCP tool and VFS root discovery) over HTTP.
+pub async fn list_entities(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListEntitiesQuery>,
+) -> Result<Json<Vec<EntityResponse>>, ApiError> {
+    let limit = params.limit.unwrap_or(500);
+    let bucket = params.bucket.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        let arr: [u8; 32] = bytes.try_into().ok()?;
+        Some(memvault_core::BucketId(arr))
+    });
+    let entities = state.client.list_entities(limit, bucket.as_ref()).await?;
+    let results: Vec<EntityResponse> = entities
+        .into_iter()
+        .filter(|e| params.kind.as_deref().is_none_or(|k| e.kind == k))
+        .map(|e| EntityResponse {
+            id: format!("entity:{}", hex::encode(e.id.0)),
+            kind: e.kind,
+            props: e.props,
+            edges: vec![],
+        })
+        .collect();
+    let results = crate::api::auth::filter_readable(&auth.claims, results, |r| r.id.clone())?;
+    Ok(Json(results))
 }
 
 /// POST /api/v1/entities

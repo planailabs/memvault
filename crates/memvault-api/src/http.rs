@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use memvault_auth::TokenRole;
-use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::classification::Classification;
+use memvault_core::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 
@@ -136,6 +137,73 @@ fn urlencoded(s: &str) -> String {
 
 fn map_reqwest(e: reqwest::Error) -> ApiError {
     ApiError::Other(e.to_string())
+}
+
+/// Decode a hex string into a fixed 32-byte array, if well-formed.
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(s).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Some(arr)
+}
+
+/// Reconstruct a full [`BucketInfo`] from the server's elaborate `/buckets`
+/// JSON (see `memvault-web` `bucket_to_json`). IDs/pubkeys are hex strings;
+/// the enum fields carry their canonical serde form. Returns `None` only when
+/// the mandatory `id` is missing or malformed.
+fn parse_bucket_info(v: &serde_json::Value) -> Option<BucketInfo> {
+    let id = hex32(v["id"].as_str()?)?;
+    Some(BucketInfo {
+        id: BucketId(id),
+        name: v["name"].as_str().unwrap_or_default().to_string(),
+        description: v["description"].as_str().map(|s| s.to_string()),
+        owner_agent: v["owner_agent"].as_str().map(|s| AgentId(s.to_string())),
+        owner_agent_pubkey: v["owner_agent_pubkey"].as_str().and_then(hex32),
+        owner_node_pubkey: v["owner_node_pubkey"].as_str().and_then(hex32),
+        cluster_id: v["cluster_id"].as_str().and_then(hex32).map(ClusterId),
+        is_attached: v["is_attached"].as_bool().unwrap_or(false),
+        default_visibility: v
+            .get("default_visibility")
+            .and_then(|x| serde_json::from_value(x.clone()).ok())
+            .unwrap_or(Visibility::Internal),
+        default_classification: v
+            .get("default_classification")
+            .and_then(|x| serde_json::from_value(x.clone()).ok())
+            .unwrap_or(Classification::Internal),
+        created_ns: v["created_ns"].as_u64().unwrap_or(0),
+        envelope_count: v["envelope_count"].as_u64().unwrap_or(0),
+        role: v
+            .get("role")
+            .and_then(|x| serde_json::from_value(x.clone()).ok())
+            .unwrap_or_default(),
+    })
+}
+
+/// Reconstruct an [`AuditRecord`] from the server's `/audit` and
+/// `/docs/{id}/history` JSON (hex-encoded byte fields; `op_kind` in canonical
+/// snake_case serde form). Fields absent on a given endpoint default to empty.
+fn parse_audit_record(v: &serde_json::Value) -> AuditRecord {
+    let hexvec = |key: &str| v[key].as_str().and_then(|s| hex::decode(s).ok());
+    AuditRecord {
+        cid: hexvec("cid").unwrap_or_default(),
+        op_kind: v
+            .get("op_kind")
+            .and_then(|x| serde_json::from_value(x.clone()).ok())
+            .unwrap_or(memvault_query::OpKind::DocCreate),
+        author: hexvec("author").unwrap_or_default(),
+        agent_attestation: hexvec("agent_attestation"),
+        wall_ns: v["wall_ns"].as_u64().unwrap_or(0),
+        doc_id: v["doc_id"].as_str().and_then(hex32).map(DocId),
+        entity_id: hexvec("entity_id"),
+        attachment_cid: hexvec("attachment_cid"),
+        tags: v
+            .get("tags")
+            .and_then(|t| serde_json::from_value(t.clone()).ok())
+            .unwrap_or_default(),
+    }
 }
 
 #[async_trait]
@@ -306,7 +374,10 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        let cid_hex = resp["cid"].as_str().unwrap_or("");
+        // The upload endpoint returns the node label ("attachment:<hex>"); the
+        // manifest cid is the hex after the type prefix (bare hex also works).
+        let raw = resp["cid"].as_str().unwrap_or_default();
+        let cid_hex = raw.rsplit(':').next().unwrap_or(raw);
         Ok(hex::decode(cid_hex).unwrap_or_default())
     }
 
@@ -334,18 +405,65 @@ impl MemvaultClient for HttpApiClient {
         })
     }
 
-    async fn read_extracted_text(&self, _manifest_cid: &[u8]) -> Result<Option<String>> {
-        Ok(None)
+    async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>> {
+        let resp: serde_json::Value = self
+            .client
+            .get(self.url(&format!("/files/{}/extracted-text", hex::encode(manifest_cid))))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(resp["text"].as_str().map(|s| s.to_string()))
     }
 
-    async fn pin_file(&self, _manifest_cid: &[u8]) -> Result<()> {
+    async fn pin_file(&self, manifest_cid: &[u8]) -> Result<()> {
+        self.client
+            .post(self.url(&format!("/files/{}/pin", hex::encode(manifest_cid))))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
         Ok(())
     }
-    async fn unpin_file(&self, _manifest_cid: &[u8]) -> Result<()> {
+    async fn unpin_file(&self, manifest_cid: &[u8]) -> Result<()> {
+        self.client
+            .delete(self.url(&format!("/files/{}/pin", hex::encode(manifest_cid))))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
         Ok(())
     }
     async fn list_pinned(&self) -> Result<Vec<(Vec<u8>, String)>> {
-        Ok(vec![])
+        let resp: serde_json::Value = self
+            .client
+            .get(self.url("/pins"))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let pins = resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let cid = hex::decode(v["cid"].as_str()?).ok()?;
+                        Some((cid, v["name"].as_str().unwrap_or_default().to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(pins)
     }
 
     async fn get_file_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -396,12 +514,18 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        let id_hex = resp["id"].as_str().unwrap_or("");
-        let bytes = hex::decode(id_hex).unwrap_or(vec![0u8; 32]);
-        let mut arr = [0u8; 32];
-        let len = bytes.len().min(32);
-        arr[..len].copy_from_slice(&bytes[..len]);
-        Ok(EntityId(arr))
+        // The server returns the node label "entity:<hex>" (not bare hex), so
+        // decode via NodeRef rather than hex-decoding the whole string — the
+        // old `hex::decode("entity:…")` always failed and silently yielded a
+        // zero EntityId, which is what made `vfs_mkdir`/`resolve("/")` report
+        // entity:000…000.
+        let id_str = resp["id"].as_str().unwrap_or_default();
+        match NodeRef::from_tag_label(id_str) {
+            Some(NodeRef::Entity(eid)) => Ok(eid),
+            _ => Err(ApiError::Other(format!(
+                "create entity: server returned unexpected id {id_str:?}"
+            ))),
+        }
     }
 
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>> {
@@ -435,10 +559,14 @@ impl MemvaultClient for HttpApiClient {
         }))
     }
 
-    async fn list_entities(&self, limit: usize, _bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
+    async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>> {
+        let mut url = format!("{}?limit={limit}", self.url("/entities"));
+        if let Some(b) = bucket {
+            url.push_str(&format!("&bucket={}", hex::encode(b.0)));
+        }
         let resp: serde_json::Value = self
             .client
-            .get(self.url(&format!("/nodes?limit={limit}&type=entity")))
+            .get(&url)
             .send()
             .await
             .map_err(map_reqwest)?
@@ -447,20 +575,18 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
+        // Server shape (graph::EntityResponse): [{ id: "entity:<hex>", kind, props, edges }]
         let entities = resp
             .as_array()
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| {
-                        let id_hex = v["id"].as_str()?;
-                        let bytes = hex::decode(id_hex).ok()?;
-                        if bytes.len() != 32 {
-                            return None;
-                        }
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&bytes);
+                        let id = match NodeRef::from_tag_label(v["id"].as_str()?)? {
+                            NodeRef::Entity(eid) => eid,
+                            _ => return None,
+                        };
                         Some(Entity {
-                            id: EntityId(arr),
+                            id,
                             kind: v["kind"].as_str().unwrap_or("").to_string(),
                             props: v
                                 .get("props")
@@ -481,11 +607,54 @@ impl MemvaultClient for HttpApiClient {
 
     // -- Links --
 
-    async fn add_link(&self, _source: &NodeRef, _edge: Edge, _vis: Visibility) -> Result<EdgeId> {
-        Ok(EdgeId::random())
+    async fn add_link(&self, source: &NodeRef, edge: Edge, vis: Visibility) -> Result<EdgeId> {
+        let body = serde_json::json!({
+            "source": source.tag_label(),
+            "target": edge.target.tag_label(),
+            "relation": edge.relation,
+            "weight": edge.weight,
+            "props": edge.props,
+            "visibility": format!("{vis:?}").to_lowercase(),
+        });
+        let resp: serde_json::Value = self
+            .client
+            .post(self.url("/links"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let edge_hex = resp["edge_id"].as_str().unwrap_or_default();
+        let bytes = hex::decode(edge_hex)
+            .map_err(|e| ApiError::Other(format!("create link: bad edge_id {edge_hex:?}: {e}")))?;
+        if bytes.len() != 32 {
+            return Err(ApiError::Other(format!(
+                "create link: edge_id must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(EdgeId(arr))
     }
 
-    async fn remove_link_from(&self, _source: &NodeRef, _edge_id: &EdgeId) -> Result<()> {
+    async fn remove_link_from(&self, source: &NodeRef, edge_id: &EdgeId) -> Result<()> {
+        let url = format!(
+            "{}?source={}",
+            self.url(&format!("/links/{}", hex::encode(edge_id.0))),
+            urlencoded(&source.tag_label())
+        );
+        self.client
+            .delete(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
         Ok(())
     }
 
@@ -503,18 +672,96 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        // Parse edges from response — simplified for now
-        let _ = resp;
-        Ok(vec![])
+        // Server shape (links::LinkResponse):
+        //   [{ edge_id, source, target, relation, weight, props }]
+        let edges = resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let source = NodeRef::from_tag_label(v["source"].as_str()?)?;
+                        let target = NodeRef::from_tag_label(v["target"].as_str()?)?;
+                        let edge_bytes = hex::decode(v["edge_id"].as_str()?).ok()?;
+                        if edge_bytes.len() != 32 {
+                            return None;
+                        }
+                        let mut eid = [0u8; 32];
+                        eid.copy_from_slice(&edge_bytes);
+                        let props = v
+                            .get("props")
+                            .and_then(|p| serde_json::from_value(p.clone()).ok())
+                            .unwrap_or_default();
+                        let edge = Edge {
+                            id: EdgeId(eid),
+                            relation: v["relation"].as_str().unwrap_or_default().to_string(),
+                            target,
+                            weight: v.get("weight").and_then(|w| w.as_f64()).map(|w| w as f32),
+                            props,
+                            provenance: None,
+                        };
+                        Some((source, edge))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(edges)
     }
 
     async fn traverse_from(
         &self,
-        _from: &NodeRef,
-        _relation: Option<&str>,
-        _max_depth: usize,
+        from: &NodeRef,
+        relation: Option<&str>,
+        max_depth: usize,
     ) -> Result<Vec<TraversalHit>> {
-        Ok(vec![])
+        let mut url = format!(
+            "{}?from={}&max_depth={max_depth}",
+            self.url("/traverse"),
+            urlencoded(&from.tag_label())
+        );
+        if let Some(rel) = relation {
+            url.push_str(&format!("&relation={}", urlencoded(rel)));
+        }
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        // Server shape: [{ node: "<label>", depth, path: [[edge_hex, relation], ...] }]
+        let hits = resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let node = NodeRef::from_tag_label(v["node"].as_str()?)?;
+                        let path = v["path"]
+                            .as_array()
+                            .map(|p| {
+                                p.iter()
+                                    .filter_map(|step| {
+                                        let s = step.as_array()?;
+                                        let eid = hex32(s.first()?.as_str()?).map(EdgeId)?;
+                                        let rel = s.get(1)?.as_str()?.to_string();
+                                        Some((eid, rel))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some(TraversalHit {
+                            node,
+                            depth: v["depth"].as_u64().unwrap_or(0) as usize,
+                            path,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(hits)
     }
 
     // -- Tags --
@@ -555,8 +802,13 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        let tags = resp
-            .as_array()
+        // Server shape (views::get_tags): { node_id, tags: [[scope, label], ...] }.
+        // Accept a bare array too for resilience.
+        let arr = resp
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .or_else(|| resp.as_array());
+        let tags = arr
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| {
@@ -575,18 +827,68 @@ impl MemvaultClient for HttpApiClient {
     // -- Views --
 
     async fn list_views(&self) -> Result<Vec<View>> {
-        Ok(vec![])
+        // `View` is serde-clean (no byte-newtype fields), so decode directly.
+        let views = self
+            .client
+            .get(self.url("/views"))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(views)
     }
-    async fn create_view(&self, _view: View) -> Result<()> {
+    async fn create_view(&self, view: View) -> Result<()> {
+        self.client
+            .post(self.url("/views"))
+            .json(&serde_json::json!({ "name": view.name, "tags": view.tags }))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
         Ok(())
     }
-    async fn delete_view(&self, _name: &str) -> Result<()> {
+    async fn delete_view(&self, name: &str) -> Result<()> {
+        self.client
+            .delete(self.url(&format!("/views/{}", urlencoded(name))))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
         Ok(())
     }
-    async fn get_view(&self, _name: &str) -> Result<Option<View>> {
-        Ok(None)
+    async fn get_view(&self, name: &str) -> Result<Option<View>> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/views/{}", urlencoded(name))))
+            .send()
+            .await
+            .map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let view = resp
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(Some(view))
     }
-    async fn update_view(&self, _view: View) -> Result<()> {
+    async fn update_view(&self, view: View) -> Result<()> {
+        self.client
+            .put(self.url(&format!("/views/{}", urlencoded(&view.name))))
+            .json(&serde_json::json!({ "name": view.name, "tags": view.tags }))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
         Ok(())
     }
 
@@ -598,7 +900,7 @@ impl MemvaultClient for HttpApiClient {
             self.url("/search"),
             urlencoded(query)
         );
-        let _resp: serde_json::Value = self
+        let resp: serde_json::Value = self
             .client
             .get(&url)
             .send()
@@ -609,15 +911,68 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        Ok(vec![])
+        // Server shape (search::SearchHitResponse): [{ doc_id, score, snippet }]
+        // where doc_id is bare hex.
+        let hits = resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let doc_id = hex32(v["doc_id"].as_str()?).map(DocId)?;
+                        Some(SearchHit {
+                            doc_id,
+                            score: v["score"].as_f64().unwrap_or(0.0) as f32,
+                            snippet: v["snippet"].as_str().unwrap_or_default().to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(hits)
     }
 
     async fn search_unified(
         &self,
-        _query: &str,
-        _limit: usize,
+        query: &str,
+        limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
-        Ok(vec![])
+        // The server's /search endpoint is doc-only; surface those hits as
+        // UnifiedHit so this is not a silent empty stub.
+        let url = format!(
+            "{}?q={}&limit={limit}",
+            self.url("/search"),
+            urlencoded(query)
+        );
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let hits = resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let doc_hex = v["doc_id"].as_str()?;
+                        Some(memvault_query::UnifiedHit {
+                            node_id: format!("doc:{doc_hex}"),
+                            node_type: "doc".to_string(),
+                            label: String::new(),
+                            score: v["score"].as_f64().unwrap_or(0.0) as f32,
+                            snippet: v["snippet"].as_str().unwrap_or_default().to_string(),
+                            match_contexts: vec![],
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(hits)
     }
 
     async fn list_all(
@@ -684,8 +1039,29 @@ impl MemvaultClient for HttpApiClient {
         Ok(nodes)
     }
 
-    async fn view_members(&self, _view_name: &str) -> Result<Vec<String>> {
-        Ok(vec![])
+    async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
+        let resp: serde_json::Value = self
+            .client
+            .get(self.url(&format!("/views/{}/members", urlencoded(view_name))))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        // Server shape: { view, count, members: [node_id, ...] }
+        let members = resp
+            .get("members")
+            .and_then(|m| m.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(members)
     }
     async fn resolve_label(&self, _node_id: &str) -> Result<Option<String>> {
         Ok(None)
@@ -695,7 +1071,7 @@ impl MemvaultClient for HttpApiClient {
 
     async fn history_of(&self, doc_id: &DocId) -> Result<Vec<AuditRecord>> {
         let id_hex = hex::encode(doc_id.0);
-        let _resp: serde_json::Value = self
+        let resp: serde_json::Value = self
             .client
             .get(self.url(&format!("/docs/{id_hex}/history")))
             .send()
@@ -706,11 +1082,67 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        Ok(vec![])
+        let recs = resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|v| {
+                        // history rows omit doc_id; stamp the queried one back in.
+                        let mut rec = parse_audit_record(v);
+                        if rec.doc_id.is_none() {
+                            rec.doc_id = Some(doc_id.clone());
+                        }
+                        rec
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(recs)
     }
 
-    async fn audit(&self, _query: AuditQuery) -> Result<Vec<AuditRecord>> {
-        Ok(vec![])
+    async fn audit(&self, query: AuditQuery) -> Result<Vec<AuditRecord>> {
+        let mut params: Vec<String> = Vec::new();
+        if let Some(d) = &query.doc_id {
+            params.push(format!("doc_id={}", hex::encode(d.0)));
+        }
+        if let Some(a) = &query.author {
+            params.push(format!("author={}", hex::encode(a)));
+        }
+        if let Some(k) = &query.op_kind {
+            if let Some(s) = serde_json::to_value(k).ok().and_then(|v| v.as_str().map(String::from)) {
+                params.push(format!("op_kind={s}"));
+            }
+        }
+        if let Some(n) = query.after_ns {
+            params.push(format!("after_ns={n}"));
+        }
+        if let Some(n) = query.before_ns {
+            params.push(format!("before_ns={n}"));
+        }
+        if let Some(n) = query.limit {
+            params.push(format!("limit={n}"));
+        }
+        let url = if params.is_empty() {
+            self.url("/audit")
+        } else {
+            format!("{}?{}", self.url("/audit"), params.join("&"))
+        };
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let recs = resp
+            .as_array()
+            .map(|arr| arr.iter().map(parse_audit_record).collect())
+            .unwrap_or_default();
+        Ok(recs)
     }
 
     async fn retract(&self, target_cid: &[u8], _reason: &str) -> Result<Vec<u8>> {
@@ -828,16 +1260,17 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        let id_bytes: Vec<u8> = serde_json::from_value(resp["id"].clone())
-            .map_err(|e| ApiError::Other(format!("missing bucket id: {e}")))?;
-        let arr: [u8; 32] = id_bytes
-            .try_into()
-            .map_err(|_| ApiError::Other("bucket id must be 32 bytes".into()))?;
+        // Server returns the id as a hex string (CreateBucketResponse), not a
+        // byte array.
+        let arr = resp["id"]
+            .as_str()
+            .and_then(hex32)
+            .ok_or_else(|| ApiError::Other("create bucket: missing/invalid id".into()))?;
         Ok(memvault_core::BucketId(arr))
     }
 
     async fn bucket_list(&self) -> Result<Vec<BucketInfo>> {
-        let resp = self
+        let resp: serde_json::Value = self
             .client
             .get(self.url("/buckets"))
             .send()
@@ -848,7 +1281,11 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        Ok(resp)
+        let buckets = resp
+            .as_array()
+            .map(|arr| arr.iter().filter_map(parse_bucket_info).collect())
+            .unwrap_or_default();
+        Ok(buckets)
     }
 
     async fn bucket_get(&self, id: &memvault_core::BucketId) -> Result<Option<BucketInfo>> {
@@ -861,13 +1298,13 @@ impl MemvaultClient for HttpApiClient {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let info = resp
+        let val: serde_json::Value = resp
             .error_for_status()
             .map_err(map_reqwest)?
             .json()
             .await
             .map_err(map_reqwest)?;
-        Ok(Some(info))
+        Ok(parse_bucket_info(&val))
     }
 
     async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {
