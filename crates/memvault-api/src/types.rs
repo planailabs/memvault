@@ -6,9 +6,14 @@ use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visib
 use serde::{Deserialize, Serialize};
 
 /// Summary of a document for list operations.
+///
+/// Wire shape per `standards/`: `id` is an opaque doc id → hex; `cid` is the
+/// document's content address → canonical CID string (not hex).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocSummary {
+    #[serde(with = "crate::wire::hex_id")]
     pub id: DocId,
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
     pub title: Option<String>,
     pub tags: Vec<(String, String)>,

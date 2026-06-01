@@ -2,17 +2,17 @@
 
 use serde::Serialize;
 
-use crate::api::docs::DocSummaryResponse;
+use memvault_api::DocSummary;
 
 /// A paginated list of documents.
 #[derive(Serialize)]
 pub struct MemoryListView {
-    pub items: Vec<DocSummaryResponse>,
+    pub items: Vec<DocSummary>,
     pub total: usize,
 }
 
 impl MemoryListView {
-    pub fn new(items: Vec<DocSummaryResponse>) -> Self {
+    pub fn new(items: Vec<DocSummary>) -> Self {
         let total = items.len();
         Self { items, total }
     }

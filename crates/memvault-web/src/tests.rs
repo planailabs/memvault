@@ -124,7 +124,9 @@ impl MemvaultClient for MockClient {
         if let Some(doc) = guard.as_ref() {
             Ok(vec![memvault_api::DocSummary {
                 id: doc.id.clone(),
-                cid: doc.id.0.to_vec(),
+                // DocSummary.cid is a real CID on the wire (cid_str encoding),
+                // so the mock must emit valid CID bytes, not raw id bytes.
+                cid: memvault_core::cid_from_bytes(&doc.id.0).to_bytes(),
                 title: doc
                     .frontmatter
                     .get("title")

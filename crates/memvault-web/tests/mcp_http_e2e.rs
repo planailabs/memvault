@@ -328,6 +328,21 @@ async fn docs_put_get_and_search() {
         got.expect("doc present").body,
         "the kangaroo metric improved this quarter"
     );
+
+    // list_docs used to drop every row (server sent `doc:<hex>` labels, client
+    // hand-parsed them as bare hex). It now decodes DocSummary directly.
+    let docs = client
+        .list_docs(None, 50, Some(&bucket))
+        .await
+        .expect("list_docs");
+    assert!(
+        docs.iter().any(|d| d.id == doc_id),
+        "list_docs must return the doc it stored, got {} rows",
+        docs.len()
+    );
+    // The summary's cid is the content address, round-trips as CID bytes.
+    let summary = docs.iter().find(|d| d.id == doc_id).unwrap();
+    assert!(!summary.cid.is_empty(), "DocSummary.cid must be populated");
 }
 
 #[tokio::test]

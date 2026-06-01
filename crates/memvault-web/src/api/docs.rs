@@ -46,16 +46,6 @@ pub struct DocResponse {
     pub updated_ns: u64,
 }
 
-#[derive(Serialize)]
-pub struct DocSummaryResponse {
-    pub id: String,
-    pub cid: String,
-    pub title: Option<String>,
-    pub tags: Vec<(String, String)>,
-    pub updated_ns: u64,
-    pub attachment_count: usize,
-}
-
 #[derive(Deserialize)]
 pub struct UpdateDocRequest {
     pub ops: Vec<TextOpRequest>,
@@ -73,7 +63,7 @@ pub async fn list_docs(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListDocsQuery>,
-) -> Result<Json<Vec<DocSummaryResponse>>, ApiError> {
+) -> Result<Json<Vec<memvault_api::DocSummary>>, ApiError> {
     let tag_filter = match (params.tag_ns, params.tag_val) {
         (Some(ns), Some(val)) => Some((ns, val)),
         _ => None,
@@ -100,19 +90,9 @@ pub async fn list_docs(
         .list_docs_ex(tag_filter, limit, bucket_id.as_ref(), include_retracted)
         .await?;
 
-    let results: Vec<DocSummaryResponse> = docs
-        .into_iter()
-        .map(|d| DocSummaryResponse {
-            id: format!("doc:{}", hex::encode(d.id.0)),
-            cid: hex::encode(&d.cid),
-            title: d.title,
-            tags: d.tags,
-            updated_ns: d.updated_ns,
-            attachment_count: d.attachment_count,
-        })
-        .collect();
-
-    Ok(Json(results))
+    // `DocSummary` carries its own wire encoding (hex id, CID-string cid); the
+    // client decodes it directly — no hand-built response (see `standards/`).
+    Ok(Json(docs))
 }
 
 /// POST /api/v1/docs
