@@ -1332,3 +1332,159 @@ impl MemvaultServer {
         }
     }
 }
+
+#[cfg(test)]
+mod tool_tests {
+    //! Thin in-crate tests that drive the rmcp `MemvaultServer` tool methods
+    //! directly, backed by an enrolled-agent in-process `LocalClient` (no HTTP).
+    //! Complements the HTTP-transport coverage in
+    //! `memvault-web/tests/mcp_http_e2e.rs`.
+
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use ed25519_dalek::SigningKey;
+    use tokio::sync::RwLock;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Build a `MemvaultServer` over a freshly enrolled-agent `LocalClient`.
+    async fn test_server() -> MemvaultServer {
+        let admin = SigningKey::from_bytes(&[0x51u8; 32]);
+        let node = SigningKey::from_bytes(&[0x52u8; 32]);
+        let cluster = memvault_core::ClusterId([0x33u8; 32]);
+
+        let dir = std::env::temp_dir().join(format!(
+            "mv-mcp-tools-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store =
+            Arc::new(memvault_store::MemvaultStore::open(dir.join("blocks.redb")).unwrap());
+        let client = memvault_api::LocalClient::new(
+            store,
+            Arc::new(RwLock::new(memvault_query::QuotaManager::new(Default::default()))),
+            Arc::new(memvault_api::EventBus::new(16)),
+            node.verifying_key().to_bytes().to_vec(),
+            cluster.0.to_vec(),
+        );
+        let genesis = memvault_auth::sign_admin_genesis(&admin, cluster.clone(), 1).unwrap();
+        client.set_admin_signing_key(admin);
+        client.set_pinned_admin_genesis(genesis);
+        client.set_node_signing_key(node);
+        let identity = memvault_api::agent_identity::enroll_local_agent(
+            &client,
+            "mcp-tools",
+            &dir.join("agent"),
+            memvault_auth::AgentRole::AgentHost,
+            u64::MAX,
+        )
+        .expect("enroll_local_agent");
+        client.set_agent_identity(identity);
+
+        let client: Arc<dyn MemvaultClient> = Arc::new(client);
+        let bucket = client
+            .ensure_agent_bucket("mcp-tools")
+            .await
+            .expect("ensure_agent_bucket");
+        MemvaultServer::new(client, vec![], "internal".to_string(), Some(bucket))
+    }
+
+    /// Tool methods return either a JSON string or `"error: …"`.
+    fn assert_ok(s: &str) {
+        assert!(!s.starts_with("error"), "tool returned an error: {s}");
+    }
+
+    #[tokio::test]
+    async fn put_search_via_tools() {
+        let srv = test_server().await;
+        let put = srv
+            .put(Parameters(crate::types::PutParams {
+                text: "the platypus index rose sharply this quarter".to_string(),
+                title: Some("Platypus".to_string()),
+                tags: vec![],
+                visibility: None,
+                vfs_path: None,
+                bucket: None,
+            }))
+            .await;
+        assert_ok(&put);
+        assert!(put.contains("node_id"), "put must return a node_id: {put}");
+
+        let hits = srv
+            .search(Parameters(crate::types::SearchParams {
+                query: "platypus".to_string(),
+                limit: Some(10),
+                tag_filter: None,
+                bucket: None,
+            }))
+            .await;
+        assert_ok(&hits);
+        assert!(hits.contains("doc_id"), "search must find the doc: {hits}");
+    }
+
+    #[tokio::test]
+    async fn graph_and_vfs_via_tools() {
+        let srv = test_server().await;
+        assert_ok(
+            &srv.graph_add(Parameters(crate::types::GraphAddParams {
+                kind: "project".to_string(),
+                props: Default::default(),
+                visibility: None,
+                vfs_path: None,
+                bucket: None,
+            }))
+            .await,
+        );
+
+        let mkdir = srv
+            .vfs_mkdir(Parameters(crate::types::VfsMkdirParams {
+                path: "/projects/acme".to_string(),
+                bucket: None,
+            }))
+            .await;
+        assert_ok(&mkdir);
+        // The regression guard: a real entity id, never entity:000…000.
+        assert!(
+            !mkdir.contains(&"0".repeat(64)),
+            "vfs_mkdir must not return a zero entity id: {mkdir}"
+        );
+
+        assert_ok(
+            &srv.vfs_resolve(Parameters(crate::types::VfsResolveParams {
+                path: "/projects/acme".to_string(),
+                bucket: None,
+            }))
+            .await,
+        );
+
+        let ls = srv
+            .vfs_ls(Parameters(crate::types::VfsLsParams {
+                path: "/".to_string(),
+                recursive: Some(false),
+                bucket: None,
+            }))
+            .await;
+        assert_ok(&ls);
+        assert!(ls.contains("projects"), "vfs_ls / must list 'projects': {ls}");
+    }
+
+    #[tokio::test]
+    async fn bucket_status_list_via_tools() {
+        let srv = test_server().await;
+        assert_ok(&srv.bucket_list().await);
+        assert_ok(&srv.status().await);
+        assert_ok(
+            &srv.list_all(Parameters(crate::types::ListAllParams {
+                limit: Some(50),
+                view: None,
+                bucket: None,
+            }))
+            .await,
+        );
+    }
+}
