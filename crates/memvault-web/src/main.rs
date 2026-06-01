@@ -31,8 +31,15 @@ fn main() {
                     // key and install it on the LocalClient. The daemon main
                     // path does this with the libp2p host key; here we use a
                     // file-backed key under `<data_dir>/identity/node.key`.
+                    //
+                    // Installing the key also runs the deferred blockstore
+                    // rebuild: `LocalClient::open` no longer rebuilds on
+                    // construction because the rebuild needs this key to
+                    // re-sign migrated legacy envelopes.
                     match memvault_api::node_key::load_or_generate(&data_dir) {
-                        Ok(k) => local_client.set_node_signing_key(k),
+                        Ok(k) => {
+                            local_client.install_node_key_and_rebuild(Some(k));
+                        }
                         Err(e) => {
                             eprintln!("memvault: API routes NOT mounted (node key: {e})");
                             return Ok(router);

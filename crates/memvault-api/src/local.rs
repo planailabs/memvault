@@ -539,11 +539,17 @@ impl LocalClient {
         client
     }
 
-    /// Create a LocalClient and run a blockstore rebuild if the version
-    /// is outdated.  This is the recommended entry point — use `new()`
-    /// only when you need to skip the rebuild (e.g. tests).
-    /// Create a LocalClient and run a sync blockstore rebuild if the
-    /// version is outdated.  This is the recommended entry point.
+    /// Create a LocalClient.  This is the recommended entry point.
+    ///
+    /// The blockstore rebuild is intentionally **not** run here.  The rebuild
+    /// re-signs migrated legacy envelopes with the node signing key, which is
+    /// not available at construction time.  Running it here would bail out —
+    /// and never stamp the schema version — on any store that carries legacy
+    /// pre-bucket data, leaving it to retry-and-fail on every boot.  Callers
+    /// load the node key and then call [`install_node_key_and_rebuild`]
+    /// once, which is the correct ordering.
+    ///
+    /// [`install_node_key_and_rebuild`]: Self::install_node_key_and_rebuild
     pub fn open(
         store: Arc<MemvaultStore>,
         quotas: Arc<RwLock<QuotaManager>>,
@@ -551,11 +557,36 @@ impl LocalClient {
         peer_id: Vec<u8>,
         cluster_id: Vec<u8>,
     ) -> Result<Self> {
-        let client = Self::new(store, quotas, event_bus, peer_id, cluster_id);
-        if let Err(e) = client.rebuild_if_needed() {
-            tracing::warn!("blockstore rebuild error on open: {e}");
+        Ok(Self::new(store, quotas, event_bus, peer_id, cluster_id))
+    }
+
+    /// Install the node signing key (when available) and then run a deferred
+    /// blockstore rebuild — the correct startup ordering.
+    ///
+    /// The rebuild must re-sign migrated legacy envelopes with the node key,
+    /// so the key has to be set *before* the rebuild runs; [`open`] defers the
+    /// rebuild to this call for exactly that reason.  Pass `None` when no node
+    /// key is available (pre-genesis, or a store with nothing to migrate) —
+    /// the rebuild still runs and is a no-op when the schema version is
+    /// already current.  A rebuild error is logged and swallowed so a degraded
+    /// store still starts; the version stays un-stamped so the next boot
+    /// retries.
+    ///
+    /// [`open`]: Self::open
+    pub fn install_node_key_and_rebuild(
+        &self,
+        key: Option<ed25519_dalek::SigningKey>,
+    ) -> Option<crate::rebuild::RebuildReport> {
+        if let Some(key) = key {
+            self.set_node_signing_key(key);
         }
-        Ok(client)
+        match self.rebuild_if_needed() {
+            Ok(report) => report,
+            Err(e) => {
+                tracing::warn!("blockstore rebuild error: {e}");
+                None
+            }
+        }
     }
 
     /// Register an admin signing secret this node holds. Idempotent per
@@ -725,6 +756,12 @@ impl LocalClient {
             let _ = std::fs::remove_file(&admin_path);
             tracing::info!("migrated admin.key into keystore");
         }
+
+        // libp2p.key → keystore `nodesk` (design A-1: node key = libp2p key).
+        // Mirrors the admin.key migration: read the loose seed, store it in the
+        // keystore, delete the file. No-op when there is no loose file (e.g. the
+        // production daemon, which derives its node key from the host PEM).
+        let _ = crate::node_key::node_seed_from_keystore_or_file(&self.keystore, identity_dir);
 
         // cluster_admin_genesis.cbor → keystore `genesis`
         let gen_path = identity_dir.join("cluster_admin_genesis.cbor");

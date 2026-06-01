@@ -754,19 +754,32 @@ mod native {
         let _ = client.migrate_tokens_to_keystore();
         // Load admin signing key (enables token issuance) from the keystore.
         client.load_admin_keys_from_keystore();
-        // Load the node signing key (the libp2p host key, design A-1).
+        // Load the node signing key (design A-1: node key = libp2p key).
         // Needed by anything that mints sigchain blocks — including
-        // `enroll_remote_agent` on the non-daemon CLI path. Silent if
-        // libp2p.key doesn't exist yet (genesis hasn't run, or this is
-        // a fresh data_dir); callers that need it will fail later
+        // `enroll_remote_agent` on the non-daemon CLI path. Resolves
+        // keystore-first (the daemon persists it under `nodesk`; a loose
+        // libp2p.key is migrated in), so we no longer gate on a loose file
+        // existing — the key is available even on a daemon-managed data_dir
+        // that never wrote libp2p.key. `None` when no identity exists yet
+        // (pre-genesis / fresh data_dir); callers that need it fail later
         // with a clear error.
-        if data_dir.join("identity").join("libp2p.key").exists() {
-            if let Ok(node_sk) = libp2p_node_signing_key(data_dir) {
-                client.set_node_signing_key(node_sk);
-                // Stamp node ownership of the per-node legacy bucket now
-                // that the node key is available (rebuild ran without it).
-                let _ = client.ensure_legacy_bucket_node_owner();
-            }
+        //
+        // Installing the key also runs the deferred blockstore rebuild:
+        // `LocalClient::open` no longer rebuilds on construction because the
+        // rebuild needs this key to re-sign migrated legacy envelopes. Passing
+        // `None` still runs the rebuild — a no-op when there is nothing to
+        // migrate.
+        let node_sk = memvault_api::node_key::node_seed_from_keystore_or_file(
+            client.keystore(),
+            &data_dir.join("identity"),
+        )
+        .map(|seed| ed25519_dalek::SigningKey::from_bytes(&seed));
+        let had_node_key = node_sk.is_some();
+        client.install_node_key_and_rebuild(node_sk);
+        if had_node_key {
+            // Stamp node ownership of the per-node legacy bucket now that the
+            // node key and the rebuilt legacy bucket are both available.
+            let _ = client.ensure_legacy_bucket_node_owner();
         }
         // Load the pinned AdminGenesis from the keystore so `token issue`
         // embeds it for joining peers, and so peers can verify trust.
@@ -1032,17 +1045,20 @@ mod native {
     /// the pubkey `bootstrap_cluster_trust` keys trust state by is the
     /// same pubkey the JoinRequest carries.
     pub fn libp2p_node_signing_key(data_dir: &Path) -> Result<ed25519_dalek::SigningKey> {
-        let key_path = data_dir.join("identity").join("libp2p.key");
-        let mut key_bytes = std::fs::read(&key_path)
-            .map_err(|e| anyhow::anyhow!("read {}: {e}", key_path.display()))?;
-        // `load_or_generate_keypair` accepts both 32-byte seed-only files
-        // and 64-byte seed+public files — mirror that here.
-        if key_bytes.len() == 64 {
-            key_bytes.truncate(32);
-        }
-        let seed: [u8; 32] = key_bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("libp2p.key must contain a 32-byte seed"))?;
+        // Resolve keystore-first (a daemon persists the seed under `nodesk`),
+        // falling back to — and migrating — a loose `libp2p.key`. Signing-only:
+        // error when neither source exists rather than minting a new identity.
+        let identity_dir = data_dir.join("identity");
+        let keystore = memvault_api::keystore_open::open_token_keystore(&identity_dir)
+            .map_err(|e| anyhow::anyhow!("open keystore: {e}"))?;
+        let seed = memvault_api::node_key::node_seed_from_keystore_or_file(&keystore, &identity_dir)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no node signing key: keystore `nodesk` is empty and no \
+                     {}/libp2p.key exists",
+                    identity_dir.display()
+                )
+            })?;
         Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
     }
 
@@ -1079,38 +1095,37 @@ mod native {
         );
     }
 
+    /// Load (or generate) the swarm libp2p keypair, resolving the seed
+    /// keystore-first (design A-1: node key = libp2p key). `key_path` is the
+    /// legacy `<identity>/libp2p.key` location; its parent identity dir hosts
+    /// the keystore. A loose file is migrated into the keystore and deleted; a
+    /// freshly generated seed is persisted to the keystore only (no loose file).
     pub fn load_or_generate_keypair(key_path: &Path) -> Result<libp2p::identity::Keypair> {
-        if key_path.exists() {
-            let mut key_bytes = std::fs::read(key_path)?;
-            // ed25519_from_bytes expects the 32-byte seed. If we accidentally
-            // saved 64 bytes (seed + public), truncate to the seed portion.
-            if key_bytes.len() == 64 {
-                key_bytes.truncate(32);
-            }
-            let kp = libp2p::identity::Keypair::ed25519_from_bytes(key_bytes).map_err(|e| {
-                anyhow::anyhow!("failed to load keypair from {}: {e}", key_path.display())
-            })?;
-            return Ok(kp);
-        }
+        let identity_dir = key_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("key path {} has no parent dir", key_path.display()))?;
+        let keystore = memvault_api::keystore_open::open_token_keystore(identity_dir)
+            .map_err(|e| anyhow::anyhow!("open keystore: {e}"))?;
 
-        // Generate new keypair and save the 32-byte secret seed.
-        let kp = libp2p::identity::Keypair::generate_ed25519();
-        if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let ed_kp = kp
-            .clone()
-            .try_into_ed25519()
-            .map_err(|e| anyhow::anyhow!("keypair is not ed25519: {e}"))?;
-        let full_bytes = ed_kp.to_bytes();
-        // Save only the 32-byte seed (first half of the 64-byte keypair)
-        std::fs::write(key_path, &full_bytes[..32])?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(kp)
+        let seed = match memvault_api::node_key::node_seed_from_keystore_or_file(
+            &keystore,
+            identity_dir,
+        ) {
+            Some(seed) => seed,
+            None => {
+                // No existing identity anywhere — generate one and persist the
+                // 32-byte seed into the keystore (no loose file).
+                let mut seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+                keystore
+                    .put(memvault_api::node_key::NODE_SEED_KEYSTORE_KEY, &seed)
+                    .map_err(|e| anyhow::anyhow!("persist node seed to keystore: {e}"))?;
+                seed
+            }
+        };
+
+        libp2p::identity::Keypair::ed25519_from_bytes(seed)
+            .map_err(|e| anyhow::anyhow!("build libp2p keypair from node seed: {e}"))
     }
 
     fn parse_entity_id(hex_str: &str) -> Result<EntityId> {
