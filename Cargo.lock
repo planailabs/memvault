@@ -5380,6 +5380,7 @@ dependencies = [
  "memvault-doc",
  "memvault-export",
  "memvault-query",
+ "memvault-store",
  "mime_guess",
  "rand 0.8.6",
  "reqwest 0.13.4",

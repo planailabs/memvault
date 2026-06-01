@@ -6,8 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use memvault_auth::TokenRole;
-use memvault_core::classification::Classification;
-use memvault_core::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visibility};
+use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Document, Edge, Entity, TextPatch};
 use memvault_query::{AuditQuery, AuditRecord, SearchHit};
 
@@ -148,38 +147,6 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Some(arr)
-}
-
-/// Reconstruct a full [`BucketInfo`] from the server's elaborate `/buckets`
-/// JSON (see `memvault-web` `bucket_to_json`). IDs/pubkeys are hex strings;
-/// the enum fields carry their canonical serde form. Returns `None` only when
-/// the mandatory `id` is missing or malformed.
-fn parse_bucket_info(v: &serde_json::Value) -> Option<BucketInfo> {
-    let id = hex32(v["id"].as_str()?)?;
-    Some(BucketInfo {
-        id: BucketId(id),
-        name: v["name"].as_str().unwrap_or_default().to_string(),
-        description: v["description"].as_str().map(|s| s.to_string()),
-        owner_agent: v["owner_agent"].as_str().map(|s| AgentId(s.to_string())),
-        owner_agent_pubkey: v["owner_agent_pubkey"].as_str().and_then(hex32),
-        owner_node_pubkey: v["owner_node_pubkey"].as_str().and_then(hex32),
-        cluster_id: v["cluster_id"].as_str().and_then(hex32).map(ClusterId),
-        is_attached: v["is_attached"].as_bool().unwrap_or(false),
-        default_visibility: v
-            .get("default_visibility")
-            .and_then(|x| serde_json::from_value(x.clone()).ok())
-            .unwrap_or(Visibility::Internal),
-        default_classification: v
-            .get("default_classification")
-            .and_then(|x| serde_json::from_value(x.clone()).ok())
-            .unwrap_or(Classification::Internal),
-        created_ns: v["created_ns"].as_u64().unwrap_or(0),
-        envelope_count: v["envelope_count"].as_u64().unwrap_or(0),
-        role: v
-            .get("role")
-            .and_then(|x| serde_json::from_value(x.clone()).ok())
-            .unwrap_or_default(),
-    })
 }
 
 /// Reconstruct an [`AuditRecord`] from the server's `/audit` and
@@ -1270,7 +1237,8 @@ impl MemvaultClient for HttpApiClient {
     }
 
     async fn bucket_list(&self) -> Result<Vec<BucketInfo>> {
-        let resp: serde_json::Value = self
+        // `BucketInfo` decodes directly (hex-id wire shape, see `standards/`).
+        let buckets = self
             .client
             .get(self.url("/buckets"))
             .send()
@@ -1281,10 +1249,6 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        let buckets = resp
-            .as_array()
-            .map(|arr| arr.iter().filter_map(parse_bucket_info).collect())
-            .unwrap_or_default();
         Ok(buckets)
     }
 
@@ -1298,13 +1262,14 @@ impl MemvaultClient for HttpApiClient {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let val: serde_json::Value = resp
+        // `BucketInfo` decodes directly (hex-id wire shape, see `standards/`).
+        let info = resp
             .error_for_status()
             .map_err(map_reqwest)?
             .json()
             .await
             .map_err(map_reqwest)?;
-        Ok(parse_bucket_info(&val))
+        Ok(Some(info))
     }
 
     async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {

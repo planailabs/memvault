@@ -25,6 +25,7 @@ pub mod subscription;
 pub mod tokens;
 pub mod types;
 pub mod vfs;
+pub mod wire;
 
 pub use client::MemvaultClient;
 /// The query-scope triplet types live in `memvault-core` (so `memvault-query`

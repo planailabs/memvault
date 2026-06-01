@@ -2,6 +2,21 @@
 
 Rules for any AI agent (Claude Code, Copilot, etc.) working on the memvault crates.
 
+## API & wire standards
+
+- **Honour the standards in [`standards/`](standards/).** They define the
+  uniform API/wire conventions (ID encoding, response envelopes, bucket
+  scoping, auth) and the "one wire shape per type, no ad-hoc JSON" rule. Read
+  them before adding or changing an endpoint, a `MemvaultClient` method, an MCP
+  tool, or an API return type.
+- **Keep the standards current.** If a convention genuinely needs to change,
+  update the relevant file in `standards/` in the *same* change — code and
+  standard must not drift.
+- **Transmit existing shapes; minimize custom JSON.** Serialize the domain type
+  (with `memvault_api::wire` hex helpers / `*Wire` DTOs) and deserialize it with
+  `serde`. Do not hand-build `serde_json::json!({…})` on the server or
+  field-pick a `serde_json::Value` on the client.
+
 ## CID integrity
 
 - **Never store a block without CID verification.** Use `store.put_block(cid, data)` which checks `cid == hash(data)`. The method `put_block_unchecked` was removed for this reason — do not reintroduce it.

@@ -135,21 +135,27 @@ pub struct WriteOptions {
 }
 
 /// Information about a bucket.
+///
+/// Wire shape per `standards/`: IDs are hex strings (the byte-newtype `serde`
+/// is reserved for dag-cbor blocks), so the ID fields carry `crate::wire`
+/// hex helpers and the type is transmitted as-is — no hand-built JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketInfo {
+    #[serde(with = "crate::wire::hex_id")]
     pub id: BucketId,
     pub name: String,
     pub description: Option<String>,
     pub owner_agent: Option<memvault_core::AgentId>,
     /// Owner agent's ed25519 pubkey, when recorded at creation. Used by
     /// ACL to resolve owner / attesting-node grant authority.
-    #[serde(default)]
+    #[serde(default, with = "crate::wire::hex_array32_opt")]
     pub owner_agent_pubkey: Option<[u8; 32]>,
     /// Owning node's ed25519 pubkey for node-owned buckets (e.g. the
     /// per-node legacy bucket).
-    #[serde(default)]
+    #[serde(default, with = "crate::wire::hex_array32_opt")]
     pub owner_node_pubkey: Option<[u8; 32]>,
     /// Which cluster this bucket is bound to (None if unbound/standalone).
+    #[serde(default, with = "crate::wire::hex_id_opt")]
     pub cluster_id: Option<ClusterId>,
     /// Whether this bucket is attached to the cluster (private_to_peer is None).
     pub is_attached: bool,
