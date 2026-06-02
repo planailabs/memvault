@@ -517,7 +517,8 @@ impl MemvaultClient for HttpApiClient {
         if let Some(b) = bucket {
             url.push_str(&format!("&bucket={}", hex::encode(b.0)));
         }
-        let resp: serde_json::Value = self
+        // Decode the shared EntityWire DTO (no serde_json::Value field-picking).
+        let wire: Vec<crate::wire::EntityWire> = self
             .client
             .get(&url)
             .send()
@@ -528,30 +529,7 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        // Server shape (graph::EntityResponse): [{ id: "entity:<hex>", kind, props, edges }]
-        let entities = resp
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        let id = match NodeRef::from_tag_label(v["id"].as_str()?)? {
-                            NodeRef::Entity(eid) => eid,
-                            _ => return None,
-                        };
-                        Some(Entity {
-                            id,
-                            kind: v["kind"].as_str().unwrap_or("").to_string(),
-                            props: v
-                                .get("props")
-                                .and_then(|p| serde_json::from_value(p.clone()).ok())
-                                .unwrap_or_default(),
-                            edges_out: vec![],
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(entities)
+        Ok(wire.into_iter().filter_map(|w| w.into_entity()).collect())
     }
 
     async fn entity_history(&self, _id: &EntityId) -> Result<Vec<AuditRecord>> {
@@ -614,7 +592,8 @@ impl MemvaultClient for HttpApiClient {
     async fn edges_of(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
         let node_id = node.tag_label();
         let url = format!("{}?node={}", self.url("/links"), urlencoded(&node_id));
-        let resp: serde_json::Value = self
+        // Decode the shared LinkWire DTO (no serde_json::Value field-picking).
+        let wire: Vec<crate::wire::LinkWire> = self
             .client
             .get(&url)
             .send()
@@ -625,39 +604,7 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        // Server shape (links::LinkResponse):
-        //   [{ edge_id, source, target, relation, weight, props }]
-        let edges = resp
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        let source = NodeRef::from_tag_label(v["source"].as_str()?)?;
-                        let target = NodeRef::from_tag_label(v["target"].as_str()?)?;
-                        let edge_bytes = hex::decode(v["edge_id"].as_str()?).ok()?;
-                        if edge_bytes.len() != 32 {
-                            return None;
-                        }
-                        let mut eid = [0u8; 32];
-                        eid.copy_from_slice(&edge_bytes);
-                        let props = v
-                            .get("props")
-                            .and_then(|p| serde_json::from_value(p.clone()).ok())
-                            .unwrap_or_default();
-                        let edge = Edge {
-                            id: EdgeId(eid),
-                            relation: v["relation"].as_str().unwrap_or_default().to_string(),
-                            target,
-                            weight: v.get("weight").and_then(|w| w.as_f64()).map(|w| w as f32),
-                            props,
-                            provenance: None,
-                        };
-                        Some((source, edge))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(edges)
+        Ok(wire.into_iter().filter_map(|w| w.into_source_edge()).collect())
     }
 
     async fn traverse_from(

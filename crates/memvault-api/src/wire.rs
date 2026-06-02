@@ -15,7 +15,7 @@
 //! #[serde(with = "crate::wire::hex_bytes")]         cid: Vec<u8>,
 //! ```
 
-use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId};
+use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef};
 use serde::{Deserialize, Deserializer, Serializer};
 
 /// A 32-byte ID newtype that round-trips through a lowercase hex string.
@@ -179,6 +179,73 @@ pub mod cid_str_opt {
             )),
             None => Ok(None),
         }
+    }
+}
+
+// ── Shared DTOs for graph block types ──────────────────────────────────
+// Entity/Edge serde is frozen (dag-cbor / CIDs), so the wire shape is a thin
+// DTO with string ids/labels that both server responses and the client decode
+// via serde — no `serde_json::Value` field-picking. See wire-dtos.md.
+
+/// Wire form of an [`Entity`] summary (matches the server's `/entities` shape).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct EntityWire {
+    /// "entity:<hex>" node label.
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub props: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl EntityWire {
+    /// Convert to a domain [`Entity`] (no edges; `list_entities` omits them).
+    pub fn into_entity(self) -> Option<memvault_doc::Entity> {
+        let id = match NodeRef::from_tag_label(&self.id)? {
+            NodeRef::Entity(e) => e,
+            _ => return None,
+        };
+        Some(memvault_doc::Entity {
+            id,
+            kind: self.kind,
+            props: self.props,
+            edges_out: vec![],
+        })
+    }
+}
+
+/// Wire form of an edge (matches the server's `/links` `LinkResponse`).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LinkWire {
+    /// Bare-hex edge id.
+    pub edge_id: String,
+    /// "type:hex" node labels.
+    pub source: String,
+    pub target: String,
+    pub relation: String,
+    #[serde(default)]
+    pub weight: Option<f32>,
+    #[serde(default)]
+    pub props: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl LinkWire {
+    /// Convert to a `(source, Edge)` pair (the shape `edges_of` returns).
+    pub fn into_source_edge(self) -> Option<(NodeRef, memvault_doc::Edge)> {
+        let source = NodeRef::from_tag_label(&self.source)?;
+        let target = NodeRef::from_tag_label(&self.target)?;
+        let bytes = hex::decode(&self.edge_id).ok()?;
+        let eid: [u8; 32] = bytes.try_into().ok()?;
+        Some((
+            source,
+            memvault_doc::Edge {
+                id: EdgeId(eid),
+                relation: self.relation,
+                target,
+                weight: self.weight,
+                props: self.props,
+                provenance: None,
+            },
+        ))
     }
 }
 

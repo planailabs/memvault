@@ -87,11 +87,11 @@ and emits CID strings on its cid inputs/outputs.
   to a CID string would add CID-vs-hex parse *ambiguity* to a core node-ref
   parser used across links/vfs/traverse, for marginal gain. Left as hex; the
   emitted file/manifest CIDs elsewhere are canonical.
-- **Entity/Edge/Document hand-parsers** (`add_entity`/`get_entity`/
-  `list_entities`/`edges_of`) — these decode `serde_json::Value` today but are
-  fully covered by the e2e + tool tests and carry no CID fields (entity/edge
-  ids are opaque hex, targets are node labels). Consolidating into `*Wire` DTOs
-  is cleanup, not a correctness fix; do it when touching that code.
+- **Entity/Edge hand-parsers** — `list_entities` and `edges_of` now decode the
+  shared `wire::EntityWire` / `wire::LinkWire` DTOs (no `serde_json::Value`
+  field-picking). `add_entity` (extracts a single id) and `get_entity` (decodes
+  the distinct `/nodes/{id}` shape) still do minimal field access; consolidate
+  when next touching them.
 - **`TokenStatus.cid` → CID string** — gated behind a separate route bug
   (`list_tokens` client hits `/tokens`, server serves `/admin/tokens`); fix the
   route in the same change.
