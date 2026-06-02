@@ -4495,8 +4495,16 @@ impl MemvaultClient for LocalClient {
         let cids = if let Some((ref scope, ref label)) = tag_filter {
             self.store.query_by_tag(scope, label, 0, limit * 5)?
         } else {
+            // Scan all doc labels when bucket-scoped: a global cap would drop
+            // docs of any bucket outside the global first-N (same flaw as
+            // list_entities_ex). The result is capped at `limit` below.
+            let label_cap = if bucket_cid_set.is_some() {
+                usize::MAX
+            } else {
+                limit * 5
+            };
             self.store
-                .query_unique_labels("doc", limit * 5)?
+                .query_unique_labels("doc", label_cap)?
                 .into_iter()
                 .flat_map(|label| {
                     self.store
@@ -4510,6 +4518,9 @@ impl MemvaultClient for LocalClient {
         let mut seen_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
 
         for cid in &cids {
+            if summaries.len() >= limit {
+                break;
+            }
             // Skip CIDs not in the active bucket (when filtered).
             if let Some(ref bset) = bucket_cid_set {
                 if !bset.contains(cid) {
@@ -4873,9 +4884,22 @@ impl MemvaultClient for LocalClient {
                 if all.is_empty() { None } else { Some(all) }
             };
 
-        let labels = self.store.query_unique_labels("entity", limit)?;
+        // When scoped to a bucket, the global `limit` cap on labels would
+        // wrongly drop entities (including the per-bucket VFS root, which
+        // breaks `ensure_root` → mkdir/resolve) of any bucket whose entities
+        // fall outside the global first-`limit`. Scan all entity labels and
+        // cap the *filtered* result at `limit` instead.
+        let label_cap = if bucket_cid_set.is_some() {
+            usize::MAX
+        } else {
+            limit
+        };
+        let labels = self.store.query_unique_labels("entity", label_cap)?;
         let mut entities = Vec::new();
         for label in labels {
+            if entities.len() >= limit {
+                break;
+            }
             // When bucket-filtered, check if any of this entity's CIDs are in the bucket.
             if let Some(ref bset) = bucket_cid_set {
                 let entity_cids = self

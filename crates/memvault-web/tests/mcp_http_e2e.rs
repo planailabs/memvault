@@ -453,6 +453,45 @@ async fn status_reports_node() {
 }
 
 #[tokio::test]
+async fn listing_and_vfs_are_bucket_scoped() {
+    let (client, _agent) = client_and_bucket().await;
+    let a = fresh_bucket(&client, "scope-a").await;
+    let b = fresh_bucket(&client, "scope-b").await;
+
+    // A doc in each bucket.
+    let mk = |body: &str| memvault_doc::Document {
+        id: memvault_core::DocId([0u8; 32]),
+        frontmatter: Default::default(),
+        body: body.to_string(),
+    };
+    client.put_doc(mk("alpha doc"), vec![], Visibility::Internal, Some(&a)).await.expect("put a");
+    client.put_doc(mk("beta doc"), vec![], Visibility::Internal, Some(&b)).await.expect("put b");
+
+    // list_docs must be bucket-scoped: the two buckets return disjoint,
+    // non-empty doc sets. (The old HTTP client dropped the bucket param, so
+    // every bucket returned the same all-buckets list.)
+    let da = client.list_docs(None, 50, Some(&a)).await.expect("list a");
+    let db = client.list_docs(None, 50, Some(&b)).await.expect("list b");
+    let aids: std::collections::HashSet<_> = da.iter().map(|d| d.id.clone()).collect();
+    let bids: std::collections::HashSet<_> = db.iter().map(|d| d.id.clone()).collect();
+    assert!(!aids.is_empty() && !bids.is_empty(), "each bucket must list its own doc");
+    assert!(aids.is_disjoint(&bids), "list_docs must be bucket-scoped, not global");
+
+    // VFS in the non-default bucket B: mkdir → resolve → tree (the
+    // customer-plan-ai symptom was resolve failing / tree empty here).
+    memvault_api::vfs::mkdir(&client, &b, "/scoped/dir").await.expect("mkdir b");
+    assert!(
+        memvault_api::vfs::resolve_path(&client, &b, "/scoped/dir").await.expect("resolve b").is_some(),
+        "VFS path must resolve in a non-default bucket"
+    );
+    let tree = memvault_api::vfs::tree(&client, &b, "/", 10).await.expect("tree b");
+    assert!(tree.contains("scoped"), "tree must show the dir in bucket B: {tree}");
+    // list_entities is bucket-scoped: B's root entity must be visible.
+    let ents_b = client.list_entities(50, Some(&b)).await.expect("list_entities b");
+    assert!(!ents_b.is_empty(), "bucket B must surface its VFS entities");
+}
+
+#[tokio::test]
 async fn traverse_from_returns_neighbours() {
     let (client, bucket) = client_and_bucket().await;
     let a = client

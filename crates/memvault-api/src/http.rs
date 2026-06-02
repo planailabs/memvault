@@ -269,7 +269,7 @@ impl MemvaultClient for HttpApiClient {
         &self,
         tag_filter: Option<(String, String)>,
         limit: usize,
-        _bucket: Option<&BucketId>,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<DocSummary>> {
         let mut url = format!("{}?limit={limit}", self.url("/docs"));
         if let Some((scope, label)) = &tag_filter {
@@ -278,6 +278,11 @@ impl MemvaultClient for HttpApiClient {
                 urlencoded(scope),
                 urlencoded(label)
             ));
+        }
+        // Pass the bucket through — without it the server lists across all
+        // accessible buckets, so every `bucket=` returned the same docs.
+        if let Some(b) = bucket {
+            url.push_str(&format!("&bucket={}", hex::encode(b.0)));
         }
         // `DocSummary` decodes directly (hex id, CID-string cid; see
         // `standards/`). The old hand-parse decoded `id` as bare hex while the
