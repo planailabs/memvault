@@ -193,13 +193,17 @@ pub struct NodeStatus {
 /// Summary of a capability grant visible to a caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrantInfo {
-    /// Hex-encoded grant envelope CID.
+    /// Grant envelope CID (canonical CID string on the wire).
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
     /// Bucket the grant is scoped to (the one the caller asked about).
+    #[serde(with = "crate::wire::hex_id")]
     pub bucket_id: BucketId,
     /// Issuer peer of the grant.
+    #[serde(with = "crate::wire::peer_hex")]
     pub issuer: memvault_core::PeerId,
     /// Issuing cluster.
+    #[serde(with = "crate::wire::hex_id")]
     pub issuing_cluster: ClusterId,
     /// Who the grant is addressed to.
     pub audience: memvault_auth::GrantAudience,
@@ -212,12 +216,18 @@ pub struct GrantInfo {
 /// Summary of a cross-cluster share proposal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareProposalInfo {
-    /// Hex-encoded proposal envelope CID.
+    /// Proposal envelope CID (canonical CID string on the wire).
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
+    #[serde(with = "crate::wire::hex_array16")]
     pub proposal_id: [u8; 16],
+    #[serde(with = "crate::wire::hex_id")]
     pub from_cluster: ClusterId,
+    #[serde(with = "crate::wire::hex_id")]
     pub from_bucket: BucketId,
+    #[serde(with = "crate::wire::peer_hex")]
     pub from_admin: memvault_core::PeerId,
+    #[serde(with = "crate::wire::hex_id")]
     pub to_cluster: ClusterId,
     pub to_recipient: memvault_auth::ShareRecipient,
     pub proposed_actions: Vec<memvault_auth::Action>,

@@ -106,6 +106,40 @@ pub mod hex_bytes {
     }
 }
 
+/// `#[serde(with = "hex_array16")]` for a `[u8; 16]` (e.g. a 16-byte proposal id).
+pub mod hex_array16 {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &[u8; 16], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(v))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 16], D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+        bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("expected 16-byte hex"))
+    }
+}
+
+/// `#[serde(with = "peer_hex")]` for a `memvault_core::PeerId`.
+///
+/// Peer ids are libp2p multihashes; base58 is their canonical form (a FIX
+/// noted in standards/). Hex here keeps it a string (never a byte array) in
+/// the meantime.
+pub mod peer_hex {
+    use super::*;
+    use memvault_core::PeerId;
+
+    pub fn serialize<S: Serializer>(v: &PeerId, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(&v.0))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PeerId, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(PeerId(hex::decode(s).map_err(serde::de::Error::custom)?))
+    }
+}
+
 /// `#[serde(with = "cid_str")]` for a `Vec<u8>` that holds **CID bytes**.
 ///
 /// Encodes as the canonical multibase CID string (`bafy…`) via
