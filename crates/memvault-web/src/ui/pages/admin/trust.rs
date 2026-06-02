@@ -11,10 +11,32 @@ use crate::ui::topbar::use_topbar;
 struct AgentRow {
     pubkey: String,
     agent_id: String,
+    /// Mutable display label (set via agent rename). `None` when never renamed.
+    label: Option<String>,
     role: String,
     revoked: bool,
     not_after_ns: u64,
     expired: bool,
+}
+
+impl AgentRow {
+    /// Human display name: the mutable label, else the enrolled agent_id,
+    /// else a short pubkey prefix.
+    fn display_name(&self) -> String {
+        self.label
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if self.agent_id.is_empty() {
+                    None
+                } else {
+                    Some(self.agent_id.clone())
+                }
+            })
+            .unwrap_or_else(|| {
+                format!("{}…", &self.pubkey[..self.pubkey.len().min(8)])
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +154,9 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
                 .map(|att| AgentRow {
                     pubkey: hex::encode(att.agent_pubkey),
                     agent_id: att.agent_id.0.clone(),
+                    label: memvault_api::sigchain::agent_label(&*client, &att.agent_pubkey)
+                        .ok()
+                        .flatten(),
                     role: format!("{:?}", att.role),
                     revoked: revoked_agents.contains(&att.agent_pubkey),
                     not_after_ns: att.not_after_ns,
@@ -192,13 +217,89 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
     })
 }
 
+/// Set an agent's display label (by hex pubkey). Display-only; never affects
+/// access. Authorised for the agent's attesting node / admin.
+#[server]
+async fn rename_agent(pubkey: String, label: String) -> Result<(), ServerFnError> {
+    use memvault_api::MemvaultClient;
+    let bytes = hex::decode(&pubkey).map_err(|_| ServerFnError::new("invalid pubkey hex"))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| ServerFnError::new("agent pubkey must be 32 bytes"))?;
+    let client = crate::ui::state::local_client()?;
+    client
+        .agent_rename(&arr, label.trim())
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(())
+}
+
+/// Inline control to relabel an agent. Shows the current display name and,
+/// on submit, calls [`rename_agent`] then refreshes the trust tree.
+#[component]
+fn AgentRenameControl(pubkey: String, current: String, on_saved: EventHandler<()>) -> Element {
+    let mut editing = use_signal(|| false);
+    let mut value = use_signal(|| current.clone());
+    let mut saving = use_signal(|| false);
+
+    if !editing() {
+        return rsx! {
+            button {
+                class: "text-xs text-fg-muted hover:text-fg underline",
+                onclick: move |_| editing.set(true),
+                "rename"
+            }
+        };
+    }
+
+    let pubkey_for_save = pubkey.clone();
+    rsx! {
+        form {
+            class: "flex items-center gap-1",
+            onsubmit: move |_| {
+                let pk = pubkey_for_save.clone();
+                let new_label = value();
+                async move {
+                    saving.set(true);
+                    if rename_agent(pk, new_label).await.is_ok() {
+                        editing.set(false);
+                        // Ask the parent to refresh so the new label shows.
+                        on_saved.call(());
+                    }
+                    saving.set(false);
+                }
+            },
+            input {
+                class: "px-1 py-0.5 text-xs border border-border rounded bg-bg",
+                value: "{value}",
+                disabled: saving(),
+                oninput: move |e| value.set(e.value()),
+            }
+            button {
+                r#type: "submit",
+                class: "text-xs text-accent hover:underline",
+                disabled: saving(),
+                "save"
+            }
+            button {
+                r#type: "button",
+                class: "text-xs text-fg-muted hover:underline",
+                onclick: move |_| editing.set(false),
+                "cancel"
+            }
+        }
+    }
+}
+
 #[component]
 pub fn TrustTreePage() -> Element {
     use_topbar("Trust tree");
-    let data = use_server_future(get_trust_tree)?;
+    let mut data = use_server_future(get_trust_tree)?;
 
     match &*data.read() {
-        Some(Ok(tree)) => rsx! { TrustTreeView { tree: tree.clone() } },
+        Some(Ok(tree)) => rsx! {
+            TrustTreeView { tree: tree.clone(), on_refresh: move |_| data.restart() }
+        },
         Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
         None => rsx! { p { class: "text-fg-muted", "Loading…" } },
     }
@@ -224,7 +325,7 @@ fn fmt_expiry(not_after_ns: u64) -> String {
 }
 
 #[component]
-fn TrustTreeView(tree: TrustTree) -> Element {
+fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
     rsx! {
         div { class: "space-y-6",
             PageHeader { "Trust tree" }
@@ -298,11 +399,19 @@ fn TrustTreeView(tree: TrustTree) -> Element {
                                                     } else {
                                                         Pill { variant: PillVariant::Muted, "agent" }
                                                     }
-                                                    span { class: "font-mono text-sm", "{agent.agent_id}" }
+                                                    span { class: "font-medium text-sm", "{agent.display_name()}" }
+                                                    if agent.label.is_some() && !agent.agent_id.is_empty() {
+                                                        span { class: "font-mono text-xs text-fg-muted", "({agent.agent_id})" }
+                                                    }
                                                     CidDisplay { cid: agent.pubkey.clone(), len: Some(12) }
                                                     Pill { variant: PillVariant::Info, "{agent.role}" }
                                                     span { class: "text-xs text-fg-muted",
                                                         "expires: {fmt_expiry(agent.not_after_ns)}"
+                                                    }
+                                                    AgentRenameControl {
+                                                        pubkey: agent.pubkey.clone(),
+                                                        current: agent.display_name(),
+                                                        on_saved: move |_| on_refresh.call(()),
                                                     }
                                                 }
                                             }
