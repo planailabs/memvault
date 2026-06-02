@@ -38,7 +38,7 @@ let
   rp = if slim then slimRustPlatform else rustPlatform;
 in
 
-rp.buildRustPackage {
+rp.buildRustPackage ({
   pname = "memctl";
   version = "0.1.0";
   src = ./.;
@@ -65,9 +65,8 @@ rp.buildRustPackage {
   env.GIT_SHA = gitSha;
 
   doCheck = false;
-}
-// (if slim then {
-  # Plain cargo build of memctl. Faster than dx by a wide margin;
+} // (if slim then {
+  # Plain cargo build of memctl only. Faster than dx by a wide margin;
   # adequate for any caller that doesn't serve the browser-side WASM
   # client (integration tests, headless deployments).
   cargoBuildFlags = [ "-p" "memctl" ];
@@ -85,6 +84,11 @@ rp.buildRustPackage {
   # (`#[cfg(feature = "embed")]`) that makes the daemon serve the fullstack
   # web UI. Both are required — without the feature the assets are embedded
   # but `memctl daemon` reports "Web UI: disabled".
+  #
+  # Keep these phases inside the buildRustPackage argument set. Merging them
+  # onto the finished derivation would only add inert attributes and would let
+  # the default cargo build compile/install every workspace binary instead of
+  # the dx-built memctl package.
   buildPhase = ''
     runHook preBuild
 
@@ -107,10 +111,9 @@ rp.buildRustPackage {
     mkdir -p $out/bin
     cp target/dx/memctl/release/web/server $out/bin/memctl
 
-    # `memctl daemon` enables the UI router only when fullstack assets are
-    # available. Keep Nix's full Dioxus build self-contained by installing
-    # the generated public assets beside the binary, matching memctl's
-    # runtime probe; this preserves API-only behaviour for slim/plain builds.
+    # `memctl daemon` enables the UI router when it is compiled with the
+    # embed feature. If dx also emits a public directory, install it beside
+    # the binary for tooling/static fallbacks; embedded-only builds are valid.
     if [ -d target/dx/memctl/release/web/public ]; then
       cp -r target/dx/memctl/release/web/public $out/bin/public
     fi
@@ -123,4 +126,4 @@ rp.buildRustPackage {
     license = lib.licenses.asl20;
     mainProgram = "memctl";
   };
-})
+}))
