@@ -937,7 +937,7 @@ mod native {
                 rt.block_on(async move {
                     // Bridge EventBus → head announcements (must be inside a runtime).
                     let (head_tx, head_rx) = memvault_swarm::head_channel();
-                    spawn_event_bridge(event_bus, head_tx);
+                    memvault_swarm::spawn_event_bridge(event_bus, head_tx);
 
                     let listen: libp2p::Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
                     let mut swarm =
@@ -2231,7 +2231,7 @@ mod native {
 
                     // Bridge EventBus → sync loop head announcements
                     let (head_tx, head_rx) = memvault_swarm::head_channel();
-                    spawn_event_bridge(event_bus_shared, head_tx);
+                    memvault_swarm::spawn_event_bridge(event_bus_shared, head_tx);
 
                     let sync_config = memvault_swarm::SyncConfig {
                         cluster_id: cluster_id_bytes.clone(),
@@ -2260,7 +2260,7 @@ mod native {
                             .map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
                     let (head_tx, head_rx) = memvault_swarm::head_channel();
-                    spawn_event_bridge(event_bus_shared, head_tx);
+                    memvault_swarm::spawn_event_bridge(event_bus_shared, head_tx);
 
                     let sync_config = memvault_swarm::SyncConfig {
                         cluster_id: cluster_id_bytes.clone(),
@@ -2520,59 +2520,9 @@ mod native {
 
     /// Spawn a background task that bridges EventBus events to the
     /// sync loop's head announcement channel.
-    fn spawn_event_bridge(
-        event_bus: Arc<EventBus>,
-        head_tx: tokio::sync::mpsc::UnboundedSender<memvault_swarm::OutboundHead>,
-    ) {
-        tokio::spawn(async move {
-            let mut rx = event_bus.subscribe();
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        let cid = match &event {
-                            memvault_api::MemvaultEvent::DocCreated { cid, .. } => {
-                                Some(cid.clone())
-                            }
-                            memvault_api::MemvaultEvent::DocUpdated { cid, .. } => {
-                                Some(cid.clone())
-                            }
-                            memvault_api::MemvaultEvent::BucketCreated { cid, .. } => {
-                                Some(cid.clone())
-                            }
-                            memvault_api::MemvaultEvent::Retracted { cid } => Some(cid.clone()),
-                            memvault_api::MemvaultEvent::TokenConsumed { token_cid } => {
-                                Some(token_cid.clone())
-                            }
-                            // Push-on-create: announce sigchain blocks
-                            // immediately over gossip so peers don't have to
-                            // wait for the next RBSR cycle to learn about a
-                            // new attestation, revocation, or envelope
-                            // authorship sidecar.
-                            memvault_api::MemvaultEvent::SigchainBlock { cid, .. } => {
-                                Some(cid.clone())
-                            }
-                            _ => None,
-                        };
-                        if let Some(cid) = cid {
-                            if head_tx
-                                .send(memvault_swarm::OutboundHead {
-                                    cid,
-                                    bucket_id: None,
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "event bus lagged, some heads not announced");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
+    // The EventBus→head bridge now lives in memvault-swarm
+    // (`memvault_swarm::spawn_event_bridge`) so memctl and the mac-mgmt daemon
+    // announce the same event set; call sites use it directly.
 
     /// Write a 32-byte secret atomically with 0600 perms (Unix), so it is
     /// never momentarily world/group-readable (no create-then-chmod TOCTOU).

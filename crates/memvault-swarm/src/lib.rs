@@ -694,6 +694,55 @@ pub fn head_channel() -> (
     mpsc::unbounded_channel()
 }
 
+/// Bridge a `LocalClient` `EventBus` to a head-announcement channel: whenever a
+/// block is minted (or a sigchain block lands), forward its CID so the sync
+/// loop gossips a [`OutboundHead`] immediately instead of waiting for the next
+/// RBSR cycle. Shared by `memctl daemon` and the mac-mgmt daemon so both
+/// announce the same event set; spawns a detached task that ends when either
+/// the bus or the channel closes.
+pub fn spawn_event_bridge(
+    event_bus: std::sync::Arc<memvault_api::EventBus>,
+    head_tx: mpsc::UnboundedSender<OutboundHead>,
+) {
+    use memvault_api::MemvaultEvent;
+    tokio::spawn(async move {
+        let mut rx = event_bus.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let cid = match &event {
+                        MemvaultEvent::DocCreated { cid, .. }
+                        | MemvaultEvent::DocUpdated { cid, .. }
+                        | MemvaultEvent::BucketCreated { cid, .. }
+                        | MemvaultEvent::Retracted { cid }
+                        // Push-on-create: announce sigchain blocks (attestations,
+                        // revocations, authorship sidecars) immediately so peers
+                        // don't wait for the next RBSR cycle.
+                        | MemvaultEvent::SigchainBlock { cid, .. } => Some(cid.clone()),
+                        MemvaultEvent::TokenConsumed { token_cid } => Some(token_cid.clone()),
+                        _ => None,
+                    };
+                    if let Some(cid) = cid {
+                        if head_tx
+                            .send(OutboundHead {
+                                cid,
+                                bucket_id: None,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "event bus lagged, some heads not announced");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 /// Number of time windows for RBSR initial sync.
