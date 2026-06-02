@@ -180,9 +180,9 @@ pub struct BucketInfo {
 /// Node status information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
-    // peer_id is a libp2p multihash (base58 is the canonical form — a FIX noted
-    // in standards/); cluster_id is an opaque id. Both as hex strings for now.
-    #[serde(with = "crate::wire::hex_bytes")]
+    // peer_id is a libp2p multihash → base58btc canonical string; cluster_id is
+    // an opaque id → hex.
+    #[serde(with = "crate::wire::b58_bytes")]
     pub peer_id: Vec<u8>,
     #[serde(with = "crate::wire::hex_bytes")]
     pub cluster_id: Vec<u8>,
@@ -202,7 +202,7 @@ pub struct GrantInfo {
     #[serde(with = "crate::wire::hex_id")]
     pub bucket_id: BucketId,
     /// Issuer peer of the grant.
-    #[serde(with = "crate::wire::peer_hex")]
+    #[serde(with = "crate::wire::peer_b58")]
     pub issuer: memvault_core::PeerId,
     /// Issuing cluster.
     #[serde(with = "crate::wire::hex_id")]
@@ -227,7 +227,7 @@ pub struct ShareProposalInfo {
     pub from_cluster: ClusterId,
     #[serde(with = "crate::wire::hex_id")]
     pub from_bucket: BucketId,
-    #[serde(with = "crate::wire::peer_hex")]
+    #[serde(with = "crate::wire::peer_b58")]
     pub from_admin: memvault_core::PeerId,
     #[serde(with = "crate::wire::hex_id")]
     pub to_cluster: ClusterId,

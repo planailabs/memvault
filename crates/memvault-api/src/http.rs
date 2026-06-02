@@ -482,34 +482,25 @@ impl MemvaultClient for HttpApiClient {
     }
 
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>> {
-        let id_hex = hex::encode(id.0);
-        let node_id = format!("entity:{id_hex}");
+        // Decode the shared EntityWire DTO from /entities/{id} (no
+        // serde_json::Value field-picking; this also populates edges_out, which
+        // the old /nodes hand-parse dropped).
         let resp = self
             .client
-            .get(self.url(&format!("/nodes/{}", urlencoded(&node_id))))
+            .get(self.url(&format!("/entities/{}", hex::encode(id.0))))
             .send()
             .await
             .map_err(map_reqwest)?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let val: serde_json::Value = resp
+        let wire: crate::wire::EntityWire = resp
             .error_for_status()
             .map_err(map_reqwest)?
             .json()
             .await
             .map_err(map_reqwest)?;
-        let kind = val["kind"].as_str().unwrap_or("").to_string();
-        let props: BTreeMap<String, serde_json::Value> = val
-            .get("props")
-            .and_then(|p| serde_json::from_value(p.clone()).ok())
-            .unwrap_or_default();
-        Ok(Some(Entity {
-            id: id.clone(),
-            kind,
-            props,
-            edges_out: vec![],
-        }))
+        Ok(wire.into_entity())
     }
 
     async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>> {

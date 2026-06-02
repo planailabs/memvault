@@ -83,18 +83,24 @@ upload response) via accept-both/emit-canonical. The MCP tool surface accepts
 and emits CID strings on its cid inputs/outputs.
 
 **Consciously deferred (rationale, not oversight):**
-- **`NodeRef::Attachment` `file:` label** — flipping `tag_label`/`from_tag_label`
-  to a CID string would add CID-vs-hex parse *ambiguity* to a core node-ref
-  parser used across links/vfs/traverse, for marginal gain. Left as hex; the
-  emitted file/manifest CIDs elsewhere are canonical.
-- **Entity/Edge hand-parsers** — `list_entities` and `edges_of` now decode the
-  shared `wire::EntityWire` / `wire::LinkWire` DTOs (no `serde_json::Value`
-  field-picking). `add_entity` (extracts a single id) and `get_entity` (decodes
-  the distinct `/nodes/{id}` shape) still do minimal field access; consolidate
-  when next touching them.
-- **`TokenStatus.cid` → CID string** — gated behind a separate route bug
-  (`list_tokens` client hits `/tokens`, server serves `/admin/tokens`); fix the
-  route in the same change.
-- **`PeerId` base58** — peer ids are multihashes; base58 is canonical but
-  needs a libp2p-aware formatter. Currently hex (string, not array), which is
-  the main goal; base58 is a follow-up.
+- **`NodeRef::Attachment` `file:` label — must NOT be flipped without a
+  re-index migration.** `tag_label()` is not merely a wire string: the tag and
+  search indexes are keyed by the `node_id` *string* it produces
+  (`LocalClient::add_tags`/`get_tags` → the Tantivy index keys on `node_id`).
+  Changing the attachment label from `file:<hex>` to `file:<cid-string>` would
+  orphan every existing attachment's tags and search entries. So this is a
+  data-migration item (re-index attachment nodes under the new key), not a wire
+  tweak — left as hex deliberately. Entity/Doc labels are unaffected (still hex
+  of their opaque ids). The standalone file/manifest CID surface is already
+  canonical and accept-both.
+- **`add_entity`** — extracts a single id via `NodeRef::from_tag_label` (not
+  struct field-picking); idiomatic, left as-is. `list_entities`, `edges_of`,
+  and `get_entity` now decode the shared `wire::EntityWire` / `wire::LinkWire`
+  DTOs (and `get_entity` now populates `edges_out`, which the old `/nodes`
+  hand-parse dropped).
+
+**Resolved follow-ups** (previously deferred):
+- `PeerId` → base58btc (`wire::peer_b58` / `wire::b58_bytes`, backed by
+  `memvault_core::b58_encode/decode`): `NodeStatus.peer_id`, `GrantInfo.issuer`,
+  `ShareProposalInfo.from_admin`.
+- `TokenStatus.cid` → CID string, and the `/tokens` → `/admin/tokens` route bug.

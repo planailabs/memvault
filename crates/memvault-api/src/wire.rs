@@ -122,21 +122,34 @@ pub mod hex_array16 {
     }
 }
 
-/// `#[serde(with = "peer_hex")]` for a `memvault_core::PeerId`.
-///
-/// Peer ids are libp2p multihashes; base58 is their canonical form (a FIX
-/// noted in standards/). Hex here keeps it a string (never a byte array) in
-/// the meantime.
-pub mod peer_hex {
+/// `#[serde(with = "peer_b58")]` for a `memvault_core::PeerId` — base58btc, the
+/// canonical multihash/peer-id string form (matches `PeerId::Display`).
+pub mod peer_b58 {
     use super::*;
     use memvault_core::PeerId;
 
     pub fn serialize<S: Serializer>(v: &PeerId, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hex::encode(&v.0))
+        s.serialize_str(&memvault_core::b58_encode(&v.0))
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PeerId, D::Error> {
         let s = String::deserialize(d)?;
-        Ok(PeerId(hex::decode(s).map_err(serde::de::Error::custom)?))
+        Ok(PeerId(
+            memvault_core::b58_decode(&s).map_err(serde::de::Error::custom)?,
+        ))
+    }
+}
+
+/// `#[serde(with = "b58_bytes")]` for a `Vec<u8>` that holds a peer id /
+/// multihash (base58btc canonical string).
+pub mod b58_bytes {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&memvault_core::b58_encode(v))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        memvault_core::b58_decode(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -187,7 +200,36 @@ pub mod cid_str_opt {
 // DTO with string ids/labels that both server responses and the client decode
 // via serde — no `serde_json::Value` field-picking. See wire-dtos.md.
 
-/// Wire form of an [`Entity`] summary (matches the server's `/entities` shape).
+/// Wire form of an out-edge within an [`EntityWire`] (server `EdgeResponse`).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct EntityEdgeWire {
+    /// Bare-hex edge id.
+    pub id: String,
+    pub relation: String,
+    /// "type:hex" node label.
+    pub target: String,
+    #[serde(default)]
+    pub weight: Option<f32>,
+    #[serde(default)]
+    pub props: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl EntityEdgeWire {
+    fn into_edge(self) -> Option<memvault_doc::Edge> {
+        let target = NodeRef::from_tag_label(&self.target)?;
+        let eid: [u8; 32] = hex::decode(&self.id).ok()?.try_into().ok()?;
+        Some(memvault_doc::Edge {
+            id: EdgeId(eid),
+            relation: self.relation,
+            target,
+            weight: self.weight,
+            props: self.props,
+            provenance: None,
+        })
+    }
+}
+
+/// Wire form of an [`Entity`] (matches the server's `/entities` shape).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct EntityWire {
     /// "entity:<hex>" node label.
@@ -195,10 +237,13 @@ pub struct EntityWire {
     pub kind: String,
     #[serde(default)]
     pub props: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub edges: Vec<EntityEdgeWire>,
 }
 
 impl EntityWire {
-    /// Convert to a domain [`Entity`] (no edges; `list_entities` omits them).
+    /// Convert to a domain [`Entity`]. `list_entities` omits edges (empty);
+    /// `get_entity` populates them.
     pub fn into_entity(self) -> Option<memvault_doc::Entity> {
         let id = match NodeRef::from_tag_label(&self.id)? {
             NodeRef::Entity(e) => e,
@@ -208,7 +253,7 @@ impl EntityWire {
             id,
             kind: self.kind,
             props: self.props,
-            edges_out: vec![],
+            edges_out: self.edges.into_iter().filter_map(|e| e.into_edge()).collect(),
         })
     }
 }

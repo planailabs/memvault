@@ -36,6 +36,17 @@ impl ClusterId {
     }
 }
 
+/// Base58btc-encode bytes — the canonical string form for peer ids and other
+/// multihash-shaped values (matches the `PeerId`/`ClusterId` `Display` impls).
+pub fn b58_encode(bytes: &[u8]) -> String {
+    bs58::encode(bytes).into_string()
+}
+
+/// Decode a base58btc string back to bytes.
+pub fn b58_decode(s: &str) -> Result<Vec<u8>, bs58::decode::Error> {
+    bs58::decode(s).into_vec()
+}
+
 /// Parse a hex string (with an optional `prefix:` like `doc:` or `entity:`)
 /// into a 32-byte array. Used by the per-Id `from_hex` constructors below.
 fn parse_hex_id(s: &str, expected_prefix: &str) -> Result<[u8; 32], hex::FromHexError> {
