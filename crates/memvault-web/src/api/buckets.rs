@@ -271,6 +271,8 @@ pub enum IssueGrantAudience {
     Cluster { cluster_id: String },
     Peer { peer_id: String },
     Agent { agent_id: String },
+    /// Canonical pubkey-addressed agent grant (hex ed25519 pubkey).
+    AgentKey { agent_pubkey: String },
     Role { role: String },
 }
 
@@ -316,6 +318,14 @@ pub async fn issue_grant(
         }
         IssueGrantAudience::Agent { agent_id } => {
             memvault_auth::GrantAudience::Agent(memvault_core::AgentId(agent_id))
+        }
+        IssueGrantAudience::AgentKey { agent_pubkey } => {
+            let bytes = hex::decode(&agent_pubkey)
+                .map_err(|_| ApiError::bad_request("agent_pubkey hex"))?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| ApiError::bad_request("agent_pubkey must be 32 bytes"))?;
+            memvault_auth::GrantAudience::AgentKey(arr)
         }
         IssueGrantAudience::Role { role } => {
             let parsed = match role.as_str() {

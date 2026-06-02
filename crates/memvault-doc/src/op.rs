@@ -91,6 +91,16 @@ pub enum Op {
         bucket_id: BucketId,
         agent: AgentId,
     },
+    // Agent ops — appended, never inserted in the middle.
+    // added B12, removable never
+    //
+    // Sets a mutable human-readable display label for an agent identified by
+    // its ed25519 pubkey. Display-only — it never participates in access
+    // control (which keys on the pubkey / attestation). Mirrors `BucketRename`.
+    AgentRename {
+        agent_pubkey: [u8; 32],
+        new_label: String,
+    },
 }
 
 /// A text patch (simplified operational transform).

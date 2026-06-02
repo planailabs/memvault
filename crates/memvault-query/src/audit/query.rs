@@ -22,6 +22,7 @@ pub enum OpKind {
     Retract,
     BucketCreate,
     BucketRename,
+    AgentRename,
     BucketAttach,
     BucketArchive,
     BucketBind,
@@ -339,6 +340,8 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
             Some(OpKind::BucketCreate)
         } else if p.get("BucketRename").is_some() {
             Some(OpKind::BucketRename)
+        } else if p.get("AgentRename").is_some() {
+            Some(OpKind::AgentRename)
         } else if p.get("BucketAttach").is_some() {
             Some(OpKind::BucketAttach)
         } else if p.get("BucketArchive").is_some() {
@@ -373,6 +376,7 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
             // Bucket ops stored without payload wrapper (legacy).
             (_, _, Some("bucket-decl")) => OpKind::BucketCreate,
             (_, _, Some("bucket-rename")) => OpKind::BucketRename,
+            (_, _, Some("agent-rename")) => OpKind::AgentRename,
             (_, _, Some("bucket-archive")) => OpKind::BucketArchive,
             // View and token blocks.
             (_, _, Some("view")) => OpKind::ViewCreate,

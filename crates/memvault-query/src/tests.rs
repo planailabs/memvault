@@ -1,6 +1,6 @@
 //! Comprehensive tests for memvault-query.
 
-use memvault_core::{AgentId, DocId, PeerId, Tag};
+use memvault_core::{DocId, PeerId, Tag};
 use memvault_store::{EnvelopeMeta, MemvaultStore};
 
 use crate::audit::retraction::{is_retracted, retract};
@@ -129,7 +129,7 @@ fn text_index_title_boost() {
 #[test]
 fn quota_check_write_within_limits() {
     let manager = QuotaManager::default();
-    let agent = AgentId("agent-1".into());
+    let agent = [1u8; 32];
     assert!(manager.check_write(&agent, 100).is_ok());
 }
 
@@ -140,7 +140,7 @@ fn quota_check_write_exceeds_storage() {
         max_bytes: 100,
         max_entities: 10,
     });
-    let agent = AgentId("agent-1".into());
+    let agent = [1u8; 32];
 
     // Record some bytes first
     manager.record_write(&agent, 90);
@@ -159,7 +159,7 @@ fn quota_doc_create_limit() {
         max_bytes: 1_000_000,
         max_entities: 100,
     });
-    let agent = AgentId("agent-1".into());
+    let agent = [1u8; 32];
 
     manager.record_doc_create(&agent, 100);
     assert!(manager.check_doc_create(&agent).is_ok());
@@ -177,7 +177,7 @@ fn quota_entity_create_limit() {
         max_bytes: 1_000_000,
         max_entities: 1,
     });
-    let agent = AgentId("agent-1".into());
+    let agent = [1u8; 32];
 
     manager.record_entity_create(&agent);
     let result = manager.check_entity_create(&agent);
@@ -187,7 +187,7 @@ fn quota_entity_create_limit() {
 #[test]
 fn quota_custom_quota_per_agent() {
     let mut manager = QuotaManager::default();
-    let agent = AgentId("special-agent".into());
+    let agent = [2u8; 32];
 
     // Set a very small custom quota
     manager.set_quota(
@@ -203,6 +203,49 @@ fn quota_custom_quota_per_agent() {
     // 40 + 20 > 50
     let result = manager.check_write(&agent, 20);
     assert!(result.is_err());
+}
+
+#[test]
+fn quota_isolated_by_pubkey_not_label() {
+    // Two agents that would share the SAME human agent_id ("alice") but have
+    // different ed25519 pubkeys must NOT share a quota pool.
+    let mut manager = QuotaManager::new(AgentQuota {
+        max_docs: 1,
+        max_bytes: 1_000_000,
+        max_entities: 100,
+    });
+    let alice_a = [0xAA; 32];
+    let alice_b = [0xBB; 32];
+
+    // alice_a uses up its single doc.
+    manager.record_doc_create(&alice_a, 100);
+    assert!(
+        manager.check_doc_create(&alice_a).is_err(),
+        "alice_a is at its doc limit"
+    );
+    // alice_b (same label, different key) is unaffected.
+    assert!(
+        manager.check_doc_create(&alice_b).is_ok(),
+        "alice_b must have an independent quota"
+    );
+}
+
+#[test]
+fn quota_set_and_check_by_pubkey() {
+    let mut manager = QuotaManager::default();
+    let pk = [7u8; 32];
+    manager.set_quota(
+        &pk,
+        AgentQuota {
+            max_docs: 100,
+            max_bytes: 50,
+            max_entities: 100,
+        },
+    );
+    manager.record_write(&pk, 40);
+    assert!(manager.check_write(&pk, 20).is_err(), "40+20 > 50 for this pubkey");
+    // A different pubkey falls back to the (large) default quota.
+    assert!(manager.check_write(&[8u8; 32], 20).is_ok());
 }
 
 // === Retraction Tests ===

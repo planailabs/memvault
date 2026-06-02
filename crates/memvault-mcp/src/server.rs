@@ -861,6 +861,24 @@ impl MemvaultServer {
     }
 
     #[tool(
+        name = "memvault_agent_rename",
+        description = "Set an agent's display label (by ed25519 pubkey). Display-only; does not affect access."
+    )]
+    async fn agent_rename(&self, Parameters(params): Parameters<AgentRenameParams>) -> String {
+        let pk = match hex::decode(&params.agent_pubkey)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        {
+            Some(p) => p,
+            None => return "error: agent_pubkey must be 32-byte hex".to_string(),
+        };
+        match self.client.agent_rename(&pk, &params.label).await {
+            Ok(()) => serde_json::json!({ "status": "renamed" }).to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
         name = "memvault_bucket_archive",
         description = "Archive a bucket (soft-remove, data preserved)."
     )]

@@ -2,15 +2,15 @@
 
 use std::collections::HashMap;
 
-use memvault_core::AgentId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Quota exceeded error.
+/// Quota exceeded error. `agent` is the hex-encoded agent pubkey (or
+/// `bucket:<hex>` for per-bucket limits).
 #[derive(Debug, Error)]
-#[error("quota exceeded for agent {agent_id}: {detail}")]
+#[error("quota exceeded for {agent}: {detail}")]
 pub struct QuotaExceeded {
-    pub agent_id: String,
+    pub agent: String,
     pub detail: String,
 }
 
@@ -33,9 +33,13 @@ impl Default for AgentQuota {
 }
 
 /// Tracks per-agent and per-bucket usage against configured quotas.
+///
+/// Agent quotas/usage are keyed by the agent's **ed25519 pubkey** (the
+/// canonical, globally-unique identity), not the human `agent_id` string —
+/// otherwise two nodes' same-named agents would share one quota pool.
 pub struct QuotaManager {
-    quotas: HashMap<String, AgentQuota>,
-    usage: HashMap<String, AgentUsage>,
+    quotas: HashMap<[u8; 32], AgentQuota>,
+    usage: HashMap<[u8; 32], AgentUsage>,
     default_quota: AgentQuota,
     /// Per-bucket quotas (added B8). Keyed by hex-encoded bucket_id.
     bucket_quotas: HashMap<String, BucketQuota>,
@@ -61,20 +65,20 @@ impl QuotaManager {
         }
     }
 
-    /// Set a specific quota for an agent.
-    pub fn set_quota(&mut self, agent_id: &AgentId, quota: AgentQuota) {
-        self.quotas.insert(agent_id.0.clone(), quota);
+    /// Set a specific quota for an agent (keyed by ed25519 pubkey).
+    pub fn set_quota(&mut self, agent_pubkey: &[u8; 32], quota: AgentQuota) {
+        self.quotas.insert(*agent_pubkey, quota);
     }
 
     /// Check if a write of `bytes` size is allowed for the agent.
-    pub fn check_write(&self, agent_id: &AgentId, bytes: u64) -> Result<(), QuotaExceeded> {
-        let quota = self.quotas.get(&agent_id.0).unwrap_or(&self.default_quota);
-        let usage = self.usage.get(&agent_id.0);
+    pub fn check_write(&self, agent_pubkey: &[u8; 32], bytes: u64) -> Result<(), QuotaExceeded> {
+        let quota = self.quotas.get(agent_pubkey).unwrap_or(&self.default_quota);
+        let usage = self.usage.get(agent_pubkey);
         let current_bytes = usage.map(|u| u.byte_count).unwrap_or(0);
 
         if current_bytes + bytes > quota.max_bytes {
             return Err(QuotaExceeded {
-                agent_id: agent_id.0.clone(),
+                agent: hex::encode(agent_pubkey),
                 detail: format!(
                     "byte limit exceeded: {} + {} > {}",
                     current_bytes, bytes, quota.max_bytes
@@ -85,14 +89,14 @@ impl QuotaManager {
     }
 
     /// Check if creating a new doc is allowed for the agent.
-    pub fn check_doc_create(&self, agent_id: &AgentId) -> Result<(), QuotaExceeded> {
-        let quota = self.quotas.get(&agent_id.0).unwrap_or(&self.default_quota);
-        let usage = self.usage.get(&agent_id.0);
+    pub fn check_doc_create(&self, agent_pubkey: &[u8; 32]) -> Result<(), QuotaExceeded> {
+        let quota = self.quotas.get(agent_pubkey).unwrap_or(&self.default_quota);
+        let usage = self.usage.get(agent_pubkey);
         let current_docs = usage.map(|u| u.doc_count).unwrap_or(0);
 
         if current_docs >= quota.max_docs {
             return Err(QuotaExceeded {
-                agent_id: agent_id.0.clone(),
+                agent: hex::encode(agent_pubkey),
                 detail: format!("doc limit reached: {} >= {}", current_docs, quota.max_docs),
             });
         }
@@ -100,14 +104,14 @@ impl QuotaManager {
     }
 
     /// Check if creating a new entity is allowed for the agent.
-    pub fn check_entity_create(&self, agent_id: &AgentId) -> Result<(), QuotaExceeded> {
-        let quota = self.quotas.get(&agent_id.0).unwrap_or(&self.default_quota);
-        let usage = self.usage.get(&agent_id.0);
+    pub fn check_entity_create(&self, agent_pubkey: &[u8; 32]) -> Result<(), QuotaExceeded> {
+        let quota = self.quotas.get(agent_pubkey).unwrap_or(&self.default_quota);
+        let usage = self.usage.get(agent_pubkey);
         let current = usage.map(|u| u.entity_count).unwrap_or(0);
 
         if current >= quota.max_entities {
             return Err(QuotaExceeded {
-                agent_id: agent_id.0.clone(),
+                agent: hex::encode(agent_pubkey),
                 detail: format!(
                     "entity limit reached: {} >= {}",
                     current, quota.max_entities
@@ -118,21 +122,21 @@ impl QuotaManager {
     }
 
     /// Record that a doc was created by an agent.
-    pub fn record_doc_create(&mut self, agent_id: &AgentId, bytes: u64) {
-        let usage = self.usage.entry(agent_id.0.clone()).or_default();
+    pub fn record_doc_create(&mut self, agent_pubkey: &[u8; 32], bytes: u64) {
+        let usage = self.usage.entry(*agent_pubkey).or_default();
         usage.doc_count += 1;
         usage.byte_count += bytes;
     }
 
     /// Record that bytes were written by an agent.
-    pub fn record_write(&mut self, agent_id: &AgentId, bytes: u64) {
-        let usage = self.usage.entry(agent_id.0.clone()).or_default();
+    pub fn record_write(&mut self, agent_pubkey: &[u8; 32], bytes: u64) {
+        let usage = self.usage.entry(*agent_pubkey).or_default();
         usage.byte_count += bytes;
     }
 
     /// Record that an entity was created by an agent.
-    pub fn record_entity_create(&mut self, agent_id: &AgentId) {
-        let usage = self.usage.entry(agent_id.0.clone()).or_default();
+    pub fn record_entity_create(&mut self, agent_pubkey: &[u8; 32]) {
+        let usage = self.usage.entry(*agent_pubkey).or_default();
         usage.entity_count += 1;
     }
 }
@@ -186,7 +190,7 @@ impl QuotaManager {
 
         if current_bytes + bytes > quota.max_bytes {
             return Err(QuotaExceeded {
-                agent_id: format!("bucket:{bucket_id}"),
+                agent: format!("bucket:{bucket_id}"),
                 detail: format!(
                     "bucket byte limit exceeded: {} + {} > {}",
                     current_bytes, bytes, quota.max_bytes
@@ -197,7 +201,7 @@ impl QuotaManager {
         let current_envelopes = usage.map(|u| u.envelope_count).unwrap_or(0);
         if current_envelopes >= quota.max_envelopes {
             return Err(QuotaExceeded {
-                agent_id: format!("bucket:{bucket_id}"),
+                agent: format!("bucket:{bucket_id}"),
                 detail: format!(
                     "bucket envelope limit reached: {} >= {}",
                     current_envelopes, quota.max_envelopes

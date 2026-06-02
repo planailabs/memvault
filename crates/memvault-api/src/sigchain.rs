@@ -843,6 +843,61 @@ pub fn find_agent_attestation(
     Ok(best)
 }
 
+/// Resolve an agent's current display label (set via `agent_rename` /
+/// `Op::AgentRename`), or `None` if it was never relabeled.
+///
+/// Display-only: the label never participates in access control. Authority:
+/// a relabel is honoured only when its envelope is node-signed by the agent's
+/// *attesting node* (the host that minted its `AgentAttestation`) — so a
+/// forged or foreign-signed relabel block synced from a peer is ignored.
+/// When several authorized relabels exist, the latest by `wall_ns` wins.
+pub fn agent_label(client: &LocalClient, agent_pubkey: &[u8; 32]) -> Result<Option<String>> {
+    // The only signer allowed to relabel this agent is the node that attested
+    // it. If that's ambiguous/absent, no relabel is trusted.
+    let Some(authority) = sole_attesting_node(client, agent_pubkey)? else {
+        return Ok(None);
+    };
+    let Ok(authority_key) = ed25519_dalek::VerifyingKey::from_bytes(&authority) else {
+        return Ok(None);
+    };
+
+    let cids = client
+        .store()
+        .query_by_tag("agent", &hex::encode(agent_pubkey), 0, usize::MAX)
+        .map_err(|e| ApiError::Other(format!("query agent labels: {e}")))?;
+
+    let mut best: Option<(u64, String)> = None;
+    for cid in cids {
+        let Ok(Some(bytes)) = client.store().get_block(&cid) else {
+            continue;
+        };
+        let Ok(signed) =
+            serde_ipld_dagcbor::from_slice::<memvault_core::Signed<serde_json::Value>>(&bytes)
+        else {
+            continue;
+        };
+        let rename = match signed.payload.get("AgentRename") {
+            Some(r) => r,
+            None => continue,
+        };
+        // The relabel must be node-signed by the agent's attesting node. We
+        // verify the signature directly against that node's key rather than
+        // trusting the envelope's `author` field — a forged or foreign-signed
+        // block won't verify and is dropped.
+        if signed.verify(&authority_key).is_err() {
+            continue;
+        }
+        let wall_ns = rename.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(label) = rename.get("new_label").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if best.as_ref().map(|(w, _)| wall_ns >= *w).unwrap_or(true) {
+            best = Some((wall_ns, label.to_string()));
+        }
+    }
+    Ok(best.map(|(_, l)| l))
+}
+
 /// Lower = less privileged ("more restrictive"). Used to pick the
 /// safest attestation when an agent pubkey has several.
 fn role_privilege(role: &memvault_auth::AgentRole) -> u8 {

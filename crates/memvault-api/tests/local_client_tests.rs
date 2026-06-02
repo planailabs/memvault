@@ -245,7 +245,6 @@ async fn event_bus_publish_subscribe() {
 
 #[tokio::test]
 async fn quota_manager_integration() {
-    use memvault_core::AgentId;
     use memvault_query::AgentQuota;
 
     let dir = tempfile::tempdir().unwrap();
@@ -264,7 +263,7 @@ async fn quota_manager_integration() {
         b"cluster-1".to_vec(),
     ));
 
-    let agent = AgentId("test-agent".to_string());
+    let agent = [0x11u8; 32]; // agent ed25519 pubkey (quota is keyed by pubkey)
 
     // Check that writes are allowed initially
     {

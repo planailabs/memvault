@@ -340,6 +340,14 @@ pub struct BucketRenameParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct AgentRenameParams {
+    /// Hex-encoded agent ed25519 pubkey (the canonical agent identity).
+    pub agent_pubkey: String,
+    /// New display label. Display-only — does not affect access.
+    pub label: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct BucketArchiveParams {
     /// Hex-encoded bucket ID.
     pub id: String,

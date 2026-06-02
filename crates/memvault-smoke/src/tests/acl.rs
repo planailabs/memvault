@@ -1301,3 +1301,109 @@ async fn conflicting_attestations_deny_host_authority() {
         .expect_err("host authority must be denied under conflicting attestations");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
 }
+
+// ── Phase 1: AgentKey(pubkey) audience ──────────────────────────────────
+// The canonical, collision-free agent grant. Access matches the caller's
+// verified ed25519 pubkey directly, so two nodes' same-named agents never
+// share access the way a legacy Agent(string) grant would.
+
+#[tokio::test]
+async fn agentkey_grant_allows_matching_pubkey() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "ak-agent", AgentRole::AgentHost).await;
+    let bucket = make_bucket(&node, "ak-bucket").await;
+
+    node.client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::AgentKey(agent_pk),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("issue agentkey grant");
+
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("AgentKey grant for the matching pubkey should pass");
+    // Read-only grant: Write still denied.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect_err("Write must require a Write grant");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn agentkey_grant_denies_other_pubkey() {
+    let node = TestNode::new();
+    // Two agents sharing the SAME agent_id label "alice" but different
+    // pubkeys — the exact cross-node collision an Agent(string) grant can't
+    // distinguish. An AgentKey grant must bind to one pubkey only.
+    let (alice_a_pk, _) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    let (alice_b_pk, _) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    assert_ne!(alice_a_pk, alice_b_pk, "the two alices must differ by key");
+    let bucket = make_bucket(&node, "ak-deny-bucket").await;
+
+    node.client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::AgentKey(alice_a_pk),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("issue agentkey grant for alice_a");
+
+    acl::check_bucket_access(&node.client, &alice_a_pk, &bucket, Action::Read)
+        .expect("alice_a (granted pubkey) should pass");
+    let err = acl::check_bucket_access(&node.client, &alice_b_pk, &bucket, Action::Read)
+        .expect_err("alice_b (same label, different pubkey) must be denied");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn owner_bypass_uses_owner_pubkey_not_label() {
+    let node = TestNode::new();
+    let (owner_pk, owner_id) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    // A second "alice" on a different key must NOT inherit ownership.
+    let (other_pk, _) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    assert_ne!(owner_pk, other_pk);
+
+    let bucket = node
+        .client
+        .ensure_agent_bucket_for_pubkey(&owner_pk, &owner_id.0)
+        .await
+        .expect("ensure agent bucket");
+
+    // Real owner bypasses without a grant.
+    acl::check_bucket_access(&node.client, &owner_pk, &bucket, Action::Write)
+        .expect("real owner pubkey bypasses");
+    // Same-label impostor is denied (no grant, owner pubkey mismatch).
+    let err = acl::check_bucket_access(&node.client, &other_pk, &bucket, Action::Read)
+        .expect_err("same-label different-pubkey must not inherit ownership");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn legacy_owner_pubkey_absent_falls_back_to_label() {
+    let node = TestNode::new();
+    let (agent_pk, agent_id) = setup_agent(&node, "legacy-owner", AgentRole::AgentHost).await;
+
+    // Legacy bucket: owner_agent recorded, owner_agent_pubkey absent (None).
+    let bucket = node
+        .client
+        .bucket_create_as(
+            agent_id,
+            None, // no owner pubkey → legacy shape
+            "legacy-owned",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .expect("create legacy owned bucket");
+
+    // With no owner pubkey on record, owner-bypass falls back to the agent_id
+    // string so the owner still gets in (back-compat).
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect("legacy label fallback owner bypass");
+}

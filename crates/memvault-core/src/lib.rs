@@ -38,4 +38,9 @@ pub use visibility::Visibility;
 /// Current blockstore version.  Peers with mismatched versions refuse to
 /// sync to prevent cross-version poisoning.  Bump when index structure,
 /// adoption logic, or derived-state semantics change.
-pub const BLOCKSTORE_VERSION: u32 = 11;
+///
+/// v12: drop legacy `GrantAudience::Agent(string)` bucket grants during the
+/// rebuild. The string audience can't disambiguate same-named agents across
+/// nodes; access now uses `GrantAudience::AgentKey(pubkey)`. The version gate
+/// stops un-migrated (v11) peers from re-injecting the dropped grants.
+pub const BLOCKSTORE_VERSION: u32 = 12;

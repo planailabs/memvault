@@ -12,7 +12,15 @@ use crate::role::AgentRole;
 pub enum GrantAudience {
     Cluster(ClusterId),
     Peer(PeerId),
+    /// Legacy: an agent addressed by its human-readable `AgentId` string.
+    /// Ambiguous across nodes (two nodes can enroll the same `agent_id` under
+    /// different keys), so new grants should target [`GrantAudience::AgentKey`]
+    /// instead. Retained for back-compat decoding of existing grants.
     Agent(AgentId),
+    /// An agent addressed by its ed25519 public key — the canonical,
+    /// globally-unique agent identity. Matched directly against the caller's
+    /// verified pubkey, with no `agent_id` indirection.
+    AgentKey([u8; 32]),
     /// An agent role — matched against the agent's `AgentAttestation.role`.
     Role(AgentRole),
 }
@@ -141,5 +149,49 @@ impl Grant {
             return Err(AuthError::GrantExpired);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memvault_core::{ClusterId, PeerId};
+
+    fn sample_grant(audience: GrantAudience) -> Grant {
+        Grant {
+            issuer: PeerId(vec![1, 2, 3]),
+            issuing_cluster: ClusterId([7u8; 32]),
+            admin_pubkey: [9u8; 32],
+            audience,
+            scopes: vec![],
+            actions: vec![Action::Read, Action::Write],
+            not_before_ns: 0,
+            not_after_ns: u64::MAX,
+            parent: None,
+            nonce: [0u8; 16],
+            bucket_scopes: vec![],
+            signature: [0u8; 64],
+        }
+    }
+
+    /// The new `AgentKey` audience must survive a DAG-CBOR round-trip and keep
+    /// `signing_bytes` stable, so a signed grant verifies after sync.
+    #[test]
+    fn agentkey_audience_dagcbor_round_trip() {
+        let pk = [42u8; 32];
+        let grant = sample_grant(GrantAudience::AgentKey(pk));
+
+        let bytes = serde_ipld_dagcbor::to_vec(&grant).expect("encode grant");
+        let decoded: Grant = serde_ipld_dagcbor::from_slice(&bytes).expect("decode grant");
+
+        match decoded.audience {
+            GrantAudience::AgentKey(got) => assert_eq!(got, pk),
+            other => panic!("audience changed across round-trip: {other:?}"),
+        }
+        assert_eq!(
+            grant.signing_bytes().unwrap(),
+            decoded.signing_bytes().unwrap(),
+            "signing bytes must be identical after round-trip"
+        );
     }
 }

@@ -568,18 +568,23 @@ mod native {
         Create {
             /// Bucket ID (hex, 64 chars)
             bucket_id: String,
+            /// Audience: target agent by ed25519 pubkey (hex, 64 chars) — the
+            /// canonical, collision-free agent identity. Preferred over --agent.
+            #[arg(long, conflicts_with_all = ["agent", "role", "peer", "cluster"])]
+            agent_key: Option<String>,
             /// Audience: target agent by id (the agent's identity dir name).
-            #[arg(long, conflicts_with_all = ["role", "peer", "cluster"])]
+            /// Legacy/ambiguous across nodes; prefer --agent-key.
+            #[arg(long, conflicts_with_all = ["agent_key", "role", "peer", "cluster"])]
             agent: Option<String>,
             /// Audience: all agents holding a given role
             /// (agent-host, auditor, service, admin).
-            #[arg(long, conflicts_with_all = ["agent", "peer", "cluster"])]
+            #[arg(long, conflicts_with_all = ["agent", "agent_key", "peer", "cluster"])]
             role: Option<String>,
             /// Audience: a specific peer (hex-encoded libp2p peer bytes).
-            #[arg(long, conflicts_with_all = ["agent", "role", "cluster"])]
+            #[arg(long, conflicts_with_all = ["agent", "agent_key", "role", "cluster"])]
             peer: Option<String>,
             /// Audience: a whole cluster id (hex, 64 chars).
-            #[arg(long, conflicts_with_all = ["agent", "role", "peer"])]
+            #[arg(long, conflicts_with_all = ["agent", "agent_key", "role", "peer"])]
             cluster: Option<String>,
             /// Comma-separated actions: read,write,admin,egress.
             #[arg(long, default_value = "read")]
@@ -624,6 +629,14 @@ mod native {
         Show {
             /// Agent identifier
             agent_id: String,
+        },
+        /// Set an agent's display label (does not affect access; identity is
+        /// the pubkey). Authorized for the agent's attesting node / admin.
+        Rename {
+            /// Agent ed25519 pubkey (hex, 64 chars).
+            agent_pubkey: String,
+            /// New display label.
+            label: String,
         },
     }
 
@@ -1965,6 +1978,7 @@ mod native {
             }
             Commands::Grant(GrantCommands::Create {
                 bucket_id,
+                agent_key,
                 agent,
                 role,
                 peer,
@@ -1978,11 +1992,18 @@ mod native {
                     .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
                 let bid = memvault_core::BucketId(bucket_arr);
 
-                let audience = match (agent, role, peer, cluster) {
-                    (Some(a), None, None, None) => memvault_auth::GrantAudience::Agent(
+                let audience = match (agent_key, agent, role, peer, cluster) {
+                    (Some(ak), None, None, None, None) => {
+                        let bytes = hex::decode(&ak)?;
+                        let arr: [u8; 32] = bytes
+                            .try_into()
+                            .map_err(|_| anyhow::anyhow!("agent pubkey must be 32 bytes"))?;
+                        memvault_auth::GrantAudience::AgentKey(arr)
+                    }
+                    (None, Some(a), None, None, None) => memvault_auth::GrantAudience::Agent(
                         memvault_core::AgentId(a),
                     ),
-                    (None, Some(r), None, None) => {
+                    (None, None, Some(r), None, None) => {
                         let parsed = match r.as_str() {
                             "agent-host" | "agenthost" => memvault_auth::AgentRole::AgentHost,
                             "auditor" => memvault_auth::AgentRole::Auditor,
@@ -1992,11 +2013,11 @@ mod native {
                         };
                         memvault_auth::GrantAudience::Role(parsed)
                     }
-                    (None, None, Some(p), None) => {
+                    (None, None, None, Some(p), None) => {
                         let bytes = hex::decode(&p)?;
                         memvault_auth::GrantAudience::Peer(memvault_core::PeerId(bytes))
                     }
-                    (None, None, None, Some(c)) => {
+                    (None, None, None, None, Some(c)) => {
                         let bytes = hex::decode(&c)?;
                         let arr: [u8; 32] = bytes
                             .try_into()
@@ -2004,7 +2025,7 @@ mod native {
                         memvault_auth::GrantAudience::Cluster(memvault_core::ClusterId(arr))
                     }
                     _ => anyhow::bail!(
-                        "exactly one of --agent / --role / --peer / --cluster must be given"
+                        "exactly one of --agent-key / --agent / --role / --peer / --cluster must be given"
                     ),
                 };
 
@@ -2044,6 +2065,9 @@ mod native {
                             }
                             memvault_auth::GrantAudience::Agent(a) => {
                                 format!("agent={}", a.0)
+                            }
+                            memvault_auth::GrantAudience::AgentKey(pk) => {
+                                format!("agentkey={}", hex::encode(pk))
                             }
                             memvault_auth::GrantAudience::Role(r) => {
                                 format!("role={r:?}")
@@ -2505,6 +2529,18 @@ mod native {
                      fetch via `memctl audit --kind agent-attestation` or \
                      the web trust-tree)"
                 );
+            }
+            Commands::Agent(AgentCommands::Rename {
+                agent_pubkey,
+                label,
+            }) => {
+                let bytes = hex::decode(&agent_pubkey)?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("agent pubkey must be 32 bytes"))?;
+                let client = connect().connect().await?;
+                client.agent_rename(&arr, &label).await?;
+                println!("Agent {} relabeled to {label:?}", hex::encode(arr));
             }
             Commands::Seed {
                 docs,

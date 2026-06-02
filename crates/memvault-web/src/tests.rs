@@ -409,6 +409,13 @@ impl MemvaultClient for MockClient {
     ) -> memvault_api::Result<()> {
         Ok(())
     }
+    async fn agent_rename(
+        &self,
+        _agent_pubkey: &[u8; 32],
+        _new_label: &str,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
     async fn bucket_bind(
         &self,
         _bucket: &memvault_core::BucketId,

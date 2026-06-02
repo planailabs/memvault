@@ -5590,6 +5590,40 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
+    async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()> {
+        let wall_ns = memvault_core::wall_ns();
+        let agent_hex = hex::encode(agent_pubkey);
+        let tags = vec![
+            ("kind".to_string(), "agent-rename".to_string()),
+            ("agent".to_string(), agent_hex.clone()),
+        ];
+        // `payload.AgentRename` shape matches audit parsing
+        // (`memvault_query::audit::parse_audit_record`). Display-only metadata:
+        // the rebuilt `agent_labels` index reads this; access control never does.
+        let payload = serde_json::json!({
+            "AgentRename": {
+                "agent_pubkey": agent_pubkey.to_vec(),
+                "new_label": new_label,
+                "wall_ns": wall_ns,
+            }
+        });
+        let (cid_bytes, envelope_bytes) =
+            self.build_signed_envelope(payload, &tags, Visibility::Internal, wall_ns, None)?;
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.effective_author(),
+            tags,
+            wall_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            ..Default::default()
+        };
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        tracing::info!(agent = %agent_hex, new_label, "agent relabeled");
+        Ok(())
+    }
+
     async fn bucket_bind(
         &self,
         bucket_id: &memvault_core::BucketId,

@@ -289,6 +289,11 @@ pub trait MemvaultClient: Send + Sync {
     /// Rename a bucket (writes a BucketRename op, LWW by lamport).
     async fn bucket_rename(&self, id: &BucketId, new_name: &str) -> Result<()>;
 
+    /// Set an agent's mutable display label (writes an AgentRename op, latest
+    /// wins by wall_ns). Display-only — never affects access control, which
+    /// keys on the agent's ed25519 pubkey. `agent_pubkey` is the 32-byte key.
+    async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()>;
+
     /// Bind a bucket to a cluster.
     async fn bucket_bind(
         &self,

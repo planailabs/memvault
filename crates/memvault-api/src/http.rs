@@ -1220,6 +1220,19 @@ impl MemvaultClient for HttpApiClient {
         Ok(())
     }
 
+    async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()> {
+        let body = serde_json::json!({ "label": new_label });
+        self.client
+            .patch(self.url(&format!("/agents/{}", hex::encode(agent_pubkey))))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
     async fn bucket_bind(
         &self,
         bucket_id: &memvault_core::BucketId,
@@ -1296,6 +1309,10 @@ impl MemvaultClient for HttpApiClient {
             memvault_auth::GrantAudience::Agent(a) => serde_json::json!({
                 "kind": "agent",
                 "agent_id": a.0,
+            }),
+            memvault_auth::GrantAudience::AgentKey(pk) => serde_json::json!({
+                "kind": "agentkey",
+                "agent_pubkey": hex::encode(pk),
             }),
             memvault_auth::GrantAudience::Role(r) => serde_json::json!({
                 "kind": "role",

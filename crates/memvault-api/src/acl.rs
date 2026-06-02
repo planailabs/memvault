@@ -58,7 +58,18 @@ pub fn check_bucket_access(
     // the owner/attesting-node grant authorities below.
     let (owner_agent_pubkey, owner_node_pubkey) = match client.bucket_info_sync(bucket_id) {
         Ok(Some(bucket)) => {
-            if bucket.owner_agent.as_ref() == Some(&attestation.agent_id) {
+            // Owner-bypass: prefer the owner's *pubkey* (collision-free across
+            // nodes). Only fall back to the `agent_id` string for legacy
+            // buckets that predate `owner_agent_pubkey`, where the pubkey was
+            // never recorded — otherwise a different node's same-named agent
+            // would wrongly inherit ownership.
+            let owner_by_pubkey = bucket
+                .owner_agent_pubkey
+                .map(|pk| pk.as_slice() == agent_pubkey)
+                .unwrap_or(false);
+            let owner_by_label = bucket.owner_agent_pubkey.is_none()
+                && bucket.owner_agent.as_ref() == Some(&attestation.agent_id);
+            if owner_by_pubkey || owner_by_label {
                 return Ok(());
             }
             (bucket.owner_agent_pubkey, bucket.owner_node_pubkey)
@@ -112,6 +123,11 @@ pub fn check_bucket_access(
         }
         let matches = match &grant.audience {
             GrantAudience::Peer(p) => p.0.as_slice() == agent_pubkey,
+            // Canonical pubkey-addressed grant: match the caller's verified
+            // ed25519 key directly (collision-free across nodes).
+            GrantAudience::AgentKey(pk) => pk.as_slice() == agent_pubkey,
+            // Legacy string-addressed grant. Ambiguous across nodes; kept for
+            // back-compat until the v12 blockstore migration drops them.
             GrantAudience::Agent(id) => id == &attestation.agent_id,
             GrantAudience::Role(r) => *r == attestation.role,
             GrantAudience::Cluster(c) => {

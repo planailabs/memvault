@@ -591,6 +591,19 @@ enum Verdict {
 }
 
 fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
+    // v12 migration: drop legacy `GrantAudience::Agent(string)` bucket grants.
+    // Their string audience is ambiguous across nodes (two nodes' same-named
+    // agents both match), so they're poisoned. New grants use `AgentKey(pubkey)`,
+    // which survive. A non-grant block won't deserialize as `Grant` (required
+    // fields), so this can't false-positive. Revocation isn't an option here —
+    // it needs an admin/owner key that may be absent; dropping in the rebuild
+    // needs no authority.
+    if let Ok(grant) = serde_ipld_dagcbor::from_slice::<memvault_auth::Grant>(data) {
+        if matches!(grant.audience, memvault_auth::GrantAudience::Agent(_)) {
+            return Verdict::Drop;
+        }
+    }
+
     // Try to deserialize as structured data.
     let val = match memvault_store::deserialize_block(data) {
         Some(v) => v,
@@ -721,4 +734,52 @@ fn resign_legacy_envelope(
     .ok()?;
 
     serde_ipld_dagcbor::to_vec(&envelope).ok()
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn grant_with(audience: memvault_auth::GrantAudience) -> Vec<u8> {
+        let grant = memvault_auth::Grant {
+            issuer: memvault_core::PeerId(vec![1, 2, 3]),
+            issuing_cluster: memvault_core::ClusterId([7u8; 32]),
+            admin_pubkey: [9u8; 32],
+            audience,
+            scopes: vec![],
+            actions: vec![memvault_auth::Action::Read],
+            not_before_ns: 0,
+            not_after_ns: u64::MAX,
+            parent: None,
+            nonce: [0u8; 16],
+            bucket_scopes: vec![],
+            signature: [0u8; 64],
+        };
+        serde_ipld_dagcbor::to_vec(&grant).unwrap()
+    }
+
+    #[test]
+    fn drops_agent_string_grant() {
+        let bytes = grant_with(memvault_auth::GrantAudience::Agent(memvault_core::AgentId(
+            "alice".into(),
+        )));
+        let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+        assert!(matches!(classify_block(&cid, &bytes), Verdict::Drop));
+    }
+
+    #[test]
+    fn keeps_pubkey_and_role_grants() {
+        for audience in [
+            memvault_auth::GrantAudience::AgentKey([5u8; 32]),
+            memvault_auth::GrantAudience::Peer(memvault_core::PeerId(vec![4u8; 32])),
+            memvault_auth::GrantAudience::Role(memvault_auth::AgentRole::AgentHost),
+        ] {
+            let bytes = grant_with(audience);
+            let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+            assert!(
+                matches!(classify_block(&cid, &bytes), Verdict::Keep),
+                "non-Agent(string) grants must survive the v12 rebuild"
+            );
+        }
+    }
 }

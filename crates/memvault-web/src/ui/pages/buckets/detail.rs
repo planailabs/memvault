@@ -144,6 +144,9 @@ async fn list_grants(id: String) -> Result<Vec<GrantRow>, ServerFnError> {
                     format!("peer:{}", &hex::encode(&p.0)[..8])
                 }
                 memvault_auth::GrantAudience::Agent(a) => format!("agent:{}", a.0),
+                memvault_auth::GrantAudience::AgentKey(pk) => {
+                    format!("agentkey:{}", &hex::encode(pk)[..8])
+                }
                 memvault_auth::GrantAudience::Role(r) => format!("role:{r:?}"),
             };
             let actions: Vec<String> = g.actions.iter().map(|a| format!("{a:?}")).collect();
