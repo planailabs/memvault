@@ -2187,14 +2187,26 @@ mod native {
                         allowed_origins,
                     });
 
-                    // Start the web server with the fullstack UI router. The Nix
-                    // build runs `dx build --embed`, so assets are expected to be
-                    // served by Dioxus' embed/public-path machinery rather than by
-                    // a `public/` directory next to the installed binary. Gating the
-                    // fullstack router on that directory made Nix-built daemons fall
-                    // back to API-only routes even when the UI had been built.
-                    println!("  Web UI:     http://127.0.0.1:{api_port}");
-                    let router: axum::Router = memvault_web::build_fullstack_router(app_state);
+                    // Start the web server. Use fullstack (SSR + UI) when
+                    // assets are available, otherwise keep the API-only fallback
+                    // for plain/non-Dioxus builds. Nix fullstack builds install
+                    // the Dioxus public/ directory next to the binary; `dx --embed`
+                    // builds may also activate the `embed` cfg.
+                    let public_exists = cfg!(feature = "embed")
+                        || std::env::var("MEMVAULT_FORCE_FULLSTACK_UI")
+                            .ok()
+                            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+                        || std::env::current_exe()
+                            .ok()
+                            .and_then(|p| p.parent().map(|d| d.join("public").exists()))
+                            .unwrap_or(false);
+                    let router: axum::Router = if public_exists {
+                        println!("  Web UI:     http://127.0.0.1:{api_port}");
+                        memvault_web::build_fullstack_router(app_state)
+                    } else {
+                        println!("  Web UI:     disabled (run `dx build` first)");
+                        memvault_web::build_router(app_state).into()
+                    };
                     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], api_port));
                     tokio::spawn(async move {
                         let listener = match tokio::net::TcpListener::bind(addr).await {

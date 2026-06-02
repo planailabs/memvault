@@ -106,6 +106,15 @@ rp.buildRustPackage {
     runHook preInstall
     mkdir -p $out/bin
     cp target/dx/memctl/release/web/server $out/bin/memctl
+
+    # `memctl daemon` enables the UI router only when fullstack assets are
+    # available. Keep Nix's full Dioxus build self-contained by installing
+    # the generated public assets beside the binary, matching memctl's
+    # runtime probe; this preserves API-only behaviour for slim/plain builds.
+    if [ -d target/dx/memctl/release/web/public ]; then
+      cp -r target/dx/memctl/release/web/public $out/bin/public
+    fi
+
     runHook postInstall
   '';
 
