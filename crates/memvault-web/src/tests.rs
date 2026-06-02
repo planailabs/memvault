@@ -326,6 +326,7 @@ impl MemvaultClient for MockClient {
         &self,
         _view: Option<&str>,
         _limit: usize,
+        _bucket: Option<&memvault_core::BucketId>,
     ) -> memvault_api::Result<Vec<(String, String, String, Vec<(String, String)>)>> {
         Ok(vec![])
     }

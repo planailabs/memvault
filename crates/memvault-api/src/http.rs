@@ -875,8 +875,12 @@ impl MemvaultClient for HttpApiClient {
         &self,
         view_name: Option<&str>,
         limit: usize,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
         let mut url = format!("{}?limit={limit}", self.url("/nodes"));
+        if let Some(b) = bucket {
+            url.push_str(&format!("&bucket={}", hex::encode(b.0)));
+        }
         if let Some(v) = view_name {
             url.push_str(&format!("&view={}", urlencoded(v)));
         }

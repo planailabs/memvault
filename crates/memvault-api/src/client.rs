@@ -109,6 +109,7 @@ pub trait MemvaultClient: Send + Sync {
         &self,
         view_name: Option<&str>,
         limit: usize,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>>;
     /// Return node_ids of all items matching a view's required tags.
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>>;
@@ -155,7 +156,11 @@ pub trait MemvaultClient: Send + Sync {
 
     /// List nodes matching the scope. Returns node summaries (with retracted flag).
     async fn list_scoped(&self, scope: &QueryScope, limit: usize) -> Result<Vec<NodeSummary>> {
-        let rows = self.list_all(scope.view.as_deref(), limit).await?;
+        // Thread the scope's (first explicit) bucket through (see
+        // standards/query-scope.md). LocalClient overrides this with a fully
+        // scope-aware impl; this default backs the HTTP client.
+        let bucket = scope.buckets.explicit().and_then(|v| v.first());
+        let rows = self.list_all(scope.view.as_deref(), limit, bucket).await?;
         Ok(rows
             .into_iter()
             .map(|(node_id, node_type, label, tags)| NodeSummary {

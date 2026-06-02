@@ -634,10 +634,14 @@ impl MemvaultServer {
         description = "List all nodes (docs, entities, files). Optionally filter by view name."
     )]
     async fn list_all(&self, Parameters(params): Parameters<ListAllParams>) -> String {
-        let _ = self.resolve_bucket_query(params.bucket.as_deref());
+        // Bucket-scoped (standards/bucket-scoping.md): agent-bucket default.
+        let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("error: {e}"),
+        };
         match self
             .client
-            .list_all(params.view.as_deref(), params.limit.unwrap_or(100))
+            .list_all(params.view.as_deref(), params.limit.unwrap_or(100), Some(&bucket))
             .await
         {
             Ok(items) => serde_json::json!(items

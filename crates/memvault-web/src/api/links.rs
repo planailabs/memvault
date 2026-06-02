@@ -136,6 +136,8 @@ pub async fn list_links(
 pub struct ListNodesQuery {
     pub view: Option<String>,
     pub limit: Option<usize>,
+    /// Optional bucket id (hex) to scope the listing (standards/bucket-scoping.md).
+    pub bucket: Option<String>,
 }
 
 /// GET /api/v1/nodes/:node_id — get any node by type:hex ID.
@@ -209,11 +211,19 @@ pub async fn list_nodes(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = params.limit.unwrap_or(100);
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    // Optional bucket scope (standards/bucket-scoping.md): when present, the
+    // listing is restricted to that bucket via QueryScope.
+    let bucket = params.bucket.as_deref().and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        let arr: [u8; 32] = bytes.try_into().ok()?;
+        Some(memvault_core::BucketId(arr))
+    });
     let items = state
         .client
         .list_scoped(
             &memvault_core::QueryScope::all()
                 .with_view(params.view.clone())
+                .with_bucket(bucket)
                 .with_include_retracted(include_retracted),
             limit,
         )

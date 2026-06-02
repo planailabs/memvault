@@ -48,12 +48,14 @@ concrete bucket; the `list_docs_ex`/`list_entities_ex` server queries filter by
 bucket and cap the filtered result; the `memvault_list` and
 `memvault_list_entities` tools now use `resolve_bucket` (agent-bucket default).
 
+Also applied: `list_all` (`memvault_list_all`) now threads a bucket through
+`MemvaultClient::list_all`, the HTTP client, `ListNodesQuery` + `list_nodes`
+(`QueryScope::all().with_bucket(..)`), `LocalClient::list_all`, and back-fills
+the export caller with `None` (vault export is cross-bucket by design). The
+scoped paths (`list_all`, `scoped_list`) scan all index rows when bucketed and
+cap the *filtered* result.
+
 **Remaining (needs a cross-crate signature change, do as a focused pass):**
-- `list_all` (`memvault_list_all`, node listing) — bucket must thread through
-  the `MemvaultClient::list_all` *required* method, `HttpApiClient`,
-  `ListNodesQuery` + `list_nodes` (`.with_bucket`), `LocalClient::list_all`'s
-  bucket loop, and the export caller. Server-side it lands as
-  `QueryScope::all().with_bucket(..)` (see query-scope.md).
 - `audit` (`memvault_audit`) — needs a `bucket` field on
   `memvault_query::AuditQuery` and the store audit query before the tool can
   scope it; currently cross-bucket.

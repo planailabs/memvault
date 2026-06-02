@@ -3188,7 +3188,11 @@ impl LocalClient {
             return Ok(Vec::new()); // explicit empty set → empty result
         }
 
-        let fetch = if limit == usize::MAX {
+        // When scoped to specific buckets, scan all index rows: a global cap
+        // would drop items of a bucket whose nodes fall outside the global
+        // first-N (same flaw as list_docs_ex/list_entities_ex). The result is
+        // capped at `limit` in the loop below. See standards/bucket-scoping.md.
+        let fetch = if limit == usize::MAX || eff.is_some() {
             usize::MAX
         } else {
             limit.saturating_mul(4).max(limit)
@@ -5158,6 +5162,7 @@ impl MemvaultClient for LocalClient {
         &self,
         view_name: Option<&str>,
         limit: usize,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
         let view_tags = if let Some(name) = view_name {
             let view = self
@@ -5169,10 +5174,13 @@ impl MemvaultClient for LocalClient {
             None
         };
         self.flush_index().await;
+        // Scan all index rows when scoped to a bucket: a global cap drops nodes
+        // of a bucket outside the global first-N (see standards/bucket-scoping.md).
+        let fetch = if bucket.is_some() { usize::MAX } else { limit * 2 };
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
         let all: Vec<(String, String, String, Vec<(String, String)>)> = idx
-            .list_all_mode(view_tags.as_deref(), mode, limit * 2)
+            .list_all_mode(view_tags.as_deref(), mode, fetch)
             .into_iter()
             .map(|(id, ty, label, tags, _retracted)| (id, ty, label, tags))
             .collect();
@@ -5182,15 +5190,18 @@ impl MemvaultClient for LocalClient {
         if buckets.is_empty() {
             return Ok(all.into_iter().take(limit).collect()); // pre-genesis
         }
-        let bucket_ids: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
+        // Scoped to one bucket → keep only that bucket's nodes; otherwise keep
+        // any accessible bucket's nodes.
+        let accessible: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
+        let target: Option<Vec<u8>> = bucket.map(|b| b.0.to_vec());
         Ok(all
             .into_iter()
-            .filter(|(node_id, _, _, _)| {
-                if let Some(node_bucket) = self.inferred_bucket_for_node_id(node_id) {
-                    bucket_ids.iter().any(|b| *b == node_bucket)
-                } else {
-                    false
-                }
+            .filter(|(node_id, _, _, _)| match self.inferred_bucket_for_node_id(node_id) {
+                Some(node_bucket) => match &target {
+                    Some(t) => node_bucket == *t,
+                    None => accessible.iter().any(|b| *b == node_bucket),
+                },
+                None => false,
             })
             .take(limit)
             .collect())
