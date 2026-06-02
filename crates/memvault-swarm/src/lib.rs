@@ -26,6 +26,69 @@ use memvault_net::{
 };
 use memvault_store::MemvaultStore;
 
+use libp2p::request_response::ResponseChannel;
+use libp2p::{Multiaddr, PeerId, Swarm};
+
+/// The set of swarm operations the memvault sync [`MemvaultDriver`] needs from
+/// whatever swarm hosts it. Implemented both for the self-owned standalone
+/// swarm ([`StandaloneHost`], used by `memctl daemon`) and for an external
+/// parent swarm that embeds [`memvault_net::MemvaultBehaviour`] as a
+/// sub-behaviour (e.g. the mac-mgmt daemon's `ClusterBehaviour`).
+///
+/// This is the seam that lets the engine either *create* its own swarm or
+/// *extend* an existing one without the driver knowing the concrete behaviour
+/// type — libp2p fixes that type at compile time via `#[derive(NetworkBehaviour)]`,
+/// so composition has to happen at the behaviour + driver layer.
+pub trait MemvaultHost {
+    /// Dial a multiaddr (errors are logged/ignored by the impl).
+    fn dial(&mut self, addr: Multiaddr);
+    /// Register a known address for a peer in Kademlia.
+    fn kad_add_address(&mut self, peer: &PeerId, addr: Multiaddr);
+    /// Send a `/ai-memvault/block/1.0` request.
+    fn send_block_request(&mut self, peer: &PeerId, req: BlockRequest);
+    /// Answer an inbound block request on its response channel.
+    fn send_block_response(&mut self, channel: ResponseChannel<BlockResponse>, resp: BlockResponse);
+    /// Send a `/ai-memvault/join/1.0` request.
+    fn send_join_request(&mut self, peer: &PeerId, req: JoinRequest);
+    /// Answer an inbound join request on its response channel.
+    fn send_join_response(&mut self, channel: ResponseChannel<JoinResponse>, resp: JoinResponse);
+    /// Publish bytes to a gossipsub topic (the memvault heads/admin topics).
+    fn gossip_publish(&mut self, topic: libp2p::gossipsub::IdentTopic, data: Vec<u8>);
+}
+
+/// [`MemvaultHost`] adapter over a self-owned standalone swarm.
+pub struct StandaloneHost<'a>(pub &'a mut Swarm<StandaloneMemvaultBehaviour>);
+
+impl MemvaultHost for StandaloneHost<'_> {
+    fn dial(&mut self, addr: Multiaddr) {
+        if let Err(e) = self.0.dial(addr) {
+            tracing::warn!(error = %e, "dial failed");
+        }
+    }
+    fn kad_add_address(&mut self, peer: &PeerId, addr: Multiaddr) {
+        self.0.behaviour_mut().kad.add_address(peer, addr);
+    }
+    fn send_block_request(&mut self, peer: &PeerId, req: BlockRequest) {
+        self.0.behaviour_mut().block_exchange.send_request(peer, req);
+    }
+    fn send_block_response(&mut self, channel: ResponseChannel<BlockResponse>, resp: BlockResponse) {
+        let _ = self
+            .0
+            .behaviour_mut()
+            .block_exchange
+            .send_response(channel, resp);
+    }
+    fn send_join_request(&mut self, peer: &PeerId, req: JoinRequest) {
+        let _ = self.0.behaviour_mut().join.send_request(peer, req);
+    }
+    fn send_join_response(&mut self, channel: ResponseChannel<JoinResponse>, resp: JoinResponse) {
+        let _ = self.0.behaviour_mut().join.send_response(channel, resp);
+    }
+    fn gossip_publish(&mut self, topic: libp2p::gossipsub::IdentTopic, data: Vec<u8>) {
+        let _ = self.0.behaviour_mut().gossipsub.publish(topic, data);
+    }
+}
+
 /// Configuration for the sync loop.
 pub struct SyncConfig {
     /// Cluster ID for head announcements.
@@ -96,6 +159,470 @@ pub struct JoinConfig {
     pub on_join_success: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
+impl JoinConfig {
+    /// Assemble a `JoinConfig` from an already-opened token keystore, reading
+    /// all identity from it (no loose files):
+    /// - `pendingtoken`: the joining peer's redemption credential.
+    /// - first `adminkey:*`: the admin signing key (admin node serves joins).
+    /// - `genesis`: the pinned `AdminGenesis` (its pubkey rejects foreign
+    ///   `NodeAttestation`s at sync ingress).
+    /// - `pendingadmit`: an opt-in co-admin key to present for admission.
+    ///
+    /// `on_join_success` clears `pendingtoken` and, on a co-admin admission,
+    /// promotes `pendingadmit` to a held `adminkey:` (activated live by the
+    /// running client's keystore watch).
+    ///
+    /// The caller opens the keystore (via `memvault_api::keystore_open` so the
+    /// at-rest cipher matches every other opener) and supplies `node_pubkey` —
+    /// the ed25519 pubkey of the libp2p identity the swarm serves with, which
+    /// MUST match so incoming joins aren't refused with `PeerIdMismatch` and
+    /// admins can verify outgoing joins (design A-1: node key = libp2p key).
+    pub fn from_keystore(
+        keystore: std::sync::Arc<memvault_keystore::KeyStore>,
+        cluster_id: &[u8],
+        node_pubkey: [u8; 32],
+    ) -> Self {
+        let pending_token = keystore
+            .get(b"pendingtoken")
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.starts_with("mvjoin1:"));
+
+        let admin_signing_key = keystore
+            .keys_with_prefix(b"adminkey:")
+            .into_iter()
+            .next()
+            .and_then(|k| keystore.get(&k))
+            .filter(|b| b.len() == 32)
+            .map(|b| {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&b[..32]);
+                ed25519_dalek::SigningKey::from_bytes(&seed)
+            });
+
+        // Pinned admin verifying key — sync uses it to reject foreign
+        // NodeAttestations BEFORE storing them.
+        let pinned_admin_pubkey = keystore
+            .get(b"genesis")
+            .and_then(|b| serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok())
+            .filter(|g| g.verify_self_signature().is_ok())
+            .map(|g| g.admin_pubkey);
+
+        let mut cluster_arr = [0u8; 32];
+        if cluster_id.len() == 32 {
+            cluster_arr.copy_from_slice(cluster_id);
+        }
+
+        // Opt-in co-admin join: `cluster-join --admit-as-admin` stashed a key
+        // under `pendingadmit`. `send_join_request` signs a fresh POP with it;
+        // the admin only mints an AdminKeyAdmission if the token allows it.
+        let admit_seed: Option<[u8; 32]> = keystore
+            .get(b"pendingadmit")
+            .filter(|b| b.len() == 32)
+            .map(|b| {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&b[..32]);
+                seed
+            });
+        let admit_admin_key = admit_seed.map(|s| ed25519_dalek::SigningKey::from_bytes(&s));
+
+        let ks_cb = std::sync::Arc::clone(&keystore);
+        let on_join_success: std::sync::Arc<dyn Fn() + Send + Sync> =
+            std::sync::Arc::new(move || {
+                let _ = ks_cb.delete(b"pendingtoken");
+                // On a successful admission, promote the staged admit key to a
+                // held admin key in the keystore. The running client's
+                // admin-key rescan (fired when the AdminKeyAdmission block
+                // lands) then activates it live — no restart. Only on success;
+                // a refused admission leaves `pendingadmit` untouched.
+                if let Some(seed) = admit_seed {
+                    let pubkey = ed25519_dalek::SigningKey::from_bytes(&seed)
+                        .verifying_key()
+                        .to_bytes();
+                    let key = format!("adminkey:{}", hex::encode(pubkey));
+                    if let Err(e) = ks_cb.put(key.as_bytes(), &seed) {
+                        tracing::warn!(error = %e, "could not store admitted admin key");
+                    } else {
+                        let _ = ks_cb.delete(b"pendingadmit");
+                        tracing::info!(
+                            "/join/1.0 admitted this node as co-admin; admin key activated"
+                        );
+                    }
+                }
+                tracing::info!("/join/1.0 success; cleared pending token");
+            });
+
+        JoinConfig {
+            pending_token,
+            node_pubkey,
+            admin_signing_key,
+            pinned_admin_pubkey,
+            cluster_id: cluster_arr,
+            admit_admin_key,
+            keystore: Some(keystore),
+            on_join_success: Some(on_join_success),
+        }
+    }
+}
+
+/// Drives memvault block sync over a host swarm via [`MemvaultHost`].
+///
+/// Owns the store, sync config, join config, and the per-peer sync state that
+/// previously lived as locals inside `run_sync_loop`. The host swarm's event
+/// loop feeds events in through the `on_*` / `tick_*` methods; the driver is
+/// agnostic to whether the swarm is the self-owned standalone one or an
+/// external parent swarm embedding [`memvault_net::MemvaultBehaviour`].
+pub struct MemvaultDriver {
+    store: Arc<MemvaultStore>,
+    config: SyncConfig,
+    join_config: JoinConfig,
+    /// Currently-connected peers (added on ConnectionEstablished, dropped on
+    /// ConnectionClosed). Not "synced" — only "talking right now".
+    synced_peers: HashSet<PeerId>,
+    /// Peers we've completed an initial exchange with (first `BlockResponse`).
+    initial_sync_complete: HashSet<PeerId>,
+    /// Peers whose last exchange failed; drained on the next success.
+    failed_sync_peers: HashSet<PeerId>,
+    /// peer → cluster_id, learned from identify, for visibility enforcement.
+    peer_clusters: HashMap<PeerId, Vec<u8>>,
+}
+
+impl MemvaultDriver {
+    /// Create a driver. Call [`MemvaultDriver::on_start`] once before the loop.
+    pub fn new(store: Arc<MemvaultStore>, config: SyncConfig, join_config: JoinConfig) -> Self {
+        Self {
+            store,
+            config,
+            join_config,
+            synced_peers: HashSet::new(),
+            initial_sync_complete: HashSet::new(),
+            failed_sync_peers: HashSet::new(),
+            peer_clusters: HashMap::new(),
+        }
+    }
+
+    /// True while we still hold an unredeemed join token.
+    pub fn join_pending(&self) -> bool {
+        self.join_config.pending_token.is_some()
+    }
+
+    /// Startup hook: if we hold a pending join token that embeds the issuer's
+    /// dialable multiaddr(s), register + dial them directly so join works
+    /// without mDNS/Kademlia discovery. Only the real admin returns Success,
+    /// so dialing the wrong peer is harmless.
+    pub fn on_start(&mut self, host: &mut impl MemvaultHost) {
+        let Some(token_str) = &self.join_config.pending_token else {
+            return;
+        };
+        let Ok(token) = memvault_auth::decode_token_string(token_str) else {
+            return;
+        };
+        let issuer_peer = peer_id_from_pubkey(&token.issuer.0);
+        for addr_str in &token.issuer_addrs {
+            match addr_str.parse::<Multiaddr>() {
+                Ok(addr) => {
+                    if let Some(peer) = issuer_peer {
+                        host.kad_add_address(&peer, addr.clone());
+                    }
+                    tracing::info!(%addr, "dialing join-token issuer addr");
+                    host.dial(addr);
+                }
+                Err(e) => {
+                    tracing::warn!(addr = %addr_str, error = %e, "skipping unparseable issuer addr")
+                }
+            }
+        }
+    }
+
+    /// A peer connected: request their heads, and redeem a pending token.
+    pub fn on_connection_established(&mut self, peer: PeerId, host: &mut impl MemvaultHost) {
+        tracing::info!(%peer, "peer connected");
+        if self.synced_peers.insert(peer) {
+            request_remote_heads(host, &self.store, &self.config, peer);
+        }
+        if let Some(token) = self.join_config.pending_token.clone() {
+            send_join_request(host, peer, &token, &self.join_config);
+        }
+    }
+
+    /// A peer disconnected: forget its sync state.
+    pub fn on_connection_closed(&mut self, peer: PeerId) {
+        tracing::info!(%peer, "peer disconnected");
+        self.synced_peers.remove(&peer);
+        self.initial_sync_complete.remove(&peer);
+        self.failed_sync_peers.remove(&peer);
+    }
+
+    /// mDNS discovered peers: register in Kademlia and dial.
+    pub fn on_mdns_discovered(
+        &mut self,
+        peers: impl IntoIterator<Item = (PeerId, Multiaddr)>,
+        host: &mut impl MemvaultHost,
+    ) {
+        for (peer, addr) in peers {
+            tracing::info!(%peer, %addr, "mDNS discovered peer");
+            host.kad_add_address(&peer, addr.clone());
+            host.dial(addr);
+        }
+    }
+
+    /// Identify info: feed addresses into Kademlia and learn the peer's
+    /// cluster_id from its agent string (convention `memvault/<cluster_hex>`).
+    pub fn on_identify(
+        &mut self,
+        peer: PeerId,
+        listen_addrs: &[Multiaddr],
+        agent_version: &str,
+        host: &mut impl MemvaultHost,
+    ) {
+        for addr in listen_addrs {
+            host.kad_add_address(&peer, addr.clone());
+        }
+        if let Some(cluster_hex) = agent_version.strip_prefix("memvault/") {
+            if let Ok(cid_bytes) = hex::decode(cluster_hex) {
+                self.peer_clusters.insert(peer, cid_bytes);
+            }
+        }
+        tracing::debug!(%peer, addrs = listen_addrs.len(), "identify received");
+    }
+
+    /// A gossipsub message on a memvault topic (heads/admin).
+    pub fn on_gossip(
+        &mut self,
+        source: PeerId,
+        message: &libp2p::gossipsub::Message,
+        host: &mut impl MemvaultHost,
+    ) {
+        handle_gossip_message(host, &self.store, source, message);
+        // Reactive RBSR: gossip from a connected-but-unsynced peer means the
+        // first RBSR raced a concurrent mint or never ran. Re-issue now.
+        if self.synced_peers.contains(&source) && !self.initial_sync_complete.contains(&source) {
+            tracing::debug!(peer = %source, "gossip from unsynced peer — re-RBSRing");
+            request_remote_heads(host, &self.store, &self.config, source);
+        }
+    }
+
+    /// Serve an inbound block-exchange request.
+    pub fn on_block_request(
+        &mut self,
+        peer: PeerId,
+        channel: ResponseChannel<BlockResponse>,
+        request: BlockRequest,
+        host: &mut impl MemvaultHost,
+    ) {
+        serve_block_request(
+            host,
+            &self.store,
+            peer,
+            channel,
+            request,
+            &self.config.cluster_id,
+            &self.peer_clusters,
+            &self.join_config,
+        );
+        if self.synced_peers.contains(&peer) && !self.initial_sync_complete.contains(&peer) {
+            tracing::debug!(%peer, "block request from unsynced peer — re-RBSRing");
+            request_remote_heads(host, &self.store, &self.config, peer);
+        }
+    }
+
+    /// Process an inbound block-exchange response (store blocks, chase deps).
+    pub fn on_block_response(
+        &mut self,
+        peer: PeerId,
+        response: BlockResponse,
+        host: &mut impl MemvaultHost,
+    ) {
+        handle_block_response(host, &self.store, peer, response, &self.join_config);
+        if self.synced_peers.contains(&peer) {
+            self.initial_sync_complete.insert(peer);
+            self.failed_sync_peers.remove(&peer);
+        }
+    }
+
+    /// A block-exchange inbound/outbound failure with a peer.
+    pub fn on_block_failure(&mut self, peer: PeerId) {
+        if self.synced_peers.contains(&peer) {
+            self.failed_sync_peers.insert(peer);
+            self.initial_sync_complete.remove(&peer);
+        }
+    }
+
+    /// Serve an inbound `/join/1.0` request (admin mints a NodeAttestation).
+    pub fn on_join_request(
+        &mut self,
+        peer: PeerId,
+        channel: ResponseChannel<JoinResponse>,
+        request: JoinRequest,
+        host: &mut impl MemvaultHost,
+    ) {
+        serve_join_request(host, &self.store, peer, channel, request, &self.join_config);
+    }
+
+    /// Handle a response to our `/join/1.0` request.
+    pub fn on_join_response(
+        &mut self,
+        peer: PeerId,
+        response: JoinResponse,
+        host: &mut impl MemvaultHost,
+    ) {
+        if handle_join_response(&self.store, peer, response, &self.join_config) {
+            // Success: clear the pending token, fire the callback, and re-pull
+            // heads now that the admin has minted our NodeAttestation (earlier
+            // pulls were refused as "not an attested cluster node").
+            self.join_config.pending_token = None;
+            if let Some(cb) = self.join_config.on_join_success.take() {
+                cb();
+            }
+            request_remote_heads(host, &self.store, &self.config, peer);
+        }
+    }
+
+    /// A locally-minted head to announce on gossipsub, plus post-mint resync of
+    /// any peer we haven't finished (or failed) initial sync with.
+    pub fn on_local_head(&mut self, outbound: OutboundHead, host: &mut impl MemvaultHost) {
+        publish_head(host, &self.config.cluster_id, outbound);
+        let needs_resync: Vec<_> = self
+            .synced_peers
+            .iter()
+            .filter(|p| {
+                !self.initial_sync_complete.contains(p) || self.failed_sync_peers.contains(p)
+            })
+            .copied()
+            .collect();
+        for peer in needs_resync {
+            tracing::debug!(%peer, "post-mint resync of failed/incomplete peer");
+            request_remote_heads(host, &self.store, &self.config, peer);
+        }
+    }
+
+    /// Periodic RBSR resync to heal partial sync + chase incomplete files.
+    pub fn tick_resync(&mut self, host: &mut impl MemvaultHost) {
+        let peers: Vec<_> = self.synced_peers.iter().copied().collect();
+        if peers.is_empty() {
+            return;
+        }
+        tracing::info!(peers = peers.len(), "periodic RBSR resync");
+        for peer_id in &peers {
+            request_remote_heads(host, &self.store, &self.config, *peer_id);
+        }
+        // Verify completeness: walk all stored blocks, find missing
+        // dependencies (manifest → DAG chunks), and re-request them.
+        let missing = collect_incomplete_cids(&self.store);
+        if !missing.is_empty() {
+            let target = peers[0];
+            tracing::info!(missing = missing.len(), %target, "requesting incomplete file chunks");
+            for chunk in missing.chunks(FETCH_CHUNK_SIZE) {
+                host.send_block_request(
+                    &target,
+                    BlockRequest {
+                        cids: chunk.to_vec(),
+                        since_ns: None,
+                        limit: None,
+                        range_fingerprints: vec![],
+                        token: None,
+                        store_version: memvault_core::BLOCKSTORE_VERSION,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Rebroadcast a pending `/join/1.0` request to all connected peers.
+    pub fn tick_join_retry(&mut self, host: &mut impl MemvaultHost) {
+        let Some(token) = self.join_config.pending_token.clone() else {
+            return;
+        };
+        let peers: Vec<_> = self.synced_peers.iter().copied().collect();
+        if peers.is_empty() {
+            return;
+        }
+        tracing::debug!(peers = peers.len(), "retrying /join/1.0 (still pending)");
+        for peer_id in peers {
+            send_join_request(host, peer_id, &token, &self.join_config);
+        }
+    }
+}
+
+/// Translate a standalone-swarm behaviour event into [`MemvaultDriver`] calls.
+fn dispatch_standalone_event(
+    driver: &mut MemvaultDriver,
+    swarm: &mut Swarm<StandaloneMemvaultBehaviour>,
+    ev: StandaloneMemvaultBehaviourEvent,
+) {
+    use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
+    let mut host = StandaloneHost(swarm);
+    match ev {
+        StandaloneMemvaultBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(peers)) => {
+            driver.on_mdns_discovered(peers, &mut host);
+        }
+        StandaloneMemvaultBehaviourEvent::Mdns(libp2p::mdns::Event::Expired(peers)) => {
+            for (peer_id, addr) in peers {
+                tracing::debug!(%peer_id, %addr, "mDNS peer expired");
+            }
+        }
+        StandaloneMemvaultBehaviourEvent::Identify(libp2p::identify::Event::Received {
+            peer_id,
+            info,
+            ..
+        }) => {
+            driver.on_identify(peer_id, &info.listen_addrs, &info.agent_version, &mut host);
+        }
+        StandaloneMemvaultBehaviourEvent::Gossipsub(libp2p::gossipsub::Event::Message {
+            propagation_source,
+            message,
+            ..
+        }) => {
+            driver.on_gossip(propagation_source, &message, &mut host);
+        }
+        StandaloneMemvaultBehaviourEvent::BlockExchange(RrEvent::Message {
+            peer,
+            message: RrMessage::Request { channel, request, .. },
+            ..
+        }) => {
+            driver.on_block_request(peer, channel, request, &mut host);
+        }
+        StandaloneMemvaultBehaviourEvent::BlockExchange(RrEvent::Message {
+            peer,
+            message: RrMessage::Response { response, .. },
+            ..
+        }) => {
+            driver.on_block_response(peer, response, &mut host);
+        }
+        StandaloneMemvaultBehaviourEvent::BlockExchange(RrEvent::OutboundFailure {
+            peer,
+            error,
+            ..
+        }) => {
+            tracing::warn!(%peer, %error, "block exchange outbound failure");
+            driver.on_block_failure(peer);
+        }
+        StandaloneMemvaultBehaviourEvent::BlockExchange(RrEvent::InboundFailure {
+            peer,
+            error,
+            ..
+        }) => {
+            tracing::warn!(%peer, %error, "block exchange inbound failure");
+            driver.on_block_failure(peer);
+        }
+        StandaloneMemvaultBehaviourEvent::Join(RrEvent::Message {
+            peer,
+            message: RrMessage::Request { channel, request, .. },
+            ..
+        }) => {
+            driver.on_join_request(peer, channel, request, &mut host);
+        }
+        StandaloneMemvaultBehaviourEvent::Join(RrEvent::Message {
+            peer,
+            message: RrMessage::Response { response, .. },
+            ..
+        }) => {
+            driver.on_join_response(peer, response, &mut host);
+        }
+        _ => {}
+    }
+}
+
 /// Run the swarm event loop with full block sync.
 ///
 /// This function blocks until ctrl+c is received.
@@ -104,68 +631,20 @@ pub async fn run_sync_loop(
     store: Arc<MemvaultStore>,
     mut head_rx: mpsc::UnboundedReceiver<OutboundHead>,
     config: SyncConfig,
-    mut join_config: JoinConfig,
+    join_config: JoinConfig,
 ) {
-    // Currently-connected peers (added on ConnectionEstablished, dropped
-    // on ConnectionClosed). Misnamed historically — it's not "we've
-    // synced with them", only "we're talking right now". `initial_sync_complete`
-    // below tracks the actual exchange.
-    let mut synced_peers: HashSet<libp2p::PeerId> = HashSet::new();
-    // Per-peer initial-sync state. Populated on the first successful
-    // `BlockResponse` from a peer (proxy for "we exchanged data with
-    // them and didn't error out"). Reactive resync triggers off the
-    // *absence* of an entry here: if we see gossip / a request from a
-    // connected peer we haven't completed initial sync with, kick off
-    // another RBSR. Closes the window where the initial RBSR raced
-    // with a concurrent mint on either side.
-    let mut initial_sync_complete: HashSet<libp2p::PeerId> = HashSet::new();
-    // Peers whose last RBSR / block-exchange round trip explicitly
-    // failed (timeout, codec error, attestation refusal). Drained on
-    // the next successful exchange. On every local head_rx tick
-    // (i.e. after we mint a new block), we re-issue RBSR to everyone
-    // in (failed_sync_peers ∪ not-yet-initial-sync-complete) ∩ synced_peers
-    // so the freshly-minted block doesn't depend on the 5-minute periodic
-    // resync to reach those peers.
-    let mut failed_sync_peers: HashSet<libp2p::PeerId> = HashSet::new();
-    // Track peer → cluster_id for visibility enforcement.
-    let mut peer_clusters: HashMap<libp2p::PeerId, Vec<u8>> = HashMap::new();
+    let mut driver = MemvaultDriver::new(store, config, join_config);
+
     // Periodic resync timer to heal partial sync.
     let mut resync_timer = tokio::time::interval(RESYNC_INTERVAL);
-    // Retry timer for /join/1.0 — re-broadcast the JoinRequest while
-    // we still hold a pending token. Covers transient request-response
-    // failures (admin briefly offline, codec retries, etc.) without
-    // requiring a peer reconnect.
+    // Retry timer for /join/1.0 — re-broadcast the JoinRequest while we still
+    // hold a pending token. Covers transient request-response failures (admin
+    // briefly offline, codec retries) without requiring a peer reconnect.
     let mut join_retry_timer = tokio::time::interval(Duration::from_secs(15));
     join_retry_timer.tick().await; // skip immediate fire
     resync_timer.tick().await; // consume the immediate first tick
 
-    // If we hold a pending join token that embeds the issuer's dialable
-    // multiaddr(s), dial them directly so join works without mDNS/Kademlia
-    // discovery. The token's `issuer` pubkey identifies the target peer; we
-    // register the addrs against it and dial. Only the real admin (matching
-    // our pinned genesis) returns Success, so dialing the wrong peer is
-    // harmless — it just replies NotAdminPeer and we keep waiting.
-    if let Some(token_str) = &join_config.pending_token {
-        if let Ok(token) = memvault_auth::decode_token_string(token_str) {
-            let issuer_peer = peer_id_from_pubkey(&token.issuer.0);
-            for addr_str in &token.issuer_addrs {
-                match addr_str.parse::<libp2p::Multiaddr>() {
-                    Ok(addr) => {
-                        if let Some(peer) = issuer_peer {
-                            swarm.behaviour_mut().kad.add_address(&peer, addr.clone());
-                        }
-                        match swarm.dial(addr.clone()) {
-                            Ok(()) => tracing::info!(%addr, "dialing join-token issuer addr"),
-                            Err(e) => tracing::warn!(%addr, error = %e, "failed to dial issuer addr"),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(addr = %addr_str, error = %e, "skipping unparseable issuer addr")
-                    }
-                }
-            }
-        }
-    }
+    driver.on_start(&mut StandaloneHost(swarm));
 
     loop {
         tokio::select! {
@@ -174,217 +653,15 @@ pub async fn run_sync_loop(
                     Some(SwarmEvent::NewListenAddr { address, .. }) => {
                         println!("  Listening on: {address}");
                     }
-
-                    // ── New peer connected: request their recent heads ──
                     Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
-                        tracing::info!(%peer_id, "peer connected");
-                        if synced_peers.insert(peer_id) {
-                            request_remote_heads(swarm, &store, &config, peer_id);
-                        }
-                        // If we have a pending join token, redeem it with
-                        // this peer. Only admin will reply Success — other
-                        // peers respond NotAdminPeer and we keep waiting.
-                        if let Some(token) = &join_config.pending_token {
-                            send_join_request(swarm, peer_id, token, &join_config);
-                        }
+                        driver.on_connection_established(peer_id, &mut StandaloneHost(swarm));
                     }
-
                     Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
-                        tracing::info!(%peer_id, "peer disconnected");
-                        synced_peers.remove(&peer_id);
-                        initial_sync_complete.remove(&peer_id);
-                        failed_sync_peers.remove(&peer_id);
+                        driver.on_connection_closed(peer_id);
                     }
-
-                    // ── mDNS discovery ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::Mdns(
-                            libp2p::mdns::Event::Discovered(peers)
-                        )
-                    )) => {
-                        for (peer_id, addr) in peers {
-                            tracing::info!(%peer_id, %addr, "mDNS discovered peer");
-                            swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
-                            let _ = swarm.dial(addr);
-                        }
+                    Some(SwarmEvent::Behaviour(ev)) => {
+                        dispatch_standalone_event(&mut driver, swarm, ev);
                     }
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::Mdns(
-                            libp2p::mdns::Event::Expired(peers)
-                        )
-                    )) => {
-                        for (peer_id, addr) in peers {
-                            tracing::debug!(%peer_id, %addr, "mDNS peer expired");
-                        }
-                    }
-
-                    // ── Identify → update Kademlia ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::Identify(
-                            libp2p::identify::Event::Received { peer_id, info, .. }
-                        )
-                    )) => {
-                        for addr in &info.listen_addrs {
-                            swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
-                        }
-                        // Extract cluster_id from the identify agent string if it
-                        // contains a hex-encoded cluster ID (convention: "memvault/<cluster_hex>").
-                        if let Some(cluster_hex) = info.agent_version.strip_prefix("memvault/") {
-                            if let Ok(cid_bytes) = hex::decode(cluster_hex) {
-                                peer_clusters.insert(peer_id, cid_bytes);
-                            }
-                        }
-                        tracing::debug!(%peer_id, addrs = info.listen_addrs.len(), "identify received");
-                    }
-
-                    // ── Gossipsub: head announcements ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::Gossipsub(
-                            libp2p::gossipsub::Event::Message { propagation_source, message, .. }
-                        )
-                    )) => {
-                        handle_gossip_message(swarm, &store, propagation_source, &message);
-                        // Reactive RBSR: gossip from a connected peer
-                        // we haven't completed initial sync with means
-                        // the first RBSR either raced a concurrent mint
-                        // or didn't run at all. Re-issue now.
-                        if synced_peers.contains(&propagation_source)
-                            && !initial_sync_complete.contains(&propagation_source)
-                        {
-                            tracing::debug!(
-                                peer = %propagation_source,
-                                "gossip from unsynced peer — re-RBSRing"
-                            );
-                            request_remote_heads(swarm, &store, &config, propagation_source);
-                        }
-                    }
-
-                    // ── Block exchange: serve requests ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::BlockExchange(
-                            libp2p::request_response::Event::Message {
-                                peer,
-                                message: libp2p::request_response::Message::Request {
-                                    channel, request, ..
-                                },
-                                ..
-                            }
-                        )
-                    )) => {
-                        serve_block_request(swarm, &store, peer, channel, request, &config.cluster_id, &peer_clusters, &join_config);
-                        // Reactive RBSR (same rationale as the gossip
-                        // arm): activity from this peer means we should
-                        // exchange state with them if we haven't yet.
-                        if synced_peers.contains(&peer)
-                            && !initial_sync_complete.contains(&peer)
-                        {
-                            tracing::debug!(
-                                %peer,
-                                "block request from unsynced peer — re-RBSRing"
-                            );
-                            request_remote_heads(swarm, &store, &config, peer);
-                        }
-                    }
-
-                    // ── Block exchange: process responses ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::BlockExchange(
-                            libp2p::request_response::Event::Message {
-                                peer,
-                                message: libp2p::request_response::Message::Response {
-                                    response, ..
-                                },
-                                ..
-                            }
-                        )
-                    )) => {
-                        handle_block_response(swarm, &store, peer, response, &join_config);
-                        // We got a response back — treat that as
-                        // initial-sync-complete with this peer.
-                        // BlockResponse doesn't distinguish RBSR vs
-                        // ad-hoc fetch, but any successful exchange is
-                        // strong enough evidence that we'd hear back
-                        // if a follow-up RBSR were needed.
-                        if synced_peers.contains(&peer) {
-                            initial_sync_complete.insert(peer);
-                            failed_sync_peers.remove(&peer);
-                        }
-                    }
-
-                    // ── Block exchange: errors ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::BlockExchange(
-                            libp2p::request_response::Event::OutboundFailure {
-                                peer, error, ..
-                            }
-                        )
-                    )) => {
-                        tracing::warn!(%peer, %error, "block exchange outbound failure");
-                        if synced_peers.contains(&peer) {
-                            failed_sync_peers.insert(peer);
-                            initial_sync_complete.remove(&peer);
-                        }
-                    }
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::BlockExchange(
-                            libp2p::request_response::Event::InboundFailure {
-                                peer, error, ..
-                            }
-                        )
-                    )) => {
-                        tracing::warn!(%peer, %error, "block exchange inbound failure");
-                        if synced_peers.contains(&peer) {
-                            failed_sync_peers.insert(peer);
-                            initial_sync_complete.remove(&peer);
-                        }
-                    }
-
-                    // ── /join/1.0 server: incoming JoinRequest ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::Join(
-                            libp2p::request_response::Event::Message {
-                                peer,
-                                message: libp2p::request_response::Message::Request {
-                                    channel, request, ..
-                                },
-                                ..
-                            }
-                        )
-                    )) => {
-                        serve_join_request(swarm, &store, peer, channel, request, &join_config);
-                    }
-
-                    // ── /join/1.0 client: response to our JoinRequest ──
-                    Some(SwarmEvent::Behaviour(
-                        StandaloneMemvaultBehaviourEvent::Join(
-                            libp2p::request_response::Event::Message {
-                                peer,
-                                message: libp2p::request_response::Message::Response {
-                                    response, ..
-                                },
-                                ..
-                            }
-                        )
-                    )) => {
-                        if handle_join_response(&store, peer, response, &join_config) {
-                            // Success. Clear pending token + fire callback
-                            // (caller removes the pending-token file).
-                            join_config.pending_token = None;
-                            if let Some(cb) = join_config.on_join_success.take() {
-                                cb();
-                            }
-                            // Re-request heads from the admin now that it has
-                            // minted our NodeAttestation. Any block requests we
-                            // sent on first connect were refused ("peer is not
-                            // an attested cluster node") because the mint hadn't
-                            // happened yet; this retries the pull now that we're
-                            // attested, instead of waiting for the periodic
-                            // resync timer to heal it.
-                            request_remote_heads(swarm, &store, &config, peer);
-                        }
-                    }
-
-                    Some(SwarmEvent::Behaviour(_)) => {}
                     _ => {}
                 }
             }
@@ -392,89 +669,14 @@ pub async fn run_sync_loop(
             // ── Outbound head announcements from local writes ──
             head = head_rx.recv() => {
                 match head {
-                    Some(outbound) => {
-                        publish_head(swarm, &config.cluster_id, outbound);
-                        // Post-mint reactive resync: every peer we
-                        // either know we failed with, or never finished
-                        // initial sync with, gets a fresh RBSR triggered
-                        // by *this* local mint. Without this, a peer that
-                        // raced its initial RBSR with our previous mint
-                        // would only learn about the new chain blocks on
-                        // the next 5-minute periodic resync — and the
-                        // chain of "first-RBSR raced minting" can keep
-                        // chaining if the next mint is also concurrent.
-                        let needs_resync: Vec<_> = synced_peers
-                            .iter()
-                            .filter(|p| {
-                                !initial_sync_complete.contains(p)
-                                    || failed_sync_peers.contains(p)
-                            })
-                            .copied()
-                            .collect();
-                        for peer in needs_resync {
-                            tracing::debug!(
-                                %peer,
-                                "post-mint resync of failed/incomplete peer"
-                            );
-                            request_remote_heads(swarm, &store, &config, peer);
-                        }
-                    }
-                    None => {
-                        tracing::debug!("head announcement channel closed");
-                    }
+                    Some(outbound) => driver.on_local_head(outbound, &mut StandaloneHost(swarm)),
+                    None => tracing::debug!("head announcement channel closed"),
                 }
             }
 
-            // ── Periodic re-sync to heal partial sync ──
-            _ = resync_timer.tick() => {
-                let peers: Vec<_> = synced_peers.iter().copied().collect();
-                if !peers.is_empty() {
-                    tracing::info!(peers = peers.len(), "periodic RBSR resync");
-                    for peer_id in &peers {
-                        request_remote_heads(swarm, &store, &config, *peer_id);
-                    }
+            _ = resync_timer.tick() => driver.tick_resync(&mut StandaloneHost(swarm)),
 
-                    // Verify completeness: walk all stored blocks, find missing
-                    // dependencies (manifest → DAG chunks), and re-request them.
-                    let missing = collect_incomplete_cids(&store);
-                    if !missing.is_empty() {
-                        let target = peers[0]; // request from first connected peer
-                        tracing::info!(missing = missing.len(), %target, "requesting incomplete file chunks");
-                        for chunk in missing.chunks(FETCH_CHUNK_SIZE) {
-                            swarm.behaviour_mut().block_exchange.send_request(
-                                &target,
-                                BlockRequest {
-                                    cids: chunk.to_vec(),
-                                    since_ns: None,
-                                    limit: None,
-                                    range_fingerprints: vec![],
-                                    token: None,
-                                    store_version: memvault_core::BLOCKSTORE_VERSION,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            // ── /join/1.0 retry while a token is pending ──
-            // Rebroadcasts the JoinRequest to every connected peer until
-            // one returns Success and clears the pending token. Covers
-            // transient drops without waiting for peer reconnect.
-            _ = join_retry_timer.tick() => {
-                if let Some(token) = join_config.pending_token.clone() {
-                    let peers: Vec<_> = synced_peers.iter().copied().collect();
-                    if !peers.is_empty() {
-                        tracing::debug!(
-                            peers = peers.len(),
-                            "retrying /join/1.0 (still pending)"
-                        );
-                        for peer_id in peers {
-                            send_join_request(swarm, peer_id, &token, &join_config);
-                        }
-                    }
-                }
-            }
+            _ = join_retry_timer.tick() => driver.tick_join_retry(&mut StandaloneHost(swarm)),
 
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutting down...");
@@ -508,7 +710,7 @@ const RESYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// (not just recent data). RBSR makes this efficient: matching windows
 /// are skipped, so bandwidth is proportional to the diff.
 fn request_remote_heads(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    host: &mut impl MemvaultHost,
     store: &MemvaultStore,
     _config: &SyncConfig,
     peer_id: libp2p::PeerId,
@@ -549,18 +751,11 @@ fn request_remote_heads(
         token: None,
         store_version: memvault_core::BLOCKSTORE_VERSION,
     };
-    swarm
-        .behaviour_mut()
-        .block_exchange
-        .send_request(&peer_id, request);
+    host.send_block_request(&peer_id, request);
     tracing::info!(%peer_id, windows = RBSR_WINDOWS, total_blocks = total, "sent RBSR full sync request");
 }
 
-fn publish_head(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
-    cluster_id: &[u8],
-    outbound: OutboundHead,
-) {
+fn publish_head(host: &mut impl MemvaultHost, cluster_id: &[u8], outbound: OutboundHead) {
     let ann = HeadAnnouncement {
         cid: outbound.cid,
         cluster_id: cluster_id.to_vec(),
@@ -568,15 +763,12 @@ fn publish_head(
         bucket_id: outbound.bucket_id,
     };
     if let Ok(data) = serde_ipld_dagcbor::to_vec(&ann) {
-        let _ = swarm
-            .behaviour_mut()
-            .gossipsub
-            .publish(memvault_net::gossip::heads_topic(), data);
+        host.gossip_publish(memvault_net::gossip::heads_topic(), data);
     }
 }
 
 fn handle_gossip_message(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    host: &mut impl MemvaultHost,
     store: &MemvaultStore,
     source: libp2p::PeerId,
     message: &libp2p::gossipsub::Message,
@@ -586,7 +778,7 @@ fn handle_gossip_message(
         if let Ok(ann) = serde_ipld_dagcbor::from_slice::<HeadAnnouncement>(&message.data) {
             if store.get_block(&ann.cid).ok().flatten().is_none() {
                 tracing::debug!(cid = %hex::encode(&ann.cid), %source, "missing block from gossip");
-                swarm.behaviour_mut().block_exchange.send_request(
+                host.send_block_request(
                     &source,
                     BlockRequest {
                         cids: vec![ann.cid],
@@ -610,7 +802,7 @@ fn handle_gossip_message(
 ///   CIDs from mismatched windows (bandwidth ∝ diff, not total set size).
 /// - **List heads** (cids empty, since_ns set): return recent CIDs (no data).
 fn serve_block_request(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    host: &mut impl MemvaultHost,
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     channel: libp2p::request_response::ResponseChannel<BlockResponse>,
@@ -631,10 +823,7 @@ fn serve_block_request(
             %peer,
             "refusing to serve blocks: peer is not an attested cluster node"
         );
-        let _ = swarm
-            .behaviour_mut()
-            .block_exchange
-            .send_response(channel, BlockResponse { blocks: vec![] });
+        host.send_block_response(channel, BlockResponse { blocks: vec![] });
         return;
     }
 
@@ -647,10 +836,7 @@ fn serve_block_request(
             local = local_version,
             "rejecting sync: blockstore version mismatch"
         );
-        let _ = swarm
-            .behaviour_mut()
-            .block_exchange
-            .send_response(channel, BlockResponse { blocks: vec![] });
+        host.send_block_response(channel, BlockResponse { blocks: vec![] });
         return;
     }
 
@@ -729,10 +915,7 @@ fn serve_block_request(
 
     let found = entries.iter().filter(|e| e.found).count();
     tracing::debug!(%peer, found, total = entries.len(), "serving block response");
-    let _ = swarm
-        .behaviour_mut()
-        .block_exchange
-        .send_response(channel, BlockResponse { blocks: entries });
+    host.send_block_response(channel, BlockResponse { blocks: entries });
 }
 
 /// Check whether a block should be served to a remote peer.
@@ -1114,7 +1297,7 @@ fn vet_sync_block(
 }
 
 fn handle_block_response(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    host: &mut impl MemvaultHost,
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     response: BlockResponse,
@@ -1201,7 +1384,7 @@ fn handle_block_response(
     if !missing_cids.is_empty() {
         tracing::info!(%peer, missing = missing_cids.len(), "requesting missing blocks from peer");
         for chunk in missing_cids.chunks(FETCH_CHUNK_SIZE) {
-            swarm.behaviour_mut().block_exchange.send_request(
+            host.send_block_request(
                 &peer,
                 BlockRequest {
                     cids: chunk.to_vec(),
@@ -1311,7 +1494,7 @@ fn collect_incomplete_cids(store: &MemvaultStore) -> Vec<Vec<u8>> {
 // ─────────────────────────────────────────────────────────────────────────
 
 fn send_join_request(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    host: &mut impl MemvaultHost,
     peer_id: libp2p::PeerId,
     token: &str,
     join_config: &JoinConfig,
@@ -1347,12 +1530,12 @@ fn send_join_request(
         admin_pop,
         admin_pop_not_after_ns,
     };
-    let _ = swarm.behaviour_mut().join.send_request(&peer_id, req);
+    host.send_join_request(&peer_id, req);
     tracing::debug!(%peer_id, "sent /join/1.0 request");
 }
 
 fn serve_join_request(
-    swarm: &mut libp2p::Swarm<StandaloneMemvaultBehaviour>,
+    host: &mut impl MemvaultHost,
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     channel: libp2p::request_response::ResponseChannel<JoinResponse>,
@@ -1360,7 +1543,7 @@ fn serve_join_request(
     join_config: &JoinConfig,
 ) {
     let response = build_join_response(store, peer, &request, join_config);
-    let _ = swarm.behaviour_mut().join.send_response(channel, response);
+    host.send_join_response(channel, response);
 }
 
 fn build_join_response(

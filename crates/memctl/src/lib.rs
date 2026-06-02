@@ -878,32 +878,6 @@ mod native {
         let keystore = memvault_api::keystore_open::open_token_keystore(&identity_dir)
             .map_err(|e| anyhow::anyhow!("open keystore: {e}"))?;
 
-        let pending_token = keystore
-            .get(b"pendingtoken")
-            .and_then(|b| String::from_utf8(b).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| s.starts_with("mvjoin1:"));
-
-        let admin_signing_key = keystore
-            .keys_with_prefix(b"adminkey:")
-            .into_iter()
-            .next()
-            .and_then(|k| keystore.get(&k))
-            .filter(|b| b.len() == 32)
-            .map(|b| {
-                let mut seed = [0u8; 32];
-                seed.copy_from_slice(&b[..32]);
-                ed25519_dalek::SigningKey::from_bytes(&seed)
-            });
-
-        // Pinned admin verifying key — sync uses it to reject foreign
-        // NodeAttestations BEFORE storing them.
-        let pinned_admin_pubkey = keystore
-            .get(b"genesis")
-            .and_then(|b| serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok())
-            .filter(|g| g.verify_self_signature().is_ok())
-            .map(|g| g.admin_pubkey);
-
         // Hard-fail: the swarm-side node pubkey MUST match the libp2p
         // identity it's serving with. A zero pubkey would silently break
         // both incoming joins (PeerIdMismatch refusals) and outgoing
@@ -914,59 +888,13 @@ mod native {
             .map_err(|e| anyhow::anyhow!("libp2p keypair is not ed25519: {e}"))?
             .to_bytes();
 
-        let mut cluster_arr = [0u8; 32];
-        if cluster_id.len() == 32 {
-            cluster_arr.copy_from_slice(cluster_id);
-        }
-
-        // Opt-in co-admin join: `cluster-join --admit-as-admin` stashed a key
-        // under `pendingadmit`. `send_join_request` signs a fresh POP with it;
-        // the admin only mints an AdminKeyAdmission if the token allows it.
-        let admit_seed: Option<[u8; 32]> = keystore
-            .get(b"pendingadmit")
-            .filter(|b| b.len() == 32)
-            .map(|b| {
-                let mut seed = [0u8; 32];
-                seed.copy_from_slice(&b[..32]);
-                seed
-            });
-        let admit_admin_key = admit_seed.map(|s| ed25519_dalek::SigningKey::from_bytes(&s));
-
-        let ks_cb = std::sync::Arc::clone(&keystore);
-        let on_join_success: std::sync::Arc<dyn Fn() + Send + Sync> =
-            std::sync::Arc::new(move || {
-                let _ = ks_cb.delete(b"pendingtoken");
-                // On a successful admission, promote the staged admit key to a
-                // held admin key in the keystore. The running client's
-                // admin-key rescan (fired when the AdminKeyAdmission block
-                // lands) then activates it live — no restart. Only on success;
-                // a refused admission leaves `pendingadmit` untouched.
-                if let Some(seed) = admit_seed {
-                    let pubkey =
-                        ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-                    let key = format!("adminkey:{}", hex::encode(pubkey));
-                    if let Err(e) = ks_cb.put(key.as_bytes(), &seed) {
-                        tracing::warn!(error = %e, "could not store admitted admin key");
-                    } else {
-                        let _ = ks_cb.delete(b"pendingadmit");
-                        tracing::info!(
-                            "/join/1.0 admitted this node as co-admin; admin key activated"
-                        );
-                    }
-                }
-                tracing::info!("/join/1.0 success; cleared pending token");
-            });
-
-        Ok(memvault_swarm::JoinConfig {
-            pending_token,
+        // Assembly logic is shared with the mac-mgmt daemon via memvault-swarm
+        // so both construct JoinConfig identically from the same keystore keys.
+        Ok(memvault_swarm::JoinConfig::from_keystore(
+            keystore,
+            cluster_id,
             node_pubkey,
-            admin_signing_key,
-            pinned_admin_pubkey,
-            cluster_id: cluster_arr,
-            admit_admin_key,
-            keystore: Some(keystore),
-            on_join_success: Some(on_join_success),
-        })
+        ))
     }
 
     /// Spawn the swarm with an already-opened store.  Call AFTER
