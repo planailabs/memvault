@@ -21,7 +21,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 
 use crate::AppState;
 
@@ -130,6 +130,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/buckets/{id}/grants",
             get(buckets::list_grants).post(buckets::submit_grant),
         )
+        // Set an agent's display label (the agent itself or an Admin).
+        .route("/agents/{pubkey}", patch(agents::rename_agent))
         .route("/buckets/{id}/issue-grant", post(buckets::issue_grant))
         .route("/grants/{cid}/revoke", post(buckets::revoke_grant))
         .route("/buckets/{id}/attach", post(buckets::attach_bucket))
