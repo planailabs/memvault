@@ -50,7 +50,13 @@ pub async fn rename_agent(
         .client
         .agent_rename(&target, &req.label)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| match e {
+            // The caller is authorised, but this node isn't the agent's
+            // attesting node, so the relabel can't take effect here.
+            // 409: right request, wrong node.
+            memvault_api::ApiError::Forbidden(_) => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

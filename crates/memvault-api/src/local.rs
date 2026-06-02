@@ -5591,8 +5591,34 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()> {
-        let wall_ns = memvault_core::wall_ns();
         let agent_hex = hex::encode(agent_pubkey);
+
+        // A relabel is node-signed and only takes effect when signed by the
+        // agent's *attesting node* (see `sigchain::agent_label`). Reject up
+        // front if this node can't make it stick — otherwise the write would
+        // succeed but the label would be silently ignored on read. This makes
+        // the no-op observable to every caller (CLI / MCP / HTTP / web).
+        let node_pk = self
+            .node_signing_key()
+            .map(|k| k.verifying_key().to_bytes())
+            .ok_or_else(|| ApiError::Forbidden("node signing key not set".into()))?;
+        match crate::sigchain::sole_attesting_node(self, agent_pubkey)? {
+            Some(att) if att == node_pk => {}
+            Some(_) => {
+                return Err(ApiError::Forbidden(format!(
+                    "agent {agent_hex} is attested by a different node; \
+                     issue the relabel on its attesting node"
+                )));
+            }
+            None => {
+                return Err(ApiError::Forbidden(format!(
+                    "agent {agent_hex} has no unambiguous attestation on this node; \
+                     cannot relabel"
+                )));
+            }
+        }
+
+        let wall_ns = memvault_core::wall_ns();
         let tags = vec![
             ("kind".to_string(), "agent-rename".to_string()),
             ("agent".to_string(), agent_hex.clone()),

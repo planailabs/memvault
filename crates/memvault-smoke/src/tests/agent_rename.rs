@@ -97,6 +97,31 @@ async fn agent_rename_does_not_affect_access() {
 }
 
 #[tokio::test]
+async fn agent_rename_errors_when_node_is_not_attester() {
+    let node = TestNode::new();
+    // A pubkey this node never attested: it has no authority to relabel it, so
+    // the rename must fail loudly instead of writing a silently-ignored block.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let stranger = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+
+    let err = node
+        .client
+        .agent_rename(&stranger, "nope")
+        .await
+        .expect_err("relabel of a non-attested agent must error");
+    assert!(
+        matches!(err, memvault_api::ApiError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
+    // And no label leaked through.
+    assert_eq!(
+        sigchain::agent_label(&node.client, &stranger).expect("label lookup"),
+        None,
+    );
+}
+
+#[tokio::test]
 async fn agent_rename_from_untrusted_signer_ignored() {
     let node = TestNode::new();
     let pk = setup_agent(&node, "robot-7").await;
