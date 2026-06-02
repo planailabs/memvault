@@ -108,6 +108,7 @@ pub struct TokenStatus {
 /// Information about a key rotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RotationInfo {
+    #[serde(with = "crate::wire::hex_bytes")]
     pub rotation_id: Vec<u8>,
     pub kind: String,
     pub valid_from_ns: u64,
@@ -177,7 +178,11 @@ pub struct BucketInfo {
 /// Node status information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
+    // peer_id is a libp2p multihash (base58 is the canonical form — a FIX noted
+    // in standards/); cluster_id is an opaque id. Both as hex strings for now.
+    #[serde(with = "crate::wire::hex_bytes")]
     pub peer_id: Vec<u8>,
+    #[serde(with = "crate::wire::hex_bytes")]
     pub cluster_id: Vec<u8>,
     pub block_count: u64,
     pub doc_count: u64,

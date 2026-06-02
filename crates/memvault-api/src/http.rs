@@ -1473,13 +1473,27 @@ impl MemvaultClient for HttpApiClient {
     // -- Rotation --
 
     async fn list_rotations(&self) -> Result<Vec<RotationInfo>> {
-        Ok(vec![])
+        // RotationInfo decodes directly (hex wire encoding; see standards/).
+        let rotations = self
+            .client
+            .get(self.url("/admin/rotations"))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(rotations)
     }
 
     // -- Status --
 
     async fn status(&self) -> Result<NodeStatus> {
-        let resp: serde_json::Value = self
+        // NodeStatus decodes directly (hex wire encoding; see standards/). The
+        // old hand-parse dropped peer_id/cluster_id entirely.
+        let status = self
             .client
             .get(self.url("/admin/status"))
             .send()
@@ -1490,14 +1504,7 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        Ok(NodeStatus {
-            peer_id: vec![],
-            cluster_id: vec![],
-            block_count: resp["block_count"].as_u64().unwrap_or(0),
-            doc_count: resp["doc_count"].as_u64().unwrap_or(0),
-            peer_count: resp["peer_count"].as_u64().unwrap_or(0) as u32,
-            uptime_secs: resp["uptime_secs"].as_u64().unwrap_or(0),
-        })
+        Ok(status)
     }
 
     async fn legacy_bucket_id(&self) -> Result<BucketId> {

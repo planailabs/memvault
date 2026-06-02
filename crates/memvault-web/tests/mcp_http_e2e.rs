@@ -445,7 +445,11 @@ async fn tags_add_and_get() {
 async fn status_reports_node() {
     let (client, _bucket) = client_and_bucket().await;
     // status() backs the memvault_status MCP tool.
-    client.status().await.expect("status");
+    let status = client.status().await.expect("status");
+    // NodeStatus now decodes peer_id/cluster_id (the old hand-parse dropped
+    // them — it returned empty vecs).
+    assert!(!status.peer_id.is_empty(), "status must carry peer_id");
+    assert!(!status.cluster_id.is_empty(), "status must carry cluster_id");
 }
 
 #[tokio::test]

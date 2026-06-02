@@ -11,16 +11,6 @@ use crate::api::auth::RequireAdmin;
 use crate::error::ApiError;
 
 #[derive(Serialize)]
-pub struct NodeStatusResponse {
-    pub peer_id: String,
-    pub cluster_id: String,
-    pub block_count: u64,
-    pub doc_count: u64,
-    pub peer_count: u32,
-    pub uptime_secs: u64,
-}
-
-#[derive(Serialize)]
 pub struct TokenStatusResponse {
     pub cid: String,
     pub label: Option<String>,
@@ -56,29 +46,14 @@ pub struct IssueTokenRequest {
     pub issuer_addrs: Vec<String>,
 }
 
-#[derive(Serialize)]
-pub struct RotationInfoResponse {
-    pub rotation_id: String,
-    pub kind: String,
-    pub valid_from_ns: u64,
-    pub overlap_until_ns: u64,
-    pub aborted: bool,
-}
-
 /// GET /api/v1/admin/status
 pub async fn status(
     _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<NodeStatusResponse>, ApiError> {
+) -> Result<Json<memvault_api::NodeStatus>, ApiError> {
+    // NodeStatus carries hex wire encoding (see standards/); transmit as-is.
     let s = state.client.status().await?;
-    Ok(Json(NodeStatusResponse {
-        peer_id: hex::encode(&s.peer_id),
-        cluster_id: hex::encode(&s.cluster_id),
-        block_count: s.block_count,
-        doc_count: s.doc_count,
-        peer_count: s.peer_count,
-        uptime_secs: s.uptime_secs,
-    }))
+    Ok(Json(s))
 }
 
 /// GET /api/v1/admin/peers
@@ -161,19 +136,10 @@ pub async fn revoke_token(
 pub async fn list_rotations(
     _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<RotationInfoResponse>>, ApiError> {
+) -> Result<Json<Vec<memvault_api::RotationInfo>>, ApiError> {
+    // RotationInfo carries hex wire encoding (see standards/); transmit as-is.
     let rotations = state.client.list_rotations().await?;
-    let results: Vec<RotationInfoResponse> = rotations
-        .into_iter()
-        .map(|r| RotationInfoResponse {
-            rotation_id: hex::encode(&r.rotation_id),
-            kind: r.kind,
-            valid_from_ns: r.valid_from_ns,
-            overlap_until_ns: r.overlap_until_ns,
-            aborted: r.aborted,
-        })
-        .collect();
-    Ok(Json(results))
+    Ok(Json(rotations))
 }
 
 pub(crate) fn parse_agent_role(s: &str) -> Result<memvault_auth::AgentRole, ApiError> {
