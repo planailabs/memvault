@@ -306,6 +306,17 @@ impl MemvaultDriver {
         self.join_config.pending_token.is_some()
     }
 
+    /// PeerId of the pending join-token issuer — the admin that can mint our
+    /// `NodeAttestation`. Derived from the token so we redeem only with that
+    /// peer instead of asking every peer (which only replies `NotAdminPeer`).
+    /// `None` when there's no pending token or its issuer pubkey can't be
+    /// decoded (legacy/corrupt token); callers then fall back to broadcasting.
+    fn pending_token_issuer_peer(&self) -> Option<PeerId> {
+        let token = self.join_config.pending_token.as_deref()?;
+        let decoded = memvault_auth::decode_token_string(token).ok()?;
+        peer_id_from_pubkey(&decoded.issuer.0)
+    }
+
     /// Startup hook: if we hold a pending join token that embeds the issuer's
     /// dialable multiaddr(s), register + dial them directly so join works
     /// without mDNS/Kademlia discovery. Only the real admin returns Success,
@@ -341,7 +352,15 @@ impl MemvaultDriver {
             request_remote_heads(host, &self.store, &self.config, peer);
         }
         if let Some(token) = self.join_config.pending_token.clone() {
-            send_join_request(host, peer, &token, &self.join_config);
+            // Redeem only with the token's issuer (the admin that can mint our
+            // attestation), not every peer that connects. Fall back to asking
+            // this peer only when the issuer can't be derived from the token.
+            if self
+                .pending_token_issuer_peer()
+                .map_or(true, |issuer| issuer == peer)
+            {
+                send_join_request(host, peer, &token, &self.join_config);
+            }
         }
     }
 
@@ -528,17 +547,32 @@ impl MemvaultDriver {
         }
     }
 
-    /// Rebroadcast a pending `/join/1.0` request to all connected peers.
+    /// Retry a pending `/join/1.0` request. Targets only the token's issuer
+    /// (if identifiable and connected); falls back to every connected peer
+    /// when the issuer can't be derived from the token.
     pub fn tick_join_retry(&mut self, host: &mut impl MemvaultHost) {
         let Some(token) = self.join_config.pending_token.clone() else {
             return;
         };
-        let peers: Vec<_> = self.synced_peers.iter().copied().collect();
-        if peers.is_empty() {
+        let targets: Vec<PeerId> = match self.pending_token_issuer_peer() {
+            // Known issuer: retry only if it's currently connected. If it isn't,
+            // there's nothing to retry — on_connection_established fires the
+            // request when it (re)connects.
+            Some(issuer) => {
+                if self.synced_peers.contains(&issuer) {
+                    vec![issuer]
+                } else {
+                    vec![]
+                }
+            }
+            // Unknown issuer (legacy/corrupt token): fall back to broadcasting.
+            None => self.synced_peers.iter().copied().collect(),
+        };
+        if targets.is_empty() {
             return;
         }
-        tracing::debug!(peers = peers.len(), "retrying /join/1.0 (still pending)");
-        for peer_id in peers {
+        tracing::debug!(peers = targets.len(), "retrying /join/1.0 (still pending)");
+        for peer_id in targets {
             send_join_request(host, peer_id, &token, &self.join_config);
         }
     }
