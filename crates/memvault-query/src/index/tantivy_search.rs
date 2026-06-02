@@ -35,6 +35,10 @@ pub struct TantivyIndex {
     /// of deleting the doc, so admins/auditors can still surface retracted
     /// content via `RetractionMode`.
     f_retracted: Field,
+    /// Fine-grained entity `kind` (e.g. "skill", "vfs:dir") as a discrete,
+    /// exact-match filter field. Empty for docs/files. Lets scoped queries
+    /// narrow to a single entity kind without a tag convention.
+    f_entity_kind: Field,
 }
 
 /// All stored fields of an indexed node — used to read/rewrite a doc by
@@ -51,6 +55,8 @@ struct StoredFields {
     wall_ns: u64,
     bucket_id: String,
     retracted: u64,
+    /// Fine-grained entity kind; empty for docs/files.
+    entity_kind: String,
 }
 
 /// Split a stored "scope:label" tag into a `(scope, label)` pair on the first
@@ -124,6 +130,7 @@ impl TantivyIndex {
             "retracted",
             NumericOptions::default().set_stored().set_indexed(),
         );
+        let f_entity_kind = schema_builder.add_text_field("entity_kind", STRING | STORED);
         let schema = schema_builder.build();
 
         std::fs::create_dir_all(path).map_err(|e| QueryError::Other(e.to_string()))?;
@@ -156,6 +163,7 @@ impl TantivyIndex {
             f_wall_ns,
             f_bucket_id,
             f_retracted,
+            f_entity_kind,
         })
     }
 
@@ -182,6 +190,7 @@ impl TantivyIndex {
         doc.add_u64(self.f_wall_ns, wall_ns);
         doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
         doc.add_u64(self.f_retracted, 0);
+        doc.add_text(self.f_entity_kind, "");
 
         self.writer
             .add_document(doc)
@@ -213,6 +222,7 @@ impl TantivyIndex {
         doc.add_u64(self.f_wall_ns, wall_ns);
         doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
         doc.add_u64(self.f_retracted, 0);
+        doc.add_text(self.f_entity_kind, kind);
 
         self.writer
             .add_document(doc)
@@ -255,6 +265,7 @@ impl TantivyIndex {
         doc.add_u64(self.f_wall_ns, wall_ns);
         doc.add_text(self.f_bucket_id, bucket_id.unwrap_or(""));
         doc.add_u64(self.f_retracted, 0);
+        doc.add_text(self.f_entity_kind, "");
 
         self.writer
             .add_document(doc)
@@ -371,6 +382,7 @@ impl TantivyIndex {
             query_text,
             &buckets,
             &[],
+            None,
             RetractionMode::ActiveOnly,
             limit,
         )
@@ -384,6 +396,7 @@ impl TantivyIndex {
     ///   buckets an agent has access to.
     /// - `view_tags`: `(scope, label)` pairs AND-ed in (a view is a tag
     ///   conjunction); empty = no view filter.
+    /// - `entity_kind`: when set, narrows to entities of that exact `kind`.
     /// - `retraction`: `ActiveOnly` adds `retracted:0`, `RetractedOnly` adds
     ///   `retracted:1`, `IncludeRetracted` adds no clause.
     pub fn search_scoped(
@@ -391,6 +404,7 @@ impl TantivyIndex {
         query_text: &str,
         bucket_ids: &[&str],
         view_tags: &[(String, String)],
+        entity_kind: Option<&str>,
         retraction: RetractionMode,
         limit: usize,
     ) -> Result<Vec<TantivyHit>, QueryError> {
@@ -418,6 +432,13 @@ impl TantivyIndex {
         }
         for (scope, label) in view_tags {
             let t = Term::from_field_text(self.f_tags, &format!("{scope}:{label}"));
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(t, IndexRecordOption::Basic)),
+            ));
+        }
+        if let Some(k) = entity_kind {
+            let t = Term::from_field_text(self.f_entity_kind, k);
             clauses.push((
                 Occur::Must,
                 Box::new(TermQuery::new(t, IndexRecordOption::Basic)),
@@ -605,6 +626,7 @@ impl TantivyIndex {
             nd.add_u64(self.f_wall_ns, wall_ns);
             nd.add_text(self.f_bucket_id, self.get_text_field(&d, self.f_bucket_id));
             nd.add_u64(self.f_retracted, flag);
+            nd.add_text(self.f_entity_kind, self.get_text_field(&d, self.f_entity_kind));
             self.writer
                 .add_document(nd)
                 .map_err(|e| QueryError::Other(e.to_string()))?;
@@ -648,6 +670,7 @@ impl TantivyIndex {
             wall_ns: d.get_first(self.f_wall_ns).and_then(|v| v.as_u64()).unwrap_or(0),
             bucket_id: self.get_text_field(d, self.f_bucket_id),
             retracted: d.get_first(self.f_retracted).and_then(|v| v.as_u64()).unwrap_or(0),
+            entity_kind: self.get_text_field(d, self.f_entity_kind),
         }
     }
 
@@ -668,6 +691,7 @@ impl TantivyIndex {
         nd.add_u64(self.f_wall_ns, f.wall_ns);
         nd.add_text(self.f_bucket_id, &f.bucket_id);
         nd.add_u64(self.f_retracted, f.retracted);
+        nd.add_text(self.f_entity_kind, &f.entity_kind);
         self.writer
             .add_document(nd)
             .map_err(|e| QueryError::Other(e.to_string()))?;
@@ -745,12 +769,21 @@ impl TantivyIndex {
         out
     }
 
-    /// Build the filter clauses for a `(view_tags, retraction)` pair.
-    fn mode_clauses(view_tags: &[(String, String)], mode: RetractionMode) -> Vec<String> {
+    /// Build the filter clauses for a `(view_tags, entity_kind, retraction)`
+    /// triple. `entity_kind`, when set, narrows to entities of that exact kind
+    /// (an in-index clause, like the `tags:` conjunction — not a post-filter).
+    fn mode_clauses(
+        view_tags: &[(String, String)],
+        entity_kind: Option<&str>,
+        mode: RetractionMode,
+    ) -> Vec<String> {
         let mut clauses: Vec<String> = view_tags
             .iter()
             .map(|(s, l)| format!("tags:\"{s}:{l}\""))
             .collect();
+        if let Some(k) = entity_kind {
+            clauses.push(format!("entity_kind:\"{k}\""));
+        }
         match mode {
             RetractionMode::ActiveOnly => clauses.push("retracted:0".to_string()),
             RetractionMode::RetractedOnly => clauses.push("retracted:1".to_string()),
@@ -765,23 +798,25 @@ impl TantivyIndex {
         view_tags: &[(String, String)],
         mode: RetractionMode,
     ) -> Vec<String> {
-        let clauses = Self::mode_clauses(view_tags, mode);
+        let clauses = Self::mode_clauses(view_tags, None, mode);
         self.collect_rows(&clauses, 0)
             .into_iter()
             .map(|f| f.node_id)
             .collect()
     }
 
-    /// List all nodes (optionally view-filtered) under a mode, with the
-    /// retracted flag. Returns `(node_id, node_type, label, tags, retracted)`.
+    /// List all nodes (optionally view-filtered, optionally narrowed to one
+    /// entity kind) under a mode, with the retracted flag. Returns
+    /// `(node_id, node_type, label, tags, retracted)`.
     #[allow(clippy::type_complexity)]
     pub fn list_all_mode(
         &self,
         view_tags: Option<&[(String, String)]>,
+        entity_kind: Option<&str>,
         mode: RetractionMode,
         limit: usize,
     ) -> Vec<(String, String, String, Vec<(String, String)>, bool)> {
-        let clauses = Self::mode_clauses(view_tags.unwrap_or(&[]), mode);
+        let clauses = Self::mode_clauses(view_tags.unwrap_or(&[]), entity_kind, mode);
         self.collect_rows(&clauses, limit)
             .into_iter()
             .map(|f| {
@@ -792,13 +827,15 @@ impl TantivyIndex {
     }
 
     /// Unified search honouring the retraction mode; returns `UnifiedHit`s.
+    /// `entity_kind`, when set, narrows to entities of that exact kind.
     pub fn search_unified_mode(
         &self,
         query: &str,
+        entity_kind: Option<&str>,
         mode: RetractionMode,
         limit: usize,
     ) -> Vec<crate::index::search::UnifiedHit> {
-        let hits = match self.search_scoped(query, &[], &[], mode, limit) {
+        let hits = match self.search_scoped(query, &[], &[], entity_kind, mode, limit) {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!("tantivy search failed for {query:?}: {e}");
@@ -982,17 +1019,17 @@ mod tests {
 
         // Active-only search no longer finds it.
         let active = idx
-            .search_scoped("content", &[], &[], RetractionMode::ActiveOnly, 10)
+            .search_scoped("content", &[], &[], None, RetractionMode::ActiveOnly, 10)
             .unwrap();
         assert_eq!(active.len(), 0);
         // Retracted-only finds it.
         let retr = idx
-            .search_scoped("content", &[], &[], RetractionMode::RetractedOnly, 10)
+            .search_scoped("content", &[], &[], None, RetractionMode::RetractedOnly, 10)
             .unwrap();
         assert_eq!(retr.len(), 1);
         // Include-retracted finds it.
         let incl = idx
-            .search_scoped("content", &[], &[], RetractionMode::IncludeRetracted, 10)
+            .search_scoped("content", &[], &[], None, RetractionMode::IncludeRetracted, 10)
             .unwrap();
         assert_eq!(incl.len(), 1);
 
@@ -1000,7 +1037,7 @@ mod tests {
         assert!(idx.unretract("doc:r1").unwrap());
         idx.commit().unwrap();
         let active = idx
-            .search_scoped("content", &[], &[], RetractionMode::ActiveOnly, 10)
+            .search_scoped("content", &[], &[], None, RetractionMode::ActiveOnly, 10)
             .unwrap();
         assert_eq!(active.len(), 1);
     }
@@ -1018,12 +1055,12 @@ mod tests {
 
         // Union of two of three buckets.
         let hits = idx
-            .search_scoped("shared", &["baaa", "bbbb"], &[], RetractionMode::ActiveOnly, 10)
+            .search_scoped("shared", &["baaa", "bbbb"], &[], None, RetractionMode::ActiveOnly, 10)
             .unwrap();
         assert_eq!(hits.len(), 2);
         // All buckets (empty filter).
         let all = idx
-            .search_scoped("shared", &[], &[], RetractionMode::ActiveOnly, 10)
+            .search_scoped("shared", &[], &[], None, RetractionMode::ActiveOnly, 10)
             .unwrap();
         assert_eq!(all.len(), 3);
     }
@@ -1059,7 +1096,7 @@ mod tests {
         tags.sort();
         assert_eq!(tags, vec![("a".to_string(), "x".to_string()), ("c".to_string(), "z".to_string())]);
         // bucket + body preserved across the rewrite
-        let hit = idx.search_scoped("body", &["bkt"], &[], RetractionMode::ActiveOnly, 10).unwrap();
+        let hit = idx.search_scoped("body", &["bkt"], &[], None, RetractionMode::ActiveOnly, 10).unwrap();
         assert_eq!(hit.len(), 1);
     }
 
@@ -1077,7 +1114,7 @@ mod tests {
         assert_eq!(m, vec!["doc:1".to_string(), "doc:2".to_string()]);
 
         // list all (no view) active
-        let all = idx.list_all_mode(None, RetractionMode::ActiveOnly, 100);
+        let all = idx.list_all_mode(None, None, RetractionMode::ActiveOnly, 100);
         assert_eq!(all.len(), 3);
 
         // retract doc:2, then modes
@@ -1094,7 +1131,7 @@ mod tests {
         assert_eq!(idx.resolve_label_mode("doc:2", RetractionMode::IncludeRetracted).as_deref(), Some("B"));
 
         // search_unified_mode returns UnifiedHit
-        let hits = idx.search_unified_mode("alpha", RetractionMode::ActiveOnly, 10);
+        let hits = idx.search_unified_mode("alpha", None, RetractionMode::ActiveOnly, 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].node_id, "doc:1");
     }
@@ -1130,6 +1167,7 @@ mod tests {
                 "alpha",
                 &[],
                 &[("proj".into(), "x".into())],
+                None,
                 RetractionMode::ActiveOnly,
                 10,
             )
@@ -1274,6 +1312,38 @@ mod tests {
     }
 
     #[test]
+    fn test_entity_kind_filter() {
+        let (_dir, mut idx) = make_index();
+        // Two skills, one ordinary entity, all sharing a body term.
+        idx.add_entity("c1", "entity:1", "skill", "Code Review", "review code lint", &[], None, 1)
+            .unwrap();
+        idx.add_entity("c2", "entity:2", "skill", "Deploy", "deploy code ship", &[], None, 2)
+            .unwrap();
+        idx.add_entity("c3", "entity:3", "person", "Alice", "writes code daily", &[], None, 3)
+            .unwrap();
+        idx.commit().unwrap();
+
+        // Listing narrowed to kind=skill returns only the two skills.
+        let skills = idx.list_all_mode(None, Some("skill"), RetractionMode::ActiveOnly, 100);
+        assert_eq!(skills.len(), 2);
+        assert!(skills.iter().all(|(_, ty, _, _, _)| ty == "entity"));
+
+        // No filter returns all three.
+        assert_eq!(idx.list_all_mode(None, None, RetractionMode::ActiveOnly, 100).len(), 3);
+
+        // Full-text search narrowed to kind=skill excludes the person.
+        let hits = idx
+            .search_scoped("code", &[], &[], Some("skill"), RetractionMode::ActiveOnly, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|h| h.node_type == "entity"));
+
+        // search_unified_mode honours the same filter.
+        let uh = idx.search_unified_mode("code", Some("skill"), RetractionMode::ActiveOnly, 10);
+        assert_eq!(uh.len(), 2);
+    }
+
+    #[test]
     fn test_unified_mode_returns_match_centered_snippets() {
         let (_dir, mut idx) = make_index();
         // Long body with the query term buried well past the old 200-char
@@ -1284,7 +1354,7 @@ mod tests {
             .unwrap();
         idx.commit().unwrap();
 
-        let hits = idx.search_unified_mode("quantum", RetractionMode::ActiveOnly, 10);
+        let hits = idx.search_unified_mode("quantum", None, RetractionMode::ActiveOnly, 10);
         assert_eq!(hits.len(), 1);
         let h = &hits[0];
         // Snippet is centered on the match, not the body prefix.

@@ -66,7 +66,12 @@ struct IndexedEntry {
 /// `flush_index` reindex queue — previously they only updated redb's secondary
 /// indexes, so synced/seeded docs were invisible to search and the scoped table
 /// view. Bump wipes indexes left empty/partial by that gap so they repopulate.
-pub const INDEX_FORMAT_VERSION: u32 = 10;
+///
+/// v11: entities now index their fine-grained `kind` ("skill", "vfs:dir", …) in
+/// a discrete, exact-match `entity_kind` field so scoped queries can narrow to
+/// one entity kind without a tag convention. Old v10 indexes lack the field, so
+/// they must be rebuilt for entity-kind filters to return results.
+pub const INDEX_FORMAT_VERSION: u32 = 11;
 
 #[derive(Serialize, Deserialize)]
 struct IndexSnapshot {

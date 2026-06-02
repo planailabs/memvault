@@ -3199,7 +3199,12 @@ impl LocalClient {
         };
         let rows = {
             let idx = self.index.read().await;
-            idx.list_all_mode(view_tags.as_deref(), scope.retraction, fetch)
+            idx.list_all_mode(
+                view_tags.as_deref(),
+                scope.entity_kind.as_deref(),
+                scope.retraction,
+                fetch,
+            )
         };
         let mut out = Vec::new();
         for (node_id, node_type, label, tags, retracted) in rows {
@@ -3332,7 +3337,8 @@ impl LocalClient {
             let view_set: Option<std::collections::HashSet<String>> = view_tags
                 .as_ref()
                 .map(|t| idx.members_of_view_mode(t, scope.retraction).into_iter().collect());
-            let hits = idx.search_unified_mode(query, scope.retraction, fetch);
+            let hits =
+                idx.search_unified_mode(query, scope.entity_kind.as_deref(), scope.retraction, fetch);
             (hits, view_set)
         };
         let mut out = Vec::new();
@@ -3398,6 +3404,7 @@ impl LocalClient {
             buckets: scope.buckets.clone(),
             retraction: memvault_core::RetractionMode::IncludeRetracted,
             kind: scope.kind,
+            entity_kind: scope.entity_kind.clone(),
             // Counting never needs per-node detail.
             detail: memvault_core::DetailLevel::Summary,
         };
@@ -5077,7 +5084,7 @@ impl MemvaultClient for LocalClient {
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
         let hits: Vec<SearchHit> = idx
-            .search_unified_mode(query, mode, limit * 2)
+            .search_unified_mode(query, None, mode, limit * 2)
             .into_iter()
             .filter(|h| h.node_type == "doc")
             .filter_map(|h| {
@@ -5125,7 +5132,7 @@ impl MemvaultClient for LocalClient {
         self.flush_index().await;
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
-        let hits = idx.search_unified_mode(query, mode, limit * 2);
+        let hits = idx.search_unified_mode(query, None, mode, limit * 2);
         drop(idx);
 
         let buckets = self.store.list_buckets().unwrap_or_default();
@@ -5180,7 +5187,7 @@ impl MemvaultClient for LocalClient {
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
         let all: Vec<(String, String, String, Vec<(String, String)>)> = idx
-            .list_all_mode(view_tags.as_deref(), mode, fetch)
+            .list_all_mode(view_tags.as_deref(), None, mode, fetch)
             .into_iter()
             .map(|(id, ty, label, tags, _retracted)| (id, ty, label, tags))
             .collect();
