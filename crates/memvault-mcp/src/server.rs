@@ -208,7 +208,9 @@ impl MemvaultServer {
     )]
     async fn list(&self, Parameters(params): Parameters<ListParams>) -> String {
         let limit = params.limit.unwrap_or(20);
-        let bucket = match self.resolve_bucket_query(params.bucket.as_deref()) {
+        // Bucket-scoped (standards/bucket-scoping.md): default to the agent
+        // bucket rather than fanning out across all accessible buckets.
+        let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
@@ -216,7 +218,7 @@ impl MemvaultServer {
             (Some(s), Some(l)) => Some((s, l)),
             _ => None,
         };
-        match self.client.list_docs(tag_filter, limit, bucket.as_ref()).await {
+        match self.client.list_docs(tag_filter, limit, Some(&bucket)).await {
             Ok(docs) => serde_json::json!(docs
                 .iter()
                 .map(|d| serde_json::json!({
@@ -498,13 +500,14 @@ impl MemvaultServer {
         description = "List knowledge graph entities."
     )]
     async fn list_entities(&self, Parameters(params): Parameters<ListEntitiesParams>) -> String {
-        let bucket = match self.resolve_bucket_query(params.bucket.as_deref()) {
+        // Bucket-scoped (standards/bucket-scoping.md): agent-bucket default.
+        let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
         match self
             .client
-            .list_entities(params.limit.unwrap_or(50), bucket.as_ref())
+            .list_entities(params.limit.unwrap_or(50), Some(&bucket))
             .await
         {
             Ok(entities) => serde_json::json!(
