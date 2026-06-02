@@ -160,19 +160,21 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
 /// `/docs/{id}/history` JSON (hex-encoded byte fields; `op_kind` in canonical
 /// snake_case serde form). Fields absent on a given endpoint default to empty.
 fn parse_audit_record(v: &serde_json::Value) -> AuditRecord {
+    // CID-valued fields are CID strings; key/opaque-id fields are hex.
     let hexvec = |key: &str| v[key].as_str().and_then(|s| hex::decode(s).ok());
+    let cidvec = |key: &str| v[key].as_str().and_then(|s| memvault_core::cid_bytes_lenient(s).ok());
     AuditRecord {
-        cid: hexvec("cid").unwrap_or_default(),
+        cid: cidvec("cid").unwrap_or_default(),
         op_kind: v
             .get("op_kind")
             .and_then(|x| serde_json::from_value(x.clone()).ok())
             .unwrap_or(memvault_query::OpKind::DocCreate),
         author: hexvec("author").unwrap_or_default(),
-        agent_attestation: hexvec("agent_attestation"),
+        agent_attestation: cidvec("agent_attestation"),
         wall_ns: v["wall_ns"].as_u64().unwrap_or(0),
         doc_id: v["doc_id"].as_str().and_then(hex32).map(DocId),
         entity_id: hexvec("entity_id"),
-        attachment_cid: hexvec("attachment_cid"),
+        attachment_cid: cidvec("attachment_cid"),
         tags: v
             .get("tags")
             .and_then(|t| serde_json::from_value(t.clone()).ok())

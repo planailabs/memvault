@@ -83,7 +83,9 @@ pub async fn query_audit(
     let results: Vec<AuditRecordResponse> = records
         .into_iter()
         .map(|r| AuditRecordResponse {
-            cid: hex::encode(&r.cid),
+            // cid + agent_attestation are CIDs → canonical CID string (standards/).
+            cid: memvault_core::cid_string_from_bytes(&r.cid)
+                .unwrap_or_else(|_| hex::encode(&r.cid)),
             // Canonical serde form (snake_case, e.g. "doc_create") so the HTTP
             // client can round-trip it back into an OpKind — the old Debug
             // form ("DocCreate") was not deserializable.
@@ -92,7 +94,9 @@ pub async fn query_audit(
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_default(),
             author: hex::encode(&r.author),
-            agent_attestation: r.agent_attestation.as_ref().map(hex::encode),
+            agent_attestation: r.agent_attestation.as_ref().map(|c| {
+                memvault_core::cid_string_from_bytes(c).unwrap_or_else(|_| hex::encode(c))
+            }),
             wall_ns: r.wall_ns,
             doc_id: r.doc_id.map(|d| hex::encode(d.0)),
             tags: r.tags,

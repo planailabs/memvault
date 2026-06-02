@@ -251,14 +251,18 @@ pub async fn doc_history(
     let results: Vec<serde_json::Value> = records
         .into_iter()
         .map(|r| {
+            // cid + agent_attestation are CIDs → canonical CID string (standards/).
             let mut row = serde_json::json!({
-                "cid": hex::encode(&r.cid),
+                "cid": memvault_core::cid_string_from_bytes(&r.cid)
+                    .unwrap_or_else(|_| hex::encode(&r.cid)),
                 "op_kind": r.op_kind,
                 "wall_ns": r.wall_ns,
                 "author": hex::encode(&r.author),
             });
             if let Some(cid) = r.agent_attestation.as_ref() {
-                row["agent_attestation"] = serde_json::Value::String(hex::encode(cid));
+                row["agent_attestation"] = serde_json::Value::String(
+                    memvault_core::cid_string_from_bytes(cid).unwrap_or_else(|_| hex::encode(cid)),
+                );
             }
             row
         })
