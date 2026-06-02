@@ -26,6 +26,12 @@ fn ensure_entity_label(id: &str) -> String {
     }
 }
 
+/// Render CID bytes as the canonical CID string for tool output (hex fallback
+/// for any non-CID bytes). See `standards/api-wire-conventions.md` §1b.
+fn cid_out(bytes: &[u8]) -> String {
+    memvault_core::cid_string_from_bytes(bytes).unwrap_or_else(|_| hex::encode(bytes))
+}
+
 #[derive(Clone)]
 pub struct MemvaultServer {
     client: Arc<dyn MemvaultClient>,
@@ -143,7 +149,7 @@ impl MemvaultServer {
                 let mut result = serde_json::json!({
                     "node_id": res.node_id,
                     "doc_id": hex::encode(res.doc_id.0),
-                    "cid": hex::encode(&res.cid),
+                    "cid": cid_out(&res.cid),
                     "status": "stored",
                 });
                 if let Some(path) = &params.vfs_path {
@@ -237,7 +243,7 @@ impl MemvaultServer {
             Ok(records) => serde_json::json!(records
                 .iter()
                 .map(|r| serde_json::json!({
-                    "cid": hex::encode(&r.cid),
+                    "cid": cid_out(&r.cid),
                     "op_kind": format!("{:?}", r.op_kind),
                     "wall_ns": r.wall_ns,
                 }))
@@ -292,7 +298,7 @@ impl MemvaultServer {
             Ok((cid, node_id)) => {
                 let mut result = serde_json::json!({
                     "node_id": node_id,
-                    "cid": hex::encode(&cid),
+                    "cid": cid_out(&cid),
                     "filename": filename,
                     "size": data.len(),
                     "mime_type": mime_type,
@@ -312,7 +318,7 @@ impl MemvaultServer {
         description = "Read a byte range [start, end) from a file. Returns base64-encoded bytes."
     )]
     async fn read_range(&self, Parameters(params): Parameters<ReadRangeParams>) -> String {
-        let cid = match hex::decode(&params.manifest_cid) {
+        let cid = match memvault_core::cid_bytes_lenient(&params.manifest_cid) {
             Ok(b) => b,
             Err(e) => return format!("error: invalid hex: {e}"),
         };
@@ -334,7 +340,7 @@ impl MemvaultServer {
         description = "Pin a file to prevent garbage collection."
     )]
     async fn pin(&self, Parameters(params): Parameters<PinParams>) -> String {
-        let cid = match hex::decode(&params.manifest_cid) {
+        let cid = match memvault_core::cid_bytes_lenient(&params.manifest_cid) {
             Ok(b) => b,
             Err(e) => return format!("error: invalid hex: {e}"),
         };
@@ -353,7 +359,7 @@ impl MemvaultServer {
         description = "Unpin a file, allowing garbage collection."
     )]
     async fn unpin(&self, Parameters(params): Parameters<UnpinParams>) -> String {
-        let cid = match hex::decode(&params.manifest_cid) {
+        let cid = match memvault_core::cid_bytes_lenient(&params.manifest_cid) {
             Ok(b) => b,
             Err(e) => return format!("error: invalid hex: {e}"),
         };
@@ -372,7 +378,7 @@ impl MemvaultServer {
         description = "Extract text from a file (PDF, DOCX, HTML, Markdown, plain text)."
     )]
     async fn extract_text(&self, Parameters(params): Parameters<ExtractTextParams>) -> String {
-        let cid = match hex::decode(&params.manifest_cid) {
+        let cid = match memvault_core::cid_bytes_lenient(&params.manifest_cid) {
             Ok(b) => b,
             Err(e) => return format!("error: invalid hex: {e}"),
         };
@@ -396,7 +402,7 @@ impl MemvaultServer {
         description = "Get manifest metadata for a file."
     )]
     async fn file_info(&self, Parameters(params): Parameters<FileInfoParams>) -> String {
-        let cid = match hex::decode(&params.manifest_cid) {
+        let cid = match memvault_core::cid_bytes_lenient(&params.manifest_cid) {
             Ok(b) => b,
             Err(e) => return format!("error: invalid hex: {e}"),
         };
@@ -887,7 +893,7 @@ impl MemvaultServer {
                 Ok(grants) => {
                     for g in grants {
                         all.push(serde_json::json!({
-                            "cid": hex::encode(&g.cid),
+                            "cid": cid_out(&g.cid),
                             "bucket_id": hex::encode(g.bucket_id.0),
                             "issuer": hex::encode(&g.issuer.0),
                             "issuing_cluster": hex::encode(g.issuing_cluster.0),
@@ -939,14 +945,14 @@ impl MemvaultServer {
         description = "Approve or reject a cross-cluster share proposal. Two-step: call first with `confirm: false` (default) to preview the proposal contents, then call again with `confirm: true` to commit the decision."
     )]
     async fn share_decide(&self, Parameters(params): Parameters<ShareDecideParams>) -> String {
-        let cid = match hex::decode(&params.proposal_cid) {
+        let cid = match memvault_core::cid_bytes_lenient(&params.proposal_cid) {
             Ok(c) => c,
             Err(e) => return format!("error: invalid hex cid: {e}"),
         };
 
         let preview = match self.client.share_get_proposal(&cid).await {
             Ok(Some(p)) => serde_json::json!({
-                "cid": hex::encode(&p.cid),
+                "cid": cid_out(&p.cid),
                 "proposal_id": hex::encode(p.proposal_id),
                 "from_cluster": hex::encode(p.from_cluster.0),
                 "from_bucket": hex::encode(p.from_bucket.0),
@@ -1015,7 +1021,7 @@ impl MemvaultServer {
             Ok(records) => serde_json::json!(records
                 .iter()
                 .map(|r| serde_json::json!({
-                    "cid": hex::encode(&r.cid),
+                    "cid": cid_out(&r.cid),
                     "op_kind": format!("{:?}", r.op_kind),
                     "author": hex::encode(&r.author),
                     "wall_ns": r.wall_ns,
@@ -1574,11 +1580,10 @@ mod tool_tests {
         assert_ok(&up);
         // The manifest cid is the node_id's hex ("attachment:<hex>"); the
         // separate "cid" field is the content cid.
-        // The manifest cid is the node_id's hex ("attachment:<hex>"); the MCP
-        // tool output cid layer is flipped to CID strings separately.
-        let node_id = jget(&up, "node_id");
-        let cid = node_id.rsplit(':').next().unwrap_or(&node_id).to_string();
-        assert!(!cid.is_empty(), "upload_file must return a node id: {up}");
+        // The MCP tool now emits the canonical manifest CID string and accepts
+        // it back on the manifest_cid params (cid_bytes_lenient).
+        let cid = jget(&up, "cid");
+        assert!(cid.starts_with('b'), "upload cid must be a CID string: {up}");
 
         // file_info parses the manifest block as JSON, but manifests are
         // stored as dag-cbor — a real shape mismatch (see the wire-standards
