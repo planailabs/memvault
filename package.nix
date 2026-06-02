@@ -79,8 +79,12 @@ rp.buildRustPackage {
   };
 } else {
   # Fullstack build via dx: @client gets only the web feature (no native
-  # deps like tokio/mio), @server gets default features. --embed bakes
-  # the client's public assets into the server binary via rust-embed.
+  # deps like tokio/mio), @server gets default features + `embed`. --embed
+  # bakes the client's public assets into the server binary via rust-embed;
+  # `@server --features embed` turns on the runtime gate
+  # (`#[cfg(feature = "embed")]`) that makes the daemon serve the fullstack
+  # web UI. Both are required — without the feature the assets are embedded
+  # but `memctl daemon` reports "Web UI: disabled".
   buildPhase = ''
     runHook preBuild
 
@@ -93,7 +97,7 @@ rp.buildRustPackage {
 
     dx build --package memctl --release --embed \
       @client --platform web --no-default-features --features web \
-      @server --platform server
+      @server --platform server --features embed
 
     runHook postBuild
   '';

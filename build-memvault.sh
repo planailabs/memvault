@@ -61,9 +61,14 @@ DX_CMD=(dx build --package memctl)
 if [ -n "$DX_PROFILE" ]; then
   DX_CMD+=("$DX_PROFILE")
 fi
+# `--embed` bakes the client assets into the server binary; `@server
+# --features embed` turns on memctl's `embed` cargo feature, which is the
+# runtime gate (`#[cfg(feature = "embed")]`) that makes the daemon actually
+# serve the fullstack web UI. Both are required — without the feature the
+# assets are embedded but the daemon reports "Web UI: disabled".
 DX_CMD+=(--embed
   @client --platform web --no-default-features --features web
-  @server --platform server)
+  @server --platform server --features embed)
 set +e
 "${DX_CMD[@]}" 2>&1 | tee "$DX_LOG"
 status=${PIPESTATUS[0]}

@@ -50,7 +50,7 @@ export RUSTFLAGS="${RUSTFLAGS:-} -L $DL_STUB"
 
 dx build --package memctl --release --embed \
   @client --platform web --no-default-features --features web \
-  @server --platform server --target x86_64-unknown-linux-musl
+  @server --platform server --features embed --target x86_64-unknown-linux-musl
 
 rm -rf "$DL_STUB"
 unset RUSTFLAGS
@@ -98,7 +98,7 @@ export PATH="$CARGO_SHIM:$PATH"
 
 dx build --package memctl --release --embed \
   @client --platform web --no-default-features --features web \
-  @server --platform server --target aarch64-apple-darwin
+  @server --platform server --features embed --target aarch64-apple-darwin
 
 export PATH="${PATH#"$CARGO_SHIM:"}"
 rm -rf "$CARGO_SHIM"
