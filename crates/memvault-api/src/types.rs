@@ -91,6 +91,8 @@ impl TraversalHit {
 /// Status of an issued token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenStatus {
+    /// Token envelope CID (canonical CID string on the wire).
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
     pub label: Option<String>,
     pub role: TokenRole,

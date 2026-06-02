@@ -72,7 +72,29 @@ convert via those.
 
 ## Migration status
 
-The shared helpers live in `memvault-api/src/wire.rs`. Types are migrated to
-the standard incrementally; each migration deletes the corresponding
-server-side `json!` builder and client-side hand-parser. Track remaining
-non-conforming handlers/methods against the audit in this directory's history.
+The shared helpers live in `memvault-api/src/wire.rs`. Each migration deletes
+the corresponding server-side `json!` builder and/or client-side hand-parser.
+
+**Migrated (transmit the type directly; ids hex, CIDs as CID strings):**
+`BucketInfo`, `DocSummary`, `NodeStatus`, `RotationInfo`, `GrantInfo`,
+`ShareProposalInfo`, `AuditRecord` (cid/agent_attestation), and the file/
+manifest CID surface (`GET /files/{cid}`, manifest/pin/extracted-text, `/pins`,
+upload response) via accept-both/emit-canonical. The MCP tool surface accepts
+and emits CID strings on its cid inputs/outputs.
+
+**Consciously deferred (rationale, not oversight):**
+- **`NodeRef::Attachment` `file:` label** — flipping `tag_label`/`from_tag_label`
+  to a CID string would add CID-vs-hex parse *ambiguity* to a core node-ref
+  parser used across links/vfs/traverse, for marginal gain. Left as hex; the
+  emitted file/manifest CIDs elsewhere are canonical.
+- **Entity/Edge/Document hand-parsers** (`add_entity`/`get_entity`/
+  `list_entities`/`edges_of`) — these decode `serde_json::Value` today but are
+  fully covered by the e2e + tool tests and carry no CID fields (entity/edge
+  ids are opaque hex, targets are node labels). Consolidating into `*Wire` DTOs
+  is cleanup, not a correctness fix; do it when touching that code.
+- **`TokenStatus.cid` → CID string** — gated behind a separate route bug
+  (`list_tokens` client hits `/tokens`, server serves `/admin/tokens`); fix the
+  route in the same change.
+- **`PeerId` base58** — peer ids are multihashes; base58 is canonical but
+  needs a libp2p-aware formatter. Currently hex (string, not array), which is
+  the main goal; base58 is a follow-up.

@@ -10,22 +10,6 @@ use crate::AppState;
 use crate::api::auth::RequireAdmin;
 use crate::error::ApiError;
 
-#[derive(Serialize)]
-pub struct TokenStatusResponse {
-    pub cid: String,
-    pub label: Option<String>,
-    pub role: String,
-    pub max_uses: u32,
-    pub consumed_count: u32,
-    pub not_after_ns: u64,
-    pub revoked: bool,
-    /// Unix ns when the token was explicitly invalidated (revoked or
-    /// exhausted); `None` if only subject to TTL expiry. Record is GC'd
-    /// 30 days after invalidation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub invalidated_at_ns: Option<u64>,
-}
-
 #[derive(Deserialize)]
 pub struct IssueTokenRequest {
     /// Agent role for an agent-enrolment token (agenthost/auditor/service/admin).
@@ -103,22 +87,10 @@ pub async fn issue_token(
 pub async fn list_tokens(
     _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<TokenStatusResponse>>, ApiError> {
+) -> Result<Json<Vec<memvault_api::TokenStatus>>, ApiError> {
+    // TokenStatus carries hex/CID wire encoding (see standards/); transmit as-is.
     let tokens = state.client.list_tokens().await?;
-    let results: Vec<TokenStatusResponse> = tokens
-        .into_iter()
-        .map(|t| TokenStatusResponse {
-            cid: hex::encode(&t.cid),
-            label: t.label,
-            role: format!("{:?}", t.role).to_lowercase(),
-            max_uses: t.max_uses,
-            consumed_count: t.consumed_count,
-            not_after_ns: t.not_after_ns,
-            revoked: t.revoked,
-            invalidated_at_ns: t.invalidated_at_ns,
-        })
-        .collect();
-    Ok(Json(results))
+    Ok(Json(tokens))
 }
 
 /// DELETE /api/v1/admin/tokens/:cid

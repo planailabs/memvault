@@ -1157,9 +1157,11 @@ impl MemvaultClient for HttpApiClient {
     }
 
     async fn list_tokens(&self) -> Result<Vec<TokenStatus>> {
+        // TokenStatus decodes directly (hex/CID wire encoding; see standards/).
+        // Route is /admin/tokens (the old /tokens path 404'd).
         let resp = self
             .client
-            .get(self.url("/tokens"))
+            .get(self.url("/admin/tokens"))
             .send()
             .await
             .map_err(map_reqwest)?
