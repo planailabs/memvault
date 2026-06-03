@@ -124,6 +124,7 @@ fn parse_edge(edge_hex: &str) -> Result<memvault_core::EdgeId, ServerFnError> {
 }
 
 /// Upload a file and attach it to the skill as a `skill:resource` in one step.
+/// The file always lands in the skill's own bucket (resolved server-side).
 #[server]
 async fn upload_skill_file(
     id: String,
@@ -131,16 +132,18 @@ async fn upload_skill_file(
     data: Vec<u8>,
     path: String,
     executable: bool,
-    bucket_hex: String,
 ) -> Result<(), ServerFnError> {
     let entity_id = memvault_core::EntityId::from_hex(&id)
         .map_err(|e| ServerFnError::new(format!("bad id: {e}")))?;
-    let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
-        .map_err(|_| ServerFnError::new("select a bucket (top bar) to upload into".to_string()))?;
     if data.is_empty() {
         return Err(ServerFnError::new("no file selected".to_string()));
     }
     let client = crate::ui::state::client()?;
+    let bucket = client
+        .node_bucket(&memvault_core::NodeRef::Entity(entity_id.clone()))
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("could not resolve the skill's bucket".to_string()))?;
     let mime = memvault_api::files::detect_mime(std::path::Path::new(&filename));
     let cid = client
         .upload_file(&data, Some(&filename), mime, vec![], "internal", Some(&bucket))
@@ -325,7 +328,6 @@ pub fn SkillDetail(id: String) -> Element {
 
 #[component]
 fn SkillResources(skill_id: String, data: SkillDetailData) -> Element {
-    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
     let mut show_upload = use_signal(|| false);
     let mut show_link = use_signal(|| false);
     let mut err = use_signal(String::new);
@@ -405,11 +407,6 @@ fn SkillResources(skill_id: String, data: SkillDetailData) -> Element {
                             onclick: {
                                 let sid = skill_id.clone();
                                 move |_| {
-                                    let bucket_hex = active_bucket.read().id.clone().unwrap_or_default();
-                                    if bucket_hex.is_empty() {
-                                        err.set("Select a bucket (top bar) to upload into.".to_string());
-                                        return;
-                                    }
                                     let Some((fname, bytes)) = up_file.read().clone() else {
                                         err.set("Choose a file first.".to_string());
                                         return;
@@ -418,7 +415,7 @@ fn SkillResources(skill_id: String, data: SkillDetailData) -> Element {
                                     let exec = *up_exec.read();
                                     let sid = sid.clone();
                                     spawn(async move {
-                                        match upload_skill_file(sid.clone(), fname, bytes, p, exec, bucket_hex).await {
+                                        match upload_skill_file(sid.clone(), fname, bytes, p, exec).await {
                                             Ok(_) => {
                                                 show_upload.set(false);
                                                 up_file.set(None);

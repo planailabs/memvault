@@ -117,6 +117,20 @@ impl ClientArgs {
             Ok(Box::new(client))
         }
     }
+
+    /// Load the configured agent identity's public key without connecting.
+    /// `None` in local (`--db`) mode or when no identity is present. Callers
+    /// (e.g. the MCP server) use it to resolve the agent's bucket by pubkey
+    /// now that an agent's identity *is* its ed25519 key.
+    pub fn load_agent_pubkey(&self) -> Option<[u8; 32]> {
+        if self.db.is_some() {
+            return None;
+        }
+        let identity_dir = self.identity_dir.clone().unwrap_or_else(default_identity_dir);
+        crate::agent_identity::AgentIdentity::load(&identity_dir)
+            .ok()
+            .map(|id| id.verifying_key.to_bytes())
+    }
 }
 
 /// Connection options for creating a MemvaultClient (programmatic API).

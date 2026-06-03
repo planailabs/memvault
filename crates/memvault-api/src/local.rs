@@ -4898,6 +4898,13 @@ impl MemvaultClient for LocalClient {
         self.get_entity_async(id, false).await
     }
 
+    async fn node_bucket(&self, node: &NodeRef) -> Result<Option<BucketId>> {
+        Ok(self
+            .inferred_node_bucket(node)
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .map(BucketId))
+    }
+
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>> {
         let label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
         let cids = self.store.query_by_tag("entity", &label, 0, usize::MAX)?;

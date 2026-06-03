@@ -75,6 +75,13 @@ pub trait MemvaultClient: Send + Sync {
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>>;
     async fn list_entities(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<Entity>>;
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>>;
+    /// The bucket a node currently lives in, if resolvable. Default `None`;
+    /// `LocalClient` resolves it from the store. Used e.g. to keep a skill's
+    /// uploaded resources in the skill's own bucket.
+    async fn node_bucket(&self, node: &NodeRef) -> Result<Option<BucketId>> {
+        let _ = node;
+        Ok(None)
+    }
 
     // -- Links (cross-type edges) --
     /// Create a directed edge from any node to any node.
