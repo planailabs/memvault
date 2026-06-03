@@ -2644,6 +2644,7 @@ mod native {
                     &token,
                     &agent_id,
                     agent_pubkey,
+                    u64::MAX, // never expires (default)
                 )
                 .map_err(|e| anyhow::anyhow!("enrollment failed: {e}"))?;
 

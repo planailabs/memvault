@@ -35,6 +35,10 @@ pub struct EnrollAgentRequest {
     /// Hex-encoded 32-byte ed25519 public key the agent will sign JWTs
     /// with. The agent's private key stays on the agent side.
     pub public_key: String,
+    /// Optional attestation lifetime in seconds. Omitted / null = never
+    /// expires (the default). Independent of the join token's expiry.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -77,11 +81,17 @@ pub async fn enroll_agent(
 
     // Delegate to memvault-api: signature verify + revocation check +
     // max_uses gate + idempotent mint + sigchain publish + consumption.
+    // None / 0 → never expires; otherwise seconds → nanoseconds.
+    let ttl_ns = match req.ttl_secs {
+        None | Some(0) => u64::MAX,
+        Some(secs) => secs.saturating_mul(1_000_000_000),
+    };
     let result = memvault_api::agent_identity::enroll_remote_agent(
         &client,
         &req.token,
         &req.agent_id,
         agent_pubkey,
+        ttl_ns,
     )
     .map_err(|e| ApiError::bad_request(format!("enroll: {e}")))?;
 

@@ -54,6 +54,11 @@ pub struct EnrollArgs {
     /// `--identity-dir` nor `MEMVAULT_IDENTITY_DIR` is set.
     #[arg(long, env = "MEMVAULT_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
+    /// Attestation lifetime in seconds. Omit (the default) for an
+    /// attestation that never expires; pass e.g. `--ttl-secs 2592000`
+    /// for a 30-day credential.
+    #[arg(long)]
+    pub ttl_secs: Option<u64>,
 }
 
 pub async fn run(args: EnrollArgs) -> Result<()> {
@@ -89,6 +94,7 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
         "token": args.token,
         "agent_id": args.agent_id,
         "public_key": hex::encode(agent_pubkey),
+        "ttl_secs": args.ttl_secs,
     });
 
     let client = reqwest::Client::builder()
@@ -149,6 +155,12 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let expiry = if attestation.not_after_ns == u64::MAX {
+        "never".to_string()
+    } else {
+        format!("{} (unix ns)", attestation.not_after_ns)
+    };
+
     std::fs::create_dir_all(&identity_dir)?;
     memvault_api::agent_identity::write_identity_dir(&identity_dir, &agent_sk)
         .map_err(|e| anyhow!("write identity dir: {e}"))?;
@@ -159,6 +171,7 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
     println!("  Identity dir: {}", identity_dir.display());
     println!("  Public key:   {}", hex::encode(agent_pubkey));
     println!("  Attestation:  {att_cid}");
+    println!("  Expires:      {expiry}");
 
     Ok(())
 }

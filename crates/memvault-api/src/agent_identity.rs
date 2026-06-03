@@ -425,6 +425,9 @@ pub fn enroll_remote_agent(
     token_str: &str,
     agent_id: &str,
     agent_pubkey: [u8; 32],
+    // Attestation lifetime in nanoseconds. `u64::MAX` = never expires
+    // (the default). Independent of the join token's own expiry.
+    ttl_ns: u64,
 ) -> Result<EnrollResult> {
     // Decode + verify the token.
     let token = memvault_auth::decode_token_string(token_str)
@@ -509,7 +512,7 @@ pub fn enroll_remote_agent(
         AgentName(agent_id.to_string()),
         agent_pubkey,
         agent_role,
-        token.not_after_ns,
+        now_ns.saturating_add(ttl_ns),
     )
     .map_err(|e| ApiError::Other(format!("sign attestation: {e}")))?;
     let attestation_cid = crate::sigchain::publish_agent_attestation(client, &attestation)?;
