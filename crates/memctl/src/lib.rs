@@ -1592,6 +1592,11 @@ mod native {
                 }
             }
             Commands::Graph(GraphCommands::Add { kind, prop }) => {
+                if memvault_core::is_reserved_entity_kind(&kind) {
+                    anyhow::bail!(
+                        "'{kind}' is a managed kind — use `memctl skill publish` or the VFS tools, not `graph add`"
+                    );
+                }
                 let store = make_store()?;
                 let client = create_client(store)?;
                 let props: BTreeMap<String, serde_json::Value> = prop

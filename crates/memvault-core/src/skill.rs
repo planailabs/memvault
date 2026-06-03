@@ -39,3 +39,12 @@ pub const SKILL_DESCRIPTION_PROP: &str = "description";
 
 /// Entity prop: when the skill should be used (the trigger text).
 pub const SKILL_TRIGGER_PROP: &str = "trigger";
+
+/// True if `kind` is a reserved, managed entity kind (skills, VFS dirs) that
+/// must only be created or mutated through its dedicated API — never the
+/// generic entity/node API. The generic create/delete paths reject these and
+/// the graph view hides them, so their invariants (aggregate edges, bundle
+/// structure) can't be bypassed.
+pub fn is_reserved_entity_kind(kind: &str) -> bool {
+    kind == SKILL_KIND || kind == crate::vfs::VFS_DIR_KIND
+}

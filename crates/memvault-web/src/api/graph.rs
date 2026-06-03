@@ -118,6 +118,9 @@ pub async fn list_entities(
     let entities = state.client.list_entities(limit, bucket.as_ref()).await?;
     let results: Vec<EntityResponse> = entities
         .into_iter()
+        // Hide reserved/managed kinds (skill, vfs:dir) from the generic graph
+        // listing — they have dedicated APIs and views.
+        .filter(|e| !memvault_core::is_reserved_entity_kind(&e.kind))
         .filter(|e| params.kind.as_deref().is_none_or(|k| e.kind == k))
         .map(|e| EntityResponse {
             id: format!("entity:{}", hex::encode(e.id.0)),
@@ -137,6 +140,11 @@ pub async fn create_entity(
     Json(req): Json<CreateEntityRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     let kind = req.kind;
+    if memvault_core::is_reserved_entity_kind(&kind) {
+        return Err(ApiError::bad_request(
+            "reserved entity kind — create skills via /skills and VFS dirs via /vfs",
+        ));
+    }
     let entity = Entity {
         id: EntityId::random(),
         kind: kind.clone(),
@@ -225,6 +233,14 @@ pub async fn delete_entity(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let entity_id = parse_entity_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Write)?;
+    // Reserved kinds (skill, vfs:dir) must be removed via their dedicated API.
+    if let Ok(Some(e)) = state.client.get_entity(&entity_id).await {
+        if memvault_core::is_reserved_entity_kind(&e.kind) {
+            return Err(ApiError::bad_request(
+                "reserved entity kind — delete skills via /skills and VFS dirs via /vfs",
+            ));
+        }
+    }
     // Retract entity by its ID bytes
     let cid = state
         .client

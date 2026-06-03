@@ -33,7 +33,7 @@ pub use scope::{
 pub use skill::{
     SKILL_DESCRIPTION_PROP, SKILL_EXECUTABLE_PROP, SKILL_INSTRUCTION_REL, SKILL_KIND,
     SKILL_NAME_PROP, SKILL_ORDER_PROP, SKILL_PATH_PROP, SKILL_REQUIRES_REL, SKILL_RESOURCE_REL,
-    SKILL_TRIGGER_PROP,
+    SKILL_TRIGGER_PROP, is_reserved_entity_kind,
 };
 pub use tags::{Tag, TagPattern};
 pub use tags_lint::lint_tags;

@@ -90,13 +90,13 @@ async fn list_graph_nodes(
             let id = &item.node_id;
             let node_type = &item.node_type;
             let label = &item.label;
-            // Skip vfs:dir entities from graph view.
+            // Skip reserved/managed entities (vfs:dir, skill) from graph view.
             if node_type == "entity" {
                 if let Some(memvault_core::NodeRef::Entity(eid)) =
                     memvault_core::NodeRef::from_tag_label(id)
                 {
                     if let Ok(Some(e)) = client.get_entity_scoped(&eid, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
-                        if e.kind == memvault_core::VFS_DIR_KIND {
+                        if memvault_core::is_reserved_entity_kind(&e.kind) {
                             continue;
                         }
                     }
@@ -138,7 +138,7 @@ async fn list_graph_nodes(
 
     let mut nodes: Vec<NodeSummary> = entities
         .into_iter()
-        .filter(|entity| entity.kind != memvault_core::VFS_DIR_KIND)
+        .filter(|entity| !memvault_core::is_reserved_entity_kind(&entity.kind))
         .map(|entity| {
             let label = entity
                 .props

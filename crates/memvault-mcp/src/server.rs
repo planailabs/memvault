@@ -425,6 +425,12 @@ impl MemvaultServer {
         description = "Add an entity to the knowledge graph. Returns the hex-encoded entity ID."
     )]
     async fn graph_add(&self, Parameters(params): Parameters<GraphAddParams>) -> String {
+        if memvault_core::is_reserved_entity_kind(&params.kind) {
+            return format!(
+                "error: '{}' is a managed kind — use memvault_skill_publish or the VFS tools, not graph_add",
+                params.kind
+            );
+        }
         let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
@@ -712,7 +718,10 @@ impl MemvaultServer {
             .await
         {
             Ok(entities) => serde_json::json!(
-                entities.iter().map(|e| serde_json::json!({
+                entities.iter()
+                    // Hide managed kinds (skill, vfs:dir) — use the skill/VFS tools.
+                    .filter(|e| !memvault_core::is_reserved_entity_kind(&e.kind))
+                    .map(|e| serde_json::json!({
                     "id": hex::encode(e.id.0),
                     "kind": e.kind,
                     "label": e.props.get("name").or_else(|| e.props.get("title"))
@@ -864,6 +873,18 @@ impl MemvaultServer {
         description = "Retract (soft-delete) any node. Node must be in type:hex format: doc:<hex>, entity:<hex>, or file:<hex>."
     )]
     async fn retract(&self, Parameters(params): Parameters<RetractParams>) -> String {
+        // Reserved kinds (skill, vfs:dir) must be removed via their dedicated
+        // tools, not the generic retract.
+        if let Some(NodeRef::Entity(eid)) = NodeRef::from_tag_label(&params.node) {
+            if let Ok(Some(e)) = self.client.get_entity(&eid).await {
+                if memvault_core::is_reserved_entity_kind(&e.kind) {
+                    return format!(
+                        "error: '{}' is a managed kind — use memvault_skill_delete or the VFS tools",
+                        e.kind
+                    );
+                }
+            }
+        }
         match self.client.retract_node(&params.node, &params.reason).await {
             Ok(()) => serde_json::json!({
                 "node_id": params.node,
