@@ -40,6 +40,13 @@ pub fn check_bucket_access(
         .try_into()
         .map_err(|_| ApiError::Forbidden("caller pubkey must be 32 bytes".into()))?;
 
+    // Normalize a merged (source) bucket to its canonical target, so a
+    // grant or owner-bypass on the canonical authorizes access to any
+    // source's content with zero grant migration (§6). A bucket with no
+    // merge resolves to itself.
+    let canonical = BucketId(client.canonical_of(&bucket_id.0));
+    let bucket_id = &canonical;
+
     let attestation = crate::sigchain::find_agent_attestation(client, &pubkey_arr)?
         .ok_or_else(|| {
             ApiError::Forbidden(format!(
