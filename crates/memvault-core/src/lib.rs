@@ -6,6 +6,7 @@ pub mod envelope;
 pub mod error;
 pub mod ids;
 pub mod scope;
+pub mod skill;
 pub mod tags;
 pub mod tags_lint;
 pub mod time;
@@ -28,6 +29,11 @@ pub use ids::{
 pub use scope::{
     BucketSelector, DetailLevel, NodeKind, QueryScope, RetractionMode, bucket_scope_id,
     view_bucket_scope_id, view_scope_id,
+};
+pub use skill::{
+    SKILL_DESCRIPTION_PROP, SKILL_EXECUTABLE_PROP, SKILL_INSTRUCTION_REL, SKILL_KIND,
+    SKILL_NAME_PROP, SKILL_ORDER_PROP, SKILL_PATH_PROP, SKILL_REQUIRES_REL, SKILL_RESOURCE_REL,
+    SKILL_TRIGGER_PROP,
 };
 pub use tags::{Tag, TagPattern};
 pub use tags_lint::lint_tags;

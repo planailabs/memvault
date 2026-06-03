@@ -409,6 +409,13 @@ impl MemvaultClient for MockClient {
     ) -> memvault_api::Result<()> {
         Ok(())
     }
+    async fn skill_rename(
+        &self,
+        _id: &memvault_core::EntityId,
+        _new_name: &str,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
     async fn agent_rename(
         &self,
         _agent_pubkey: &[u8; 32],

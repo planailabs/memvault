@@ -189,6 +189,90 @@ async fn add_entity_and_traverse() {
 }
 
 #[tokio::test]
+async fn skill_publish_get_list_rename_roundtrip() {
+    let (_dir, client) = make_client();
+
+    let spec = memvault_api::SkillSpec {
+        name: "Code Review".to_string(),
+        description: Some("Review a diff for bugs".to_string()),
+        trigger: Some("when asked to review code".to_string()),
+        instruction_body: Some("# Code Review\nRun the linter, then read the diff.".to_string()),
+    };
+    let skill_id = client
+        .skill_publish(spec, Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    // get() assembles the manifest plus the linked instruction doc.
+    let bundle = client.skill_get(&skill_id).await.unwrap().expect("skill exists");
+    assert_eq!(bundle.info.name, "Code Review");
+    assert_eq!(bundle.info.description.as_deref(), Some("Review a diff for bugs"));
+    assert_eq!(bundle.instructions.len(), 1);
+    assert_eq!(bundle.instructions[0].relation, memvault_core::SKILL_INSTRUCTION_REL);
+    assert!(bundle.instructions[0].node.starts_with("doc:"));
+
+    // A plain (non-skill) entity must not appear in skill_list.
+    let other = Entity {
+        id: EntityId::random(),
+        kind: "person".to_string(),
+        props: BTreeMap::new(),
+        edges_out: vec![],
+    };
+    client.add_entity(other, Visibility::Internal, None).await.unwrap();
+
+    let skills = client.skill_list(100, None).await.unwrap();
+    assert_eq!(skills.len(), 1, "only the skill, not the person entity");
+    assert_eq!(skills[0].id, skill_id);
+    assert_eq!(skills[0].name, "Code Review");
+
+    // Link a script resource with a bundle path + exec bit.
+    let file_cid = client
+        .upload_file(
+            b"#!/bin/sh\necho hi\n",
+            Some("run.sh"),
+            "text/x-shellscript",
+            vec![],
+            "internal",
+            None,
+        )
+        .await
+        .unwrap();
+    let edge_id = client
+        .skill_link_resource(
+            &skill_id,
+            &NodeRef::Attachment(file_cid.clone()),
+            memvault_core::SKILL_RESOURCE_REL,
+            Some("scripts/run.sh"),
+            true,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+
+    let bundle = client.skill_get(&skill_id).await.unwrap().unwrap();
+    assert_eq!(bundle.resources.len(), 1);
+    assert_eq!(bundle.resources[0].path.as_deref(), Some("scripts/run.sh"));
+    assert!(bundle.resources[0].executable);
+
+    // Unlink the resource.
+    client.skill_unlink_resource(&skill_id, &edge_id).await.unwrap();
+    let bundle = client.skill_get(&skill_id).await.unwrap().unwrap();
+    assert_eq!(bundle.resources.len(), 0);
+
+    // Rename via EntityUpdate; both get() and list() reflect it.
+    client.skill_rename(&skill_id, "Diff Review").await.unwrap();
+    let bundle = client.skill_get(&skill_id).await.unwrap().unwrap();
+    assert_eq!(bundle.info.name, "Diff Review");
+    let skills = client.skill_list(100, None).await.unwrap();
+    assert_eq!(skills[0].name, "Diff Review");
+
+    // Delete (retract): no longer listed.
+    client.skill_delete(&skill_id, "obsolete").await.unwrap();
+    let skills = client.skill_list(100, None).await.unwrap();
+    assert_eq!(skills.len(), 0);
+}
+
+#[tokio::test]
 async fn search_after_indexing() {
     let (_dir, client) = make_client();
 

@@ -4855,6 +4855,45 @@ impl MemvaultClient for LocalClient {
         Ok(entity_id)
     }
 
+    async fn skill_rename(&self, id: &EntityId, new_name: &str) -> Result<()> {
+        let mut props: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        props.insert(
+            memvault_core::SKILL_NAME_PROP.to_string(),
+            serde_json::Value::String(new_name.to_string()),
+        );
+        let op = Op::EntityUpdate {
+            entity_id: id.clone(),
+            props,
+        };
+        let entity_label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let tags = vec![("entity".to_string(), entity_label)];
+        let inferred_bucket = self
+            .inferred_entity_bucket(id)
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .map(BucketId);
+        self.store_op(&op, &tags, &Visibility::Internal, inferred_bucket.as_ref())?;
+
+        // Reindex so search reflects the new name: remove the stale entity doc,
+        // then re-add the merged entity (delete+add in one commit, mirroring the
+        // retract/tag-update paths).
+        if let Ok(Some(entity)) = self.get_entity_async(id, false).await {
+            let bucket_hex = self.inferred_entity_bucket(id).map(hex::encode);
+            let mut idx = self.index.write().await;
+            let _ = idx.remove(&hex::encode(id.0));
+            let _ = idx.index_entity(
+                id,
+                &entity.kind,
+                &entity.props,
+                &tags,
+                bucket_hex.as_deref(),
+                memvault_core::wall_ns(),
+            );
+            self.commit_or_defer(&mut idx);
+        }
+        Ok(())
+    }
+
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>> {
         self.get_entity_async(id, false).await
     }

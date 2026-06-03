@@ -1233,6 +1233,19 @@ impl MemvaultClient for HttpApiClient {
         Ok(())
     }
 
+    async fn skill_rename(&self, id: &EntityId, new_name: &str) -> Result<()> {
+        let body = serde_json::json!({ "name": new_name });
+        self.client
+            .patch(self.url(&format!("/skills/{}", hex::encode(id.0))))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
     async fn bucket_bind(
         &self,
         bucket_id: &memvault_core::BucketId,

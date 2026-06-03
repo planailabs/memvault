@@ -88,6 +88,64 @@ impl TraversalHit {
     }
 }
 
+/// Spec for publishing a new skill — the manifest props plus an optional inline
+/// instruction body (when set, a Document is created and linked as the skill's
+/// primary instruction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSpec {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub instruction_body: Option<String>,
+}
+
+/// Summary of a skill for list/discovery — the manifest props only, no
+/// resource traversal (cheap; `DetailLevel::Summary`-equivalent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInfo {
+    #[serde(with = "crate::wire::hex_id")]
+    pub id: EntityId,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub retracted: bool,
+}
+
+/// One component node of a skill, paired with the edge that links it. `node` is
+/// a `"type:hex"` tag label (parse via [`NodeRef::from_tag_label`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillResource {
+    #[serde(with = "crate::wire::hex_id")]
+    pub edge_id: EdgeId,
+    pub node: String,
+    pub relation: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub executable: bool,
+    #[serde(default)]
+    pub order: Option<i64>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// A fully-assembled skill: the manifest plus its linked components, grouped by
+/// relation. This is what `skill_get` returns and what the bundle hydrator
+/// walks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillBundle {
+    pub info: SkillInfo,
+    pub instructions: Vec<SkillResource>,
+    pub resources: Vec<SkillResource>,
+    pub requires: Vec<SkillResource>,
+}
+
 /// Status of an issued token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenStatus {

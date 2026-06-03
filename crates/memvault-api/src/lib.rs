@@ -40,7 +40,8 @@ pub use local::LocalClient;
 pub use subscription::{EventBus, MemvaultEvent};
 pub use types::{
     DocSummary, GrantInfo, NodeDetail, NodeStatus, NodeSummary, RotationInfo, ScopeCount,
-    ShareProposalInfo, TokenStatus, TraversalHit, View,
+    ShareProposalInfo, SkillBundle, SkillInfo, SkillResource, SkillSpec, TokenStatus, TraversalHit,
+    View,
 };
 
 /// Shared CLI arguments for connecting to a memvault instance.
