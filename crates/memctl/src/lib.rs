@@ -640,6 +640,27 @@ mod native {
             /// Cluster ID (hex)
             cluster_id: String,
         },
+        /// Merge source buckets into a canonical bucket (read/ACL alias
+        /// overlay — nothing is moved or re-signed). Requires admin/owner
+        /// authority on the canonical and every source.
+        Merge {
+            /// Canonical bucket ID (hex) — the merge target
+            #[arg(long)]
+            canonical: String,
+            /// Source bucket IDs (hex) to fold into the canonical
+            #[arg(required = true)]
+            sources: Vec<String>,
+        },
+        /// Reverse a single source → canonical merge edge
+        Unmerge {
+            /// Canonical bucket ID (hex)
+            #[arg(long)]
+            canonical: String,
+            /// Source bucket ID (hex) to detach
+            source: String,
+        },
+        /// List all source → canonical merge edges
+        Merges,
     }
 
     /// Bucket-grant subcommands. Grants are signed by the local node's
@@ -2181,6 +2202,55 @@ mod native {
                 let client = connect().connect().await?;
                 client.bucket_bind(&bid, &cid).await?;
                 println!("Bucket bound to cluster.");
+            }
+            Commands::Bucket(BucketCommands::Merge { canonical, sources }) => {
+                let parse = |s: &str| -> anyhow::Result<memvault_core::BucketId> {
+                    let arr: [u8; 32] = hex::decode(s)?
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+                    Ok(memvault_core::BucketId(arr))
+                };
+                let canonical_id = parse(&canonical)?;
+                let source_ids = sources
+                    .iter()
+                    .map(|s| parse(s))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let client = connect().connect().await?;
+                client.bucket_merge(&source_ids, &canonical_id).await?;
+                println!(
+                    "Merged {} source(s) into {}.",
+                    source_ids.len(),
+                    hex::encode(canonical_id.0)
+                );
+            }
+            Commands::Bucket(BucketCommands::Unmerge { canonical, source }) => {
+                let parse = |s: &str| -> anyhow::Result<memvault_core::BucketId> {
+                    let arr: [u8; 32] = hex::decode(s)?
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("bucket id must be 32 bytes"))?;
+                    Ok(memvault_core::BucketId(arr))
+                };
+                let canonical_id = parse(&canonical)?;
+                let source_id = parse(&source)?;
+                let client = connect().connect().await?;
+                client.bucket_unmerge(&source_id, &canonical_id).await?;
+                println!(
+                    "Unmerged {} from {}.",
+                    hex::encode(source_id.0),
+                    hex::encode(canonical_id.0)
+                );
+            }
+            Commands::Bucket(BucketCommands::Merges) => {
+                let client = connect().connect().await?;
+                let edges = client.bucket_merges().await?;
+                if edges.is_empty() {
+                    println!("No bucket merges.");
+                } else {
+                    println!("Bucket merges (source -> canonical):");
+                    for (s, c) in edges {
+                        println!("  {} -> {}", hex::encode(s.0), hex::encode(c.0));
+                    }
+                }
             }
             Commands::Grant(GrantCommands::Create {
                 bucket_id,
