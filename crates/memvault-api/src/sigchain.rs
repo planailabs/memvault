@@ -31,6 +31,10 @@ const LABEL_NODE_REV: &str = "node_rev";
 const LABEL_ADMIN_ADMISSION: &str = "admin_admission";
 const LABEL_ADMIN_RETIREMENT: &str = "admin_retirement";
 const LABEL_GRANT_REVOCATION: &str = "grant_revocation";
+/// Label for a bucket-merge alias record (`BucketMergeRecord`). Tagged
+/// `("sigchain", "bucket_merge")` so synced records invalidate the alias
+/// cache here and surface in the audit log (§8.1).
+const LABEL_BUCKET_MERGE: &str = "bucket_merge";
 /// Label for the "token redeemed" audit record (`TokenConsumption`).
 pub const LABEL_TOKEN_REDEEM: &str = "token_redeem";
 
@@ -780,6 +784,14 @@ fn apply_sigchain_block(
             // check reads that index directly (uncached), so the revoked
             // grant stops conferring access on the next check.
             let _ = apply_grant_revocation(client, &bytes);
+        }
+        LABEL_BUCKET_MERGE => {
+            // A bucket-merge alias record landed (local or synced). Bump the
+            // alias generation so the next resolution rebuilds the alias maps
+            // from the bucket_merge side blocks and the union takes effect.
+            // No reindex: source blocks keep their original bucket_id and
+            // were already indexed; only the alias + scope member-sets change.
+            client.bump_alias_generation();
         }
         LABEL_ADMIN_ADMISSION | LABEL_ADMIN_RETIREMENT => {
             // Admin-key set changed. SECURITY: never apply incrementally
