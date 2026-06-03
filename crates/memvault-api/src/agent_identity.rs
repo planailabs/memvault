@@ -163,7 +163,9 @@ impl AgentIdentity {
     /// `scope`: space-separated OAuth-style scopes ("read write" / "admin" / etc.).
     /// `ttl_secs`: lifetime in seconds; typical values 300 (short-lived) — 3600.
     pub fn issue_jwt(&self, scope: &str, ttl_secs: u64) -> Result<String> {
-        memvault_auth::jwt::issue(&self.signing_key, &self.agent_id.0, scope, ttl_secs)
+        // `agent_id` is intentionally NOT passed — `iss` is canonicalized
+        // server-side from the on-chain attestation (keyed by pubkey).
+        memvault_auth::jwt::issue(&self.signing_key, scope, ttl_secs)
             .map_err(|e| ApiError::Other(format!("issue_jwt: {e}")))
     }
 }

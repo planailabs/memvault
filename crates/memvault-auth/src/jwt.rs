@@ -98,19 +98,21 @@ fn now_ns() -> u64 {
 
 /// Issue a JWT signed by `signing_key` (the agent's private key).
 ///
-/// The verifier will look up the agent's [`AgentAttestation`] from its
-/// local sigchain by `sub` — no attestation embed needed in the token.
-/// `agent_id` is a human-readable label carried in `iss` (display /
-/// audit only; not authoritative).
-pub fn issue(
-    signing_key: &SigningKey,
-    agent_id: &str,
-    scope: &str,
-    ttl_secs: u64,
-) -> Result<String> {
+/// The verifier looks up the agent's [`AgentAttestation`] from its local
+/// sigchain by `sub` (the pubkey) — no attestation embed needed. `iss` is
+/// left EMPTY: it is a display label, not an identity, and the verifier
+/// canonicalizes it from the on-chain attestation, so a client-provided
+/// name only risks an `iss`-mismatch rejection.
+pub fn issue(signing_key: &SigningKey, scope: &str, ttl_secs: u64) -> Result<String> {
     let now = now_secs();
     let claims = AgentTokenClaims {
-        iss: agent_id.to_string(),
+        // `iss` is a display label, not an identity — the agent IS its
+        // pubkey (`sub`). The verifier canonicalizes `iss` from the on-chain
+        // attestation (looked up by `sub`), so the client must NOT provide a
+        // name here: doing so was the source of "iss != attestation.agent_id"
+        // 401s when a client's local name (e.g. identity-dir basename) drifted
+        // from the enrolled agent_id.
+        iss: String::new(),
         sub: hex::encode(signing_key.verifying_key().to_bytes()),
         iat: now,
         exp: now + ttl_secs,
@@ -370,7 +372,7 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", scope, ttl).unwrap();
+        let tok = issue(&agent, scope, ttl).unwrap();
         (tok, admin.verifying_key(), n_att, a_att)
     }
 
@@ -389,7 +391,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let tok = issue(&agent, "read", 300).unwrap();
         let err = verify(
             &tok,
             &[admin.verifying_key()],
@@ -421,7 +423,7 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let tok = issue(&agent, "read", 300).unwrap();
         let err = verify(
             &tok,
             &[admin.verifying_key()],
@@ -460,7 +462,7 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let tok = issue(&agent, "read", 300).unwrap();
         let claims = verify(
             &tok,
             &[],
@@ -471,11 +473,12 @@ mod tests {
         assert_eq!(claims.iss, "alice");
     }
 
-    /// A token whose `iss` differs from the attestation's `agent_id` (e.g.
-    /// a renamed/copied identity dir) must still verify — `sub` (pubkey) is
-    /// the identity — and the returned claims adopt the on-chain agent_id.
+    /// `iss` is canonicalized from the on-chain attestation, not enforced
+    /// against the token. The client now mints an empty `iss` (and even a
+    /// stale client-provided one would be tolerated) — `sub` (pubkey) is the
+    /// identity; the returned claims carry the canonical agent_id.
     #[test]
-    fn iss_mismatch_is_tolerated_and_canonicalized() {
+    fn iss_is_canonicalized_from_attestation() {
         let admin = make_key();
         let node = make_key();
         let agent = make_key();
@@ -489,8 +492,8 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        // But the client mints a token claiming iss="stale-dir-name".
-        let tok = issue(&agent, "stale-dir-name", "read", 300).unwrap();
+        // Client mints with no iss; verify fills it from the attestation.
+        let tok = issue(&agent, "read", 300).unwrap();
         let claims = verify(
             &tok,
             &[admin.verifying_key()],
