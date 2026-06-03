@@ -3189,7 +3189,21 @@ impl LocalClient {
         match sel {
             memvault_core::BucketSelector::Accessible => None,
             memvault_core::BucketSelector::Only(req) => {
-                Some(req.iter().map(|b| b.0).filter(|b| known.contains(b)).collect())
+                // Expand each requested (canonical) bucket with the sources
+                // merged into it, so a query scoped to the canonical pulls
+                // source-tagged blocks too (§5). Blocks keep their original
+                // signed bucket_id; nothing is rewritten. Intersect with the
+                // known set so a merge can never widen access beyond what
+                // this node actually holds.
+                let mut out = std::collections::HashSet::new();
+                for b in req {
+                    out.insert(b.0);
+                    for m in self.bucket_merge_members(&b.0) {
+                        out.insert(m);
+                    }
+                }
+                out.retain(|b| known.contains(b));
+                Some(out)
             }
         }
     }
