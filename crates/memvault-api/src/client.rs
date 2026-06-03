@@ -405,6 +405,20 @@ pub trait MemvaultClient: Send + Sync {
     /// Rename a bucket (writes a BucketRename op, LWW by lamport).
     async fn bucket_rename(&self, id: &BucketId, new_name: &str) -> Result<()>;
 
+    /// Merge each `source` bucket into `canonical`: a read/ACL alias overlay
+    /// so a query scoped to the canonical returns the union of its own and
+    /// all sources' blocks (nothing is re-homed or re-signed). Authority:
+    /// the caller must be admin or the owner of the canonical **and** every
+    /// source. Over HTTP the server enforces this via the JWT.
+    async fn bucket_merge(&self, sources: &[BucketId], canonical: &BucketId) -> Result<()>;
+
+    /// Reverse a single `source → canonical` merge edge (the source's blocks
+    /// were never moved, so the union simply stops including it). Reversible.
+    async fn bucket_unmerge(&self, source: &BucketId, canonical: &BucketId) -> Result<()>;
+
+    /// List all `source → canonical` merge edges (one-hop).
+    async fn bucket_merges(&self) -> Result<Vec<(BucketId, BucketId)>>;
+
     /// Set an agent's mutable display label (writes an AgentRename op, latest
     /// wins by wall_ns). Display-only — never affects access control, which
     /// keys on the agent's ed25519 pubkey. `agent_pubkey` is the 32-byte key.

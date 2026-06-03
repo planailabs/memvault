@@ -49,4 +49,14 @@ pub use visibility::Visibility;
 /// rebuild. The string audience can't disambiguate same-named agents across
 /// nodes; access now uses `GrantAudience::AgentKey(pubkey)`. The version gate
 /// stops un-migrated (v11) peers from re-injecting the dropped grants.
-pub const BLOCKSTORE_VERSION: u32 = 12;
+///
+/// v13: agent-bucket derivation changed to `deterministic_agent_bucket_id(
+/// pubkey)` (cluster_id dropped) so an agent's bucket is stable across
+/// genesis/join/re-genesis, plus the bucket-merge alias overlay
+/// (`BucketMergeRecord` side blocks, resolved at the read/ACL layer). Both
+/// are derived-state semantics changes: a v12 peer wouldn't apply the merge
+/// union and would still derive cluster-scoped agent ids, so the version
+/// gate keeps v12 and v13 nodes from syncing and diverging. The upgrade
+/// rebuild re-derives + auto-aliases legacy agent buckets onto the stable id
+/// (agent blocks keep their original signed bucket_id — never re-homed).
+pub const BLOCKSTORE_VERSION: u32 = 13;

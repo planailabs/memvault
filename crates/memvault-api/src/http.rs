@@ -1221,6 +1221,72 @@ impl MemvaultClient for HttpApiClient {
         Ok(())
     }
 
+    async fn bucket_merge(
+        &self,
+        sources: &[memvault_core::BucketId],
+        canonical: &memvault_core::BucketId,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "sources": sources.iter().map(|b| hex::encode(b.0)).collect::<Vec<_>>(),
+            "canonical": hex::encode(canonical.0),
+        });
+        self.client
+            .post(self.url("/buckets/merge"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn bucket_unmerge(
+        &self,
+        source: &memvault_core::BucketId,
+        canonical: &memvault_core::BucketId,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "source": hex::encode(source.0),
+            "canonical": hex::encode(canonical.0),
+        });
+        self.client
+            .post(self.url("/buckets/unmerge"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn bucket_merges(
+        &self,
+    ) -> Result<Vec<(memvault_core::BucketId, memvault_core::BucketId)>> {
+        let rows: Vec<serde_json::Value> = self
+            .client
+            .get(self.url("/buckets/merges"))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let parse = |v: &serde_json::Value, k: &str| -> Option<memvault_core::BucketId> {
+            let hexs = v.get(k)?.as_str()?;
+            let bytes = hex::decode(hexs).ok()?;
+            let arr: [u8; 32] = bytes.try_into().ok()?;
+            Some(memvault_core::BucketId(arr))
+        };
+        Ok(rows
+            .iter()
+            .filter_map(|v| Some((parse(v, "source")?, parse(v, "canonical")?)))
+            .collect())
+    }
+
     async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()> {
         let body = serde_json::json!({ "label": new_label });
         self.client

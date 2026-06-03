@@ -6029,6 +6029,29 @@ impl MemvaultClient for LocalClient {
         Ok(())
     }
 
+    async fn bucket_merge(
+        &self,
+        sources: &[memvault_core::BucketId],
+        canonical: &memvault_core::BucketId,
+    ) -> Result<()> {
+        self.bucket_merge_sync(sources, canonical)?;
+        Ok(())
+    }
+
+    async fn bucket_unmerge(
+        &self,
+        source: &memvault_core::BucketId,
+        canonical: &memvault_core::BucketId,
+    ) -> Result<()> {
+        LocalClient::bucket_unmerge(self, source, canonical).await
+    }
+
+    async fn bucket_merges(
+        &self,
+    ) -> Result<Vec<(memvault_core::BucketId, memvault_core::BucketId)>> {
+        Ok(LocalClient::bucket_merges(self))
+    }
+
     async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()> {
         let agent_hex = hex::encode(agent_pubkey);
 

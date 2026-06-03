@@ -409,6 +409,25 @@ impl MemvaultClient for MockClient {
     ) -> memvault_api::Result<()> {
         Ok(())
     }
+    async fn bucket_merge(
+        &self,
+        _sources: &[memvault_core::BucketId],
+        _canonical: &memvault_core::BucketId,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_unmerge(
+        &self,
+        _source: &memvault_core::BucketId,
+        _canonical: &memvault_core::BucketId,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_merges(
+        &self,
+    ) -> memvault_api::Result<Vec<(memvault_core::BucketId, memvault_core::BucketId)>> {
+        Ok(Vec::new())
+    }
     async fn skill_rename(
         &self,
         _id: &memvault_core::EntityId,
