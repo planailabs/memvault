@@ -192,6 +192,13 @@ mod native {
             /// Optional second store to compare against.
             #[arg(long)]
             compare: Option<PathBuf>,
+            /// Delete orphaned agent attestation blocks (attesting node never
+            /// attested into the cluster). Dry-run unless `--force` is given.
+            #[arg(long)]
+            prune_orphans: bool,
+            /// Actually apply `--prune-orphans` (otherwise just list).
+            #[arg(long)]
+            force: bool,
         },
         /// Export all raw blocks (one file per CID, hex-encoded name)
         ExportBlocks {
@@ -1811,12 +1818,17 @@ mod native {
                 println!("GC: doc={doc:?} before={before:?}");
                 println!("  (manual GC not yet wired to compaction)");
             }
-            Commands::Sigchain { db, compare } => {
+            Commands::Sigchain {
+                db,
+                compare,
+                prune_orphans,
+                force,
+            } => {
                 let primary = db.unwrap_or_else(|| data_dir.join("blocks.redb"));
-                let s1 = dump_sigchain(&primary)?;
+                let s1 = dump_sigchain(&primary, prune_orphans, force)?;
                 if let Some(other) = compare {
                     println!();
-                    let s2 = dump_sigchain(&other)?;
+                    let s2 = dump_sigchain(&other, false, false)?;
                     println!("\n=== Comparison ===");
                     println!(
                         "  {}: {} trusted node(s), {} agent(s), {} ORPHANED",
@@ -3521,7 +3533,7 @@ mod native {
     /// agent attestations with an ORPHAN flag (attesting node not itself
     /// attested into the cluster). Read-only; opens the redb directly so it
     /// works against a stopped daemon.
-    fn dump_sigchain(db: &Path) -> Result<SigchainSummary> {
+    fn dump_sigchain(db: &Path, prune_orphans: bool, force: bool) -> Result<SigchainSummary> {
         use std::collections::{HashMap, HashSet};
 
         let store = MemvaultStore::open(db)?;
@@ -3575,6 +3587,7 @@ mod native {
         let mut total_agents = 0usize;
         let mut orphaned_agents = 0usize;
         let mut orphan_nodes: HashMap<[u8; 32], usize> = HashMap::new();
+        let mut orphan_cids: Vec<Vec<u8>> = Vec::new();
         for cid in store.query_by_tag("sigchain", "agent_att", 0, 2000).unwrap_or_default() {
             if let Ok(Some(b)) = store.get_block(&cid) {
                 if let Ok(a) =
@@ -3585,6 +3598,7 @@ mod native {
                     if orphan {
                         orphaned_agents += 1;
                         *orphan_nodes.entry(a.node_pubkey).or_default() += 1;
+                        orphan_cids.push(cid.clone());
                     }
                     println!(
                         "  agent_att id={:<10} agent={} role={:?} node={} {}",
@@ -3613,6 +3627,30 @@ mod native {
                     hex::encode(n),
                     node_pk_to_peer_id(n),
                     count
+                );
+            }
+        }
+
+        // Prune pass: delete orphaned agent attestation blocks. Dry-run
+        // unless --force. Pairs with the swarm ingress filter (which stops
+        // new foreign _ui orphans) so pruned blocks stay gone.
+        if prune_orphans && !orphan_cids.is_empty() {
+            if force {
+                let mut deleted = 0usize;
+                for cid in &orphan_cids {
+                    if store.delete_block(cid).unwrap_or(false) {
+                        deleted += 1;
+                    }
+                }
+                println!(
+                    "  -- pruned {deleted} orphaned agent attestation block(s) from {}",
+                    db.display()
+                );
+            } else {
+                println!(
+                    "  -- DRY RUN: {} orphaned agent attestation block(s) would be deleted \
+                     (re-run with --force to apply)",
+                    orphan_cids.len()
                 );
             }
         }
