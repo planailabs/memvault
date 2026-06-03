@@ -202,8 +202,13 @@ async fn create_grant(
             };
             memvault_auth::GrantAudience::Role(role)
         }
-        "agent" => {
-            memvault_auth::GrantAudience::Agent(memvault_core::AgentId(audience_value))
+        "agent_key" => {
+            let bytes = hex::decode(audience_value.trim())
+                .map_err(|_| ServerFnError::new("agent public key must be hex".to_string()))?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| ServerFnError::new("agent public key must be 32 bytes".to_string()))?;
+            memvault_auth::GrantAudience::AgentKey(arr)
         }
         _ => return Err(ServerFnError::new(format!("unsupported audience type: {audience_type}"))),
     };
@@ -387,7 +392,7 @@ fn BucketAcls(bucket_id: String) -> Element {
                                     value: "{audience_type}",
                                     onchange: move |e| audience_type.set(e.value()),
                                     option { value: "role", "Role" }
-                                    option { value: "agent", "Agent" }
+                                    option { value: "agent_key", "Agent (public key)" }
                                 }
                             }
                             div {
@@ -404,8 +409,8 @@ fn BucketAcls(bucket_id: String) -> Element {
                                     }
                                 } else {
                                     input {
-                                        class: "w-full rounded border border-border bg-bg px-2 py-1 text-sm",
-                                        placeholder: "agent-id",
+                                        class: "w-full rounded border border-border bg-bg px-2 py-1 text-sm font-mono",
+                                        placeholder: "agent public key (hex)",
                                         value: "{audience_value}",
                                         oninput: move |e| audience_value.set(e.value()),
                                     }

@@ -126,9 +126,11 @@ pub fn check_bucket_access(
             // Canonical pubkey-addressed grant: match the caller's verified
             // ed25519 key directly (collision-free across nodes).
             GrantAudience::AgentKey(pk) => pk.as_slice() == agent_pubkey,
-            // Legacy string-addressed grant. Ambiguous across nodes; kept for
-            // back-compat until the v12 blockstore migration drops them.
-            GrantAudience::Agent(id) => id == &attestation.agent_id,
+            // Legacy string-addressed grant: no longer honored. Ambiguous
+            // across nodes; the v12 blockstore migration drops these, and new
+            // grants must use `AgentKey`. The variant remains only so the
+            // migration can still decode and discard pre-migration grants.
+            GrantAudience::Agent(_) => false,
             GrantAudience::Role(r) => *r == attestation.role,
             GrantAudience::Cluster(c) => {
                 // Allow when the bucket is bound to the same cluster the

@@ -316,8 +316,10 @@ pub async fn issue_grant(
                 .map_err(|_| ApiError::bad_request("peer_id hex"))?;
             memvault_auth::GrantAudience::Peer(memvault_core::PeerId(bytes))
         }
-        IssueGrantAudience::Agent { agent_id } => {
-            memvault_auth::GrantAudience::Agent(memvault_core::AgentId(agent_id))
+        IssueGrantAudience::Agent { .. } => {
+            return Err(ApiError::bad_request(
+                "legacy agent-id grants are no longer supported — grant by agent_pubkey instead",
+            ));
         }
         IssueGrantAudience::AgentKey { agent_pubkey } => {
             let bytes = hex::decode(&agent_pubkey)

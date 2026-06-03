@@ -103,13 +103,13 @@ async fn allow_peer_audience() {
 #[tokio::test]
 async fn allow_agent_audience() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "named-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "named-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "named-bucket").await;
 
     node.client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Write],
             u64::MAX,
         )
@@ -242,14 +242,14 @@ async fn bucket_create_as_sets_owner_and_grants_access() {
 #[tokio::test]
 async fn revoked_grant_denied() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "revoke-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "revoke-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "revoke-bucket").await;
 
     let grant_cid = node
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id.clone()),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read, Action::Write],
             u64::MAX,
         )
@@ -293,7 +293,7 @@ async fn revoked_grant_denied() {
 #[tokio::test]
 async fn revocation_is_grant_specific() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "two-grant-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "two-grant-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "two-grant-bucket").await;
 
     // Two grants, same audience, same actions — only the first is revoked.
@@ -301,7 +301,7 @@ async fn revocation_is_grant_specific() {
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id.clone()),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read],
             u64::MAX,
         )
@@ -311,7 +311,7 @@ async fn revocation_is_grant_specific() {
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read],
             u64::MAX,
         )
@@ -810,14 +810,14 @@ async fn future_dated_grant_denied() {
 #[tokio::test]
 async fn synced_grant_revocation_applies_on_scan() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "syncrev-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "syncrev-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "syncrev-bucket").await;
 
     let grant_cid = node
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read],
             u64::MAX,
         )

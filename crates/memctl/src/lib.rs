@@ -2206,9 +2206,11 @@ mod native {
                             .map_err(|_| anyhow::anyhow!("agent pubkey must be 32 bytes"))?;
                         memvault_auth::GrantAudience::AgentKey(arr)
                     }
-                    (None, Some(a), None, None, None) => memvault_auth::GrantAudience::Agent(
-                        memvault_core::AgentId(a),
-                    ),
+                    (None, Some(_), None, None, None) => {
+                        anyhow::bail!(
+                            "legacy agent-id grants are no longer supported — use --agent-key <pubkey>"
+                        )
+                    }
                     (None, None, Some(r), None, None) => {
                         let parsed = match r.as_str() {
                             "agent-host" | "agenthost" => memvault_auth::AgentRole::AgentHost,
