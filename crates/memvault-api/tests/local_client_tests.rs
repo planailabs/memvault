@@ -321,6 +321,18 @@ async fn skill_hydrate_materializes_bundle() {
     assert_eq!(run_sh, script);
     assert_eq!(report.written.len(), 2);
 
+    // Trust gate: the test harness writes as the node (no bound agent
+    // identity), so the manifest carries no agent attestation — the executable
+    // bit is withheld even though set_executable=true was requested.
+    assert!(!report.author_attested, "node-authored skill is not attested");
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.contains("not attested")),
+        "withholding the exec bit is reported, got {:?}",
+        report.skipped
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -328,7 +340,11 @@ async fn skill_hydrate_materializes_bundle() {
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o111, 0o111, "executable bit set when trusted");
+        assert_eq!(
+            mode & 0o111,
+            0,
+            "executable bit withheld for an unattested author"
+        );
     }
 
     // Path traversal is rejected (defense-in-depth on the join helper).

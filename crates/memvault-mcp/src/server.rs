@@ -688,6 +688,8 @@ impl MemvaultServer {
                 "dest": report.dest.to_string_lossy(),
                 "written": report.written,
                 "skipped": report.skipped,
+                "author": report.author,
+                "author_attested": report.author_attested,
             })
             .to_string(),
             Err(e) => format!("error: {e}"),

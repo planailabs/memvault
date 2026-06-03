@@ -10,11 +10,21 @@
 //! ## Trust
 //!
 //! Materializing executable resources writes runnable code to disk, so it is
-//! the natural trust boundary. Callers should only hydrate skills they trust
-//! (granted bucket + attested author). Full sigchain-author verification at
-//! this layer is a follow-up; until then `set_executable` lets a caller opt
-//! out of the executable bit entirely (the default), so an untrusted bundle
-//! never lands as directly-runnable code without an explicit decision.
+//! the natural trust boundary. Two conditions must BOTH hold before the
+//! executable bit is set on any resource:
+//!
+//! 1. the caller opts in via `set_executable` (an explicit decision), and
+//! 2. the skill's `EntityCreate` write carried an agent attestation — i.e. an
+//!    *attested agent* authored the manifest. Writes from unattested agents are
+//!    already gated at write/sync time, so the presence of the attestation CID
+//!    on the authoring op is the client-visible proof that the author's
+//!    sigchain verified under the cluster trust root.
+//!
+//! Reading the skill at all already requires a grant on its bucket, so the
+//! "granted + attested author" policy is enforced end to end. Non-executable
+//! content always materializes (it is inert); only the executable bit is gated,
+//! and the [`HydrateReport`] surfaces the author + attestation status so the
+//! decision is auditable.
 //!
 //! ## Safety
 //!
@@ -36,8 +46,13 @@ pub struct HydrateReport {
     /// Relative paths written, in order.
     pub written: Vec<String>,
     /// Components skipped (with a reason), e.g. an unresolved node or an
-    /// executable resource when `set_executable` was false.
+    /// executable resource whose executable bit was withheld.
     pub skipped: Vec<String>,
+    /// Hex pubkey that authored the skill manifest (its `EntityCreate`).
+    pub author: Option<String>,
+    /// Whether the manifest author carried an agent attestation — the gate for
+    /// applying executable bits.
+    pub author_attested: bool,
 }
 
 /// Validate an untrusted relative path and join it under `dest`. Rejects
@@ -98,8 +113,21 @@ pub async fn hydrate_skill(
     std::fs::create_dir_all(dest)
         .map_err(|e| ApiError::Other(format!("create {dest:?}: {e}")))?;
 
+    // Trust gate: the executable bit is only honoured when the manifest was
+    // authored by an attested agent (its EntityCreate carried an attestation).
+    let history = client.entity_history(skill_id).await.unwrap_or_default();
+    let create_rec = history
+        .iter()
+        .find(|r| matches!(r.op_kind, memvault_query::OpKind::EntityCreate))
+        .or_else(|| history.first());
+    let author_attested = create_rec
+        .map(|r| r.agent_attestation.is_some())
+        .unwrap_or(false);
+
     let mut report = HydrateReport {
         dest: dest.to_path_buf(),
+        author: create_rec.map(|r| hex::encode(&r.author)),
+        author_attested,
         ..Default::default()
     };
 
@@ -133,11 +161,14 @@ pub async fn hydrate_skill(
                 .push(format!("{} (no bundle path)", res.node));
             continue;
         };
-        let want_exec = res.executable && set_executable;
-        if res.executable && !set_executable {
-            report
-                .skipped
-                .push(format!("{rel} (executable bit withheld)"));
+        let want_exec = res.executable && set_executable && author_attested;
+        if res.executable && !want_exec {
+            let reason = if !set_executable {
+                "executable bit withheld"
+            } else {
+                "executable bit withheld: skill author not attested"
+            };
+            report.skipped.push(format!("{rel} ({reason})"));
         }
         match NodeRef::from_tag_label(&res.node) {
             Some(NodeRef::Attachment(cid)) => {

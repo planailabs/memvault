@@ -1763,6 +1763,11 @@ mod native {
                 )
                 .await?;
                 println!("hydrated to {}", report.dest.display());
+                println!(
+                    "  author {} (attested: {})",
+                    report.author.as_deref().unwrap_or("unknown"),
+                    report.author_attested
+                );
                 for w in &report.written {
                     println!("  wrote {w}");
                 }
