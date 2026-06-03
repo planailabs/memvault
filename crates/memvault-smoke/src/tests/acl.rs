@@ -1619,4 +1619,21 @@ async fn post_genesis_founder_self_attests_and_local_agent_is_trusted() {
         att.node_pubkey, node_pk,
         "local agent is attested by the local node key"
     );
+    assert_eq!(att.not_after_ns, u64::MAX, "enrolled never-expiry");
+
+    // "Test again": mint a JWT and run the daemon's exact verification. A
+    // never-expiry attestation authenticates — the contrast with a lapsed
+    // one, which jwt::verify rejects as "agent attestation: attestation
+    // expired" (the real cause of the MCP's /buckets/agent 401).
+    let token = agent.issue_jwt("read write admin", 300).expect("mint jwt");
+    let admin_keys = vec![admin_sk.verifying_key()];
+    let node_trust = boot.trust_state.node_trust.read().unwrap().clone();
+    let claims = memvault_auth::jwt::verify(
+        &token,
+        &admin_keys,
+        |pk| memvault_api::sigchain::find_agent_attestation(&client, pk).ok().flatten(),
+        |npk| node_trust.get(npk).cloned(),
+    )
+    .expect("never-expiry local agent must authenticate");
+    assert_eq!(claims.iss, "mcp");
 }
