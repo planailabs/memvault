@@ -50,8 +50,14 @@ async fn create_skill(
     description: String,
     trigger: String,
     body: String,
+    bucket_hex: String,
 ) -> Result<String, ServerFnError> {
     let client = crate::ui::state::client()?;
+    // Skills are entities, so a write needs a target bucket (the daemon refuses
+    // unbucketed writes once any bucket exists). The UI passes the topbar's
+    // active bucket.
+    let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
+        .map_err(|_| ServerFnError::new("select a bucket to create a skill in".to_string()))?;
     let spec = memvault_api::SkillSpec {
         name,
         description: (!description.trim().is_empty()).then(|| description.trim().to_string()),
@@ -59,7 +65,7 @@ async fn create_skill(
         instruction_body: (!body.trim().is_empty()).then(|| body.clone()),
     };
     let id = client
-        .skill_publish(spec, memvault_core::Visibility::Internal, None)
+        .skill_publish(spec, memvault_core::Visibility::Internal, Some(&bucket))
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(hex::encode(id.0))
@@ -69,11 +75,13 @@ async fn create_skill(
 pub fn SkillList() -> Element {
     use_topbar("Skills");
     let mut skills = use_server_future(list_skills)?;
+    let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
     let mut show_create = use_signal(|| false);
     let mut new_name = use_signal(String::new);
     let mut new_desc = use_signal(String::new);
     let mut new_trigger = use_signal(String::new);
     let mut new_body = use_signal(String::new);
+    let mut create_err = use_signal(String::new);
 
     rsx! {
         div { class: "space-y-4",
@@ -129,23 +137,35 @@ pub fn SkillList() -> Element {
                                 oninput: move |e: Event<FormData>| new_body.set(e.value()),
                             }
                         }
+                        if !create_err.read().is_empty() {
+                            p { class: "text-danger text-sm", "{create_err}" }
+                        }
                         div { class: "flex gap-2",
                             Button {
                                 variant: ButtonVariant::Primary,
                                 onclick: move |_| {
                                     let name = new_name.read().trim().to_string();
                                     if name.is_empty() { return; }
+                                    let bucket_hex = active_bucket.read().id.clone().unwrap_or_default();
+                                    if bucket_hex.is_empty() {
+                                        create_err.set("Select a bucket (top bar) to create a skill in.".to_string());
+                                        return;
+                                    }
                                     let desc = new_desc.read().clone();
                                     let trig = new_trigger.read().clone();
                                     let body = new_body.read().clone();
                                     spawn(async move {
-                                        if create_skill(name, desc, trig, body).await.is_ok() {
-                                            show_create.set(false);
-                                            new_name.set(String::new());
-                                            new_desc.set(String::new());
-                                            new_trigger.set(String::new());
-                                            new_body.set(String::new());
-                                            skills.restart();
+                                        match create_skill(name, desc, trig, body, bucket_hex).await {
+                                            Ok(_) => {
+                                                show_create.set(false);
+                                                create_err.set(String::new());
+                                                new_name.set(String::new());
+                                                new_desc.set(String::new());
+                                                new_trigger.set(String::new());
+                                                new_body.set(String::new());
+                                                skills.restart();
+                                            }
+                                            Err(e) => create_err.set(e.to_string()),
                                         }
                                     });
                                 },
