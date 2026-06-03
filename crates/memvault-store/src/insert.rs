@@ -269,10 +269,19 @@ impl MemvaultStore {
     /// Try to parse a block as a BucketDecl and register it in the BUCKETS table.
     /// Call this after storing a synced block that might be a bucket declaration.
     /// Returns true if the block was recognized as a bucket decl.
+    /// Register a (possibly synced) BucketDecl block in the BUCKETS table and
+    /// bind it to a cluster. `fallback_cluster_id` is the LOCAL node's
+    /// cluster, used when the block itself carries no cluster_id — current
+    /// `Signed<T>` BucketDecls don't (cluster_id is not part of the signed
+    /// envelope), so without this a synced bucket would arrive UNBOUND on
+    /// the receiver until the next `bind_unbound_buckets` pass (restart).
+    /// Binding to the local cluster live closes that window for the
+    /// single-cluster case; an already-bound bucket is never overwritten.
     pub fn reindex_bucket_decl(
         &self,
         cid_bytes: &[u8],
         block_bytes: &[u8],
+        fallback_cluster_id: Option<&[u8]>,
     ) -> Result<bool, StoreError> {
         let val: serde_json::Value = match serde_json::from_slice(block_bytes) {
             Ok(v) => v,
@@ -310,12 +319,16 @@ impl MemvaultStore {
             let mut table = txn.open_table(BUCKETS)?;
             table.insert(bucket_id.as_slice(), cid_bytes)?;
 
-            // Bind to cluster if we know it.
-            if let Some(ref cid_val) = cluster_id {
+            // Bind to the block's cluster if it carries one (legacy raw
+            // BucketDecls did); otherwise fall back to the local node's
+            // cluster (current Signed<T> BucketDecls carry no cluster_id).
+            // Only bind when currently unbound — never overwrite.
+            let bind_cluster: Option<&[u8]> = cluster_id.as_deref().or(fallback_cluster_id);
+            if let Some(cid_val) = bind_cluster {
                 if cid_val.iter().any(|&b| b != 0) {
                     let mut bc_table = txn.open_table(BUCKET_CLUSTER)?;
                     if bc_table.get(bucket_id.as_slice())?.is_none() {
-                        bc_table.insert(bucket_id.as_slice(), cid_val.as_slice())?;
+                        bc_table.insert(bucket_id.as_slice(), cid_val)?;
                     }
                 }
             }
@@ -411,5 +424,70 @@ impl MemvaultStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use crate::MemvaultStore;
+    use tempfile::TempDir;
+
+    fn decl_block(bucket_id: [u8; 32], cluster_id: Option<&[u8]>) -> Vec<u8> {
+        let mut v = serde_json::json!({
+            "payload": { "BucketCreate": { "bucket_id": bucket_id.to_vec() } },
+            "name": "test-bucket",
+        });
+        if let Some(c) = cluster_id {
+            v["cluster_id"] = serde_json::json!(c.to_vec());
+        }
+        serde_json::to_vec(&v).unwrap()
+    }
+
+    /// A synced Signed<T> BucketDecl carries no cluster_id; it must bind to
+    /// the local fallback cluster live (not arrive unbound).
+    #[test]
+    fn synced_decl_without_cluster_binds_to_local_fallback() {
+        let dir = TempDir::new().unwrap();
+        let s = MemvaultStore::open(dir.path().join("db.redb")).unwrap();
+        let bid = [9u8; 32];
+        let local = [7u8; 32];
+        assert!(
+            s.reindex_bucket_decl(b"cid1", &decl_block(bid, None), Some(&local))
+                .unwrap()
+        );
+        assert_eq!(s.get_bucket_cluster(&bid).unwrap(), Some(local.to_vec()));
+    }
+
+    /// A legacy decl that carries its own cluster_id keeps it — the local
+    /// fallback only applies when the block has none.
+    #[test]
+    fn decl_with_cluster_keeps_block_cluster_over_fallback() {
+        let dir = TempDir::new().unwrap();
+        let s = MemvaultStore::open(dir.path().join("db.redb")).unwrap();
+        let bid = [3u8; 32];
+        let block_cluster = [1u8; 32];
+        let local = [7u8; 32];
+        assert!(
+            s.reindex_bucket_decl(b"cid2", &decl_block(bid, Some(&block_cluster)), Some(&local))
+                .unwrap()
+        );
+        assert_eq!(
+            s.get_bucket_cluster(&bid).unwrap(),
+            Some(block_cluster.to_vec())
+        );
+    }
+
+    /// An already-bound bucket is never rebound by a later decl reindex.
+    #[test]
+    fn existing_binding_is_not_overwritten() {
+        let dir = TempDir::new().unwrap();
+        let s = MemvaultStore::open(dir.path().join("db.redb")).unwrap();
+        let bid = [5u8; 32];
+        s.bind_bucket(&bid, &[2u8; 32]).unwrap();
+        assert!(
+            s.reindex_bucket_decl(b"cid3", &decl_block(bid, None), Some(&[7u8; 32]))
+                .unwrap()
+        );
+        assert_eq!(s.get_bucket_cluster(&bid).unwrap(), Some([2u8; 32].to_vec()));
     }
 }

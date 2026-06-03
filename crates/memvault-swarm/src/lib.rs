@@ -1449,7 +1449,14 @@ fn handle_block_response(
                         continue;
                     }
                     let _ = store.reindex_block(&entry.cid, &entry.data);
-                    let _ = store.reindex_bucket_decl(&entry.cid, &entry.data);
+                    // Bind a synced BucketDecl to our cluster live (current
+                    // Signed<T> decls carry no cluster_id, so otherwise it
+                    // would stay unbound until the next restart).
+                    let _ = store.reindex_bucket_decl(
+                        &entry.cid,
+                        &entry.data,
+                        Some(&join_config.cluster_id),
+                    );
                 }
             }
             stored += 1;

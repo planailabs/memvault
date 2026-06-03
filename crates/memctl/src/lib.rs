@@ -200,6 +200,17 @@ mod native {
             #[arg(long)]
             force: bool,
         },
+        /// List each bucket's cluster binding (from the BUCKET_CLUSTER table)
+        /// and flag UNBOUND buckets. Pass `--compare` to diff two stores'
+        /// bindings and flag buckets that are unbound or bound to a
+        /// different cluster on one side (a binding-propagation check).
+        BucketBindings {
+            /// Path to the redb database (defaults to the configured store).
+            db: Option<PathBuf>,
+            /// Optional second store to compare against.
+            #[arg(long)]
+            compare: Option<PathBuf>,
+        },
         /// Export all raw blocks (one file per CID, hex-encoded name)
         ExportBlocks {
             /// Output path (directory or .tar/.tar.gz file)
@@ -1846,6 +1857,34 @@ mod native {
                     );
                     if s1.cluster_id != s2.cluster_id {
                         println!("  ⚠ cluster_id MISMATCH between stores");
+                    }
+                }
+            }
+            Commands::BucketBindings { db, compare } => {
+                let primary = db.unwrap_or_else(|| data_dir.join("blocks.redb"));
+                let b1 = dump_bucket_bindings(&primary)?;
+                if let Some(other) = compare {
+                    println!();
+                    let b2 = dump_bucket_bindings(&other)?;
+                    println!("\n=== Binding comparison ===");
+                    let all: std::collections::BTreeSet<_> =
+                        b1.keys().chain(b2.keys()).cloned().collect();
+                    let mut issues = 0usize;
+                    for bid in all {
+                        let a = b1.get(&bid).cloned().flatten();
+                        let b = b2.get(&bid).cloned().flatten();
+                        if a != b {
+                            issues += 1;
+                            println!(
+                                "  ⚠ {} : A={} B={}",
+                                hex::encode(bid),
+                                a.map(hex::encode).unwrap_or_else(|| "UNBOUND/absent".into()),
+                                b.map(hex::encode).unwrap_or_else(|| "UNBOUND/absent".into()),
+                            );
+                        }
+                    }
+                    if issues == 0 {
+                        println!("  bindings consistent across both stores");
                     }
                 }
             }
@@ -3669,6 +3708,49 @@ mod native {
             total_agents,
             orphaned_agents,
         })
+    }
+
+    /// Print each bucket's cluster binding and return `bucket_id → cluster`
+    /// (None = UNBOUND) for cross-store comparison. Read-only; opens the
+    /// redb directly so it works against a stopped node.
+    fn dump_bucket_bindings(
+        db: &Path,
+    ) -> Result<std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>> {
+        let store = MemvaultStore::open(db)?;
+        println!("== BUCKET BINDINGS {} ==", db.display());
+        let mut out = std::collections::BTreeMap::new();
+        let mut unbound = 0usize;
+        for (bucket_id, decl_cid) in store.list_buckets()? {
+            let cluster = store.get_bucket_cluster(&bucket_id).ok().flatten();
+            let name = store
+                .get_block(&decl_cid)
+                .ok()
+                .flatten()
+                .and_then(|b| memvault_store::deserialize_block(&b))
+                .and_then(|v| {
+                    v.get("payload")
+                        .and_then(|p| p.get("BucketCreate"))
+                        .and_then(|bc| bc.get("name"))
+                        .or_else(|| v.get("name"))
+                        .and_then(|n| n.as_str().map(|s| s.to_string()))
+                })
+                .unwrap_or_else(|| "?".into());
+            match &cluster {
+                Some(c) => println!(
+                    "  {} {:<18} cluster={}",
+                    hex::encode(&bucket_id),
+                    name,
+                    hex::encode(c)
+                ),
+                None => {
+                    unbound += 1;
+                    println!("  {} {:<18} UNBOUND", hex::encode(&bucket_id), name);
+                }
+            }
+            out.insert(bucket_id, cluster);
+        }
+        println!("  -- {} bucket(s), {} UNBOUND", out.len(), unbound);
+        Ok(out)
     }
 
     fn diff_blocks(db_a: &Path, db_b: &Path) -> Result<()> {
