@@ -205,7 +205,7 @@ where
         return Err(AuthError::InvalidToken(format!("unsupported alg: {header}")));
     }
 
-    let claims: AgentTokenClaims = serde_json::from_slice(&payload_bytes)
+    let mut claims: AgentTokenClaims = serde_json::from_slice(&payload_bytes)
         .map_err(|e| AuthError::InvalidToken(format!("claims json: {e}")))?;
 
     // Parse the agent pubkey from `sub`.
@@ -240,14 +240,17 @@ where
             "lookup returned attestation for a different pubkey".into(),
         ));
     }
-    // `iss` is cosmetic but we cross-check it as a sanity guard against
-    // confused-deputy: an honest agent's iss matches its attestation's
-    // agent_id. Mismatch is a sign of a manually-constructed token.
-    if claims.iss != agent_att.agent_id.0 {
-        return Err(AuthError::InvalidToken(
-            "iss does not match attestation.agent_id".into(),
-        ));
-    }
+    // `iss` is a display LABEL, not an identity. The authoritative identity
+    // is `sub` (the agent pubkey), verified above against the token
+    // signature, and the attestation — looked up by that pubkey — carries
+    // the canonical `agent_id`. A forger cannot fake the token without the
+    // agent's private key regardless of `iss`, so enforcing `iss ==
+    // agent_id` added no security; it only 401'd a legitimate key-holder
+    // whose client-side `iss` was stale (e.g. a renamed/copied identity
+    // dir, whose basename drives `AgentIdentity`'s agent_id). Instead of
+    // rejecting, adopt the on-chain agent_id as the authoritative `iss` so
+    // downstream display/audit always shows the canonical name.
+    claims.iss = agent_att.agent_id.0.clone();
 
     // Verify the agent attestation's signature against its embedded
     // `node_pubkey` (a node-signed promise to admit this agent).
@@ -466,6 +469,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(claims.iss, "alice");
+    }
+
+    /// A token whose `iss` differs from the attestation's `agent_id` (e.g.
+    /// a renamed/copied identity dir) must still verify — `sub` (pubkey) is
+    /// the identity — and the returned claims adopt the on-chain agent_id.
+    #[test]
+    fn iss_mismatch_is_tolerated_and_canonicalized() {
+        let admin = make_key();
+        let node = make_key();
+        let agent = make_key();
+        let n_att = node_att(&admin, &node);
+        // On-chain attestation says the agent is "alice".
+        let a_att = sign_agent_attestation(
+            &node,
+            AgentName("alice".into()),
+            agent.verifying_key().to_bytes(),
+            AgentRole::AgentHost,
+            u64::MAX,
+        )
+        .unwrap();
+        // But the client mints a token claiming iss="stale-dir-name".
+        let tok = issue(&agent, "stale-dir-name", "read", 300).unwrap();
+        let claims = verify(
+            &tok,
+            &[admin.verifying_key()],
+            |_| Some(a_att.clone()),
+            |_| Some(NodeTrust::Attested(n_att.clone())),
+        )
+        .expect("iss mismatch must not reject a signature-valid token");
+        assert_eq!(claims.iss, "alice", "iss canonicalized to on-chain agent_id");
     }
 
     #[test]
