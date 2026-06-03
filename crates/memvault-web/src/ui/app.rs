@@ -20,6 +20,8 @@ use super::pages::notes::detail::NoteDetail;
 use super::pages::notes::form::{NoteEdit, NoteForm};
 use super::pages::notes::history::NoteHistory;
 use super::pages::notes::list::NoteList;
+use super::pages::skills::detail::SkillDetail;
+use super::pages::skills::list::SkillList;
 use super::pages::vfs::explorer::VfsExplorer;
 use super::pages::views::ViewManager;
 
@@ -54,6 +56,10 @@ pub enum Route {
     BucketList {},
     #[route("/buckets/:id")]
     BucketDetail { id: String },
+    #[route("/skills")]
+    SkillList {},
+    #[route("/skills/:id")]
+    SkillDetail { id: String },
     #[route("/audit")]
     AuditLog {},
     #[route("/admin")]
