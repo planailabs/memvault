@@ -1026,6 +1026,66 @@ impl LocalClient {
             .unwrap_or(false)
     }
 
+    /// Whether an agent's **attesting node** is trusted to confer that
+    /// agent's identity. True iff the attesting node is either:
+    ///   * THIS node's own key — self-trust, covering the pre-genesis
+    ///     window before an admin has attested us (the daemon's own `_ui`
+    ///     admin agent must work immediately); or
+    ///   * named as a cluster member by an admin-signed `NodeAttestation`
+    ///     in the store.
+    ///
+    /// Used by ACL to reject **orphaned** agent attestations — ones signed
+    /// by an ephemeral, never-attested node identity (e.g. a throwaway
+    /// instance that gossiped its `_ui` Admin attestation into the cluster).
+    /// Such an attestation must never confer access, not even role=Admin.
+    ///
+    /// Conservative: with no admin keys known yet (pre-genesis / standalone)
+    /// there is nothing to attest against, so the gate is inactive and only
+    /// self-trust applies — a standalone node still serves its own agents.
+    pub fn is_attesting_node_trusted(&self, node_pubkey: &[u8; 32]) -> bool {
+        // Self-trust.
+        if self
+            .node_verifying_key()
+            .map(|k| k.to_bytes())
+            .as_ref()
+            == Some(node_pubkey)
+        {
+            return true;
+        }
+        // A revoked node never confers trust.
+        if self.is_node_revoked(node_pubkey) {
+            return false;
+        }
+        let admin_keys = self.admin_verifying_keys();
+        if admin_keys.is_empty() {
+            // No cluster admin context — nothing to verify attestations
+            // against; don't gate (only self-trust, handled above, applies).
+            return true;
+        }
+        // Require an admin-signed NodeAttestation naming this node.
+        for cid in self
+            .store
+            .query_by_tag("sigchain", "node_att", 0, 1024)
+            .unwrap_or_default()
+        {
+            let Ok(Some(bytes)) = self.store.get_block(&cid) else {
+                continue;
+            };
+            let Ok(att) =
+                serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
+            else {
+                continue;
+            };
+            if att.member.0.as_slice() != node_pubkey {
+                continue;
+            }
+            if admin_keys.iter().any(|k| att.verify_signature(k).is_ok()) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Pick a signing key this node may legitimately use to issue or
     /// revoke grants on `bucket_id`, with the resulting signer pubkey.
     /// Tries, in order: a held cluster admin key; the held owner-agent

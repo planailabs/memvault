@@ -55,6 +55,21 @@ pub fn check_bucket_access(
             ))
         })?;
 
+    // The attestation must be anchored to a trusted node. An orphaned
+    // attestation — signed by an ephemeral node that was never attested
+    // into the cluster (e.g. a throwaway instance that gossiped its `_ui`
+    // Admin agent in) — must confer no access, not even role=Admin. The
+    // attestation's own signature verifying is necessary but NOT
+    // sufficient; the *attesting node* must itself be trusted (self or
+    // admin-attested).
+    if !client.is_attesting_node_trusted(&attestation.node_pubkey) {
+        return Err(ApiError::Forbidden(format!(
+            "agent {} attested by an untrusted node {} (orphaned attestation)",
+            hex::encode(pubkey_arr),
+            hex::encode(attestation.node_pubkey)
+        )));
+    }
+
     // API admin is ACL-exempt: an `AgentRole::Admin` agent bypasses
     // bucket/grant checks entirely.
     if attestation.role == memvault_auth::AgentRole::Admin {

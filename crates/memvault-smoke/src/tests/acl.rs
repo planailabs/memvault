@@ -1450,3 +1450,55 @@ async fn grant_on_canonical_authorizes_merged_source() {
         .expect_err("Write still requires a Write grant on the canonical");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
 }
+
+/// Orphaned attestation rejection: an agent attested by a node that was
+/// NEVER attested into the cluster must confer NO access — not even
+/// role=Admin. This is the ephemeral-identity-churn footgun (a throwaway
+/// instance gossiping its `_ui` Admin agent into the cluster). The
+/// attestation's own signature is valid; what's missing is a trusted
+/// attesting node.
+#[tokio::test]
+async fn orphan_admin_agent_is_denied() {
+    let node = TestNode::new();
+
+    // A foreign node identity that holds no NodeAttestation in this cluster.
+    let foreign_node = SigningKey::from_bytes(&[0x42u8; 32]);
+
+    // Mint an Admin agent attestation signed by that orphan node.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let agent_pk = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    let att = memvault_auth::sign_agent_attestation(
+        &foreign_node,
+        AgentName("evil_ui".to_string()),
+        agent_pk,
+        AgentRole::Admin,
+        u64::MAX,
+    )
+    .expect("sign orphan attestation");
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &att)
+        .expect("publish orphan attestation");
+
+    let bucket = make_bucket(&node, "victim-bucket").await;
+
+    // Self-consistent + role=Admin, yet denied: the attesting node is orphaned.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect_err("orphaned Admin attestation must not confer access");
+    assert!(
+        matches!(err, memvault_api::ApiError::Forbidden(_)),
+        "expected Forbidden for orphaned attestation, got {err:?}"
+    );
+}
+
+/// Self-trust counterpart: the node's OWN agent (attested by its own node
+/// key) is honored even with no admin NodeAttestation for itself yet —
+/// the daemon's own `_ui` admin must work through the bootstrap window.
+#[tokio::test]
+async fn self_attested_admin_agent_is_allowed() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "ui-admin", AgentRole::Admin).await;
+    let bucket = make_bucket(&node, "self-bucket").await;
+    // Attested by the local node key (self-trust) → Admin bypass applies.
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect("self-attested Admin agent must pass");
+}
