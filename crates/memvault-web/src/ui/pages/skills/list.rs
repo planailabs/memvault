@@ -195,19 +195,19 @@ pub fn SkillList() -> Element {
 }
 
 #[component]
-fn SkillTable(list: Vec<SkillRow>) -> Element {
+fn SkillTable(list: ReadSignal<Vec<SkillRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 20usize);
     let sort = use_signal::<SortState>(|| ("name".to_string(), true));
 
-    let list_clone = list.clone();
     let filtered = use_memo(move || {
+        // Read `list` reactively so the table refreshes when the parent re-fetches.
+        let list = list.read();
         let q = search.read().to_lowercase();
         let mut items: Vec<SkillRow> = if q.is_empty() {
-            list_clone.clone()
+            list.clone()
         } else {
-            list_clone
-                .iter()
+            list.iter()
                 .filter(|s| s.matches_search(&q))
                 .cloned()
                 .collect()
@@ -223,7 +223,7 @@ fn SkillTable(list: Vec<SkillRow>) -> Element {
         items
     });
 
-    let total = list.len();
+    let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
     let shown = filtered_count.min(limit_val);

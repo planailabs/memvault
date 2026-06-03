@@ -527,20 +527,21 @@ pub fn AuditLog() -> Element {
 }
 
 #[component]
-fn AuditTable(list: Vec<AuditRow>) -> Element {
+fn AuditTable(list: ReadSignal<Vec<AuditRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 50usize);
     let sort = use_signal::<SortState>(|| ("time".to_string(), false));
     let mut op_filter = use_signal(|| "all".to_string());
     let mut author_filter = use_signal(String::new);
 
-    let list_clone = list.clone();
     let filtered = use_memo(move || {
+        // Read `list` reactively so the table refreshes when the parent re-fetches.
+        let list = list.read();
         let q = search.read().to_lowercase();
         let op = op_filter.read().clone();
         let auth = author_filter.read().to_lowercase();
 
-        let mut items: Vec<AuditRow> = list_clone
+        let mut items: Vec<AuditRow> = list
             .iter()
             .filter(|r| {
                 let text_match = q.is_empty() || r.matches_search(&q);
@@ -563,13 +564,13 @@ fn AuditTable(list: Vec<AuditRow>) -> Element {
         items
     });
 
-    let total = list.len();
+    let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
     let shown = filtered_count.min(limit_val);
 
     // Collect unique op kinds for filter dropdown.
-    let mut op_kinds: Vec<String> = list.iter().map(|r| r.op_kind.clone()).collect();
+    let mut op_kinds: Vec<String> = list.read().iter().map(|r| r.op_kind.clone()).collect();
     op_kinds.sort();
     op_kinds.dedup();
 

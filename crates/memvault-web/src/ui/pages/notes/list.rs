@@ -126,19 +126,22 @@ pub fn NoteList() -> Element {
 }
 
 #[component]
-fn NoteTable(list: Vec<NoteRow>) -> Element {
+fn NoteTable(list: ReadSignal<Vec<NoteRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 20usize);
     let sort = use_signal::<SortState>(|| ("updated".to_string(), false));
 
-    let list_clone = list.clone();
     let filtered = use_memo(move || {
+        // Read the `list` prop reactively so this memo re-runs when the
+        // parent re-fetches on a scope (bucket/view/retracted) change.
+        // Capturing a plain Vec here instead would leave the table showing
+        // stale data after the scope changed.
+        let list = list.read();
         let q = search.read().to_lowercase();
         let mut items: Vec<NoteRow> = if q.is_empty() {
-            list_clone.clone()
+            list.clone()
         } else {
-            list_clone
-                .iter()
+            list.iter()
                 .filter(|n| n.matches_search(&q))
                 .cloned()
                 .collect()
@@ -155,7 +158,7 @@ fn NoteTable(list: Vec<NoteRow>) -> Element {
         items
     });
 
-    let total = list.len();
+    let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
     let shown = filtered_count.min(limit_val);

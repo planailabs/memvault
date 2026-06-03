@@ -227,19 +227,20 @@ fn FileGrid(list: Vec<FileRow>) -> Element {
 }
 
 #[component]
-fn FileTable(list: Vec<FileRow>) -> Element {
+fn FileTable(list: ReadSignal<Vec<FileRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 20usize);
     let sort = use_signal::<SortState>(|| ("wall_ns".to_string(), false));
 
-    let list_clone = list.clone();
     let filtered = use_memo(move || {
+        // Read `list` reactively so the table refreshes when the parent
+        // re-fetches on a scope (bucket/view/retracted) change.
+        let list = list.read();
         let q = search.read().to_lowercase();
         let mut items: Vec<FileRow> = if q.is_empty() {
-            list_clone.clone()
+            list.clone()
         } else {
-            list_clone
-                .iter()
+            list.iter()
                 .filter(|f| f.matches_search(&q))
                 .cloned()
                 .collect()
@@ -257,7 +258,7 @@ fn FileTable(list: Vec<FileRow>) -> Element {
         items
     });
 
-    let total = list.len();
+    let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
     let shown = filtered_count.min(limit_val);
