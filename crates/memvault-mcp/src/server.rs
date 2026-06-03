@@ -1067,6 +1067,72 @@ impl MemvaultServer {
     }
 
     #[tool(
+        name = "memvault_bucket_merge",
+        description = "Merge source buckets into a canonical bucket: a read/ACL alias overlay so queries scoped to the canonical return the union of all sources' content. Nothing is moved or re-signed. Requires admin/owner authority on every bucket."
+    )]
+    async fn bucket_merge(&self, Parameters(params): Parameters<BucketMergeParams>) -> String {
+        let canonical = match BucketId::from_hex(&params.canonical) {
+            Ok(b) => b,
+            Err(e) => return format!("error: canonical {e}"),
+        };
+        let mut sources = Vec::with_capacity(params.sources.len());
+        for s in &params.sources {
+            match BucketId::from_hex(s) {
+                Ok(b) => sources.push(b),
+                Err(e) => return format!("error: source {s}: {e}"),
+            }
+        }
+        match self.client.bucket_merge(&sources, &canonical).await {
+            Ok(()) => serde_json::json!({
+                "status": "merged",
+                "canonical": hex::encode(canonical.0),
+                "sources": params.sources,
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_bucket_unmerge",
+        description = "Reverse a single source → canonical bucket merge edge. The source's content (never moved) simply stops surfacing under the canonical."
+    )]
+    async fn bucket_unmerge(&self, Parameters(params): Parameters<BucketUnmergeParams>) -> String {
+        let canonical = match BucketId::from_hex(&params.canonical) {
+            Ok(b) => b,
+            Err(e) => return format!("error: canonical {e}"),
+        };
+        let source = match BucketId::from_hex(&params.source) {
+            Ok(b) => b,
+            Err(e) => return format!("error: source {e}"),
+        };
+        match self.client.bucket_unmerge(&source, &canonical).await {
+            Ok(()) => serde_json::json!({ "status": "unmerged" }).to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_bucket_merges",
+        description = "List all source → canonical bucket-merge edges."
+    )]
+    async fn bucket_merges(&self) -> String {
+        match self.client.bucket_merges().await {
+            Ok(edges) => serde_json::json!({
+                "merges": edges
+                    .iter()
+                    .map(|(s, c)| serde_json::json!({
+                        "source": hex::encode(s.0),
+                        "canonical": hex::encode(c.0),
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
         name = "memvault_agent_rename",
         description = "Set an agent's display label (by ed25519 pubkey). Display-only; does not affect access."
     )]

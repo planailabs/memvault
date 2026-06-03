@@ -340,6 +340,22 @@ pub struct BucketRenameParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct BucketMergeParams {
+    /// Hex-encoded source bucket IDs to fold into the canonical bucket.
+    pub sources: Vec<String>,
+    /// Hex-encoded canonical bucket ID (the merge target).
+    pub canonical: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct BucketUnmergeParams {
+    /// Hex-encoded source bucket ID to detach from the canonical.
+    pub source: String,
+    /// Hex-encoded canonical bucket ID.
+    pub canonical: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct AgentRenameParams {
     /// Hex-encoded agent ed25519 pubkey (the canonical agent identity).
     pub agent_pubkey: String,
