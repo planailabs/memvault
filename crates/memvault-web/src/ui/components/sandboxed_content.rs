@@ -144,7 +144,9 @@ fn parent_script(iframe_id: &str) -> String {
 /// once to `&quot;`, and HTML parses it as an unquoted attribute that
 /// includes literal quote characters as part of the URL.
 fn build_srcdoc(html: &str, iframe_id: &str) -> String {
-    let escaped_html = html;
+    // Passed RAW (unescaped) on purpose — Dioxus attribute-escapes the whole
+    // `srcdoc` once (see the doc comment above). Do NOT add escaping here.
+    let raw_html = html;
 
     format!(
         r#"<!DOCTYPE html>
@@ -184,7 +186,7 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
   hr {{ border: none; border-top: 1px solid rgba(128,128,128,0.2); margin: 1em 0; }}
 </style>
 </head>
-<body><div class="card"><div class="p-5 prose prose-sm dark:prose-invert max-w-none">{escaped_html}</div></div>
+<body><div class="card"><div class="p-5 prose prose-sm dark:prose-invert max-w-none">{raw_html}</div></div>
 <script>
 (function() {{
   var id = "{id}";
@@ -279,7 +281,7 @@ fn build_srcdoc(html: &str, iframe_id: &str) -> String {
 </script>
 </body>
 </html>"#,
-        escaped_html = escaped_html,
+        raw_html = raw_html,
         id = iframe_id
     )
 }
