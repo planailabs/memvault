@@ -182,6 +182,17 @@ mod native {
             /// Path to second redb database
             db_b: PathBuf,
         },
+        /// Decode the sigchain (admin genesis, node/agent attestations,
+        /// revocations) and flag orphaned agents — agents whose attesting
+        /// node was never attested into the cluster. Pass `--compare` to
+        /// diff two stores' sigchains side by side.
+        Sigchain {
+            /// Path to the redb database (defaults to the configured store).
+            db: Option<PathBuf>,
+            /// Optional second store to compare against.
+            #[arg(long)]
+            compare: Option<PathBuf>,
+        },
         /// Export all raw blocks (one file per CID, hex-encoded name)
         ExportBlocks {
             /// Output path (directory or .tar/.tar.gz file)
@@ -1799,6 +1810,32 @@ mod native {
             Commands::Gc { doc, before } => {
                 println!("GC: doc={doc:?} before={before:?}");
                 println!("  (manual GC not yet wired to compaction)");
+            }
+            Commands::Sigchain { db, compare } => {
+                let primary = db.unwrap_or_else(|| data_dir.join("blocks.redb"));
+                let s1 = dump_sigchain(&primary)?;
+                if let Some(other) = compare {
+                    println!();
+                    let s2 = dump_sigchain(&other)?;
+                    println!("\n=== Comparison ===");
+                    println!(
+                        "  {}: {} trusted node(s), {} agent(s), {} ORPHANED",
+                        primary.display(),
+                        s1.trusted_nodes,
+                        s1.total_agents,
+                        s1.orphaned_agents
+                    );
+                    println!(
+                        "  {}: {} trusted node(s), {} agent(s), {} ORPHANED",
+                        other.display(),
+                        s2.trusted_nodes,
+                        s2.total_agents,
+                        s2.orphaned_agents
+                    );
+                    if s1.cluster_id != s2.cluster_id {
+                        println!("  ⚠ cluster_id MISMATCH between stores");
+                    }
+                }
             }
             Commands::DiffBlocks { db_a, db_b } => {
                 diff_blocks(&db_a, &db_b)?;
@@ -3460,6 +3497,117 @@ mod native {
             n_docs, n_entities, n_files, link_count
         );
         Ok(())
+    }
+
+    /// Summary of a store's sigchain, returned for side-by-side comparison.
+    struct SigchainSummary {
+        cluster_id: Option<[u8; 32]>,
+        trusted_nodes: usize,
+        total_agents: usize,
+        orphaned_agents: usize,
+    }
+
+    /// Decode and print one store's sigchain: admin genesis, node
+    /// attestations (member, cluster_id, origin, signature validity), and
+    /// agent attestations with an ORPHAN flag (attesting node not itself
+    /// attested into the cluster). Read-only; opens the redb directly so it
+    /// works against a stopped daemon.
+    fn dump_sigchain(db: &Path) -> Result<SigchainSummary> {
+        use std::collections::{HashMap, HashSet};
+
+        let store = MemvaultStore::open(db)?;
+        println!("== SIGCHAIN {} ==", db.display());
+
+        // Admin genesis → admin pubkeys + cluster id.
+        let mut admin_pubkeys: HashSet<[u8; 32]> = HashSet::new();
+        let mut cluster_id: Option<[u8; 32]> = None;
+        for cid in store.query_by_tag("sigchain", "admin_genesis", 0, 100).unwrap_or_default() {
+            if let Ok(Some(b)) = store.get_block(&cid) {
+                if let Ok(g) = serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b) {
+                    admin_pubkeys.insert(g.admin_pubkey);
+                    cluster_id = Some(g.cluster_id.0);
+                    println!(
+                        "  admin_genesis admin={} cluster={}",
+                        hex::encode(g.admin_pubkey),
+                        hex::encode(g.cluster_id.0)
+                    );
+                }
+            }
+        }
+
+        // Node attestations → trusted node pubkey set.
+        let mut trusted_nodes: HashSet<[u8; 32]> = HashSet::new();
+        for cid in store.query_by_tag("sigchain", "node_att", 0, 1000).unwrap_or_default() {
+            if let Ok(Some(b)) = store.get_block(&cid) {
+                if let Ok(a) =
+                    serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&b)
+                {
+                    if let Ok(member) = <[u8; 32]>::try_from(a.member.0.clone()) {
+                        trusted_nodes.insert(member);
+                        let sig_ok = admin_pubkeys.iter().any(|ap| {
+                            ed25519_dalek::VerifyingKey::from_bytes(ap)
+                                .map(|vk| a.verify_signature(&vk).is_ok())
+                                .unwrap_or(false)
+                        });
+                        println!(
+                            "  node_att  member={} cluster={} via={:?} admin_sig_ok={}",
+                            hex::encode(member),
+                            hex::encode(a.cluster_id.0),
+                            a.issued_via,
+                            sig_ok
+                        );
+                    }
+                }
+            }
+        }
+
+        // Agent attestations → orphan detection.
+        let mut total_agents = 0usize;
+        let mut orphaned_agents = 0usize;
+        let mut orphan_nodes: HashMap<[u8; 32], usize> = HashMap::new();
+        for cid in store.query_by_tag("sigchain", "agent_att", 0, 2000).unwrap_or_default() {
+            if let Ok(Some(b)) = store.get_block(&cid) {
+                if let Ok(a) =
+                    serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&b)
+                {
+                    total_agents += 1;
+                    let orphan = !trusted_nodes.contains(&a.node_pubkey);
+                    if orphan {
+                        orphaned_agents += 1;
+                        *orphan_nodes.entry(a.node_pubkey).or_default() += 1;
+                    }
+                    println!(
+                        "  agent_att id={:<10} agent={} role={:?} node={} {}",
+                        format!("{:?}", a.agent_id.0),
+                        hex::encode(a.agent_pubkey),
+                        a.role,
+                        hex::encode(a.node_pubkey),
+                        if orphan { "ORPHAN" } else { "" }
+                    );
+                }
+            }
+        }
+
+        println!(
+            "  -- {} trusted node(s), {} agent(s), {} ORPHANED across {} dead node identit(ies)",
+            trusted_nodes.len(),
+            total_agents,
+            orphaned_agents,
+            orphan_nodes.len()
+        );
+        if orphaned_agents > 0 {
+            println!("  -- dead node identities (attested no longer / never):");
+            for (n, count) in &orphan_nodes {
+                println!("       {} ({} agent attestation(s))", hex::encode(n), count);
+            }
+        }
+
+        Ok(SigchainSummary {
+            cluster_id,
+            trusted_nodes: trusted_nodes.len(),
+            total_agents,
+            orphaned_agents,
+        })
     }
 
     fn diff_blocks(db_a: &Path, db_b: &Path) -> Result<()> {
