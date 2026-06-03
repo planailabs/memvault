@@ -2125,6 +2125,13 @@ impl LocalClient {
             .query_by_bucket(bucket_id_bytes, 0, usize::MAX)?
             .len() as u64;
 
+        // If this bucket has been merged into a canonical, record the target
+        // (a self-resolution means it's not a merged source).
+        let merged_into = <[u8; 32]>::try_from(bucket_id_bytes).ok().and_then(|arr| {
+            let canonical = self.canonical_of(&arr);
+            (canonical != arr).then_some(memvault_core::BucketId(canonical))
+        });
+
         Ok(Some(crate::types::BucketInfo {
             id: decl.bucket_id,
             name: decl.name,
@@ -2139,6 +2146,7 @@ impl LocalClient {
             created_ns: decl.created_ns,
             envelope_count,
             role: decl.role,
+            merged_into,
         }))
     }
 
@@ -4436,10 +4444,17 @@ impl LocalClient {
                 pubkeys.insert(att.agent_pubkey);
             }
         }
+        // Read owner pubkeys straight from each BucketDecl — NOT via
+        // bucket_info_sync/build_bucket_info, which now calls canonical_of
+        // and would recurse back into this alias build.
         for bid in self.all_bucket_id_arrays() {
-            if let Ok(Some(info)) = self.bucket_info_sync(&BucketId(bid)) {
-                if let Some(pk) = info.owner_agent_pubkey {
-                    pubkeys.insert(pk);
+            if let Ok(Some(decl_cid)) = self.store.get_bucket(&bid) {
+                if let Ok(Some(block)) = self.store.get_block(&decl_cid) {
+                    if let Some(decl) = Self::parse_bucket_decl(&block) {
+                        if let Some(pk) = decl.owner_agent_pubkey {
+                            pubkeys.insert(pk);
+                        }
+                    }
                 }
             }
         }

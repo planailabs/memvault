@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
@@ -22,17 +22,40 @@ pub struct CreateBucketResponse {
     pub id: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ListBucketsQuery {
+    /// Surface buckets that have been merged into a canonical (hidden by
+    /// default, like retracted). Auditor/Admin roles always see them.
+    #[serde(default)]
+    pub include_merged: bool,
+}
+
 pub async fn list_buckets(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<ListBucketsQuery>,
 ) -> Result<Json<Vec<memvault_api::types::BucketInfo>>, StatusCode> {
     // `BucketInfo` carries hex-id wire encoding (see `standards/`), so it is
     // transmitted as-is — no hand-built JSON.
-    let buckets = state
+    let mut buckets = state
         .client
         .bucket_list()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Merged source buckets are hidden from the default listing — they're
+    // surfaced under their canonical, so showing them too would double-count
+    // and confuse. Treat them like retracted: visible only when explicitly
+    // requested, or to Auditor/Admin roles (who audit the full topology).
+    let role = crate::api::auth::caller_role(&state, &auth.claims);
+    let show_merged = params.include_merged
+        || matches!(
+            role,
+            Some(memvault_auth::AgentRole::Auditor) | Some(memvault_auth::AgentRole::Admin)
+        );
+    if !show_merged {
+        buckets.retain(|b| b.merged_into.is_none());
+    }
     Ok(Json(buckets))
 }
 

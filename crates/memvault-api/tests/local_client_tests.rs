@@ -2257,3 +2257,17 @@ async fn agent_bucket_migration_aliases_legacy_to_pubkey() {
     client.run_agent_bucket_migration();
     assert_eq!(client.canonical_of(&legacy.0), canonical.0);
 }
+
+#[tokio::test]
+async fn merged_source_is_marked_in_bucket_info() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "canonical").await;
+    let b = mk_bucket(&client, "source").await;
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    // The source records its canonical; the canonical is unmarked.
+    let bi = client.bucket_get(&b).await.unwrap().unwrap();
+    assert_eq!(bi.merged_into, Some(a.clone()), "source marks its canonical");
+    let ai = client.bucket_get(&a).await.unwrap().unwrap();
+    assert_eq!(ai.merged_into, None, "canonical is not a merged source");
+}

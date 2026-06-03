@@ -233,6 +233,13 @@ pub struct BucketInfo {
     /// The role this bucket plays (standard, legacy, agent).
     #[serde(default)]
     pub role: memvault_doc::BucketRole,
+    /// When this bucket has been merged into another, the canonical bucket
+    /// it resolves to. `None` for a normal (canonical or unmerged) bucket.
+    /// Merged sources are hidden from default bucket listings (treated like
+    /// retracted) — surfaced only via an explicit include flag or to
+    /// Auditor/Admin roles.
+    #[serde(default, with = "crate::wire::hex_id_opt")]
+    pub merged_into: Option<BucketId>,
 }
 
 /// Node status information.
