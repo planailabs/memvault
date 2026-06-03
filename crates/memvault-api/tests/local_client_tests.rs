@@ -2031,3 +2031,168 @@ async fn deferred_commit_is_searchable_after_read() {
         "deferred write must be searchable after a read flushes it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bucket merge (alias overlay)
+// ---------------------------------------------------------------------------
+
+/// Test helper: a client that holds an admin key, so `bucket_merge_sync`'s
+/// authority check (`pick_grant_signer`) resolves to an admin signer
+/// (authorised on every bucket).
+fn admin_client() -> (tempfile::TempDir, Arc<LocalClient>) {
+    let (dir, client) = make_client();
+    client.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
+    (dir, client)
+}
+
+async fn mk_bucket(client: &LocalClient, name: &str) -> memvault_core::BucketId {
+    client
+        .bucket_create(
+            name,
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap()
+}
+
+async fn put_note(client: &LocalClient, bucket: &memvault_core::BucketId, body: &str) {
+    let doc = Document::new(DocId::random(), body.to_string(), BTreeMap::new());
+    client
+        .put_doc(doc, vec![], Visibility::Internal, Some(bucket))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn merge_read_union_for_docs() {
+    use memvault_core::QueryScope;
+    let (_dir, client) = admin_client();
+
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+    put_note(&client, &a, "in A").await;
+    put_note(&client, &b, "in B").await;
+
+    // Before the merge: a query scoped to A sees only A's doc.
+    let only_a = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(only_a.len(), 1, "A alone before merge");
+
+    // Merge B into A.
+    let cids = client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+    assert_eq!(cids.len(), 1, "one merge record per source");
+
+    // After the merge: a query scoped to the canonical A returns the union.
+    let union = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(union.len(), 2, "canonical A surfaces B's content after merge");
+
+    // canonical_of / members reflect the edge.
+    assert_eq!(client.canonical_of(&b.0), a.0, "B resolves to A");
+    assert_eq!(client.canonical_of(&a.0), a.0, "A resolves to itself");
+    assert_eq!(client.bucket_merge_members(&a.0), vec![b.0], "A members = [B]");
+}
+
+#[tokio::test]
+async fn merge_chain_flattens_to_terminal() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    let c = mk_bucket(&client, "c").await;
+
+    // A -> B, B -> C. canonical_of(A) must flatten to C.
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &c).unwrap();
+
+    assert_eq!(client.canonical_of(&a.0), c.0, "A flattens through B to C");
+    assert_eq!(client.canonical_of(&b.0), c.0, "B resolves to C");
+
+    // members(C) is the transitive closure {A, B}.
+    let mut members = client.bucket_merge_members(&c.0);
+    members.sort();
+    let mut expected = vec![a.0, b.0];
+    expected.sort();
+    assert_eq!(members, expected, "C members = transitive {{A, B}}");
+}
+
+#[tokio::test]
+async fn merge_cycle_is_guarded() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+
+    // A -> B then B -> A: canonical_of must terminate (no infinite loop).
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    // Both resolve to *some* terminal without hanging; the closing edge of
+    // the cycle is dropped by the visited-set guard.
+    let ca = client.canonical_of(&a.0);
+    let cb = client.canonical_of(&b.0);
+    assert!(ca == a.0 || ca == b.0);
+    assert!(cb == a.0 || cb == b.0);
+}
+
+#[tokio::test]
+async fn unmerge_drops_source_from_union() {
+    use memvault_core::QueryScope;
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+    put_note(&client, &a, "in A").await;
+    put_note(&client, &b, "in B").await;
+
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+    let union = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(union.len(), 2, "merged union");
+
+    // Reverse the merge; the union drops back to A's own content.
+    client.bucket_unmerge(&b, &a).await.unwrap();
+    assert_eq!(client.canonical_of(&b.0), b.0, "B resolves to itself again");
+    let after = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1, "unmerge drops B from A's union");
+}
+
+#[tokio::test]
+async fn merge_into_self_is_rejected() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    assert!(
+        client.bucket_merge_sync(&[a.clone()], &a).is_err(),
+        "cannot merge a bucket into itself"
+    );
+}
+
+#[tokio::test]
+async fn merge_appears_in_audit_log() {
+    use memvault_query::{AuditQuery, OpKind};
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    let rows = client
+        .audit(AuditQuery {
+            op_kind: Some(OpKind::BucketMerge),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().any(|r| r.op_kind == OpKind::BucketMerge),
+        "merge surfaces as OpKind::BucketMerge in the audit log"
+    );
+}
