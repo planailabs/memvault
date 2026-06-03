@@ -1407,3 +1407,46 @@ async fn legacy_owner_pubkey_absent_falls_back_to_label() {
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
         .expect("legacy label fallback owner bypass");
 }
+
+/// Bucket merge + ACL: a grant on the **canonical** authorizes access to a
+/// **source's** content (the merge normalizes source → canonical in
+/// `check_bucket_access`), and a source with no grant of its own is denied
+/// until the merge lands. Proves canonical-governs ACL semantics.
+#[tokio::test]
+async fn grant_on_canonical_authorizes_merged_source() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "merge-acl-agent", AgentRole::AgentHost).await;
+    let canonical = make_bucket(&node, "canonical-bucket").await;
+    let source = make_bucket(&node, "source-bucket").await;
+
+    // Grant the agent Read on the canonical only.
+    node.client
+        .issue_bucket_grant(
+            &canonical,
+            GrantAudience::AgentKey(agent_pk),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("issue canonical grant");
+
+    // Before the merge: the agent has no grant on the source → denied.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &source, Action::Read)
+        .expect_err("source has no grant of its own");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+
+    // Merge the source into the canonical.
+    node.client
+        .bucket_merge_sync(&[source.clone()], &canonical)
+        .expect("merge source into canonical");
+
+    // After the merge: an access check against the source normalizes to the
+    // canonical, where the agent's Read grant now authorizes it.
+    acl::check_bucket_access(&node.client, &agent_pk, &source, Action::Read)
+        .expect("canonical grant authorizes source content after merge");
+
+    // The grant scope is still honored: Write was never granted.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &source, Action::Write)
+        .expect_err("Write still requires a Write grant on the canonical");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
