@@ -22,6 +22,7 @@ pub mod quotas;
 pub mod rotation;
 pub mod rpc;
 pub mod skill_hydrate;
+pub mod skills;
 pub mod subscription;
 pub mod tokens;
 pub mod types;
