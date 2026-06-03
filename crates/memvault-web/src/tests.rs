@@ -473,12 +473,6 @@ impl MemvaultClient for MockClient {
 
     async fn ensure_agent_bucket(
         &self,
-        _agent_id: &str,
-    ) -> memvault_api::Result<memvault_core::BucketId> {
-        Ok(memvault_core::BucketId([0u8; 32]))
-    }
-    async fn ensure_agent_bucket_for_pubkey(
-        &self,
         _agent_pubkey: &[u8],
         _name_hint: &str,
     ) -> memvault_api::Result<memvault_core::BucketId> {

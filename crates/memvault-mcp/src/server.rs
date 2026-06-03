@@ -1621,11 +1621,12 @@ mod tool_tests {
             u64::MAX,
         )
         .expect("enroll_local_agent");
+        let agent_pk = identity.verifying_key.to_bytes();
         client.set_agent_identity(identity);
 
         let client: Arc<dyn MemvaultClient> = Arc::new(client);
         let bucket = client
-            .ensure_agent_bucket("mcp-tools")
+            .ensure_agent_bucket(&agent_pk, "mcp-tools")
             .await
             .expect("ensure_agent_bucket");
         MemvaultServer::new(client, vec![], "internal".to_string(), Some(bucket))

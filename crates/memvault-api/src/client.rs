@@ -423,18 +423,17 @@ pub trait MemvaultClient: Send + Sync {
     /// Archive a bucket (soft-remove: new writes are refused, reads continue, data preserved).
     async fn bucket_archive(&self, id: &BucketId, reason: &str) -> Result<()>;
 
-    /// Find or create the agent bucket for the given agent ID.
-    /// Used by per-agent MCP servers as the default bucket for writes.
-    async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId>;
-
-    /// Find or create the agent bucket keyed by the agent's ed25519 pubkey.
-    /// The bucket id is `deterministic_agent_bucket_id(cluster_id, pubkey)` —
-    /// cryptographically unique. `name_hint` is only used as a display
-    /// label on the BucketDecl. Prefer this over `ensure_agent_bucket`
-    /// when the caller already holds the pubkey (e.g. an HTTP handler
-    /// resolving it from a verified JWT) — it skips the name → sigchain
-    /// attestation lookup that the name-based path performs.
-    async fn ensure_agent_bucket_for_pubkey(
+    /// Find or create the agent's data bucket, keyed by its ed25519 pubkey
+    /// (`deterministic_agent_bucket_id(cluster_id, pubkey)` — cryptographically
+    /// unique across nodes). `name_hint` is only a display label on the
+    /// BucketDecl.
+    ///
+    /// Over HTTP the server is authoritative: it derives the pubkey from the
+    /// caller's verified JWT and ignores the passed bytes, so a client can only
+    /// ever ensure *its own* bucket. `LocalClient` uses the passed pubkey
+    /// directly. (The former name-string `ensure_agent_bucket(agent_id)` and
+    /// the HTTP-only `ensure_agent_bucket_for_pubkey` are folded into this.)
+    async fn ensure_agent_bucket(
         &self,
         agent_pubkey: &[u8],
         name_hint: &str,

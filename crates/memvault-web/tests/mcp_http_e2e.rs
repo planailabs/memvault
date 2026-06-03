@@ -158,8 +158,10 @@ async fn server() -> &'static TestServer {
 async fn client_and_bucket() -> (HttpApiClient, BucketId) {
     let s = server().await;
     let client = HttpApiClient::new(&s.base_url, Some(Arc::clone(&s.identity))).unwrap();
+    // The server derives the bucket from the JWT pubkey; the bytes here are
+    // ignored over HTTP. Pass the real identity pubkey anyway.
     let bucket = client
-        .ensure_agent_bucket(AGENT_ID)
+        .ensure_agent_bucket(&s.identity.verifying_key.to_bytes(), AGENT_ID)
         .await
         .expect("ensure_agent_bucket");
     (client, bucket)

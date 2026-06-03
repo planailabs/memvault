@@ -1825,11 +1825,19 @@ impl MemvaultClient for HttpApiClient {
         Ok(BucketId([0u8; 32]))
     }
 
-    async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId> {
+    async fn ensure_agent_bucket(
+        &self,
+        _agent_pubkey: &[u8],
+        name_hint: &str,
+    ) -> Result<BucketId> {
+        // The server derives the bucket from the verified JWT pubkey
+        // (`claims.sub`), so it can only ever ensure THIS agent's bucket —
+        // the passed pubkey is ignored over HTTP. `name_hint` is the display
+        // label, sent as `agent_id` (the on-wire field name is unchanged).
         let resp: serde_json::Value = self
             .client
             .post(self.url("/buckets/agent"))
-            .json(&serde_json::json!({ "agent_id": agent_id }))
+            .json(&serde_json::json!({ "agent_id": name_hint }))
             .send()
             .await
             .map_err(map_reqwest)?
@@ -1851,20 +1859,4 @@ impl MemvaultClient for HttpApiClient {
         Ok(BucketId(arr))
     }
 
-    async fn ensure_agent_bucket_for_pubkey(
-        &self,
-        _agent_pubkey: &[u8],
-        _name_hint: &str,
-    ) -> Result<BucketId> {
-        // The pubkey-keyed lookup is the server's job — it already has the
-        // verified pubkey in `claims.sub`. HTTP callers should use
-        // `ensure_agent_bucket(agent_id)` and let the server pick up the
-        // pubkey from their JWT.
-        Err(ApiError::Other(
-            "ensure_agent_bucket_for_pubkey is server-side only; HTTP clients should call \
-             ensure_agent_bucket(agent_id) and the server will derive the bucket from the \
-             verified JWT pubkey"
-                .into(),
-        ))
-    }
 }

@@ -64,30 +64,16 @@ pub async fn run(cli: Cli) -> Result<()> {
     let client: Arc<dyn memvault_api::MemvaultClient> = Arc::from(cli.client.connect().await?);
 
     // Resolve the agent bucket once at startup so subsequent writes can default
-    // to it. Prefer the explicit --agent-id (legacy name-based), otherwise
-    // resolve from the connected agent identity's pubkey — an agent's identity
-    // now IS its ed25519 key, so an enrolled MCP needs no --agent-id.
-    let agent_bucket = if let Some(agent_id) = cli.agent_id.as_deref() {
-        match client.ensure_agent_bucket(agent_id).await {
-            Ok(bid) => {
-                tracing::info!(
-                    agent_id,
-                    bucket = %hex::encode(bid.0),
-                    "resolved agent bucket"
-                );
-                Some(bid)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id,
-                    "failed to resolve agent bucket: {e} — writes without an explicit bucket will fail"
-                );
-                None
-            }
-        }
-    } else if let Some(pk) = cli.client.load_agent_pubkey() {
-        let hint = format!("agent-{}", hex::encode(&pk[..4]));
-        match client.ensure_agent_bucket_for_pubkey(&pk, &hint).await {
+    // to it. An agent's identity IS its ed25519 key, so resolve from the
+    // connected identity's pubkey; over HTTP the server re-derives it from the
+    // verified JWT, so a client can only ever resolve its own bucket. `--agent-id`
+    // (if given) is just a display label on the bucket.
+    let agent_bucket = if let Some(pk) = cli.client.load_agent_pubkey() {
+        let hint = cli
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| format!("agent-{}", hex::encode(&pk[..4])));
+        match client.ensure_agent_bucket(&pk, &hint).await {
             Ok(bid) => {
                 tracing::info!(
                     pubkey = %hex::encode(pk),
@@ -98,7 +84,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!(
-                    "failed to resolve agent bucket from identity pubkey: {e} — writes without an explicit bucket will fail"
+                    "failed to resolve agent bucket: {e} — writes without an explicit bucket will fail"
                 );
                 None
             }

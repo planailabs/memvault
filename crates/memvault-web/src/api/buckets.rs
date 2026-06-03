@@ -180,7 +180,7 @@ pub async fn ensure_agent_bucket(
     }
     let bucket_id = state
         .client
-        .ensure_agent_bucket_for_pubkey(&pubkey, &req.agent_id)
+        .ensure_agent_bucket(&pubkey, &req.agent_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(EnsureAgentBucketResponse {

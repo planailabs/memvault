@@ -131,7 +131,7 @@ pub async fn create_doc(
                 .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
             state
                 .client
-                .ensure_agent_bucket_for_pubkey(&pubkey_bytes, &auth.claims.iss)
+                .ensure_agent_bucket(&pubkey_bytes, &auth.claims.iss)
                 .await
                 .map_err(|e| {
                     ApiError::internal(format!("ensure agent bucket: {e}"))

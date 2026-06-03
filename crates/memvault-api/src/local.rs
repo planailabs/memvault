@@ -6032,16 +6032,13 @@ impl MemvaultClient for LocalClient {
             .ok_or_else(|| ApiError::Other("no legacy bucket configured".into()))
     }
 
-    async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId> {
-        let aid = memvault_core::AgentName(agent_id.to_string());
-        self.ensure_agent_bucket_for(&aid).await
-    }
-
-    async fn ensure_agent_bucket_for_pubkey(
+    async fn ensure_agent_bucket(
         &self,
         agent_pubkey: &[u8],
         name_hint: &str,
     ) -> Result<BucketId> {
+        // Delegate to the inherent pubkey-keyed helper (also used by the
+        // server-side HTTP handlers and the enroll path).
         LocalClient::ensure_agent_bucket_for_pubkey(self, agent_pubkey, name_hint).await
     }
 
