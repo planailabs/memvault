@@ -326,6 +326,48 @@ pub(crate) struct WriteSigner<'a> {
     pub agent_attestation: Option<Vec<u8>>,
 }
 
+/// Resolved bucket-merge alias maps, rebuilt from the `bucket_merge` side
+/// blocks (plus deterministic agent aliases). `alias` is the one-hop
+/// `source → canonical` edge set; `members` is the flattened, transitive
+/// `terminal-canonical → [all sources]` inverse. See `canonical_of`.
+#[derive(Debug, Default)]
+pub(crate) struct AliasMaps {
+    /// One-hop edges: `source → direct canonical`.
+    alias: std::collections::HashMap<[u8; 32], [u8; 32]>,
+    /// Flattened inverse: `terminal canonical → [every source resolving to it]`.
+    members: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>>,
+}
+
+impl AliasMaps {
+    /// Follow the alias chain from `b` to its terminal canonical, with a
+    /// visited-set cycle guard (a cycle drops the closing edge and stops).
+    fn canonical_of(&self, b: [u8; 32]) -> [u8; 32] {
+        let mut cur = b;
+        let mut visited = std::collections::HashSet::new();
+        while let Some(&next) = self.alias.get(&cur) {
+            if !visited.insert(cur) {
+                break; // cycle: stop at the closing edge
+            }
+            if next == cur {
+                break;
+            }
+            cur = next;
+        }
+        cur
+    }
+
+    /// Build the flattened `members` inverse from the one-hop `alias` map.
+    fn build_members(&mut self) {
+        let sources: Vec<[u8; 32]> = self.alias.keys().copied().collect();
+        for s in sources {
+            let term = self.canonical_of(s);
+            if term != s {
+                self.members.entry(term).or_default().push(s);
+            }
+        }
+    }
+}
+
 /// LocalClient implements MemvaultClient by calling directly into the store.
 pub struct LocalClient {
     store: Arc<MemvaultStore>,
@@ -367,6 +409,15 @@ pub struct LocalClient {
     /// forces recompute (admin set changed). Grants are immutable, so a
     /// same-generation hit is always correct.
     grant_sig_cache: std::sync::RwLock<std::collections::HashMap<Vec<u8>, (u64, bool)>>,
+    /// Bumped whenever a `BucketMergeRecord` is written locally or arrives
+    /// via sync (the `bucket_merge` notifier arm in `install_sigchain_notifier`).
+    /// The alias-map cache records the generation it was built under and
+    /// rebuilds on mismatch — the same staleness scheme as `admin_key_generation`.
+    alias_generation: std::sync::atomic::AtomicU64,
+    /// Cached bucket-merge alias maps as `(generation_at_build, maps)`. A
+    /// generation mismatch forces a rebuild from the `bucket_merge` side
+    /// blocks (small N). See `bucket_alias_maps` / `canonical_of`.
+    alias_cache: std::sync::RwLock<Option<(u64, std::sync::Arc<AliasMaps>)>>,
     /// Optional node signing key — the daemon's libp2p ed25519 private key,
     /// used to sign agent attestations and agent revocations. Distinct from
     /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
@@ -516,6 +567,8 @@ impl LocalClient {
             admin_key_state: std::sync::RwLock::new(memvault_auth::AdminKeyState::default()),
             admin_key_generation: std::sync::atomic::AtomicU64::new(0),
             grant_sig_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+            alias_generation: std::sync::atomic::AtomicU64::new(0),
+            alias_cache: std::sync::RwLock::new(None),
             node_signing_key: std::sync::OnceLock::new(),
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
@@ -4246,6 +4299,267 @@ impl LocalClient {
             }
         }
         Ok(grants)
+    }
+
+    // -- Bucket merges (alias overlay) --
+
+    /// Bump the alias generation so the next `bucket_alias_maps` call
+    /// rebuilds from the `bucket_merge` side blocks. Called on local merge
+    /// writes and from the `bucket_merge` notifier arm on synced records.
+    pub fn bump_alias_generation(&self) {
+        self.alias_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Ok(mut c) = self.alias_cache.write() {
+            *c = None;
+        }
+        // Derived scope member-sets are computed against the union, so a
+        // changed alias set invalidates them too.
+        let _ = self.store.scope_clear_all();
+    }
+
+    /// Load + build the bucket-merge alias maps, cached against
+    /// `alias_generation`. Rebuilds from the `bucket_merge` side blocks on
+    /// a generation mismatch (small N).
+    pub(crate) fn bucket_alias_maps(&self) -> std::sync::Arc<AliasMaps> {
+        let cur_gen = self
+            .alias_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        if let Ok(c) = self.alias_cache.read() {
+            if let Some((g, maps)) = c.as_ref() {
+                if *g == cur_gen {
+                    return std::sync::Arc::clone(maps);
+                }
+            }
+        }
+        let maps = std::sync::Arc::new(self.build_bucket_alias_maps());
+        if let Ok(mut c) = self.alias_cache.write() {
+            *c = Some((cur_gen, std::sync::Arc::clone(&maps)));
+        }
+        maps
+    }
+
+    /// Scan the `bucket_merge` side blocks and fold them into a one-hop
+    /// alias map (newest non-retracted record wins per source), then
+    /// flatten the transitive `members` inverse. Each record's signature
+    /// is verified against its embedded issuer; the issuer's *authority*
+    /// was checked at write time (`bucket_merge_sync`) / is re-checkable
+    /// but not re-run here (mirrors how grant authority is trusted once a
+    /// grant is in the store, with signature authenticity still enforced).
+    fn build_bucket_alias_maps(&self) -> AliasMaps {
+        let mut newest: std::collections::HashMap<[u8; 32], (u64, [u8; 32])> =
+            std::collections::HashMap::new();
+        let sources = self
+            .store
+            .query_unique_labels("bucket_merge", usize::MAX)
+            .unwrap_or_default();
+        for source_hex in &sources {
+            let cids = self
+                .store
+                .query_by_tag("bucket_merge", source_hex, 0, usize::MAX)
+                .unwrap_or_default();
+            for cid in cids {
+                if self.store.is_retracted(&cid).unwrap_or(false) {
+                    continue;
+                }
+                let Ok(Some(data)) = self.store.get_block(&cid) else {
+                    continue;
+                };
+                let Some(rec) =
+                    memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
+                else {
+                    continue;
+                };
+                // Authenticity: a sync-injected record with a bad signature
+                // must not alter resolution.
+                if rec.verify_signature().is_err() {
+                    continue;
+                }
+                // A self-edge (source == canonical) is meaningless; skip it
+                // so it can never seed a trivial cycle.
+                if rec.source.0 == rec.canonical.0 {
+                    continue;
+                }
+                let e = newest.entry(rec.source.0).or_insert((0, rec.canonical.0));
+                if rec.created_ns >= e.0 {
+                    *e = (rec.created_ns, rec.canonical.0);
+                }
+            }
+        }
+        let mut maps = AliasMaps::default();
+        for (source, (_ts, canonical)) in newest {
+            maps.alias.insert(source, canonical);
+        }
+        // Fold in deterministic agent aliases (no signed record needed):
+        // legacy cluster-scoped agent bucket ids → the pubkey-derived id.
+        self.extend_with_agent_aliases(&mut maps.alias);
+        maps.build_members();
+        maps
+    }
+
+    /// Hook for the agent-bucket auto-alias pass (Phase 9). Adds
+    /// deterministic `legacy_agent_bucket_id → deterministic_agent_bucket_id`
+    /// edges that need no signed record (owner-implied, same pubkey). A
+    /// no-op until that phase lands; kept separate so the signed-record and
+    /// deterministic alias sources stay clearly delineated.
+    fn extend_with_agent_aliases(&self, _alias: &mut std::collections::HashMap<[u8; 32], [u8; 32]>) {
+    }
+
+    /// Resolve a bucket id to its terminal canonical, following the merge
+    /// alias chain (with a cycle guard). A bucket with no alias resolves to
+    /// itself.
+    pub fn canonical_of(&self, bucket_id: &[u8; 32]) -> [u8; 32] {
+        self.bucket_alias_maps().canonical_of(*bucket_id)
+    }
+
+    /// All source bucket ids that resolve (transitively) into `canonical`.
+    /// Empty if `canonical` is not a merge target.
+    pub fn bucket_merge_members(&self, canonical: &[u8; 32]) -> Vec<[u8; 32]> {
+        self.bucket_alias_maps()
+            .members
+            .get(canonical)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// List all `source → canonical` merge edges (one-hop), for surfaces.
+    pub fn bucket_merges(&self) -> Vec<(BucketId, BucketId)> {
+        self.bucket_alias_maps()
+            .alias
+            .iter()
+            .map(|(s, c)| (BucketId(*s), BucketId(*c)))
+            .collect()
+    }
+
+    /// Merge each `source` bucket into `canonical`: store one signed
+    /// `bucket_merge` side block per source. Authority (§8): the node must
+    /// hold a signing key that is authorised on the canonical **and** on
+    /// every source — an `AgentRole::Admin` key (authorised everywhere) or
+    /// the bucket owner / attesting node key for those specific buckets.
+    /// Returns the stored record CIDs.
+    pub fn bucket_merge_sync(
+        &self,
+        sources: &[BucketId],
+        canonical: &BucketId,
+    ) -> Result<Vec<Vec<u8>>> {
+        let now_ns = memvault_core::wall_ns();
+        // The signer must be authorised on the canonical. `pick_grant_signer`
+        // returns an admin key when held (authorised everywhere) else the
+        // canonical's owner/attester key.
+        let (signer, issuer_pubkey) = self.pick_grant_signer(canonical).ok_or_else(|| {
+            ApiError::Forbidden("no merge-signing authority for canonical bucket".into())
+        })?;
+        use ed25519_dalek::Signer;
+
+        let mut cids = Vec::new();
+        for source in sources {
+            if source.0 == canonical.0 {
+                return Err(ApiError::Other(
+                    "cannot merge a bucket into itself".into(),
+                ));
+            }
+            // The same issuer must also be authorised on the source bucket,
+            // so an owner of the canonical can't annex a bucket they don't
+            // control. Admin issuers pass unconditionally.
+            let (owner_agent_pubkey, owner_node_pubkey) = match self.bucket_info_sync(source) {
+                Ok(Some(info)) => (info.owner_agent_pubkey, info.owner_node_pubkey),
+                _ => (None, None),
+            };
+            if !self.grant_issuer_authorized(
+                &issuer_pubkey,
+                now_ns,
+                owner_agent_pubkey.as_ref(),
+                owner_node_pubkey.as_ref(),
+            ) {
+                return Err(ApiError::Forbidden(format!(
+                    "issuer not authorised to merge source bucket {source}"
+                )));
+            }
+
+            let mut rec = memvault_auth::BucketMergeRecord {
+                source: source.clone(),
+                canonical: canonical.clone(),
+                created_ns: now_ns,
+                issued_by_pubkey: issuer_pubkey,
+                signature: [0u8; 64],
+            };
+            let signing_bytes = rec
+                .signing_bytes()
+                .map_err(|e| ApiError::Other(format!("merge record signing failed: {e}")))?;
+            rec.signature = signer.sign(&signing_bytes).to_bytes();
+
+            let rec_bytes = serde_ipld_dagcbor::to_vec(&rec)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            let cid_bytes = memvault_core::cid_from_bytes(&rec_bytes).to_bytes();
+            let source_hex = hex::encode(source.0);
+            let meta = memvault_store::EnvelopeMeta {
+                author: self.effective_author(),
+                // `("bucket_merge", <source_hex>)` makes the edge queryable
+                // by source (`canonical_of`) and discoverable via
+                // `query_unique_labels`. `("sigchain", "bucket_merge")` both
+                // fires the notifier (gossip head announce + alias-cache
+                // invalidation on peers) and routes the block into the audit
+                // decode path (§8.1).
+                tags: vec![
+                    ("bucket_merge".to_string(), source_hex),
+                    ("kind".to_string(), "bucket_merge".to_string()),
+                    ("sigchain".to_string(), "bucket_merge".to_string()),
+                ],
+                wall_ns: now_ns,
+                causal: vec![],
+                provenance: vec![],
+                // Home the record on the canonical so it travels with the
+                // bucket it governs.
+                cluster_id: Some(self.cluster_id.clone()),
+                bucket_id: Some(canonical.0.to_vec()),
+                ..Default::default()
+            };
+            self.store.insert_envelope(&cid_bytes, &rec_bytes, &meta)?;
+            tracing::info!(
+                source = %source,
+                canonical = %canonical,
+                cid = %hex::encode(&cid_bytes),
+                "bucket merge recorded"
+            );
+            cids.push(cid_bytes);
+        }
+        self.bump_alias_generation();
+        Ok(cids)
+    }
+
+    /// Reverse a merge: retract the `source → canonical` record(s) so the
+    /// union stops including `source`. Reversible; the source's blocks are
+    /// untouched (they were never re-homed).
+    pub async fn bucket_unmerge(&self, source: &BucketId, canonical: &BucketId) -> Result<()> {
+        let source_hex = hex::encode(source.0);
+        let cids = self
+            .store
+            .query_by_tag("bucket_merge", &source_hex, 0, usize::MAX)
+            .unwrap_or_default();
+        let mut retracted_any = false;
+        for cid in cids {
+            if self.store.is_retracted(&cid).unwrap_or(false) {
+                continue;
+            }
+            let Ok(Some(data)) = self.store.get_block(&cid) else {
+                continue;
+            };
+            let Some(rec) =
+                memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
+            else {
+                continue;
+            };
+            if rec.canonical.0 == canonical.0 {
+                self.retract(&cid, "bucket unmerge").await?;
+                retracted_any = true;
+            }
+        }
+        if !retracted_any {
+            return Err(ApiError::Other(format!(
+                "no merge edge {source} → {canonical} to reverse"
+            )));
+        }
+        self.bump_alias_generation();
+        Ok(())
     }
 
     /// Revoke a previously-issued bucket grant.
