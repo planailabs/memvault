@@ -1740,8 +1740,7 @@ impl LocalClient {
         name_hint: &str,
         owner_agent: memvault_core::AgentName,
     ) -> Result<memvault_core::BucketId> {
-        let bucket_id =
-            crate::rebuild::deterministic_agent_bucket_id(&self.cluster_id, agent_pubkey);
+        let bucket_id = crate::rebuild::deterministic_agent_bucket_id(agent_pubkey);
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
         if self
             .store
@@ -4410,12 +4409,71 @@ impl LocalClient {
         maps
     }
 
-    /// Hook for the agent-bucket auto-alias pass (Phase 9). Adds
-    /// deterministic `legacy_agent_bucket_id → deterministic_agent_bucket_id`
-    /// edges that need no signed record (owner-implied, same pubkey). A
-    /// no-op until that phase lands; kept separate so the signed-record and
-    /// deterministic alias sources stay clearly delineated.
-    fn extend_with_agent_aliases(&self, _alias: &mut std::collections::HashMap<[u8; 32], [u8; 32]>) {
+    /// Auto-alias pass: add deterministic `legacy_agent_bucket_id →
+    /// deterministic_agent_bucket_id` edges that need no signed record
+    /// (owner-implied — the same agent pubkey owns both ends). For every
+    /// known agent pubkey `P`, the new derivation homes its bucket at
+    /// `f(P)` (cluster-independent); its data may sit in a legacy bucket
+    /// `legacy_f(c, P)` for some prior cluster context `c`. We alias each
+    /// existing legacy bucket onto `f(P)` so the old data surfaces under
+    /// the stable canonical.
+    ///
+    /// Cluster contexts covered: pre-genesis (`[0;32]`) and the current
+    /// cluster_id — the two ids the old derivation actually produced.
+    /// (ClusterGenesis-history rotation and AgentKeyRotation chains are not
+    /// enumerable from stored state today; left as future inputs.)
+    ///
+    /// Deterministic + per-node: every node computes the same edges, so no
+    /// authority signature is needed (unlike a generic `BucketMergeRecord`).
+    /// `or_insert` so a signed merge for the same source always wins.
+    fn extend_with_agent_aliases(&self, alias: &mut std::collections::HashMap<[u8; 32], [u8; 32]>) {
+        // Candidate agent pubkeys: every attested agent, plus any bucket's
+        // recorded owner-agent pubkey (covers agents whose attestation this
+        // node hasn't synced but whose bucket it holds).
+        let mut pubkeys: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        if let Ok(atts) = crate::sigchain::scan_agent_attestations(self) {
+            for att in atts {
+                pubkeys.insert(att.agent_pubkey);
+            }
+        }
+        for bid in self.all_bucket_id_arrays() {
+            if let Ok(Some(info)) = self.bucket_info_sync(&BucketId(bid)) {
+                if let Some(pk) = info.owner_agent_pubkey {
+                    pubkeys.insert(pk);
+                }
+            }
+        }
+
+        // Legacy cluster contexts the old derivation could have used.
+        let mut clusters: Vec<Vec<u8>> = vec![vec![0u8; 32]];
+        if self.cluster_id.iter().any(|&b| b != 0) {
+            clusters.push(self.cluster_id.clone());
+        }
+
+        for pk in pubkeys {
+            let canonical = crate::rebuild::deterministic_agent_bucket_id(&pk).0;
+            for c in &clusters {
+                let old = crate::rebuild::legacy_agent_bucket_id(c, &pk).0;
+                if old == canonical {
+                    continue;
+                }
+                // Only alias a legacy id that actually exists as a bucket on
+                // this node — never invent an edge to an empty source.
+                if self.store.get_bucket(&old).ok().flatten().is_some() {
+                    alias.entry(old).or_insert(canonical);
+                }
+            }
+        }
+    }
+
+    /// Run the agent-bucket migration: force the alias maps to rebuild so
+    /// the deterministic legacy→canonical agent aliases (see
+    /// [`Self::extend_with_agent_aliases`]) take effect. Idempotent — the
+    /// aliases are computed, not persisted, so re-running only rebuilds the
+    /// cache. A daemon may call this at startup; resolution also triggers it
+    /// lazily on first use.
+    pub fn run_agent_bucket_migration(&self) {
+        self.bump_alias_generation();
     }
 
     /// Resolve a bucket id to its terminal canonical, following the merge

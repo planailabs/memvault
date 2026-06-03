@@ -38,18 +38,32 @@ pub fn deterministic_legacy_id(client: &LocalClient) -> BucketId {
     BucketId(id)
 }
 
-/// Deterministic agent-bucket ID — a stable function of
-/// `(cluster_id, agent_pubkey)` so every node in the cluster lands on
-/// the same bucket without consulting any list, and so collisions
-/// across reused names are impossible. The agent's pubkey is the
-/// uniqueness anchor; the `AgentName` string label can be reused or
-/// re-claimed and is therefore unsafe as a primary key.
+/// Deterministic agent-bucket ID — a stable function of the agent
+/// **pubkey alone**. The pubkey *is* the agent identity, so the bucket id
+/// is stable for the life of that identity across genesis, standalone→
+/// cluster join, and re-genesis / cluster_id rotation. (Previously the
+/// `cluster_id` was mixed in, so the same agent mapped to a *different*
+/// bucket whenever the cluster_id changed, orphaning prior data; the
+/// bucket-merge auto-alias pass folds those legacy ids into this one.)
 ///
-/// Pre-genesis (zero `cluster_id`) the seed degrades to "pubkey
-/// alone" — still idempotent on this node, and `rebuild` rebinds the
-/// resulting bucket at first post-genesis rebuild the same way
-/// `deterministic_legacy_id` does for unbucketed-adoption.
-pub fn deterministic_agent_bucket_id(cluster_id: &[u8], agent_pubkey: &[u8]) -> BucketId {
+/// The `AgentName` string label can be reused or re-claimed and is
+/// therefore unsafe as a primary key — only the pubkey is.
+pub fn deterministic_agent_bucket_id(agent_pubkey: &[u8]) -> BucketId {
+    let mut payload: Vec<u8> = Vec::with_capacity(agent_pubkey.len() + 16);
+    payload.extend_from_slice(b"::agent::");
+    payload.extend_from_slice(agent_pubkey);
+    let cid = memvault_core::cid_from_bytes(&payload);
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&cid.to_bytes()[..32]);
+    BucketId(id)
+}
+
+/// The **legacy** agent-bucket ID: a function of `(cluster_id,
+/// agent_pubkey)`. Retained only to recompute the bucket ids an agent's
+/// data was historically stored under, so the auto-alias migration can
+/// map them onto the stable [`deterministic_agent_bucket_id`]. Never used
+/// for new writes.
+pub fn legacy_agent_bucket_id(cluster_id: &[u8], agent_pubkey: &[u8]) -> BucketId {
     let mut payload: Vec<u8> = Vec::with_capacity(cluster_id.len() + agent_pubkey.len() + 16);
     payload.extend_from_slice(cluster_id);
     payload.extend_from_slice(b"::agent::");

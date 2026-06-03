@@ -756,6 +756,10 @@ fn apply_sigchain_block(
             // effects (e.g. an attestation referencing a node that was just
             // added) and is bounded by the AgentAttestation block count.
             refresh_trusted_agents(client, state);
+            // A newly-known agent pubkey may have legacy (cluster-scoped)
+            // buckets to auto-alias onto its stable f(pubkey) id. Invalidate
+            // the alias cache so the next resolution recomputes those edges.
+            client.bump_alias_generation();
         }
         LABEL_NODE_REV => {
             let Ok(rev) = serde_ipld_dagcbor::from_slice::<NodeRevocation>(&bytes) else {

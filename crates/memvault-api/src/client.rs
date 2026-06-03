@@ -424,8 +424,9 @@ pub trait MemvaultClient: Send + Sync {
     async fn bucket_archive(&self, id: &BucketId, reason: &str) -> Result<()>;
 
     /// Find or create the agent's data bucket, keyed by its ed25519 pubkey
-    /// (`deterministic_agent_bucket_id(cluster_id, pubkey)` — cryptographically
-    /// unique across nodes). `name_hint` is only a display label on the
+    /// (`deterministic_agent_bucket_id(pubkey)` — stable for the life of the
+    /// agent identity, independent of cluster_id, so genesis/join/re-genesis
+    /// never re-home it). `name_hint` is only a display label on the
     /// BucketDecl.
     ///
     /// Over HTTP the server is authoritative: it derives the pubkey from the

@@ -2196,3 +2196,64 @@ async fn merge_appears_in_audit_log() {
         "merge surfaces as OpKind::BucketMerge in the audit log"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Agent-bucket migration (deterministic legacy → pubkey auto-alias)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agent_bucket_migration_aliases_legacy_to_pubkey() {
+    use memvault_api::rebuild::{deterministic_agent_bucket_id, legacy_agent_bucket_id};
+    use memvault_core::QueryScope;
+
+    let (_dir, client) = make_client(); // cluster_id = "cluster-1"
+    let pk = [3u8; 32]; // agent pubkey
+
+    // The stable canonical id is f(pubkey); a pre-genesis legacy id mixed in
+    // the (then zero) cluster_id. They differ — that's the orphaning bug.
+    let canonical = deterministic_agent_bucket_id(&pk);
+    let legacy = legacy_agent_bucket_id(&[0u8; 32], &pk);
+    assert_ne!(canonical.0, legacy.0, "legacy and canonical ids differ");
+
+    // Materialize a legacy agent bucket as the old code would have: explicit
+    // id, owner = pk, with a doc in it.
+    client
+        .bucket_create_inner_sync(
+            legacy.clone(),
+            "agent:old",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Agent,
+            Some(memvault_core::AgentName("old".into())),
+            Some(pk),
+        )
+        .unwrap();
+    put_note(&client, &legacy, "legacy agent data").await;
+
+    // Create the canonical bucket the new way (f(pubkey)) + a fresh doc.
+    let made = client
+        .ensure_agent_bucket_for_pubkey_sync(&pk, "agent")
+        .unwrap();
+    assert_eq!(made.0, canonical.0, "new derivation homes at f(pubkey)");
+    put_note(&client, &canonical, "new agent data").await;
+
+    // Run the (idempotent) migration: the legacy id resolves under canonical.
+    client.run_agent_bucket_migration();
+    assert_eq!(
+        client.canonical_of(&legacy.0),
+        canonical.0,
+        "legacy bucket aliases onto the pubkey-derived canonical"
+    );
+
+    // A query scoped to the canonical surfaces both legacy and new data.
+    let union = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(canonical.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(union.len(), 2, "canonical surfaces legacy + new agent data");
+
+    // Idempotent: re-running changes nothing.
+    client.run_agent_bucket_migration();
+    assert_eq!(client.canonical_of(&legacy.0), canonical.0);
+}
