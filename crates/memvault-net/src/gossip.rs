@@ -31,14 +31,41 @@ pub fn federation_ident_topic(cluster_a: &[u8], cluster_b: &[u8]) -> IdentTopic 
     IdentTopic::new(federation_topic(cluster_a, cluster_b))
 }
 
-/// Returns the gossipsub topic for DAG head announcements.
+/// Returns the GLOBAL (unscoped) heads topic. Prefer
+/// [`heads_topic_for`] — cluster-scoped topics keep head gossip within a
+/// cluster instead of flooding every memvault node and filtering on
+/// receipt. Retained for callers without a cluster_id in hand.
 pub fn heads_topic() -> IdentTopic {
     IdentTopic::new(HEADS_TOPIC)
 }
 
-/// Returns the gossipsub topic for admin announcements.
+/// Returns the GLOBAL (unscoped) admin topic. Prefer [`admin_topic_for`].
 pub fn admin_topic() -> IdentTopic {
     IdentTopic::new(ADMIN_TOPIC)
+}
+
+/// Cluster-scoped DAG-head topic: `ai-memvault/heads/v1/<cluster_hex>`.
+/// Same-cluster nodes mesh here; head announcements never leave the
+/// cluster. Mirrors the cluster-pair scoping of [`federation_topic`] and
+/// the `memvault/<cluster_hex>` identify convention.
+pub fn heads_topic_for(cluster_id: &[u8]) -> IdentTopic {
+    IdentTopic::new(format!("{}/{}", HEADS_TOPIC, hex::encode(cluster_id)))
+}
+
+/// Cluster-scoped admin topic: `ai-memvault/admin/v1/<cluster_hex>`.
+pub fn admin_topic_for(cluster_id: &[u8]) -> IdentTopic {
+    IdentTopic::new(format!("{}/{}", ADMIN_TOPIC, hex::encode(cluster_id)))
+}
+
+/// True if `topic` is a heads topic (global base or any cluster-scoped
+/// `ai-memvault/heads/v1/<cluster_hex>`). Used to route inbound gossip.
+pub fn is_heads_topic(topic: &str) -> bool {
+    topic == HEADS_TOPIC || topic.starts_with(&format!("{}/", HEADS_TOPIC))
+}
+
+/// True if `topic` is an admin topic (global base or cluster-scoped).
+pub fn is_admin_topic(topic: &str) -> bool {
+    topic == ADMIN_TOPIC || topic.starts_with(&format!("{}/", ADMIN_TOPIC))
 }
 
 /// A head announcement: tells peers about a new block in the store.
@@ -83,6 +110,31 @@ pub enum AdminAnnouncement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cluster_scoped_topics_roundtrip() {
+        let cid = [7u8; 32];
+        let heads = heads_topic_for(&cid);
+        let admin = admin_topic_for(&cid);
+        assert_eq!(
+            heads.to_string(),
+            format!("{}/{}", HEADS_TOPIC, hex::encode(cid))
+        );
+        // The publish topic is classified back as a heads/admin topic.
+        assert!(is_heads_topic(heads.to_string().as_str()));
+        assert!(is_admin_topic(admin.to_string().as_str()));
+        // The global bases still classify (back-compat).
+        assert!(is_heads_topic(HEADS_TOPIC));
+        assert!(is_admin_topic(ADMIN_TOPIC));
+        // Cross-classification and unrelated topics don't match.
+        assert!(!is_admin_topic(heads.to_string().as_str()));
+        assert!(!is_heads_topic("ai-memvault/federation/v1/a/b"));
+        // Different clusters get different topics (no cross-cluster mesh).
+        assert_ne!(
+            heads_topic_for(&[1u8; 32]).to_string(),
+            heads_topic_for(&[2u8; 32]).to_string()
+        );
+    }
 
     #[test]
     fn test_federation_topic_deterministic() {

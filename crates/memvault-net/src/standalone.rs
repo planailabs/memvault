@@ -26,11 +26,15 @@ pub struct StandaloneMemvaultBehaviour {
     pub gossipsub: gossipsub::Behaviour,
 }
 
-/// Build a standalone swarm suitable for CLI tools or tests.
+/// Build a standalone swarm suitable for CLI tools or tests. `cluster_id`
+/// scopes the heads/admin gossip topics so the node meshes only with
+/// same-cluster peers (genesis/join happens before this is built, so the
+/// id is stable for the swarm's lifetime).
 pub async fn standalone_swarm(
     keypair: Keypair,
     listen_addr: Multiaddr,
     bootstrap_peers: Vec<Multiaddr>,
+    cluster_id: Vec<u8>,
 ) -> Result<Swarm<StandaloneMemvaultBehaviour>, NetError> {
     let local_peer_id = keypair.public().to_peer_id();
 
@@ -70,10 +74,10 @@ pub async fn standalone_swarm(
             )
             .map_err(|e| NetError::Gossipsub(e.to_string()))?;
 
-            // Subscribe to memvault topics
-            gs.subscribe(&gossip::heads_topic())
+            // Subscribe to the cluster-scoped memvault topics.
+            gs.subscribe(&gossip::heads_topic_for(&cluster_id))
                 .map_err(|e| NetError::Gossipsub(e.to_string()))?;
-            gs.subscribe(&gossip::admin_topic())
+            gs.subscribe(&gossip::admin_topic_for(&cluster_id))
                 .map_err(|e| NetError::Gossipsub(e.to_string()))?;
 
             let identify_config =

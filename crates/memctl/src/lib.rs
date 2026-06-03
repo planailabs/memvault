@@ -1076,7 +1076,7 @@ mod native {
 
                     let listen: libp2p::Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
                     let mut swarm =
-                        match memvault_net::standalone_swarm(keypair, listen, vec![]).await {
+                        match memvault_net::standalone_swarm(keypair, listen, vec![], cluster_id.clone()).await {
                             Ok(s) => s,
                             Err(e) => {
                                 tracing::error!("failed to start swarm: {e}");
@@ -2578,10 +2578,14 @@ mod native {
                         build_join_config(&data_dir, &cluster_id_bytes, &keypair)?;
 
                     // Build standalone swarm
-                    let mut swarm =
-                        memvault_net::standalone_swarm(keypair, listen_addr, bootstrap_addrs)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
+                    let mut swarm = memvault_net::standalone_swarm(
+                        keypair,
+                        listen_addr,
+                        bootstrap_addrs,
+                        cluster_id_bytes.to_vec(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
                     // Bridge EventBus → sync loop head announcements
                     let (head_tx, head_rx) = memvault_swarm::head_channel();
@@ -2608,10 +2612,14 @@ mod native {
                 {
                     let join_config =
                         build_join_config(&data_dir, &cluster_id_bytes, &keypair)?;
-                    let mut swarm =
-                        memvault_net::standalone_swarm(keypair, listen_addr, bootstrap_addrs)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
+                    let mut swarm = memvault_net::standalone_swarm(
+                        keypair,
+                        listen_addr,
+                        bootstrap_addrs,
+                        cluster_id_bytes.to_vec(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("swarm error: {e}"))?;
 
                     let (head_tx, head_rx) = memvault_swarm::head_channel();
                     memvault_swarm::spawn_event_bridge(event_bus_shared, head_tx);

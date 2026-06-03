@@ -148,6 +148,7 @@ async fn join_protocol_promotes_peer_to_attested() {
         admin_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -157,6 +158,7 @@ async fn join_protocol_promotes_peer_to_attested() {
         peer_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -371,6 +373,7 @@ async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
         admin_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -380,6 +383,7 @@ async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
         peer_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -549,6 +553,7 @@ async fn agent_attestation_syncs_with_correct_tag() {
         admin_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -558,6 +563,7 @@ async fn agent_attestation_syncs_with_correct_tag() {
         peer_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -845,6 +851,7 @@ async fn join_bundles_admin_node_attestation() {
         admin_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -854,6 +861,7 @@ async fn join_bundles_admin_node_attestation() {
         peer_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -996,6 +1004,7 @@ async fn join_consumes_token_once_and_refuses_replay() {
         admin_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -1004,6 +1013,7 @@ async fn join_consumes_token_once_and_refuses_replay() {
         peer_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -1165,6 +1175,7 @@ async fn join_admits_co_admin_when_token_allows() {
         admin_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -1173,6 +1184,7 @@ async fn join_admits_co_admin_when_token_allows() {
         peer_kp.clone(),
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();

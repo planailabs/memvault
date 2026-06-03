@@ -846,7 +846,9 @@ fn publish_head(host: &mut impl MemvaultHost, cluster_id: &[u8], outbound: Outbo
         bucket_id: outbound.bucket_id,
     };
     if let Ok(data) = serde_ipld_dagcbor::to_vec(&ann) {
-        host.gossip_publish(memvault_net::gossip::heads_topic(), data);
+        // Cluster-scoped: only same-cluster peers (subscribed to
+        // ai-memvault/heads/v1/<cluster_hex>) receive the announcement.
+        host.gossip_publish(memvault_net::gossip::heads_topic_for(cluster_id), data);
     }
 }
 
@@ -857,7 +859,7 @@ fn handle_gossip_message(
     message: &libp2p::gossipsub::Message,
 ) {
     let topic = message.topic.as_str();
-    if topic == memvault_net::HEADS_TOPIC {
+    if memvault_net::gossip::is_heads_topic(topic) {
         if let Ok(ann) = serde_ipld_dagcbor::from_slice::<HeadAnnouncement>(&message.data) {
             if store.get_block(&ann.cid).ok().flatten().is_none() {
                 tracing::debug!(cid = %hex::encode(&ann.cid), %source, "missing block from gossip");
@@ -874,7 +876,7 @@ fn handle_gossip_message(
                 );
             }
         }
-    } else if topic == memvault_net::ADMIN_TOPIC {
+    } else if memvault_net::gossip::is_admin_topic(topic) {
         tracing::debug!(%source, len = message.data.len(), "admin announcement received");
     }
 }

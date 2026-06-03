@@ -27,6 +27,7 @@ async fn spawn_swarm() -> (
         keypair,
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(), // random port
         vec![],
+        vec![0u8; 32],
     )
     .await
     .unwrap();
@@ -165,7 +166,7 @@ async fn gossip_admin_announcement_propagates() {
     let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
 
     connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
-    let topic = gossip::admin_topic();
+    let topic = gossip::admin_topic_for(&[0u8; 32]);
     wait_for_mesh(&mut swarm_a, &mut swarm_b, peer_a, peer_b, topic.hash()).await;
 
     // Publish an admin announcement from swarm_a
@@ -206,7 +207,7 @@ async fn gossip_bucket_created_propagates() {
     let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
 
     connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
-    let admin = gossip::admin_topic();
+    let admin = gossip::admin_topic_for(&[0u8; 32]);
     wait_for_mesh(&mut swarm_a, &mut swarm_b, peer_a, peer_b, admin.hash()).await;
 
     let announcement = AdminAnnouncement::BucketCreated(vec![10, 20, 30]);
@@ -214,7 +215,7 @@ async fn gossip_bucket_created_propagates() {
     swarm_a
         .behaviour_mut()
         .gossipsub
-        .publish(gossip::admin_topic(), data)
+        .publish(gossip::admin_topic_for(&[0u8; 32]), data)
         .unwrap();
 
     let received = timeout(Duration::from_secs(5), async {
@@ -696,7 +697,7 @@ async fn head_announcement_propagates() {
     let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
 
     connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
-    let heads = gossip::heads_topic();
+    let heads = gossip::heads_topic_for(&[0u8; 32]);
     wait_for_mesh(&mut swarm_a, &mut swarm_b, peer_a, peer_b, heads.hash()).await;
 
     let ann = memvault_net::HeadAnnouncement {
@@ -709,7 +710,7 @@ async fn head_announcement_propagates() {
     swarm_a
         .behaviour_mut()
         .gossipsub
-        .publish(gossip::heads_topic(), data)
+        .publish(gossip::heads_topic_for(&[0u8; 32]), data)
         .unwrap();
 
     let received = timeout(Duration::from_secs(5), async {
@@ -721,7 +722,7 @@ async fn head_announcement_propagates() {
                             libp2p::gossipsub::Event::Message { message, .. }
                         )
                     )) = event {
-                        if message.topic.as_str() == memvault_net::HEADS_TOPIC {
+                        if gossip::is_heads_topic(message.topic.as_str()) {
                             let decoded: memvault_net::HeadAnnouncement =
                                 serde_ipld_dagcbor::from_slice(&message.data).unwrap();
                             assert_eq!(decoded.cid, vec![0xCA; 32]);
