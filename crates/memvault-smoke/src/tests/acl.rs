@@ -1502,3 +1502,50 @@ async fn self_attested_admin_agent_is_allowed() {
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
         .expect("self-attested Admin agent must pass");
 }
+
+/// The startup orphan sweep removes orphaned attestations but keeps
+/// legitimate (self-attested) ones.
+#[tokio::test]
+async fn prune_orphaned_agent_attestations_sweeps_orphans_only() {
+    let node = TestNode::new();
+
+    // A legit self-attested agent (attesting node = this node).
+    let (legit_pk, _) = setup_agent(&node, "legit-ui", AgentRole::Admin).await;
+
+    // An orphan attested by a node never attested into the cluster.
+    let foreign_node = SigningKey::from_bytes(&[0x77u8; 32]);
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let orphan_pk = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    let att = memvault_auth::sign_agent_attestation(
+        &foreign_node,
+        AgentName("orphan-ui".to_string()),
+        orphan_pk,
+        AgentRole::Admin,
+        u64::MAX,
+    )
+    .expect("sign orphan");
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &att)
+        .expect("publish orphan");
+
+    // Sweep.
+    let pruned = node
+        .client
+        .prune_orphaned_agent_attestations()
+        .expect("prune");
+    assert_eq!(pruned, 1, "exactly the orphan is pruned");
+
+    // The orphan attestation is gone; the legit one survives.
+    assert!(
+        memvault_api::sigchain::find_agent_attestation(&node.client, &orphan_pk)
+            .unwrap()
+            .is_none(),
+        "orphan attestation removed"
+    );
+    assert!(
+        memvault_api::sigchain::find_agent_attestation(&node.client, &legit_pk)
+            .unwrap()
+            .is_some(),
+        "legit self-attested agent kept"
+    );
+}

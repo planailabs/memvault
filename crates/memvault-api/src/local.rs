@@ -1086,6 +1086,46 @@ impl LocalClient {
         false
     }
 
+    /// Delete orphaned agent attestation blocks — ones whose attesting node
+    /// is not trusted (`is_attesting_node_trusted`: neither this node's own
+    /// key nor an admin-attested cluster member). Returns the number pruned.
+    ///
+    /// Safe to run on a SETTLED trust view (e.g. at startup after
+    /// `bootstrap_cluster_trust`): orphans are inert (never trusted, ACL- and
+    /// JWT-rejected), so removing them only clears cruft. A legitimate agent
+    /// whose node attestation hasn't synced yet would re-sync via RBSR, so a
+    /// premature prune is self-healing rather than lossy. On a pre-genesis /
+    /// standalone node (no admin keys) `is_attesting_node_trusted` returns
+    /// true for everything, so nothing is pruned.
+    pub fn prune_orphaned_agent_attestations(&self) -> Result<usize> {
+        let mut pruned = 0usize;
+        for cid in self
+            .store
+            .query_by_tag("sigchain", "agent_att", 0, 4096)
+            .unwrap_or_default()
+        {
+            let Ok(Some(bytes)) = self.store.get_block(&cid) else {
+                continue;
+            };
+            let Ok(att) =
+                serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&bytes)
+            else {
+                continue;
+            };
+            if !self.is_attesting_node_trusted(&att.node_pubkey) {
+                if self.store.delete_block(&cid).unwrap_or(false) {
+                    pruned += 1;
+                    tracing::debug!(
+                        agent = %att.agent_id.0,
+                        node = %hex::encode(att.node_pubkey),
+                        "pruned orphaned agent attestation"
+                    );
+                }
+            }
+        }
+        Ok(pruned)
+    }
+
     /// Pick a signing key this node may legitimately use to issue or
     /// revoke grants on `bucket_id`, with the resulting signer pubkey.
     /// Tries, in order: a held cluster admin key; the held owner-agent
