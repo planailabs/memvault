@@ -1549,3 +1549,74 @@ async fn prune_orphaned_agent_attestations_sweeps_orphans_only() {
         "legit self-attested agent kept"
     );
 }
+
+/// Post-genesis local agent end-to-end: a founder node, after the real
+/// `bootstrap_cluster_trust`, must SELF-ATTEST its own node key as
+/// `Attested` (not leave it `PreGenesis`). Otherwise a fresh agent enrolled
+/// locally — attested by that node — fails `jwt::verify` with 401
+/// ("PreGenesis trust returned but admin keys are configured"), which is
+/// what broke the MCP's `/buckets/agent` call. This pins the invariant.
+#[tokio::test]
+async fn post_genesis_founder_self_attests_and_local_agent_is_trusted() {
+    use std::sync::Arc;
+    use ed25519_dalek::SigningKey;
+    use memvault_auth::jwt::NodeTrust;
+    use memvault_core::ClusterId;
+    use tokio::sync::RwLock;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        memvault_store::MemvaultStore::open(dir.path().join("blocks.redb")).unwrap(),
+    );
+    let cluster_id = ClusterId([3u8; 32]);
+    store.set_local_cluster_id(&cluster_id.0).unwrap();
+    let mut peer_id = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut peer_id);
+    store.set_local_peer_id(&peer_id).unwrap();
+
+    let client = Arc::new(memvault_api::LocalClient::new(
+        Arc::clone(&store),
+        Arc::new(RwLock::new(memvault_query::QuotaManager::default())),
+        Arc::new(memvault_api::EventBus::new(64)),
+        peer_id,
+        cluster_id.0.to_vec(),
+    ));
+    let admin_sk = SigningKey::from_bytes(&[5u8; 32]);
+    client.set_admin_signing_key(admin_sk.clone());
+    let genesis =
+        memvault_auth::sign_admin_genesis(&admin_sk, cluster_id.clone(), memvault_core::wall_ns())
+            .unwrap();
+    client.set_pinned_admin_genesis(genesis);
+    let node_sk = SigningKey::from_bytes(&[9u8; 32]);
+    let node_pk = node_sk.verifying_key().to_bytes();
+    client.set_node_signing_key(node_sk);
+
+    // Real bootstrap: holding the admin key, the founder must self-attest.
+    let boot = memvault_api::bootstrap::bootstrap_cluster_trust(&client).expect("bootstrap");
+
+    // The local node must be Attested, not PreGenesis.
+    {
+        let nt = boot.trust_state.node_trust.read().unwrap();
+        match nt.get(&node_pk) {
+            Some(NodeTrust::Attested(_)) => {}
+            other => panic!("post-genesis founder node must be Attested, got {other:?}"),
+        }
+    }
+
+    // A fresh local agent is attested by this (Attested) node, so its
+    // attestation chains to a trusted node — `jwt::verify` would accept it.
+    let agent = memvault_api::agent_identity::enroll_local_agent_in_keystore(
+        &client,
+        "mcp",
+        AgentRole::Admin,
+        u64::MAX,
+    )
+    .expect("enroll local agent");
+    let att = memvault_api::sigchain::find_agent_attestation(&client, &agent.verifying_key.to_bytes())
+        .unwrap()
+        .expect("agent attestation present");
+    assert_eq!(
+        att.node_pubkey, node_pk,
+        "local agent is attested by the local node key"
+    );
+}
