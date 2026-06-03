@@ -3499,6 +3499,15 @@ mod native {
         Ok(())
     }
 
+    /// Derive the libp2p `PeerId` from a 32-byte ed25519 node pubkey.
+    /// Under design A-1 (node key == libp2p key) this is the PeerId that
+    /// node presents on the wire, so it cross-references swarm logs.
+    fn node_pk_to_peer_id(pk: &[u8; 32]) -> String {
+        libp2p::identity::ed25519::PublicKey::try_from_bytes(pk)
+            .map(|ed| libp2p::identity::PublicKey::from(ed).to_peer_id().to_string())
+            .unwrap_or_else(|_| "<bad-key>".to_string())
+    }
+
     /// Summary of a store's sigchain, returned for side-by-side comparison.
     struct SigchainSummary {
         cluster_id: Option<[u8; 32]>,
@@ -3550,8 +3559,9 @@ mod native {
                                 .unwrap_or(false)
                         });
                         println!(
-                            "  node_att  member={} cluster={} via={:?} admin_sig_ok={}",
+                            "  node_att  member={} peer_id={} cluster={} via={:?} admin_sig_ok={}",
                             hex::encode(member),
+                            node_pk_to_peer_id(&member),
                             hex::encode(a.cluster_id.0),
                             a.issued_via,
                             sig_ok
@@ -3598,7 +3608,12 @@ mod native {
         if orphaned_agents > 0 {
             println!("  -- dead node identities (attested no longer / never):");
             for (n, count) in &orphan_nodes {
-                println!("       {} ({} agent attestation(s))", hex::encode(n), count);
+                println!(
+                    "       {} peer_id={} ({} agent attestation(s))",
+                    hex::encode(n),
+                    node_pk_to_peer_id(n),
+                    count
+                );
             }
         }
 
