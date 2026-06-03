@@ -425,12 +425,6 @@ impl MemvaultServer {
         description = "Add an entity to the knowledge graph. Returns the hex-encoded entity ID."
     )]
     async fn graph_add(&self, Parameters(params): Parameters<GraphAddParams>) -> String {
-        if memvault_core::is_reserved_entity_kind(&params.kind) {
-            return format!(
-                "error: '{}' is a managed kind — use memvault_skill_publish or the VFS tools, not graph_add",
-                params.kind
-            );
-        }
         let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
@@ -452,7 +446,7 @@ impl MemvaultServer {
             props: props_map,
             edges_out: vec![],
         };
-        match self.client.add_entity(entity, vis, Some(&bucket)).await {
+        match self.client.add_entity_external(entity, vis, Some(&bucket)).await {
             Ok(id) => {
                 let node_id = format!("entity:{}", hex::encode(id.0));
                 let mut result =
@@ -873,19 +867,12 @@ impl MemvaultServer {
         description = "Retract (soft-delete) any node. Node must be in type:hex format: doc:<hex>, entity:<hex>, or file:<hex>."
     )]
     async fn retract(&self, Parameters(params): Parameters<RetractParams>) -> String {
-        // Reserved kinds (skill, vfs:dir) must be removed via their dedicated
-        // tools, not the generic retract.
-        if let Some(NodeRef::Entity(eid)) = NodeRef::from_tag_label(&params.node) {
-            if let Ok(Some(e)) = self.client.get_entity(&eid).await {
-                if memvault_core::is_reserved_entity_kind(&e.kind) {
-                    return format!(
-                        "error: '{}' is a managed kind — use memvault_skill_delete or the VFS tools",
-                        e.kind
-                    );
-                }
-            }
-        }
-        match self.client.retract_node(&params.node, &params.reason).await {
+        // External (validated) retract: refuses reserved kinds (skill, vfs:dir).
+        match self
+            .client
+            .retract_node_external(&params.node, &params.reason)
+            .await
+        {
             Ok(()) => serde_json::json!({
                 "node_id": params.node,
                 "status": "retracted",

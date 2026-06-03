@@ -116,6 +116,48 @@ pub trait MemvaultClient: Send + Sync {
         max_depth: usize,
     ) -> Result<Vec<TraversalHit>>;
 
+    // -- External (validated) node API --
+    //
+    // `add_entity` / `retract_node` above are the *internal* node API: trusted
+    // callers (skill_publish, VFS mkdir/unlink) use them to manage reserved
+    // kinds. User-facing surfaces (HTTP handlers, MCP tools, the CLI) instead
+    // call these *external* variants, which reject creating or retracting a
+    // reserved/managed kind (skill, vfs:dir) so those aggregates can only be
+    // changed through their dedicated APIs. The guard lives here once, rather
+    // than duplicated at every entry point.
+
+    /// Create an entity, rejecting reserved/managed kinds (skill, vfs:dir).
+    async fn add_entity_external(
+        &self,
+        entity: Entity,
+        vis: Visibility,
+        bucket: Option<&BucketId>,
+    ) -> Result<EntityId> {
+        if memvault_core::is_reserved_entity_kind(&entity.kind) {
+            return Err(crate::error::ApiError::Invalid(format!(
+                "'{}' is a managed kind — use the dedicated skill/VFS API, not the generic entity API",
+                entity.kind
+            )));
+        }
+        self.add_entity(entity, vis, bucket).await
+    }
+
+    /// Retract a node by id, refusing reserved/managed entities (skill,
+    /// vfs:dir) — those must be removed via their dedicated API.
+    async fn retract_node_external(&self, node_id: &str, reason: &str) -> Result<()> {
+        if let Some(NodeRef::Entity(eid)) = NodeRef::from_tag_label(node_id) {
+            if let Some(e) = self.get_entity(&eid).await? {
+                if memvault_core::is_reserved_entity_kind(&e.kind) {
+                    return Err(crate::error::ApiError::Invalid(format!(
+                        "'{}' is a managed kind — use the dedicated skill/VFS API, not the generic node API",
+                        e.kind
+                    )));
+                }
+            }
+        }
+        self.retract_node(node_id, reason).await
+    }
+
     // -- Tags --
     /// Add tags to an existing item (doc, entity, or file).
     async fn add_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()>;

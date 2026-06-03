@@ -63,8 +63,15 @@ impl IntoResponse for ApiError {
 
 impl From<memvault_api::ApiError> for ApiError {
     fn from(e: memvault_api::ApiError) -> Self {
+        use memvault_api::ApiError as E;
+        let status = match &e {
+            E::NotFound(_) => StatusCode::NOT_FOUND,
+            E::Forbidden(_) => StatusCode::FORBIDDEN,
+            E::Invalid(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             message: e.to_string(),
         }
     }

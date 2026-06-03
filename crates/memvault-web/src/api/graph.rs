@@ -140,11 +140,6 @@ pub async fn create_entity(
     Json(req): Json<CreateEntityRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     let kind = req.kind;
-    if memvault_core::is_reserved_entity_kind(&kind) {
-        return Err(ApiError::bad_request(
-            "reserved entity kind — create skills via /skills and VFS dirs via /vfs",
-        ));
-    }
     let entity = Entity {
         id: EntityId::random(),
         kind: kind.clone(),
@@ -166,7 +161,7 @@ pub async fn create_entity(
     }
     let id = state
         .client
-        .add_entity(entity, vis, bucket_id.as_ref())
+        .add_entity_external(entity, vis, bucket_id.as_ref())
         .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
@@ -233,20 +228,14 @@ pub async fn delete_entity(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let entity_id = parse_entity_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Write)?;
-    // Reserved kinds (skill, vfs:dir) must be removed via their dedicated API.
-    if let Ok(Some(e)) = state.client.get_entity(&entity_id).await {
-        if memvault_core::is_reserved_entity_kind(&e.kind) {
-            return Err(ApiError::bad_request(
-                "reserved entity kind — delete skills via /skills and VFS dirs via /vfs",
-            ));
-        }
-    }
-    // Retract entity by its ID bytes
-    let cid = state
+    // External (validated) node retract: refuses reserved kinds (skill,
+    // vfs:dir), which must be removed via their dedicated API.
+    let node_id = format!("entity:{}", hex::encode(entity_id.0));
+    state
         .client
-        .retract(&entity_id.0, "deleted via API")
+        .retract_node_external(&node_id, "deleted via API")
         .await?;
-    Ok(Json(serde_json::json!({ "cid": hex::encode(&cid) })))
+    Ok(Json(serde_json::json!({ "status": "retracted", "node_id": node_id })))
 }
 
 /// Parse an entity ID from either "entity:<hex>" or raw "<hex>" format.
