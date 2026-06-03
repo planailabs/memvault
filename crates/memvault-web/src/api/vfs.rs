@@ -57,6 +57,19 @@ pub struct VfsUnlinkQuery {
     pub bucket: String,
 }
 
+#[derive(Deserialize)]
+pub struct VfsTreeQuery {
+    pub path: String,
+    pub bucket: String,
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct VfsFindQuery {
+    pub target: String,
+    pub bucket: String,
+}
+
 #[derive(Serialize)]
 pub struct VfsEntry {
     pub name: String,
@@ -181,6 +194,37 @@ pub async fn vfs_unlink(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/vfs/tree?bucket=<hex>&path=/&max_depth=10
+pub async fn vfs_tree(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<VfsTreeQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let bucket = parse_bucket(&params.bucket)?;
+    crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
+    let max_depth = params.max_depth.unwrap_or(10);
+    let tree = vfs_ops::tree(state.client.as_ref(), &bucket, &params.path, max_depth)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "path": params.path, "tree": tree })))
+}
+
+/// GET /api/v1/vfs/find?bucket=<hex>&target=entity:<hex>
+pub async fn vfs_find(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<VfsFindQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let bucket = parse_bucket(&params.bucket)?;
+    crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
+    let target = NodeRef::from_tag_label(&params.target)
+        .ok_or_else(|| ApiError::bad_request("invalid target — expected type:hex"))?;
+    let paths = vfs_ops::find_paths(state.client.as_ref(), &bucket, &target)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "target": params.target, "paths": paths })))
 }
 
 /// POST /api/v1/vfs/mv  body: { from, to, bucket }

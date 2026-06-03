@@ -45,7 +45,8 @@ async fn list_vfs_entries(
     let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
         .map_err(|e| ServerFnError::new(format!("invalid bucket: {e}")))?;
 
-    let entries = memvault_api::vfs::ls(&*client, &bucket, &path, false)
+    let entries = client
+        .vfs_ls(&bucket, &path, false)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -71,7 +72,8 @@ async fn vfs_mkdir(path: String, bucket_hex: String) -> Result<String, ServerFnE
     let client = crate::ui::state::client()?;
     let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
         .map_err(|e| ServerFnError::new(format!("invalid bucket: {e}")))?;
-    let id = memvault_api::vfs::mkdir(&*client, &bucket, &path)
+    let id = client
+        .vfs_mkdir(&bucket, &path)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(format!("entity:{}", hex::encode(id.0)))

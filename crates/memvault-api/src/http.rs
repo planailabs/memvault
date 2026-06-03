@@ -17,6 +17,7 @@ use crate::types::{
     BucketInfo, DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, SkillBundle,
     SkillInfo, SkillSpec, TokenStatus, TraversalHit, View,
 };
+use crate::vfs::VfsEntry;
 
 /// JWT TTL for auto-issued tokens. 1h is plenty for typical CLI/MCP sessions
 /// and bounds the blast radius if a token is stolen.
@@ -1383,6 +1384,195 @@ impl MemvaultClient for HttpApiClient {
             .error_for_status()
             .map_err(map_reqwest)?;
         Ok(())
+    }
+
+    // -- VFS (threads through to the dedicated /vfs/* endpoints) --
+
+    async fn vfs_mkdir(&self, bucket: &BucketId, path: &str) -> Result<EntityId> {
+        let body = serde_json::json!({ "path": path, "bucket": hex::encode(bucket.0) });
+        let resp: serde_json::Value = self
+            .client
+            .post(self.url("/vfs/mkdir"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let id_str = resp["entity_id"].as_str().unwrap_or_default();
+        match NodeRef::from_tag_label(id_str) {
+            Some(NodeRef::Entity(eid)) => Ok(eid),
+            _ => Err(ApiError::Other(format!(
+                "vfs_mkdir: unexpected entity_id {id_str:?}"
+            ))),
+        }
+    }
+
+    async fn vfs_ls(
+        &self,
+        bucket: &BucketId,
+        path: &str,
+        recursive: bool,
+    ) -> Result<Vec<VfsEntry>> {
+        let url = format!(
+            "{}?bucket={}&path={}&recursive={}",
+            self.url("/vfs"),
+            hex::encode(bucket.0),
+            urlencoded(path),
+            recursive
+        );
+        let v: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        serde_json::from_value(v["entries"].clone())
+            .map_err(|e| ApiError::Serialization(e.to_string()))
+    }
+
+    async fn vfs_resolve(
+        &self,
+        bucket: &BucketId,
+        path: &str,
+    ) -> Result<Option<(NodeRef, Option<EdgeId>)>> {
+        let url = format!(
+            "{}?bucket={}&path={}",
+            self.url("/vfs/resolve"),
+            hex::encode(bucket.0),
+            urlencoded(path)
+        );
+        let resp = self.client.get(&url).send().await.map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let v: serde_json::Value = resp
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let Some(node) = NodeRef::from_tag_label(v["node_id"].as_str().unwrap_or_default()) else {
+            return Ok(None);
+        };
+        let edge = v["edge_id"]
+            .as_str()
+            .and_then(|h| hex::decode(h).ok())
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .map(EdgeId);
+        Ok(Some((node, edge)))
+    }
+
+    async fn vfs_link(&self, bucket: &BucketId, path: &str, target: &NodeRef) -> Result<EdgeId> {
+        let body = serde_json::json!({
+            "path": path,
+            "target": target.tag_label(),
+            "bucket": hex::encode(bucket.0),
+        });
+        let v: serde_json::Value = self
+            .client
+            .post(self.url("/vfs/link"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let edge_hex = v["edge_id"].as_str().unwrap_or_default();
+        let bytes = hex::decode(edge_hex)
+            .map_err(|_| ApiError::Other(format!("vfs_link: bad edge id {edge_hex:?}")))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| ApiError::Other("vfs_link: edge id wrong length".to_string()))?;
+        Ok(EdgeId(arr))
+    }
+
+    async fn vfs_unlink(&self, bucket: &BucketId, path: &str) -> Result<()> {
+        let url = format!(
+            "{}?bucket={}&path={}",
+            self.url("/vfs"),
+            hex::encode(bucket.0),
+            urlencoded(path)
+        );
+        self.client
+            .delete(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn vfs_mv(&self, bucket: &BucketId, from: &str, to: &str) -> Result<()> {
+        let body = serde_json::json!({
+            "from": from,
+            "to": to,
+            "bucket": hex::encode(bucket.0),
+        });
+        self.client
+            .post(self.url("/vfs/mv"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn vfs_tree(&self, bucket: &BucketId, path: &str, max_depth: usize) -> Result<String> {
+        let url = format!(
+            "{}?bucket={}&path={}&max_depth={max_depth}",
+            self.url("/vfs/tree"),
+            hex::encode(bucket.0),
+            urlencoded(path)
+        );
+        let v: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(v["tree"].as_str().unwrap_or_default().to_string())
+    }
+
+    async fn vfs_find(&self, bucket: &BucketId, target: &NodeRef) -> Result<Vec<String>> {
+        let url = format!(
+            "{}?bucket={}&target={}",
+            self.url("/vfs/find"),
+            hex::encode(bucket.0),
+            urlencoded(&target.tag_label())
+        );
+        let v: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        serde_json::from_value(v["paths"].clone())
+            .map_err(|e| ApiError::Serialization(e.to_string()))
     }
 
     async fn bucket_bind(

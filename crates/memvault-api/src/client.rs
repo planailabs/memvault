@@ -163,6 +163,64 @@ pub trait MemvaultClient: Send + Sync {
         self.retract_node_internal(node_id, reason).await
     }
 
+    // -- VFS (first-class, like skills) --
+    //
+    // The per-bucket virtual filesystem is a managed aggregate (vfs:dir entities
+    // + vfs:child edges). These are the dispatch points: `LocalClient` runs the
+    // `crate::vfs::*` logic in-process (creating dirs via the raw internal node
+    // op, which is why VFS never touches the guarded generic entity API); the
+    // HTTP client overrides them to hit the dedicated `/vfs/*` endpoints in one
+    // round trip. Callers (MCP tools, web UI, CLI) use these, not the free fns.
+
+    /// `mkdir -p`; returns the leaf directory's EntityId.
+    async fn vfs_mkdir(&self, bucket: &BucketId, path: &str) -> Result<EntityId> {
+        crate::vfs::mkdir(self, bucket, path).await
+    }
+
+    /// List a directory's entries (optionally recursive).
+    async fn vfs_ls(
+        &self,
+        bucket: &BucketId,
+        path: &str,
+        recursive: bool,
+    ) -> Result<Vec<crate::vfs::VfsEntry>> {
+        crate::vfs::ls(self, bucket, path, recursive).await
+    }
+
+    /// Resolve a path to its `(node, parent-edge)`, or `None` if absent.
+    async fn vfs_resolve(
+        &self,
+        bucket: &BucketId,
+        path: &str,
+    ) -> Result<Option<(NodeRef, Option<EdgeId>)>> {
+        crate::vfs::resolve_path(self, bucket, path).await
+    }
+
+    /// Link an existing node at a path (creating parent dirs as needed).
+    async fn vfs_link(&self, bucket: &BucketId, path: &str, target: &NodeRef) -> Result<EdgeId> {
+        crate::vfs::link_at_path(self, bucket, path, target).await
+    }
+
+    /// Remove an entry from a path (the underlying node is not deleted).
+    async fn vfs_unlink(&self, bucket: &BucketId, path: &str) -> Result<()> {
+        crate::vfs::unlink_path(self, bucket, path).await
+    }
+
+    /// Move/rename a path.
+    async fn vfs_mv(&self, bucket: &BucketId, from: &str, to: &str) -> Result<()> {
+        crate::vfs::mv_path(self, bucket, from, to).await
+    }
+
+    /// Render an ASCII tree under a path.
+    async fn vfs_tree(&self, bucket: &BucketId, path: &str, max_depth: usize) -> Result<String> {
+        crate::vfs::tree(self, bucket, path, max_depth).await
+    }
+
+    /// Find all paths that lead to a target node.
+    async fn vfs_find(&self, bucket: &BucketId, target: &NodeRef) -> Result<Vec<String>> {
+        crate::vfs::find_paths(self, bucket, target).await
+    }
+
     // -- Tags --
     /// Add tags to an existing item (doc, entity, or file).
     async fn add_tags(&self, node_id: &str, tags: Vec<(String, String)>) -> Result<()>;

@@ -116,10 +116,10 @@ pub async fn list_entities(
         Some(memvault_core::BucketId(arr))
     });
     let entities = state.client.list_entities(limit, bucket.as_ref()).await?;
-    // NOTE: reserved kinds (skill, vfs:dir) are intentionally NOT filtered here
-    // — this endpoint backs `HttpApiClient::list_entities`, which VFS root
-    // discovery (`ensure_root`) relies on to find the `vfs:dir` root. The graph
-    // *view* hides them in the UI (graph explorer) instead.
+    // The generic HTTP entity list returns all kinds (it's the low-level API +
+    // introspection surface). Reserved kinds (skill, vfs:dir) are hidden from
+    // the graph *view* at the presentation layer instead — the web graph
+    // explorer and the MCP list_entities tool both filter them.
     let results: Vec<EntityResponse> = entities
         .into_iter()
         .filter(|e| params.kind.as_deref().is_none_or(|k| e.kind == k))
@@ -160,15 +160,12 @@ pub async fn create_entity(
     if let Some(bid) = &bucket_id {
         crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
     }
-    // NOTE: this endpoint is the raw node transport that HttpApiClient's
-    // internal ops (e.g. VFS dir creation) ride on, so it calls the unvalidated
-    // `add_entity_internal`. The reserved-kind guard lives in the validated
-    // `add_entity` client default, which every user-facing surface (MCP,
-    // memctl, web server fns) calls — so generic entity creation through the
-    // tools/UI is guarded; this authenticated low-level transport is not.
+    // Validated create: rejects reserved kinds (skill, vfs:dir). Safe to guard
+    // here now that VFS/skills no longer ride this endpoint — they use their
+    // own /vfs and /skills endpoints, so this is purely the generic node API.
     let id = state
         .client
-        .add_entity_internal(entity, vis, bucket_id.as_ref())
+        .add_entity(entity, vis, bucket_id.as_ref())
         .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");

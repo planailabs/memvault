@@ -188,19 +188,22 @@ async fn vfs_mkdir_resolve_ls_tree_round_trip() {
 
     // mkdir -p /reports/2026 — the regression: this used to return
     // entity:000…000 and leave nothing resolvable.
-    let id = memvault_api::vfs::mkdir(&client, &bucket, "/reports/2026")
+    let id = client
+        .vfs_mkdir(&bucket, "/reports/2026")
         .await
         .expect("mkdir");
     assert_ne!(id.0, ZERO, "mkdir must return a real (non-zero) entity id");
 
     // The leaf resolves.
-    let resolved = memvault_api::vfs::resolve_path(&client, &bucket, "/reports/2026")
+    let resolved = client
+        .vfs_resolve(&bucket, "/reports/2026")
         .await
         .expect("resolve_path");
     assert!(resolved.is_some(), "freshly created dir must resolve");
 
     // ls / shows reports.
-    let entries = memvault_api::vfs::ls(&client, &bucket, "/", false)
+    let entries = client
+        .vfs_ls(&bucket, "/", false)
         .await
         .expect("ls");
     assert!(
@@ -210,7 +213,8 @@ async fn vfs_mkdir_resolve_ls_tree_round_trip() {
     );
 
     // tree contains the nested path.
-    let tree = memvault_api::vfs::tree(&client, &bucket, "/", 10)
+    let tree = client
+        .vfs_tree(&bucket, "/", 10)
         .await
         .expect("tree");
     assert!(tree.contains("2026"), "tree must include the nested dir: {tree}");
@@ -394,19 +398,24 @@ async fn vfs_link_unlink_round_trip() {
         .expect("add_entity");
     let node_id = format!("entity:{}", hex::encode(entity.0));
 
-    memvault_api::vfs::link_node_at_path(&client, &bucket, "/notes/linked.md", &node_id)
+    let target = memvault_core::NodeRef::from_tag_label(&node_id).expect("node ref");
+    client
+        .vfs_link(&bucket, "/notes/linked.md", &target)
         .await
-        .expect("link_node_at_path");
+        .expect("vfs_link");
 
-    let resolved = memvault_api::vfs::resolve_path(&client, &bucket, "/notes/linked.md")
+    let resolved = client
+        .vfs_resolve(&bucket, "/notes/linked.md")
         .await
         .expect("resolve_path");
     assert!(resolved.is_some(), "linked node must resolve at its path");
 
-    memvault_api::vfs::unlink_path(&client, &bucket, "/notes/linked.md")
+    client
+        .vfs_unlink(&bucket, "/notes/linked.md")
         .await
         .expect("unlink_path");
-    let after = memvault_api::vfs::resolve_path(&client, &bucket, "/notes/linked.md")
+    let after = client
+        .vfs_resolve(&bucket, "/notes/linked.md")
         .await
         .expect("resolve_path after unlink");
     assert!(after.is_none(), "node must be gone after unlink");
@@ -479,12 +488,12 @@ async fn listing_and_vfs_are_bucket_scoped() {
 
     // VFS in the non-default bucket B: mkdir → resolve → tree (the
     // customer-plan-ai symptom was resolve failing / tree empty here).
-    memvault_api::vfs::mkdir(&client, &b, "/scoped/dir").await.expect("mkdir b");
+    client.vfs_mkdir(&b, "/scoped/dir").await.expect("mkdir b");
     assert!(
-        memvault_api::vfs::resolve_path(&client, &b, "/scoped/dir").await.expect("resolve b").is_some(),
+        client.vfs_resolve(&b, "/scoped/dir").await.expect("resolve b").is_some(),
         "VFS path must resolve in a non-default bucket"
     );
-    let tree = memvault_api::vfs::tree(&client, &b, "/", 10).await.expect("tree b");
+    let tree = client.vfs_tree(&b, "/", 10).await.expect("tree b");
     assert!(tree.contains("scoped"), "tree must show the dir in bucket B: {tree}");
     // list_entities is bucket-scoped: B's root entity must be visible.
     let ents_b = client.list_entities(50, Some(&b)).await.expect("list_entities b");

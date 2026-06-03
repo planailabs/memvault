@@ -732,6 +732,53 @@ async fn test_skill_publish_and_list_routes() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn test_reserved_kind_rejected_on_generic_entity_create() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+
+    // Managed kinds can't be created through the generic /entities API — it
+    // routes through the validated client add_entity (skills/VFS have their
+    // own endpoints).
+    for kind in ["skill", "vfs:dir"] {
+        let body = serde_json::json!({ "kind": kind });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/entities")
+                    .header("authorization", format!("Bearer {}", test_jwt()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "kind {kind:?} must be rejected by the generic entity API"
+        );
+    }
+
+    // An ordinary kind still creates fine.
+    let body = serde_json::json!({ "kind": "person" });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/entities")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
 
 #[tokio::test]
 async fn test_get_doc() {

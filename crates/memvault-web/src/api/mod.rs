@@ -112,6 +112,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/vfs/mkdir", post(vfs::vfs_mkdir))
         .route("/vfs/link", post(vfs::vfs_link))
         .route("/vfs/mv", post(vfs::vfs_mv))
+        .route("/vfs/tree", get(vfs::vfs_tree))
+        .route("/vfs/find", get(vfs::vfs_find))
         // ── File upload body limit (2GB) ───────────────────────────
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         // ─��� Admin ───────────��──────────────────────────────────────

@@ -8,7 +8,6 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use memvault_api::docs::{create_doc, parse_tags, parse_visibility};
 use memvault_api::files::{detect_mime, upload_file};
-use memvault_api::vfs as api_vfs;
 use memvault_api::MemvaultClient;
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Edge, Entity};
@@ -452,10 +451,8 @@ impl MemvaultServer {
                 let mut result =
                     serde_json::json!({ "node_id": node_id, "status": "created" });
                 if let Some(vfs_path) = &params.vfs_path {
-                    if let Err(e) =
-                        api_vfs::link_node_at_path(&*self.client, &bucket, vfs_path, &node_id)
-                            .await
-                    {
+                    let target = NodeRef::Entity(id.clone());
+                    if let Err(e) = self.client.vfs_link(&bucket, vfs_path, &target).await {
                         result["vfs_error"] = serde_json::json!(e.to_string());
                     } else {
                         result["vfs_path"] = serde_json::json!(vfs_path);
@@ -1300,7 +1297,7 @@ impl MemvaultServer {
             Err(e) => return format!("error: {e}"),
         };
         let recursive = params.recursive.unwrap_or(false);
-        match api_vfs::ls(&*self.client, &bucket, &params.path, recursive).await {
+        match self.client.vfs_ls(&bucket, &params.path, recursive).await {
             Ok(entries) => serde_json::json!({
                 "path": params.path,
                 "entries": entries,
@@ -1319,7 +1316,7 @@ impl MemvaultServer {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
-        match api_vfs::resolve_path(&*self.client, &bucket, &params.path).await {
+        match self.client.vfs_resolve(&bucket, &params.path).await {
             Ok(Some((node, edge_id))) => serde_json::json!({
                 "path": params.path,
                 "node_id": node.tag_label(),
@@ -1342,7 +1339,7 @@ impl MemvaultServer {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
-        match api_vfs::mkdir(&*self.client, &bucket, &params.path).await {
+        match self.client.vfs_mkdir(&bucket, &params.path).await {
             Ok(id) => serde_json::json!({
                 "path": params.path,
                 "entity_id": hex::encode(id.0),
@@ -1366,7 +1363,7 @@ impl MemvaultServer {
             Some(n) => n,
             None => return format!("error: invalid target: {}", params.target),
         };
-        match api_vfs::link_at_path(&*self.client, &bucket, &params.path, &target_ref).await {
+        match self.client.vfs_link(&bucket, &params.path, &target_ref).await {
             Ok(edge_id) => serde_json::json!({
                 "path": params.path,
                 "target": params.target,
@@ -1387,7 +1384,7 @@ impl MemvaultServer {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
-        match api_vfs::unlink_path(&*self.client, &bucket, &params.path).await {
+        match self.client.vfs_unlink(&bucket, &params.path).await {
             Ok(()) => serde_json::json!({
                 "path": params.path,
                 "status": "unlinked",
@@ -1406,7 +1403,7 @@ impl MemvaultServer {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
-        match api_vfs::mv_path(&*self.client, &bucket, &params.from, &params.to).await {
+        match self.client.vfs_mv(&bucket, &params.from, &params.to).await {
             Ok(()) => serde_json::json!({
                 "from": params.from,
                 "to": params.to,
@@ -1428,7 +1425,7 @@ impl MemvaultServer {
         };
         let path = params.path.as_deref().unwrap_or("/");
         let max_depth = params.max_depth.unwrap_or(5);
-        match api_vfs::tree(&*self.client, &bucket, path, max_depth).await {
+        match self.client.vfs_tree(&bucket, path, max_depth).await {
             Ok(t) => t,
             Err(e) => format!("error: {e}"),
         }
@@ -1447,7 +1444,7 @@ impl MemvaultServer {
             Some(n) => n,
             None => return format!("error: invalid node: {}", params.node),
         };
-        match api_vfs::find_paths(&*self.client, &bucket, &target_ref).await {
+        match self.client.vfs_find(&bucket, &target_ref).await {
             Ok(paths) => serde_json::json!({
                 "node": params.node,
                 "paths": paths,

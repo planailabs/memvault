@@ -286,7 +286,7 @@ pub async fn resolve_node_type<C: MemvaultClient + ?Sized>(
 // ── Higher-level helpers (used by MCP, web UI, CLI) ───────────────────
 
 /// A single entry produced by [`ls`].
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VfsEntry {
     pub name: String,
     pub node_id: String,
