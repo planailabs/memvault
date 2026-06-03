@@ -668,3 +668,18 @@ pub struct SkillUnlinkResourceParams {
     /// Hex-encoded edge ID to remove.
     pub edge_id: String,
 }
+
+// -- memvault_skill_hydrate --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillHydrateParams {
+    /// Skill entity ID (hex or "entity:<hex>").
+    pub id: String,
+    /// Destination directory to materialize the bundle into (created if absent).
+    pub dest: String,
+    /// Set the executable bit on resources flagged executable. Defaults to
+    /// false — only enable for skills whose author you trust, since this
+    /// writes directly-runnable code to disk.
+    #[serde(default)]
+    pub executable: bool,
+}

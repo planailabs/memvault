@@ -273,6 +273,92 @@ async fn skill_publish_get_list_rename_roundtrip() {
 }
 
 #[tokio::test]
+async fn skill_hydrate_materializes_bundle() {
+    let (_dir, client) = make_client();
+
+    let spec = memvault_api::SkillSpec {
+        name: "Deploy".to_string(),
+        description: None,
+        trigger: None,
+        instruction_body: Some("# Deploy\nRun scripts/run.sh".to_string()),
+    };
+    let skill_id = client
+        .skill_publish(spec, Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    let script = b"#!/bin/sh\necho deploying\n";
+    let cid = client
+        .upload_file(script, Some("run.sh"), "text/x-shellscript", vec![], "internal", None)
+        .await
+        .unwrap();
+    client
+        .skill_link_resource(
+            &skill_id,
+            &NodeRef::Attachment(cid),
+            memvault_core::SKILL_RESOURCE_REL,
+            Some("scripts/run.sh"),
+            true,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+
+    let out = tempfile::tempdir().unwrap();
+    let report = memvault_api::skill_hydrate::hydrate_skill(
+        client.as_ref(),
+        &skill_id,
+        out.path(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // SKILL.md (instruction) + scripts/run.sh (resource) both written.
+    let skill_md = std::fs::read_to_string(out.path().join("SKILL.md")).unwrap();
+    assert!(skill_md.contains("Run scripts/run.sh"));
+    let run_sh = std::fs::read(out.path().join("scripts/run.sh")).unwrap();
+    assert_eq!(run_sh, script);
+    assert_eq!(report.written.len(), 2);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(out.path().join("scripts/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "executable bit set when trusted");
+    }
+
+    // Path traversal is rejected (defense-in-depth on the join helper).
+    let evil = tempfile::tempdir().unwrap();
+    // Re-link a resource with a traversal path and confirm hydrate errors.
+    client
+        .skill_link_resource(
+            &skill_id,
+            &NodeRef::Attachment(client
+                .upload_file(b"x", Some("x"), "text/plain", vec![], "internal", None)
+                .await
+                .unwrap()),
+            memvault_core::SKILL_RESOURCE_REL,
+            Some("../escape.sh"),
+            false,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+    let res = memvault_api::skill_hydrate::hydrate_skill(
+        client.as_ref(),
+        &skill_id,
+        evil.path(),
+        false,
+    )
+    .await;
+    assert!(res.is_err(), "traversal path must be rejected");
+}
+
+#[tokio::test]
 async fn search_after_indexing() {
     let (_dir, client) = make_client();
 

@@ -668,6 +668,33 @@ impl MemvaultServer {
     }
 
     #[tool(
+        name = "memvault_skill_hydrate",
+        description = "Materialize a skill bundle to disk (SKILL.md + resources at their bundle paths) and return the destination + written files. memvault does not execute skills — run the materialized scripts yourself. Set executable=true only for skills whose author you trust."
+    )]
+    async fn skill_hydrate(&self, Parameters(params): Parameters<SkillHydrateParams>) -> String {
+        let id = match EntityId::from_hex(&params.id) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {e}"),
+        };
+        match memvault_api::skill_hydrate::hydrate_skill(
+            &*self.client,
+            &id,
+            std::path::Path::new(&params.dest),
+            params.executable,
+        )
+        .await
+        {
+            Ok(report) => serde_json::json!({
+                "dest": report.dest.to_string_lossy(),
+                "written": report.written,
+                "skipped": report.skipped,
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
         name = "memvault_list_entities",
         description = "List knowledge graph entities."
     )]

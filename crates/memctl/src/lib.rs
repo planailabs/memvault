@@ -554,6 +554,17 @@ mod native {
             /// Edge ID (hex)
             edge_id: String,
         },
+        /// Materialize a skill bundle to disk (SKILL.md + resources)
+        Hydrate {
+            /// Skill entity ID (hex)
+            id: String,
+            /// Destination directory
+            #[arg(long)]
+            dest: String,
+            /// Set the executable bit on executable resources (trusted skills only)
+            #[arg(long)]
+            executable: bool,
+        },
     }
 
     /// Share-proposal subcommands.
@@ -1735,6 +1746,29 @@ mod native {
                     .skill_unlink_resource(&sid, &memvault_core::EdgeId(arr))
                     .await?;
                 println!("unlinked");
+            }
+            Commands::Skill(SkillCommands::Hydrate {
+                id,
+                dest,
+                executable,
+            }) => {
+                let sid = parse_entity_id(&id)?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let report = memvault_api::skill_hydrate::hydrate_skill(
+                    &client,
+                    &sid,
+                    std::path::Path::new(&dest),
+                    executable,
+                )
+                .await?;
+                println!("hydrated to {}", report.dest.display());
+                for w in &report.written {
+                    println!("  wrote {w}");
+                }
+                for s in &report.skipped {
+                    println!("  skipped {s}");
+                }
             }
             Commands::Gc { doc, before } => {
                 println!("GC: doc={doc:?} before={before:?}");
