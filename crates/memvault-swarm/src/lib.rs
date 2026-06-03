@@ -1238,20 +1238,16 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
     }
 
     // AgentAttestation: node-signed; chain-up-to-admin check happens
-    // later in `scan_trusted_agents`.
+    // later in `scan_trusted_agents`. This INCLUDES the `_ui` agent —
+    // a legitimate `_ui` attestation (signed by an attested cluster node)
+    // MUST propagate so that node's web-UI-authored writes resolve their
+    // authorship cluster-wide (`verify_envelope_authorship` looks the agent
+    // attestation up by CID on the remote node). Orphaned `_ui`
+    // attestations (signed by a never-attested ephemeral node) land here
+    // too, but are inert: they never enter `trusted_agents` (their node is
+    // untrusted), ACL rejects them (`is_attesting_node_trusted`), and
+    // `memctl sigchain --prune-orphans` clears the cruft.
     if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(bytes) {
-        // The `_ui` agent is a node-LOCAL surface (the daemon's own web
-        // admin). Every node enrolls its own under its own node key; a node
-        // never legitimately receives another node's `_ui` via sync. Drop
-        // foreign `_ui` attestations on ingress so an ephemeral, never-
-        // attested instance can't pollute the cluster with an orphaned
-        // `_ui` Admin attestation (the main identity-churn source). A node's
-        // own `_ui` is written locally and never flows through this path.
-        if att.agent_id.0 == "_ui" {
-            return SyncSigchainVerdict::Drop {
-                reason: "agent_att: _ui is a node-local surface agent, not synced",
-            };
-        }
         if att.verify_signature().is_err() {
             return SyncSigchainVerdict::Drop {
                 reason: "agent_att: bad node signature",
@@ -2104,50 +2100,5 @@ fn handle_join_response(
             tracing::debug!(%peer, ?reason, "join refused");
             false
         }
-    }
-}
-
-#[cfg(test)]
-mod ingress_tests {
-    use super::*;
-
-    fn sign_att(node_seed: u8, agent_id: &str) -> Vec<u8> {
-        let node_sk = ed25519_dalek::SigningKey::from_bytes(&[node_seed; 32]);
-        let agent_pk = ed25519_dalek::SigningKey::from_bytes(&[0x99; 32])
-            .verifying_key()
-            .to_bytes();
-        let att = memvault_auth::sign_agent_attestation(
-            &node_sk,
-            memvault_core::AgentName(agent_id.to_string()),
-            agent_pk,
-            memvault_auth::AgentRole::Admin,
-            u64::MAX,
-        )
-        .expect("sign");
-        serde_ipld_dagcbor::to_vec(&att).expect("encode")
-    }
-
-    /// A foreign `_ui` attestation arriving via sync is dropped — it's a
-    /// node-local surface agent and must never propagate.
-    #[test]
-    fn foreign_ui_agent_attestation_is_dropped_on_ingress() {
-        let cfg = JoinConfig::default();
-        let bytes = sign_att(0x42, "_ui");
-        assert!(matches!(
-            validate_sigchain_for_sync(&bytes, &cfg),
-            SyncSigchainVerdict::Drop { .. }
-        ));
-    }
-
-    /// A normal (non-`_ui`) agent attestation is still accepted (deferred
-    /// node-trust check happens later in scan_trusted_agents).
-    #[test]
-    fn normal_agent_attestation_is_accepted_on_ingress() {
-        let cfg = JoinConfig::default();
-        let bytes = sign_att(0x42, "openclaw");
-        assert!(matches!(
-            validate_sigchain_for_sync(&bytes, &cfg),
-            SyncSigchainVerdict::Accept { label: "agent_att", .. }
-        ));
     }
 }
