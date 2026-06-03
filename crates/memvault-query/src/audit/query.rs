@@ -26,6 +26,8 @@ pub enum OpKind {
     BucketAttach,
     BucketArchive,
     BucketBind,
+    BucketMerge,
+    BucketUnmerge,
     ViewCreate,
     TokenIssue,
     TokenRedeem,
@@ -171,6 +173,7 @@ const SIGCHAIN_LABELS: &[&str] = &[
     "admin_admission",
     "admin_retirement",
     "grant_revocation",
+    "bucket_merge",
     "token_redeem",
 ];
 
@@ -273,6 +276,33 @@ fn sigchain_record(
         "admin_admission" => Some(mk(OpKind::AdminAdmit, Vec::new(), Vec::new())),
         "admin_retirement" => Some(mk(OpKind::AdminRetire, Vec::new(), Vec::new())),
         "grant_revocation" => Some(mk(OpKind::GrantRevoke, Vec::new(), Vec::new())),
+        "bucket_merge" => {
+            let rec =
+                serde_ipld_dagcbor::from_slice::<memvault_auth::BucketMergeRecord>(data).ok()?;
+            // A retracted merge record is a reversed edge — surface it as
+            // BucketUnmerge so the current state is legible; an active record
+            // is a BucketMerge. The issuer is the audit author; the record's
+            // created_ns is authoritative for ordering.
+            let op_kind = if store.is_retracted(&cid).unwrap_or(false) {
+                OpKind::BucketUnmerge
+            } else {
+                OpKind::BucketMerge
+            };
+            Some(AuditRecord {
+                cid: cid.clone(),
+                op_kind,
+                author: rec.issued_by_pubkey.to_vec(),
+                agent_attestation: None,
+                wall_ns: rec.created_ns,
+                doc_id: None,
+                entity_id: None,
+                attachment_cid: None,
+                tags: vec![
+                    ("source".to_string(), hex::encode(rec.source.0)),
+                    ("canonical".to_string(), hex::encode(rec.canonical.0)),
+                ],
+            })
+        }
         _ => None,
     }
 }
