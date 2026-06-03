@@ -109,6 +109,12 @@ pub struct AuthRejection(String);
 
 impl IntoResponse for AuthRejection {
     fn into_response(self) -> Response {
+        // Log the reason server-side. The reason is also returned in the body,
+        // but clients routinely surface only the status code (e.g. the MCP's
+        // "HTTP status 401" with no body), leaving 401s undebuggable from the
+        // daemon's own logs. A warn per auth failure is acceptable — it's a
+        // real, security-relevant event.
+        tracing::warn!(reason = %self.0, "rejected request: 401 Unauthorized");
         (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
