@@ -125,6 +125,113 @@ pub async fn rename_bucket(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn parse_bucket_hex(s: &str) -> Result<memvault_core::BucketId, ApiError> {
+    let bytes = hex::decode(s).map_err(|_| ApiError::bad_request("invalid bucket id hex"))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| ApiError::bad_request("bucket id must be 32 bytes"))?;
+    Ok(memvault_core::BucketId(arr))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MergeBucketsRequest {
+    /// Hex source bucket ids to fold into `canonical`.
+    pub sources: Vec<String>,
+    /// Hex canonical bucket id (the merge target).
+    pub canonical: String,
+}
+
+/// POST /api/v1/buckets/merge — alias `sources → canonical`.
+///
+/// Authority is enforced against the **caller's** JWT: they must be admin
+/// or owner (Action::Admin) of the canonical *and* every source. The daemon
+/// then signs the `BucketMergeRecord` with the best authority it holds.
+pub async fn merge_buckets(
+    auth: RequireWrite,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MergeBucketsRequest>,
+) -> Result<StatusCode, ApiError> {
+    let canonical = parse_bucket_hex(&req.canonical)?;
+    let sources: Vec<memvault_core::BucketId> = req
+        .sources
+        .iter()
+        .map(|s| parse_bucket_hex(s))
+        .collect::<Result<_, _>>()?;
+    if sources.is_empty() {
+        return Err(ApiError::bad_request("no source buckets given"));
+    }
+    crate::api::auth::enforce_bucket_action(
+        &auth.claims,
+        &canonical,
+        memvault_auth::Action::Admin,
+    )?;
+    for s in &sources {
+        crate::api::auth::enforce_bucket_action(&auth.claims, s, memvault_auth::Action::Admin)?;
+    }
+    state
+        .client
+        .bucket_merge(&sources, &canonical)
+        .await
+        .map_err(|e| ApiError::internal(format!("bucket merge: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnmergeBucketsRequest {
+    /// Hex source bucket id to detach from `canonical`.
+    pub source: String,
+    /// Hex canonical bucket id.
+    pub canonical: String,
+}
+
+/// POST /api/v1/buckets/unmerge — reverse a single `source → canonical` edge.
+pub async fn unmerge_buckets(
+    auth: RequireWrite,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UnmergeBucketsRequest>,
+) -> Result<StatusCode, ApiError> {
+    let canonical = parse_bucket_hex(&req.canonical)?;
+    let source = parse_bucket_hex(&req.source)?;
+    crate::api::auth::enforce_bucket_action(
+        &auth.claims,
+        &canonical,
+        memvault_auth::Action::Admin,
+    )?;
+    state
+        .client
+        .bucket_unmerge(&source, &canonical)
+        .await
+        .map_err(|e| ApiError::internal(format!("bucket unmerge: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize)]
+pub struct MergeEdge {
+    pub source: String,
+    pub canonical: String,
+}
+
+/// GET /api/v1/buckets/merges — list all `source → canonical` edges.
+pub async fn list_merges(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<MergeEdge>>, ApiError> {
+    let edges = state
+        .client
+        .bucket_merges()
+        .await
+        .map_err(|e| ApiError::internal(format!("list merges: {e}")))?;
+    Ok(Json(
+        edges
+            .into_iter()
+            .map(|(s, c)| MergeEdge {
+                source: hex::encode(s.0),
+                canonical: hex::encode(c.0),
+            })
+            .collect(),
+    ))
+}
+
 pub async fn attach_bucket(
     _auth: RequireWrite,
     State(state): State<Arc<AppState>>,
