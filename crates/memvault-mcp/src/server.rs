@@ -496,6 +496,178 @@ impl MemvaultServer {
     }
 
     #[tool(
+        name = "memvault_skill_publish",
+        description = "Publish a skill — a graph entity that aggregates instruction docs and resource files by typed edges. Pass an inline instruction_body to create the SKILL.md prose. Returns the skill's node id."
+    )]
+    async fn skill_publish(&self, Parameters(params): Parameters<SkillPublishParams>) -> String {
+        let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("error: {e}"),
+        };
+        let vis = parse_visibility(
+            params
+                .visibility
+                .as_deref()
+                .or(Some(self.default_visibility.as_str())),
+        );
+        let spec = memvault_api::SkillSpec {
+            name: params.name,
+            description: params.description,
+            trigger: params.trigger,
+            instruction_body: params.instruction_body,
+        };
+        match self.client.skill_publish(spec, vis, Some(&bucket)).await {
+            Ok(id) => serde_json::json!({
+                "node_id": format!("entity:{}", hex::encode(id.0)),
+                "status": "created"
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_skill_list",
+        description = "List skills (manifest summaries: id, name, description, trigger). Cheap discovery — does not traverse resources."
+    )]
+    async fn skill_list(&self, Parameters(params): Parameters<SkillListParams>) -> String {
+        let bucket = match self.resolve_bucket_query(params.bucket.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("error: {e}"),
+        };
+        let limit = params.limit.unwrap_or(100);
+        match self.client.skill_list(limit, bucket.as_ref()).await {
+            Ok(skills) => {
+                serde_json::to_string(&skills).unwrap_or_else(|e| format!("error: {e}"))
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_skill_get",
+        description = "Assemble a skill bundle: the manifest plus its instruction docs, resources (with bundle paths), and required skills, grouped by relation."
+    )]
+    async fn skill_get(&self, Parameters(params): Parameters<SkillGetParams>) -> String {
+        let id = match EntityId::from_hex(&params.id) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {e}"),
+        };
+        match self.client.skill_get(&id).await {
+            Ok(Some(b)) => serde_json::to_string(&b).unwrap_or_else(|e| format!("error: {e}")),
+            Ok(None) => format!("error: skill not found: {}", params.id),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_skill_rename",
+        description = "Rename a skill (sets its display name)."
+    )]
+    async fn skill_rename(&self, Parameters(params): Parameters<SkillRenameParams>) -> String {
+        let id = match EntityId::from_hex(&params.id) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {e}"),
+        };
+        match self.client.skill_rename(&id, &params.name).await {
+            Ok(()) => serde_json::json!({ "status": "renamed" }).to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_skill_delete",
+        description = "Retract a skill entity. Linked component docs/files are left intact (they may be shared by other skills)."
+    )]
+    async fn skill_delete(&self, Parameters(params): Parameters<SkillDeleteParams>) -> String {
+        let id = match EntityId::from_hex(&params.id) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {e}"),
+        };
+        let reason = params.reason.as_deref().unwrap_or("deleted via MCP");
+        match self.client.skill_delete(&id, reason).await {
+            Ok(()) => serde_json::json!({ "status": "retracted" }).to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_skill_link_resource",
+        description = "Link a node (doc/file/entity) to a skill. relation defaults to \"skill:resource\"; pass \"skill:instruction\" for a SKILL.md doc or \"skill:requires\" for a dependency. path sets the resource's location in the hydrated bundle."
+    )]
+    async fn skill_link_resource(
+        &self,
+        Parameters(params): Parameters<SkillLinkResourceParams>,
+    ) -> String {
+        let skill_id = match EntityId::from_hex(&params.skill_id) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {e}"),
+        };
+        let Some(target) = NodeRef::from_tag_label(&params.node) else {
+            return format!("error: invalid node (expected type:hex): {}", params.node);
+        };
+        let relation = params
+            .relation
+            .as_deref()
+            .unwrap_or(memvault_core::SKILL_RESOURCE_REL);
+        let vis = parse_visibility(
+            params
+                .visibility
+                .as_deref()
+                .or(Some(self.default_visibility.as_str())),
+        );
+        match self
+            .client
+            .skill_link_resource(
+                &skill_id,
+                &target,
+                relation,
+                params.path.as_deref(),
+                params.executable,
+                vis,
+            )
+            .await
+        {
+            Ok(edge_id) => serde_json::json!({
+                "edge_id": hex::encode(edge_id.0),
+                "status": "linked"
+            })
+            .to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "memvault_skill_unlink_resource",
+        description = "Remove a resource/instruction/requires edge from a skill by its edge id."
+    )]
+    async fn skill_unlink_resource(
+        &self,
+        Parameters(params): Parameters<SkillUnlinkResourceParams>,
+    ) -> String {
+        let skill_id = match EntityId::from_hex(&params.skill_id) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {e}"),
+        };
+        let bytes = match hex::decode(&params.edge_id) {
+            Ok(b) => b,
+            Err(_) => return format!("error: invalid edge id (expected hex): {}", params.edge_id),
+        };
+        let arr: [u8; 32] = match bytes.try_into() {
+            Ok(a) => a,
+            Err(_) => return "error: edge id wrong length".to_string(),
+        };
+        match self
+            .client
+            .skill_unlink_resource(&skill_id, &EdgeId(arr))
+            .await
+        {
+            Ok(()) => serde_json::json!({ "status": "unlinked" }).to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
         name = "memvault_list_entities",
         description = "List knowledge graph entities."
     )]

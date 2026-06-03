@@ -570,3 +570,101 @@ pub struct ExportVaultParams {
     // bucket: intentionally absent — `ExportOptions` doesn't carry a
     // bucket filter today. See ExportNodeParams for the same note.
 }
+
+// -- memvault_skill_publish --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillPublishParams {
+    /// Human-readable skill name.
+    pub name: String,
+    /// One-line description (used for discovery/search).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// When the skill should be used (trigger text).
+    #[serde(default)]
+    pub trigger: Option<String>,
+    /// Optional inline instruction prose (the SKILL.md body). When set, a
+    /// document is created and linked as the skill's primary instruction.
+    #[serde(default)]
+    pub instruction_body: Option<String>,
+    /// Visibility level. Defaults to "internal".
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// Optional bucket ID (hex). Defaults to the agent bucket.
+    #[serde(default)]
+    pub bucket: Option<String>,
+}
+
+// -- memvault_skill_list --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillListParams {
+    /// Maximum number of skills to return.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Optional bucket ID (hex) to scope the listing.
+    #[serde(default)]
+    pub bucket: Option<String>,
+}
+
+// -- memvault_skill_get --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillGetParams {
+    /// Skill entity ID (hex or "entity:<hex>").
+    pub id: String,
+}
+
+// -- memvault_skill_rename --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillRenameParams {
+    /// Skill entity ID (hex or "entity:<hex>").
+    pub id: String,
+    /// New display name.
+    pub name: String,
+}
+
+// -- memvault_skill_delete --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillDeleteParams {
+    /// Skill entity ID (hex or "entity:<hex>").
+    pub id: String,
+    /// Optional retraction reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+// -- memvault_skill_link_resource --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillLinkResourceParams {
+    /// Skill entity ID (hex or "entity:<hex>").
+    pub skill_id: String,
+    /// Node to link — "doc:<hex>", "file:<hex>", or "entity:<hex>".
+    pub node: String,
+    /// Edge relation: "skill:instruction", "skill:resource" (default), or
+    /// "skill:requires".
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// Relative path within the hydrated bundle (e.g. "scripts/run.sh").
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Set the executable bit when the bundle is materialized to disk.
+    #[serde(default)]
+    pub executable: bool,
+    /// Visibility level. Defaults to "internal".
+    #[serde(default)]
+    pub visibility: Option<String>,
+}
+
+// -- memvault_skill_unlink_resource --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SkillUnlinkResourceParams {
+    /// Skill entity ID (hex or "entity:<hex>").
+    pub skill_id: String,
+    /// Hex-encoded edge ID to remove.
+    pub edge_id: String,
+}

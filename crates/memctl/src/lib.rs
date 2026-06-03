@@ -151,6 +151,9 @@ mod native {
         /// Knowledge-graph operations (add / link / query)
         #[command(subcommand)]
         Graph(GraphCommands),
+        /// Skill operations (publish / list / get / rename / delete / link)
+        #[command(subcommand)]
+        Skill(SkillCommands),
         /// Run garbage collection
         Gc {
             /// Document ID (hex)
@@ -481,6 +484,75 @@ mod native {
             /// Maximum depth
             #[arg(long, default_value = "3")]
             max_depth: usize,
+        },
+    }
+
+    /// Skill subcommands. A skill is a graph entity (kind="skill") that
+    /// aggregates instruction docs + resource files by typed edges.
+    #[derive(Subcommand, Debug)]
+    pub enum SkillCommands {
+        /// Publish a new skill
+        Publish {
+            /// Skill name
+            name: String,
+            /// One-line description
+            #[arg(long)]
+            description: Option<String>,
+            /// Trigger text (when to use)
+            #[arg(long)]
+            trigger: Option<String>,
+            /// Inline instruction body (the SKILL.md prose)
+            #[arg(long)]
+            body: Option<String>,
+        },
+        /// List skills
+        List {
+            /// Maximum number to return
+            #[arg(long, default_value = "100")]
+            limit: usize,
+        },
+        /// Show a skill bundle (manifest + linked components)
+        Get {
+            /// Skill entity ID (hex)
+            id: String,
+        },
+        /// Rename a skill
+        Rename {
+            /// Skill entity ID (hex)
+            id: String,
+            /// New display name
+            name: String,
+        },
+        /// Retract a skill
+        Delete {
+            /// Skill entity ID (hex)
+            id: String,
+            /// Reason
+            #[arg(short, long, default_value = "deleted via memctl")]
+            reason: String,
+        },
+        /// Link a node (doc/file/entity) to a skill
+        Link {
+            /// Skill entity ID (hex)
+            skill_id: String,
+            /// Node to link — "doc:<hex>", "file:<hex>", or "entity:<hex>"
+            node: String,
+            /// Edge relation (default "skill:resource")
+            #[arg(long, default_value = "skill:resource")]
+            relation: String,
+            /// Relative path within the hydrated bundle
+            #[arg(long)]
+            path: Option<String>,
+            /// Set the executable bit on hydrate
+            #[arg(long)]
+            executable: bool,
+        },
+        /// Remove a resource edge from a skill
+        Unlink {
+            /// Skill entity ID (hex)
+            skill_id: String,
+            /// Edge ID (hex)
+            edge_id: String,
         },
     }
 
@@ -1568,6 +1640,101 @@ mod native {
                 for hit in hits {
                     println!("depth={} node={}", hit.depth, hit.node);
                 }
+            }
+            Commands::Skill(SkillCommands::Publish {
+                name,
+                description,
+                trigger,
+                body,
+            }) => {
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let spec = memvault_api::SkillSpec {
+                    name,
+                    description,
+                    trigger,
+                    instruction_body: body,
+                };
+                let id = client
+                    .skill_publish(spec, Visibility::Internal, None)
+                    .await?;
+                println!("entity:{}", hex::encode(id.0));
+            }
+            Commands::Skill(SkillCommands::List { limit }) => {
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let skills = client.skill_list(limit, None).await?;
+                for s in skills {
+                    println!(
+                        "{}  {}{}",
+                        hex::encode(s.id.0),
+                        s.name,
+                        s.description
+                            .map(|d| format!("  — {d}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            Commands::Skill(SkillCommands::Get { id }) => {
+                let skill_id = parse_entity_id(&id)?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                match client.skill_get(&skill_id).await? {
+                    Some(b) => println!("{}", serde_json::to_string_pretty(&b)?),
+                    None => println!("skill not found: {id}"),
+                }
+            }
+            Commands::Skill(SkillCommands::Rename { id, name }) => {
+                let skill_id = parse_entity_id(&id)?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                client.skill_rename(&skill_id, &name).await?;
+                println!("renamed");
+            }
+            Commands::Skill(SkillCommands::Delete { id, reason }) => {
+                let skill_id = parse_entity_id(&id)?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                client.skill_delete(&skill_id, &reason).await?;
+                println!("retracted");
+            }
+            Commands::Skill(SkillCommands::Link {
+                skill_id,
+                node,
+                relation,
+                path,
+                executable,
+            }) => {
+                let sid = parse_entity_id(&skill_id)?;
+                let target = memvault_core::NodeRef::from_tag_label(&node).ok_or_else(|| {
+                    anyhow::anyhow!("invalid node (expected type:hex): {node}")
+                })?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                let edge_id = client
+                    .skill_link_resource(
+                        &sid,
+                        &target,
+                        &relation,
+                        path.as_deref(),
+                        executable,
+                        Visibility::Internal,
+                    )
+                    .await?;
+                println!("{}", hex::encode(edge_id.0));
+            }
+            Commands::Skill(SkillCommands::Unlink { skill_id, edge_id }) => {
+                let sid = parse_entity_id(&skill_id)?;
+                let bytes = hex::decode(&edge_id)?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid edge id length"))?;
+                let store = make_store()?;
+                let client = create_client(store)?;
+                client
+                    .skill_unlink_resource(&sid, &memvault_core::EdgeId(arr))
+                    .await?;
+                println!("unlinked");
             }
             Commands::Gc { doc, before } => {
                 println!("GC: doc={doc:?} before={before:?}");
