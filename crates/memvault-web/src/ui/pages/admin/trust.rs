@@ -256,7 +256,9 @@ fn AgentRenameControl(pubkey: String, current: String, on_saved: EventHandler<()
     rsx! {
         form {
             class: "flex items-center gap-1",
-            onsubmit: move |_| {
+            onsubmit: move |evt: Event<FormData>| {
+                // Without this the browser does a native form submit → full page reload.
+                evt.prevent_default();
                 let pk = pubkey_for_save.clone();
                 let new_label = value();
                 async move {
