@@ -14,8 +14,8 @@ use crate::agent_identity::AgentIdentity;
 use crate::client::MemvaultClient;
 use crate::error::{ApiError, Result};
 use crate::types::{
-    BucketInfo, DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, TokenStatus,
-    TraversalHit, View,
+    BucketInfo, DocSummary, GrantInfo, NodeStatus, RotationInfo, ShareProposalInfo, SkillBundle,
+    SkillInfo, SkillSpec, TokenStatus, TraversalHit, View,
 };
 
 /// JWT TTL for auto-issued tokens. 1h is plenty for typical CLI/MCP sessions
@@ -1238,6 +1238,145 @@ impl MemvaultClient for HttpApiClient {
         self.client
             .patch(self.url(&format!("/skills/{}", hex::encode(id.0))))
             .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn skill_publish(
+        &self,
+        spec: SkillSpec,
+        vis: Visibility,
+        bucket: Option<&BucketId>,
+    ) -> Result<EntityId> {
+        let mut body = serde_json::json!({
+            "name": spec.name,
+            "description": spec.description,
+            "trigger": spec.trigger,
+            "instruction_body": spec.instruction_body,
+            "visibility": format!("{vis:?}").to_lowercase(),
+        });
+        if let Some(b) = bucket {
+            body["bucket"] = serde_json::Value::String(hex::encode(b.0));
+        }
+        let resp: serde_json::Value = self
+            .client
+            .post(self.url("/skills"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let id_str = resp["id"].as_str().unwrap_or_default();
+        match NodeRef::from_tag_label(id_str) {
+            Some(NodeRef::Entity(eid)) => Ok(eid),
+            _ => Err(ApiError::Other(format!(
+                "publish skill: server returned unexpected id {id_str:?}"
+            ))),
+        }
+    }
+
+    async fn skill_list(&self, limit: usize, bucket: Option<&BucketId>) -> Result<Vec<SkillInfo>> {
+        let mut url = format!("{}?limit={limit}", self.url("/skills"));
+        if let Some(b) = bucket {
+            url.push_str(&format!("&bucket={}", hex::encode(b.0)));
+        }
+        let skills: Vec<SkillInfo> = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(skills)
+    }
+
+    async fn skill_get(&self, id: &EntityId) -> Result<Option<SkillBundle>> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/skills/{}", hex::encode(id.0))))
+            .send()
+            .await
+            .map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let bundle: SkillBundle = resp
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        Ok(Some(bundle))
+    }
+
+    async fn skill_delete(&self, id: &EntityId, reason: &str) -> Result<()> {
+        self.client
+            .delete(self.url(&format!("/skills/{}", hex::encode(id.0))))
+            .query(&[("reason", reason)])
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?;
+        Ok(())
+    }
+
+    async fn skill_link_resource(
+        &self,
+        skill_id: &EntityId,
+        target: &NodeRef,
+        relation: &str,
+        path: Option<&str>,
+        executable: bool,
+        vis: Visibility,
+    ) -> Result<EdgeId> {
+        let body = serde_json::json!({
+            "node": target.tag_label(),
+            "relation": relation,
+            "path": path,
+            "executable": executable,
+            "visibility": format!("{vis:?}").to_lowercase(),
+        });
+        let resp: serde_json::Value = self
+            .client
+            .post(self.url(&format!("/skills/{}/resources", hex::encode(skill_id.0))))
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let edge_hex = resp["edge_id"].as_str().unwrap_or_default();
+        let bytes = hex::decode(edge_hex)
+            .map_err(|_| ApiError::Other(format!("link resource: bad edge id {edge_hex:?}")))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| ApiError::Other("link resource: edge id wrong length".to_string()))?;
+        Ok(EdgeId(arr))
+    }
+
+    async fn skill_unlink_resource(&self, skill_id: &EntityId, edge_id: &EdgeId) -> Result<()> {
+        self.client
+            .delete(self.url(&format!(
+                "/skills/{}/resources/{}",
+                hex::encode(skill_id.0),
+                hex::encode(edge_id.0)
+            )))
             .send()
             .await
             .map_err(map_reqwest)?

@@ -13,6 +13,7 @@ pub mod graph;
 pub mod links;
 pub mod ops;
 pub mod search;
+pub mod skills;
 pub mod vfs;
 pub mod views;
 
@@ -74,6 +75,19 @@ pub fn routes(state: Arc<AppState>) -> Router {
         // ── Entities (type-specific, accepts raw hex or entity:hex)
         .route("/entities", post(graph::create_entity).get(graph::list_entities))
         .route("/traverse", get(graph::traverse))
+        // ── Skills (first-class entity aggregates) ─────────────────
+        .route("/skills", get(skills::list_skills).post(skills::publish_skill))
+        .route(
+            "/skills/{id}",
+            get(skills::get_skill)
+                .patch(skills::rename_skill)
+                .delete(skills::delete_skill),
+        )
+        .route("/skills/{id}/resources", post(skills::link_resource))
+        .route(
+            "/skills/{id}/resources/{edge_id}",
+            delete(skills::unlink_resource),
+        )
         .route(
             "/entities/{id}",
             get(graph::get_entity).delete(graph::delete_entity),

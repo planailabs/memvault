@@ -670,6 +670,69 @@ async fn test_create_and_list_docs() {
 }
 
 #[tokio::test]
+async fn test_skill_publish_and_list_routes() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+
+    // Publish a skill: the route is wired, authorized, and returns an
+    // "entity:<hex>" id (the publish path threads through the client).
+    let create_body = serde_json::json!({
+        "name": "Code Review",
+        "description": "Review a diff",
+        "instruction_body": "# Code Review\nRun the linter.",
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/skills")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        v["id"].as_str().unwrap().starts_with("entity:"),
+        "publish returns an entity id, got {:?}",
+        v["id"]
+    );
+
+    // List skills: route exists and is authorized (200 with a JSON array).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/skills")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let _skills: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+    // Unauthorized access is rejected.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/skills")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn test_get_doc() {
     let state = test_app_state(Arc::new(MockClient::new()));
     let app = build_router(state);
