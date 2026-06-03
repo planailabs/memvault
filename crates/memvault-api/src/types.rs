@@ -211,7 +211,7 @@ pub struct BucketInfo {
     pub id: BucketId,
     pub name: String,
     pub description: Option<String>,
-    pub owner_agent: Option<memvault_core::AgentId>,
+    pub owner_agent: Option<memvault_core::AgentName>,
     /// Owner agent's ed25519 pubkey, when recorded at creation. Used by
     /// ACL to resolve owner / attesting-node grant authority.
     #[serde(default, with = "crate::wire::hex_array32_opt")]

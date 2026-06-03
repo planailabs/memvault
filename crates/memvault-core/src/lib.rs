@@ -24,7 +24,7 @@ pub use envelope::Signed;
 pub use error::{Error, Result};
 pub use bucket::{BucketBinding, BucketDecl, BucketRole};
 pub use ids::{
-    AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId, b58_decode, b58_encode,
+    AgentName, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId, b58_decode, b58_encode,
 };
 pub use scope::{
     BucketSelector, DetailLevel, NodeKind, QueryScope, RetractionMode, bucket_scope_id,

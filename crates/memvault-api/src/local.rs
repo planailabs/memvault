@@ -1522,7 +1522,7 @@ impl LocalClient {
     /// ID + explicit owner so the bucket is locatable on later runs.
     #[allow(clippy::too_many_arguments)]
     (bucket_create_inner_sync, bucket_create_inner_async)
-    fn(&self, bucket_id: memvault_core::BucketId, name: &str, description: Option<&str>, default_visibility: Visibility, default_classification: memvault_core::classification::Classification, role: memvault_doc::BucketRole, owner_agent_override: Option<memvault_core::AgentId>, owner_agent_pubkey: Option<[u8; 32]>) -> Result<memvault_core::BucketId>
+    fn(&self, bucket_id: memvault_core::BucketId, name: &str, description: Option<&str>, default_visibility: Visibility, default_classification: memvault_core::classification::Classification, role: memvault_doc::BucketRole, owner_agent_override: Option<memvault_core::AgentName>, owner_agent_pubkey: Option<[u8; 32]>) -> Result<memvault_core::BucketId>
     {
         use memvault_doc::BucketDecl;
 
@@ -1610,7 +1610,7 @@ impl LocalClient {
     /// needing a follow-up grant.
     pub async fn bucket_create_as(
         &self,
-        owner_agent: memvault_core::AgentId,
+        owner_agent: memvault_core::AgentName,
         owner_agent_pubkey: Option<[u8; 32]>,
         name: &str,
         description: Option<&str>,
@@ -1651,7 +1651,7 @@ impl LocalClient {
         agent_pubkey: &[u8],
         name_hint: &str,
     ) -> Result<memvault_core::BucketId> {
-        let agent_id_for_owner = memvault_core::AgentId(name_hint.to_string());
+        let agent_id_for_owner = memvault_core::AgentName(name_hint.to_string());
         self.ensure_agent_bucket_inner(agent_pubkey, name_hint, agent_id_for_owner)
     }
 
@@ -1663,7 +1663,7 @@ impl LocalClient {
     /// `ensure_agent_bucket_for_pubkey`.
     pub async fn ensure_agent_bucket_for(
         &self,
-        agent_id: &memvault_core::AgentId,
+        agent_id: &memvault_core::AgentName,
     ) -> Result<memvault_core::BucketId> {
         let attestations = crate::sigchain::scan_agent_attestations(self)?;
         let attestation = attestations
@@ -1685,7 +1685,7 @@ impl LocalClient {
         &self,
         agent_pubkey: &[u8],
         name_hint: &str,
-        owner_agent: memvault_core::AgentId,
+        owner_agent: memvault_core::AgentName,
     ) -> Result<memvault_core::BucketId> {
         let bucket_id =
             crate::rebuild::deterministic_agent_bucket_id(&self.cluster_id, agent_pubkey);
@@ -1898,7 +1898,7 @@ impl LocalClient {
             .unwrap_or(false)
     }
 
-    pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
+    pub fn agent_id(&self) -> Option<&memvault_core::AgentName> {
         self.agent_identity.get().map(|i| &i.agent_id)
     }
 
@@ -6033,7 +6033,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId> {
-        let aid = memvault_core::AgentId(agent_id.to_string());
+        let aid = memvault_core::AgentName(agent_id.to_string());
         self.ensure_agent_bucket_for(&aid).await
     }
 

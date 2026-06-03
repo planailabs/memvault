@@ -1,6 +1,6 @@
 use cid::Cid;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use memvault_core::{AgentId, BucketId, ClusterId, PeerId};
+use memvault_core::{AgentName, BucketId, ClusterId, PeerId};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -9,7 +9,7 @@ use crate::error::{AuthError, Result};
 /// Records the enrollment of an agent into a cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEnrollment {
-    pub agent_id: AgentId,
+    pub agent_id: AgentName,
     pub public_key: [u8; 32],
     pub cluster_id: ClusterId,
     pub enrolled_by: PeerId,
@@ -26,7 +26,7 @@ pub struct AgentEnrollment {
 
 #[derive(Serialize)]
 struct EnrollmentSigningPayload<'a> {
-    agent_id: &'a AgentId,
+    agent_id: &'a AgentName,
     public_key: &'a [u8; 32],
     cluster_id: &'a ClusterId,
     enrolled_by: &'a PeerId,

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use memvault_auth::Action;
-use memvault_core::{AgentId, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef};
+use memvault_core::{AgentName, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef};
 use serde::{Deserialize, Serialize};
 
 use crate::bucket::BucketDecl;
@@ -83,13 +83,13 @@ pub enum Op {
     // added B1, removable never
     BucketGrantAgent {
         bucket_id: BucketId,
-        agent: AgentId,
+        agent: AgentName,
         actions: Vec<Action>,
     },
     // added B1, removable never
     BucketRevokeAgent {
         bucket_id: BucketId,
-        agent: AgentId,
+        agent: AgentName,
     },
     // Agent ops — appended, never inserted in the middle.
     // added B12, removable never

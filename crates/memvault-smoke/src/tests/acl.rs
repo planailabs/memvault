@@ -8,7 +8,7 @@ use rand::RngCore;
 use memvault_api::MemvaultClient;
 use memvault_api::acl;
 use memvault_auth::{Action, AgentRole, Grant, GrantAudience, sign_agent_attestation};
-use memvault_core::{AgentId, BucketId, PeerId, Visibility};
+use memvault_core::{AgentName, BucketId, PeerId, Visibility};
 
 use crate::harness::TestNode;
 
@@ -19,7 +19,7 @@ async fn setup_agent(
     node: &TestNode,
     agent_name: &str,
     role: AgentRole,
-) -> ([u8; 32], AgentId) {
+) -> ([u8; 32], AgentName) {
     let node_sk = node
         .client
         .node_signing_key()
@@ -33,7 +33,7 @@ async fn setup_agent(
 
     let attestation = sign_agent_attestation(
         &node_sk,
-        AgentId(agent_name.to_string()),
+        AgentName(agent_name.to_string()),
         agent_pk,
         role,
         u64::MAX,
@@ -43,7 +43,7 @@ async fn setup_agent(
     memvault_api::sigchain::publish_agent_attestation(&node.client, &attestation)
         .expect("publish attestation");
 
-    (agent_pk, AgentId(agent_name.to_string()))
+    (agent_pk, AgentName(agent_name.to_string()))
 }
 
 /// Create a plain bucket owned by no specific agent — the default case
@@ -946,7 +946,7 @@ async fn setup_agent_keyed(
     node: &TestNode,
     name: &str,
     role: AgentRole,
-) -> (SigningKey, [u8; 32], AgentId) {
+) -> (SigningKey, [u8; 32], AgentName) {
     let node_sk = node.client.node_signing_key().expect("node key").clone();
     let mut seed = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
@@ -954,20 +954,20 @@ async fn setup_agent_keyed(
     let agent_pk = agent_sk.verifying_key().to_bytes();
     let att = sign_agent_attestation(
         &node_sk,
-        AgentId(name.to_string()),
+        AgentName(name.to_string()),
         agent_pk,
         role,
         u64::MAX,
     )
     .expect("sign attestation");
     memvault_api::sigchain::publish_agent_attestation(&node.client, &att).expect("publish");
-    (agent_sk, agent_pk, AgentId(name.to_string()))
+    (agent_sk, agent_pk, AgentName(name.to_string()))
 }
 
 async fn make_owned_bucket(
     node: &TestNode,
     name: &str,
-    owner: AgentId,
+    owner: AgentName,
     owner_pk: [u8; 32],
 ) -> BucketId {
     node.client

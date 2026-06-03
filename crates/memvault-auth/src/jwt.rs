@@ -330,7 +330,7 @@ mod tests {
     use crate::node_attestation::AttestationOrigin;
     use crate::role::AgentRole;
     use ed25519_dalek::SigningKey;
-    use memvault_core::{AgentId, ClusterId, PeerId};
+    use memvault_core::{AgentName, ClusterId, PeerId};
     use rand::RngCore;
 
     fn make_key() -> SigningKey {
@@ -361,7 +361,7 @@ mod tests {
         let n_att = node_att(&admin, &node);
         let a_att = sign_agent_attestation(
             &node,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,
@@ -380,7 +380,7 @@ mod tests {
         // Agent attestation that expired long ago (not_after_ns = 1).
         let a_att = sign_agent_attestation(
             &node,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             1,
@@ -412,7 +412,7 @@ mod tests {
         n_att.signature = admin.sign(&n_att.signing_bytes().unwrap()).to_bytes();
         let a_att = sign_agent_attestation(
             &node,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,
@@ -451,7 +451,7 @@ mod tests {
         let agent = make_key();
         let a_att = sign_agent_attestation(
             &key,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,

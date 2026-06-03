@@ -17,7 +17,7 @@ use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use memvault_auth::{AgentRole, JoinToken, TokenRole, encode_token_string};
-use memvault_core::{AgentId, ClusterId, PeerId};
+use memvault_core::{AgentName, ClusterId, PeerId};
 
 use crate::error::{ApiError, Result};
 
@@ -27,7 +27,7 @@ use crate::error::{ApiError, Result};
 /// sigchain via the agent's pubkey.
 #[derive(Debug, Clone)]
 pub struct AgentIdentity {
-    pub agent_id: AgentId,
+    pub agent_id: AgentName,
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
 }
@@ -59,7 +59,7 @@ impl AgentIdentity {
             .to_string();
 
         Ok(Self {
-            agent_id: AgentId(agent_id_str),
+            agent_id: AgentName(agent_id_str),
             signing_key,
             verifying_key,
         })
@@ -100,7 +100,7 @@ impl AgentIdentity {
 
         let attestation = memvault_auth::sign_agent_attestation(
             node_signing_key,
-            AgentId(agent_id.to_string()),
+            AgentName(agent_id.to_string()),
             verifying_key.to_bytes(),
             role,
             not_after_ns,
@@ -111,7 +111,7 @@ impl AgentIdentity {
 
         Ok((
             Self {
-                agent_id: AgentId(agent_id.to_string()),
+                agent_id: AgentName(agent_id.to_string()),
                 signing_key,
                 verifying_key,
             },
@@ -328,7 +328,7 @@ pub fn enroll_local_agent_in_keystore(
     let now_ns = memvault_core::time::wall_ns();
     let attestation = memvault_auth::sign_agent_attestation(
         &node_signing_key,
-        AgentId(agent_id.to_string()),
+        AgentName(agent_id.to_string()),
         verifying_key.to_bytes(),
         role,
         now_ns.saturating_add(ttl_ns),
@@ -339,7 +339,7 @@ pub fn enroll_local_agent_in_keystore(
     client.set_agent_attestation_cid(attestation_cid);
 
     Ok(AgentIdentity {
-        agent_id: AgentId(agent_id.to_string()),
+        agent_id: AgentName(agent_id.to_string()),
         signing_key,
         verifying_key,
     })
@@ -506,7 +506,7 @@ pub fn enroll_remote_agent(
         .ok_or_else(|| ApiError::Other("no node signing key configured".into()))?;
     let attestation = memvault_auth::sign_agent_attestation(
         node_sk,
-        AgentId(agent_id.to_string()),
+        AgentName(agent_id.to_string()),
         agent_pubkey,
         agent_role,
         token.not_after_ns,

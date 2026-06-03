@@ -20,9 +20,11 @@ pub struct EdgeId(pub [u8; 32]);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BucketId(pub [u8; 32]);
 
-/// Agent identifier (human-readable string).
+/// An agent's human-readable name (a display label). The agent's *identity*
+/// is its ed25519 public key, not this string. Serializes transparently as the
+/// inner string, so on the wire it is unchanged from the former `AgentName`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId(pub String);
+pub struct AgentName(pub String);
 
 /// Peer identity — raw bytes to avoid libp2p dependency in core.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

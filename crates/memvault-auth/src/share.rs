@@ -2,7 +2,7 @@
 
 use cid::Cid;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use memvault_core::{AgentId, BucketId, ClusterId, PeerId};
+use memvault_core::{AgentName, BucketId, ClusterId, PeerId};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -31,7 +31,7 @@ pub enum ShareRecipient {
     /// Any peer in the target cluster holding Action::Admin.
     AnyAdmin,
     /// A specific agent must approve.
-    Agent(AgentId),
+    Agent(AgentName),
 }
 
 /// A decision on a share proposal.

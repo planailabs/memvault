@@ -523,7 +523,7 @@ async fn agent_attestation_syncs_with_correct_tag() {
     let agent_sk = SigningKey::from_bytes(&agent_seed);
     let attestation = memvault_auth::sign_agent_attestation(
         &admin_node_sk,
-        memvault_core::AgentId("test_ui".into()),
+        memvault_core::AgentName("test_ui".into()),
         agent_sk.verifying_key().to_bytes(),
         AgentRole::AgentHost,
         u64::MAX,

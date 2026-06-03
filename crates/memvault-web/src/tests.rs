@@ -68,7 +68,7 @@ fn test_jwt() -> String {
     let (_admin, node, agent) = test_keys();
     let agent_att = memvault_auth::sign_agent_attestation(
         &node,
-        memvault_core::AgentId("test-agent".to_string()),
+        memvault_core::AgentName("test-agent".to_string()),
         agent.verifying_key().to_bytes(),
         AgentRole::AgentHost,
         u64::MAX,
@@ -511,7 +511,7 @@ fn test_agent_attestation() -> memvault_auth::AgentAttestation {
     let (_admin, node, agent) = test_keys();
     memvault_auth::sign_agent_attestation(
         &node,
-        memvault_core::AgentId("test-agent".to_string()),
+        memvault_core::AgentName("test-agent".to_string()),
         agent.verifying_key().to_bytes(),
         AgentRole::AgentHost,
         u64::MAX,

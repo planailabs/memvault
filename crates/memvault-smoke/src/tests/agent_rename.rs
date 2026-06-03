@@ -10,7 +10,7 @@ use rand::RngCore;
 use memvault_api::MemvaultClient;
 use memvault_api::{acl, sigchain};
 use memvault_auth::{Action, AgentRole, GrantAudience, sign_agent_attestation};
-use memvault_core::{AgentId, Visibility};
+use memvault_core::{AgentName, Visibility};
 
 use crate::harness::TestNode;
 
@@ -24,7 +24,7 @@ async fn setup_agent(node: &TestNode, agent_name: &str) -> [u8; 32] {
     let agent_pk = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
     let att = sign_agent_attestation(
         &node_sk,
-        AgentId(agent_name.to_string()),
+        AgentName(agent_name.to_string()),
         agent_pk,
         AgentRole::AgentHost,
         u64::MAX,

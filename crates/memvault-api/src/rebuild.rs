@@ -42,7 +42,7 @@ pub fn deterministic_legacy_id(client: &LocalClient) -> BucketId {
 /// `(cluster_id, agent_pubkey)` so every node in the cluster lands on
 /// the same bucket without consulting any list, and so collisions
 /// across reused names are impossible. The agent's pubkey is the
-/// uniqueness anchor; the `AgentId` string label can be reused or
+/// uniqueness anchor; the `AgentName` string label can be reused or
 /// re-claimed and is therefore unsafe as a primary key.
 ///
 /// Pre-genesis (zero `cluster_id`) the seed degrades to "pubkey
@@ -760,7 +760,7 @@ mod classify_tests {
 
     #[test]
     fn drops_agent_string_grant() {
-        let bytes = grant_with(memvault_auth::GrantAudience::Agent(memvault_core::AgentId(
+        let bytes = grant_with(memvault_auth::GrantAudience::Agent(memvault_core::AgentName(
             "alice".into(),
         )));
         let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();

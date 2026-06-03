@@ -1,6 +1,6 @@
 use cid::Cid;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use memvault_core::{AgentId, BucketId, ClusterId, PeerId, TagPattern};
+use memvault_core::{AgentName, BucketId, ClusterId, PeerId, TagPattern};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -12,11 +12,11 @@ use crate::role::AgentRole;
 pub enum GrantAudience {
     Cluster(ClusterId),
     Peer(PeerId),
-    /// Legacy: an agent addressed by its human-readable `AgentId` string.
+    /// Legacy: an agent addressed by its human-readable `AgentName` string.
     /// Ambiguous across nodes (two nodes can enroll the same `agent_id` under
     /// different keys), so new grants should target [`GrantAudience::AgentKey`]
     /// instead. Retained for back-compat decoding of existing grants.
-    Agent(AgentId),
+    Agent(AgentName),
     /// An agent addressed by its ed25519 public key — the canonical,
     /// globally-unique agent identity. Matched directly against the caller's
     /// verified pubkey, with no `agent_id` indirection.

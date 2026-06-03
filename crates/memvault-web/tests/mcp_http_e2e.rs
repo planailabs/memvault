@@ -19,7 +19,7 @@ use memvault_api::agent_identity::{enroll_local_agent, AgentIdentity};
 use memvault_api::{EventBus, HttpApiClient, LocalClient, MemvaultClient};
 use memvault_auth::node_attestation::{AttestationOrigin, NodeAttestation};
 use memvault_auth::{jwt::NodeTrust, AgentRole};
-use memvault_core::{AgentId, BucketId, ClusterId, NodeRef, PeerId, Visibility};
+use memvault_core::{AgentName, BucketId, ClusterId, NodeRef, PeerId, Visibility};
 use memvault_doc::Entity;
 use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
@@ -103,7 +103,7 @@ async fn server() -> &'static TestServer {
 
             let agent_att = memvault_auth::sign_agent_attestation(
                 &node,
-                AgentId(AGENT_ID.to_string()),
+                AgentName(AGENT_ID.to_string()),
                 agent_pubkey,
                 AgentRole::AgentHost,
                 u64::MAX,
