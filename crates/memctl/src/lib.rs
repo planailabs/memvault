@@ -1608,7 +1608,7 @@ mod native {
                     edges_out: vec![],
                 };
                 let id = client
-                    .add_entity_external(entity, Visibility::Internal, None)
+                    .add_entity(entity, Visibility::Internal, None)
                     .await?;
                 println!("{}", hex::encode(id.0));
             }

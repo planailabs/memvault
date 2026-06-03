@@ -192,7 +192,7 @@ impl MemvaultClient for MockClient {
         Ok(Some(b"{}".to_vec()))
     }
 
-    async fn add_entity(
+    async fn add_entity_internal(
         &self,
         _entity: Entity,
         _vis: Visibility,
@@ -319,7 +319,7 @@ impl MemvaultClient for MockClient {
     async fn get_tags(&self, _node_id: &str) -> memvault_api::Result<Vec<(String, String)>> {
         Ok(vec![])
     }
-    async fn retract_node(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> {
+    async fn retract_node_internal(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> {
         Ok(())
     }
     async fn list_all(
@@ -732,51 +732,6 @@ async fn test_skill_publish_and_list_routes() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn test_reserved_kind_rejected_on_generic_entity_create() {
-    let state = test_app_state(Arc::new(MockClient::new()));
-    let app = build_router(state);
-
-    // A managed kind cannot be created through the generic /entities API —
-    // it must go through the dedicated skill/VFS APIs.
-    for kind in ["skill", "vfs:dir"] {
-        let body = serde_json::json!({ "kind": kind });
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/entities")
-                    .header("authorization", format!("Bearer {}", test_jwt()))
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "kind {kind:?} must be rejected by the generic entity API"
-        );
-    }
-
-    // An ordinary kind still creates fine.
-    let body = serde_json::json!({ "kind": "person" });
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/entities")
-                .header("authorization", format!("Bearer {}", test_jwt()))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-}
 
 #[tokio::test]
 async fn test_get_doc() {

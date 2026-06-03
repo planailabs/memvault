@@ -446,7 +446,7 @@ impl MemvaultClient for HttpApiClient {
 
     // -- Graph --
 
-    async fn add_entity(
+    async fn add_entity_internal(
         &self,
         entity: Entity,
         vis: Visibility,
@@ -1057,7 +1057,7 @@ impl MemvaultClient for HttpApiClient {
         Ok(vec![])
     }
 
-    async fn retract_node(&self, node_id: &str, _reason: &str) -> Result<()> {
+    async fn retract_node_internal(&self, node_id: &str, _reason: &str) -> Result<()> {
         self.client
             .delete(self.url(&format!("/nodes/{}", urlencoded(node_id))))
             .send()

@@ -446,7 +446,7 @@ impl MemvaultServer {
             props: props_map,
             edges_out: vec![],
         };
-        match self.client.add_entity_external(entity, vis, Some(&bucket)).await {
+        match self.client.add_entity(entity, vis, Some(&bucket)).await {
             Ok(id) => {
                 let node_id = format!("entity:{}", hex::encode(id.0));
                 let mut result =
@@ -870,7 +870,7 @@ impl MemvaultServer {
         // External (validated) retract: refuses reserved kinds (skill, vfs:dir).
         match self
             .client
-            .retract_node_external(&params.node, &params.reason)
+            .retract_node(&params.node, &params.reason)
             .await
         {
             Ok(()) => serde_json::json!({

@@ -273,6 +273,67 @@ async fn skill_publish_get_list_rename_roundtrip() {
 }
 
 #[tokio::test]
+async fn reserved_kinds_rejected_by_validated_node_api() {
+    let (_dir, client) = make_client();
+
+    // The validated `add_entity` (what user-facing surfaces call) rejects
+    // managed kinds; the raw `add_entity_internal` (VFS/skill transport) allows
+    // them. An ordinary kind passes validation.
+    for kind in ["skill", "vfs:dir"] {
+        let e = Entity {
+            id: EntityId::random(),
+            kind: kind.to_string(),
+            props: BTreeMap::new(),
+            edges_out: vec![],
+        };
+        let err = client
+            .add_entity(e, Visibility::Internal, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, memvault_api::ApiError::Invalid(_)),
+            "kind {kind:?} must be rejected by the validated add_entity, got {err:?}"
+        );
+    }
+    let person = Entity {
+        id: EntityId::random(),
+        kind: "person".to_string(),
+        props: BTreeMap::new(),
+        edges_out: vec![],
+    };
+    let id = client
+        .add_entity(person, Visibility::Internal, None)
+        .await
+        .expect("ordinary kind is allowed");
+
+    // Validated retract refuses a reserved entity. Build a skill via its
+    // dedicated API, then confirm the generic retract_node rejects it.
+    let skill_id = client
+        .skill_publish(
+            memvault_api::SkillSpec {
+                name: "X".into(),
+                description: None,
+                trigger: None,
+                instruction_body: None,
+            },
+            Visibility::Internal,
+            None,
+        )
+        .await
+        .unwrap();
+    let err = client
+        .retract_node(&format!("entity:{}", hex::encode(skill_id.0)), "x")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, memvault_api::ApiError::Invalid(_)));
+    // A non-reserved entity retracts fine through the validated API.
+    client
+        .retract_node(&format!("entity:{}", hex::encode(id.0)), "x")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn skill_hydrate_materializes_bundle() {
     let (_dir, client) = make_client();
 

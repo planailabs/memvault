@@ -116,11 +116,12 @@ pub async fn list_entities(
         Some(memvault_core::BucketId(arr))
     });
     let entities = state.client.list_entities(limit, bucket.as_ref()).await?;
+    // NOTE: reserved kinds (skill, vfs:dir) are intentionally NOT filtered here
+    // — this endpoint backs `HttpApiClient::list_entities`, which VFS root
+    // discovery (`ensure_root`) relies on to find the `vfs:dir` root. The graph
+    // *view* hides them in the UI (graph explorer) instead.
     let results: Vec<EntityResponse> = entities
         .into_iter()
-        // Hide reserved/managed kinds (skill, vfs:dir) from the generic graph
-        // listing — they have dedicated APIs and views.
-        .filter(|e| !memvault_core::is_reserved_entity_kind(&e.kind))
         .filter(|e| params.kind.as_deref().is_none_or(|k| e.kind == k))
         .map(|e| EntityResponse {
             id: format!("entity:{}", hex::encode(e.id.0)),
@@ -159,9 +160,15 @@ pub async fn create_entity(
     if let Some(bid) = &bucket_id {
         crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
     }
+    // NOTE: this endpoint is the raw node transport that HttpApiClient's
+    // internal ops (e.g. VFS dir creation) ride on, so it calls the unvalidated
+    // `add_entity_internal`. The reserved-kind guard lives in the validated
+    // `add_entity` client default, which every user-facing surface (MCP,
+    // memctl, web server fns) calls — so generic entity creation through the
+    // tools/UI is guarded; this authenticated low-level transport is not.
     let id = state
         .client
-        .add_entity_external(entity, vis, bucket_id.as_ref())
+        .add_entity_internal(entity, vis, bucket_id.as_ref())
         .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
@@ -233,7 +240,7 @@ pub async fn delete_entity(
     let node_id = format!("entity:{}", hex::encode(entity_id.0));
     state
         .client
-        .retract_node_external(&node_id, "deleted via API")
+        .retract_node(&node_id, "deleted via API")
         .await?;
     Ok(Json(serde_json::json!({ "status": "retracted", "node_id": node_id })))
 }

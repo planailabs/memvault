@@ -57,7 +57,7 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
         edges_out: vec![],
     };
     let id = client
-        .add_entity(entity, Visibility::Internal, Some(bucket_id))
+        .add_entity_internal(entity, Visibility::Internal, Some(bucket_id))
         .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     client
@@ -159,7 +159,7 @@ pub async fn create_dir<C: MemvaultClient + ?Sized>(
         edges_out: vec![],
     };
     client
-        .add_entity(entity, Visibility::Internal, Some(bucket_id))
+        .add_entity_internal(entity, Visibility::Internal, Some(bucket_id))
         .await
 }
 

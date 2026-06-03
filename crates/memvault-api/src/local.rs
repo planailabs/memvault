@@ -4814,7 +4814,7 @@ impl MemvaultClient for LocalClient {
         Ok(None)
     }
 
-    async fn add_entity(
+    async fn add_entity_internal(
         &self,
         entity: Entity,
         vis: Visibility,
@@ -5333,7 +5333,7 @@ impl MemvaultClient for LocalClient {
         Ok(tombstone_bytes)
     }
 
-    async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()> {
+    async fn retract_node_internal(&self, node_id: &str, reason: &str) -> Result<()> {
         self.store_annotation(
             node_id,
             "retraction",

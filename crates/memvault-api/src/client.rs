@@ -91,7 +91,15 @@ pub trait MemvaultClient: Send + Sync {
     async fn get_file_manifest(&self, manifest_cid: &[u8]) -> Result<Option<Vec<u8>>>; // returns JSON
 
     // -- Graph --
-    async fn add_entity(
+    //
+    // `add_entity_internal` is the raw, *unvalidated* create — the required op
+    // each client implements. It is crate-internal by convention (the
+    // `_internal` name): only trusted callers that legitimately create reserved
+    // kinds (VFS mkdir, skill_publish) call it directly. Everything else calls
+    // the validated `add_entity` below. (It can't be `pub(crate)`: trait items
+    // take the trait's visibility, and the op must stay trait-dispatched so the
+    // default methods and the `&dyn` VFS helpers can reach it.)
+    async fn add_entity_internal(
         &self,
         entity: Entity,
         vis: Visibility,
@@ -116,18 +124,15 @@ pub trait MemvaultClient: Send + Sync {
         max_depth: usize,
     ) -> Result<Vec<TraversalHit>>;
 
-    // -- External (validated) node API --
+    // -- Validated node API (the default everyone should call) --
     //
-    // `add_entity` / `retract_node` above are the *internal* node API: trusted
-    // callers (skill_publish, VFS mkdir/unlink) use them to manage reserved
-    // kinds. User-facing surfaces (HTTP handlers, MCP tools, the CLI) instead
-    // call these *external* variants, which reject creating or retracting a
-    // reserved/managed kind (skill, vfs:dir) so those aggregates can only be
-    // changed through their dedicated APIs. The guard lives here once, rather
-    // than duplicated at every entry point.
+    // These wrap the raw `*_internal` ops with a reserved-kind guard, so the
+    // managed aggregates (skill, vfs:dir) can only be created/retracted through
+    // their dedicated APIs. The guard lives here once rather than at every
+    // entry point; user-facing surfaces (HTTP, MCP, CLI) call these.
 
     /// Create an entity, rejecting reserved/managed kinds (skill, vfs:dir).
-    async fn add_entity_external(
+    async fn add_entity(
         &self,
         entity: Entity,
         vis: Visibility,
@@ -139,12 +144,12 @@ pub trait MemvaultClient: Send + Sync {
                 entity.kind
             )));
         }
-        self.add_entity(entity, vis, bucket).await
+        self.add_entity_internal(entity, vis, bucket).await
     }
 
     /// Retract a node by id, refusing reserved/managed entities (skill,
     /// vfs:dir) — those must be removed via their dedicated API.
-    async fn retract_node_external(&self, node_id: &str, reason: &str) -> Result<()> {
+    async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()> {
         if let Some(NodeRef::Entity(eid)) = NodeRef::from_tag_label(node_id) {
             if let Some(e) = self.get_entity(&eid).await? {
                 if memvault_core::is_reserved_entity_kind(&e.kind) {
@@ -155,7 +160,7 @@ pub trait MemvaultClient: Send + Sync {
                 }
             }
         }
-        self.retract_node(node_id, reason).await
+        self.retract_node_internal(node_id, reason).await
     }
 
     // -- Tags --
@@ -314,8 +319,10 @@ pub trait MemvaultClient: Send + Sync {
     async fn audit(&self, query: AuditQuery) -> Result<Vec<AuditRecord>>;
     async fn retract(&self, target_cid: &[u8], reason: &str) -> Result<Vec<u8>>;
     /// Retract a node by its tag_label (e.g. "entity:<hex>", "doc:<hex>", "file:<hex>").
-    /// Removes it from the search index and marks it as retracted.
-    async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()>;
+    /// Removes it from the search index and marks it as retracted. Raw, unvalidated
+    /// op (the `_internal` convention) — call the validated `retract_node` instead
+    /// unless you are a trusted caller removing a reserved kind (e.g. skill_delete).
+    async fn retract_node_internal(&self, node_id: &str, reason: &str) -> Result<()>;
 
     // -- Tokens --
     /// Issue a join token. A `TokenRole::Node(NodeRole::Admin)` token also
@@ -490,7 +497,7 @@ pub trait MemvaultClient: Send + Sync {
             props,
             edges_out: vec![],
         };
-        let skill_id = self.add_entity(entity, vis, bucket).await?;
+        let skill_id = self.add_entity_internal(entity, vis, bucket).await?;
 
         if let Some(body) = spec.instruction_body {
             let doc = Document::new(DocId::random(), body, std::collections::BTreeMap::new());
@@ -624,7 +631,7 @@ pub trait MemvaultClient: Send + Sync {
     /// (they may be shared by other skills).
     async fn skill_delete(&self, id: &EntityId, reason: &str) -> Result<()> {
         let node_id = format!("entity:{}", hex::encode(id.0));
-        self.retract_node(&node_id, reason).await
+        self.retract_node_internal(&node_id, reason).await
     }
 
     /// Link an existing node (doc/file/entity) to a skill under `relation`,
