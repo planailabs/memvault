@@ -113,18 +113,22 @@ pub fn App() -> Element {
         });
     });
 
-    // Remove pre-hydration loading banner once WASM has hydrated.
-    use_effect(|| {
-        document::eval("document.getElementById('wasm-loading')?.remove();");
-    });
+    // Drop the pre-hydration loading banner once WASM has hydrated. Gated on a
+    // signal (not a one-shot JS `.remove()`) so Dioxus owns the node: a later
+    // suspense-driven re-render — e.g. a page restarting a `use_server_future` —
+    // can't resurrect a node we deleted behind Dioxus's back.
+    let mut hydrated = use_signal(|| false);
+    use_effect(move || hydrated.set(true));
 
     rsx! {
         script { dangerous_inner_html: THEME_INIT_SCRIPT }
         document::Stylesheet { href: asset!("/public/tailwind.css") }
 
-        div { id: "wasm-loading",
-            style: WASM_LOADING_STYLE,
-            dangerous_inner_html: WASM_LOADING_INNER,
+        if !hydrated() {
+            div { id: "wasm-loading",
+                style: WASM_LOADING_STYLE,
+                dangerous_inner_html: WASM_LOADING_INNER,
+            }
         }
 
         Router::<Route> {}
