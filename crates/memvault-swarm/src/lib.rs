@@ -1782,12 +1782,14 @@ fn build_join_response(
         return refuse(JoinRefuseReason::PeerIdMismatch);
     }
 
-    // The token's CID — keys the CONSUMED_TOKENS / REVOCATIONS tables.
+    // The token's CID — keys the CONSUMED_TOKENS / REVOCATIONS tables, and is
+    // recorded as the attestation's provenance (issued_via).
     let token_cbor = match serde_ipld_dagcbor::to_vec(&token) {
         Ok(b) => b,
         Err(_) => return refuse(JoinRefuseReason::TokenInvalidSignature),
     };
-    let token_cid = memvault_core::cid_from_bytes(&token_cbor).to_bytes();
+    let token_cid_obj = memvault_core::cid_from_bytes(&token_cbor);
+    let token_cid = token_cid_obj.to_bytes();
 
     // Token revocation: keystore first (where revocations now live), then
     // the legacy redb table.
@@ -1813,7 +1815,8 @@ fn build_join_response(
         cluster_id: memvault_core::ClusterId(join_config.cluster_id),
         member: memvault_core::PeerId(claimed.to_vec()),
         not_after_ns: u64::MAX,
-        issued_via: memvault_auth::AttestationOrigin::Direct,
+        // Provenance: this attestation was minted by redeeming `token_cid`.
+        issued_via: memvault_auth::AttestationOrigin::TokenRedemption(token_cid_obj),
         signature: [0u8; 64],
     };
     let signing_bytes = match node_att.signing_bytes() {

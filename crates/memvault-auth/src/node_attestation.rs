@@ -9,9 +9,12 @@ use crate::error::{AuthError, Result};
 /// How the attestation was issued.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AttestationOrigin {
-    /// Directly attested by an admin.
+    /// Directly attested by an admin (e.g. `memctl node-attest`).
     Direct,
-    /// Attested via token redemption; the CID references the TokenConsumption record.
+    /// Attested by redeeming a join token; the CID is the redeemed token's
+    /// content id (the same id that keys revocation/usage in the keystore).
+    /// It is an identifier, not a block reference — tokens live in the
+    /// keystore, not the blockstore.
     TokenRedemption(Cid),
 }
 

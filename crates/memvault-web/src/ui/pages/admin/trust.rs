@@ -137,7 +137,10 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
                     "attested".to_string(),
                     // NodeAttestation carries no role.
                     None,
-                    Some(format!("{:?}", att.issued_via)),
+                    Some(match &att.issued_via {
+                        memvault_auth::AttestationOrigin::Direct => "direct".to_string(),
+                        memvault_auth::AttestationOrigin::TokenRedemption(_) => "token".to_string(),
+                    }),
                     Some(att.not_after_ns),
                 ),
                 NodeTrust::PreGenesis => ("pre-genesis".to_string(), None, None, None),
