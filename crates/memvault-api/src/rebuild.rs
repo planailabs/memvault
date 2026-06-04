@@ -407,8 +407,10 @@ fn repair_vfs_sync(
     let vfs_dir_kind = crate::vfs::VFS_DIR_KIND;
     let vfs_child_rel = crate::vfs::VFS_CHILD_REL;
 
-    // 1. Collect all VFS dir entities with names.
-    let labels = store.query_unique_labels("entity", 50_000)
+    // 1. Collect all VFS dir entities with names. Exhaustive (see standards:
+    //    exhaustive-lookups) — a cap would silently drop dirs and corrupt the
+    //    rebuilt VFS tree.
+    let labels = store.query_unique_labels("entity", usize::MAX)
         .map_err(|e| ApiError::Other(format!("query entities: {e}")))?;
     let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
 

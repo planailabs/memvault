@@ -3741,7 +3741,8 @@ mod native {
         let mut orphaned_agents = 0usize;
         let mut orphan_nodes: HashMap<[u8; 32], usize> = HashMap::new();
         let mut orphan_cids: Vec<Vec<u8>> = Vec::new();
-        for cid in store.query_by_tag("sigchain", "agent_att", 0, 2000).unwrap_or_default() {
+        // Exhaustive: an audit must not silently truncate (see standards).
+        for cid in store.query_by_tag("sigchain", "agent_att", 0, usize::MAX).unwrap_or_default() {
             if let Ok(Some(b)) = store.get_block(&cid) {
                 if let Ok(a) =
                     serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&b)
