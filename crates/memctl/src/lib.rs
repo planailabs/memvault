@@ -693,7 +693,12 @@ mod native {
             source: String,
         },
         /// List all source → canonical merge edges
-        Merges,
+        Merges {
+            /// Only show edges whose canonical has no local decl (likely a
+            /// pending sync, or a merge into a bad/never-created id).
+            #[arg(long)]
+            dangling: bool,
+        },
     }
 
     /// Bucket-grant subcommands. Grants are signed by the local node's
@@ -2338,15 +2343,43 @@ mod native {
                     hex::encode(canonical_id.0)
                 );
             }
-            Commands::Bucket(BucketCommands::Merges) => {
+            Commands::Bucket(BucketCommands::Merges { dangling }) => {
                 let client = connect().connect().await?;
                 let edges = client.bucket_merges().await?;
-                if edges.is_empty() {
-                    println!("No bucket merges.");
+                // A canonical is "dangling" when it has no local decl — the
+                // merged source resolves to a target this node can't show yet.
+                let mut canonical_exists: std::collections::HashMap<[u8; 32], bool> =
+                    std::collections::HashMap::new();
+                for (_s, c) in &edges {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        canonical_exists.entry(c.0)
+                    {
+                        let exists = client.bucket_get(c).await?.is_some();
+                        e.insert(exists);
+                    }
+                }
+                let shown: Vec<_> = edges
+                    .iter()
+                    .filter(|(_s, c)| !dangling || !canonical_exists[&c.0])
+                    .collect();
+                if shown.is_empty() {
+                    println!(
+                        "{}",
+                        if dangling {
+                            "No dangling bucket merges."
+                        } else {
+                            "No bucket merges."
+                        }
+                    );
                 } else {
                     println!("Bucket merges (source -> canonical):");
-                    for (s, c) in edges {
-                        println!("  {} -> {}", hex::encode(s.0), hex::encode(c.0));
+                    for (s, c) in shown {
+                        let mark = if canonical_exists[&c.0] {
+                            ""
+                        } else {
+                            "  (dangling: canonical not found locally)"
+                        };
+                        println!("  {} -> {}{}", hex::encode(s.0), hex::encode(c.0), mark);
                     }
                 }
             }

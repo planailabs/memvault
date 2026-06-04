@@ -32,6 +32,9 @@ struct BucketData {
     envelope_count: u64,
     /// When this bucket is a merged source, the canonical it resolves to.
     merged_into_hex: String,
+    /// Whether that canonical has a local decl. False = dangling (sync pending
+    /// or a merge into a bad/never-created id).
+    merged_into_exists: bool,
 }
 
 #[server]
@@ -47,6 +50,19 @@ async fn get_bucket(id: String) -> Result<Option<BucketData>, ServerFnError> {
         .bucket_get(&bucket_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // If this is a merged source, does its canonical have a local decl? A
+    // missing one is "dangling" (sync pending, or a bad merge target).
+    let mut merged_into_exists = true;
+    if let Some(b) = &info {
+        if let Some(canonical) = &b.merged_into {
+            merged_into_exists = client
+                .bucket_get(canonical)
+                .await
+                .map_err(|e| ServerFnError::new(e.to_string()))?
+                .is_some();
+        }
+    }
 
     Ok(info.map(|b| {
         let status = if b.name.contains("[ARCHIVED]") {
@@ -75,6 +91,7 @@ async fn get_bucket(id: String) -> Result<Option<BucketData>, ServerFnError> {
             created_ns: b.created_ns,
             envelope_count: b.envelope_count,
             merged_into_hex: b.merged_into.map(|c| hex::encode(c.0)).unwrap_or_default(),
+            merged_into_exists,
         }
     }))
 }
@@ -364,6 +381,12 @@ pub fn BucketDetail(id: String) -> Element {
                             Pill { variant: PillVariant::Warn, "merged" }
                             span { class: "text-fg-muted", "This bucket is merged into " }
                             span { class: "font-mono text-xs", "{data.merged_into_hex}" }
+                            if !data.merged_into_exists {
+                                Pill { variant: PillVariant::Bad, "dangling" }
+                                span { class: "text-fg-muted text-xs",
+                                    "(canonical not found locally — sync may be pending)"
+                                }
+                            }
                             Button {
                                 variant: ButtonVariant::Secondary,
                                 onclick: {
