@@ -66,4 +66,10 @@ pub use visibility::Visibility;
 /// their `("bucket_merge", <source>)` lookup tags. Idempotent and node-agnostic:
 /// the tag key is derived from each record's own `created_ns`, so every node
 /// converges to the same index regardless of who runs it.
-pub const BLOCKSTORE_VERSION: u32 = 14;
+/// v15: backfill syncable retraction blocks for local-only `RETRACTED` entries.
+/// Block-level retractions (e.g. unmerge) used to write only the local redb
+/// table, so they never propagated — an unmerge stayed local while peers kept
+/// applying the merge. Retractions are now published as signed `retraction`
+/// sigchain blocks; this migration re-publishes one per existing local-only
+/// retraction so already-diverged clusters converge. Idempotent.
+pub const BLOCKSTORE_VERSION: u32 = 15;

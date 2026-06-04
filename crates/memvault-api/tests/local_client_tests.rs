@@ -2245,6 +2245,52 @@ async fn unmerge_by_terminal_canonical_detaches_chained_source() {
 }
 
 #[tokio::test]
+async fn unmerge_emits_syncable_retraction_block() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    assert_eq!(client.canonical_of(&a.0), b.0);
+
+    // Unmerge retracts the merge record. The retraction must be a SYNCABLE
+    // block (so peers converge), not just a local RETRACTED-table entry.
+    client.bucket_unmerge(&a, &b).await.unwrap();
+    assert_eq!(client.canonical_of(&a.0), a.0, "alias dropped locally");
+    let retr = client
+        .store()
+        .query_by_tag("sigchain", "retraction", 0, usize::MAX)
+        .unwrap();
+    assert!(!retr.is_empty(), "unmerge emitted a syncable retraction block");
+}
+
+#[tokio::test]
+async fn backfill_retraction_blocks_heals_local_only_and_is_idempotent() {
+    let (_dir, client) = admin_client();
+    // Simulate a pre-fix local-only retraction (RETRACTED table, no block).
+    let target = memvault_core::cid_from_bytes(b"some-merge-record").to_bytes();
+    client.store().record_retraction(&target, &target).unwrap();
+    assert!(
+        client
+            .store()
+            .query_by_tag("retraction", &hex::encode(&target), 0, 1)
+            .unwrap()
+            .is_empty(),
+        "no syncable block yet"
+    );
+
+    assert_eq!(
+        client.backfill_retraction_blocks().unwrap(),
+        1,
+        "backfill publishes a block for the local-only retraction"
+    );
+    assert_eq!(
+        client.backfill_retraction_blocks().unwrap(),
+        0,
+        "idempotent — already has a block"
+    );
+}
+
+#[tokio::test]
 async fn reindex_bucket_merges_heals_untagged_records() {
     let (_dir, client) = admin_client();
     let canonical = mk_bucket(&client, "canonical").await;

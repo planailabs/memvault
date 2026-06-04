@@ -4971,6 +4971,67 @@ impl LocalClient {
         Ok(fixed)
     }
 
+    /// Publish a signed, syncable retraction block for `target_cid`. Tagged
+    /// `("retraction", <target>)` + `("sigchain","retraction")` so it travels
+    /// via RBSR and the `retraction` watcher arm applies it to `RETRACTED` on
+    /// every node that ingests it. Idempotent — one block per target.
+    pub(crate) fn publish_retraction_block(
+        &self,
+        target_cid: &[u8],
+        reason: &str,
+    ) -> Result<Vec<u8>> {
+        let target_hex = hex::encode(target_cid);
+        if let Ok(existing) = self.store.query_by_tag("retraction", &target_hex, 0, 1) {
+            if let Some(cid) = existing.into_iter().next() {
+                return Ok(cid); // already published
+            }
+        }
+        let wall_ns = memvault_core::wall_ns();
+        let payload = serde_json::json!({
+            "kind": "retraction",
+            "target_cid": target_cid,
+            "reason": reason,
+        });
+        let tags = vec![
+            ("retraction".to_string(), target_hex),
+            ("sigchain".to_string(), "retraction".to_string()),
+            ("kind".to_string(), "retraction".to_string()),
+        ];
+        let (cid_bytes, envelope_bytes) =
+            self.build_signed_envelope(payload, &tags, Visibility::Internal, wall_ns, None)?;
+        let meta = memvault_store::EnvelopeMeta {
+            author: self.effective_author(),
+            tags,
+            wall_ns,
+            cluster_id: Some(self.cluster_id.clone()),
+            ..Default::default()
+        };
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        Ok(cid_bytes)
+    }
+
+    /// Backfill syncable retraction blocks for local-only `RETRACTED` entries
+    /// (recorded before retractions were published as blocks — e.g. unmerges
+    /// that never propagated). Idempotent; returns the number published.
+    pub fn backfill_retraction_blocks(&self) -> Result<usize> {
+        let mut published = 0usize;
+        for (target_cid, _tombstone) in self.store.iter_retracted()? {
+            if self
+                .store
+                .query_by_tag("retraction", &hex::encode(&target_cid), 0, 1)
+                .map(|c| !c.is_empty())
+                .unwrap_or(false)
+            {
+                continue; // already has a retraction block
+            }
+            if self.publish_retraction_block(&target_cid, "backfill").is_ok() {
+                published += 1;
+            }
+        }
+        Ok(published)
+    }
+
     /// Bump the alias generation so the next `bucket_alias_maps` call
     /// rebuilds from the `bucket_merge` side blocks. Called on local merge
     /// writes and from the `bucket_merge` notifier arm on synced records.
@@ -6491,16 +6552,21 @@ impl MemvaultClient for LocalClient {
         Ok(query_audit(&self.store, &query)?)
     }
 
-    async fn retract(&self, target_cid: &[u8], _reason: &str) -> Result<Vec<u8>> {
-        let tombstone_cid = cid_from_bytes(target_cid);
-        let tombstone_bytes = tombstone_cid.to_bytes();
-        memvault_query::retract(&self.store, target_cid, &tombstone_bytes)?;
+    async fn retract(&self, target_cid: &[u8], reason: &str) -> Result<Vec<u8>> {
+        // Immediate local effect (read-your-writes); errors if already retracted.
+        let derived = cid_from_bytes(target_cid).to_bytes();
+        memvault_query::retract(&self.store, target_cid, &derived)?;
+
+        // Publish a signed, SYNCABLE retraction block so every peer applies it
+        // too. A local-only RETRACTED entry never propagates (so an unmerge
+        // would stay local). See standards/blockstore-not-redb.md.
+        let rec_cid = self.publish_retraction_block(target_cid, reason)?;
 
         self.event_bus.publish(MemvaultEvent::Retracted {
             cid: target_cid.to_vec(),
         });
 
-        Ok(tombstone_bytes)
+        Ok(rec_cid)
     }
 
     async fn retract_node_internal(&self, node_id: &str, reason: &str) -> Result<()> {

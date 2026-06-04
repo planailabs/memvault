@@ -91,6 +91,7 @@ pub struct RebuildReport {
     pub entities_indexed: usize,
     pub attachments_indexed: usize,
     pub bucket_merges_reindexed: usize,
+    pub retractions_backfilled: usize,
 }
 
 /// Perform a full deterministic rebuild of all derived state from BLOCKS.
@@ -341,6 +342,14 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     match client.reindex_bucket_merges() {
         Ok(n) => report.bucket_merges_reindexed = n,
         Err(e) => tracing::warn!("bucket-merge reindex during rebuild failed: {e}"),
+    }
+
+    // ── Phase 4c: Backfill syncable retraction blocks (v15) ────────────
+    // Local-only RETRACTED entries (e.g. unmerges) never propagated; publish a
+    // signed retraction block per entry so peers converge.
+    match client.backfill_retraction_blocks() {
+        Ok(n) => report.retractions_backfilled = n,
+        Err(e) => tracing::warn!("retraction backfill during rebuild failed: {e}"),
     }
 
     // ── Phase 5: Rebuild text index (sync) ─────────────────────────────

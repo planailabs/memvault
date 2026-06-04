@@ -35,6 +35,10 @@ const LABEL_GRANT_REVOCATION: &str = "grant_revocation";
 /// `("sigchain", "bucket_merge")` so synced records invalidate the alias
 /// cache here and surface in the audit log (§8.1).
 const LABEL_BUCKET_MERGE: &str = "bucket_merge";
+/// Label for a syncable retraction record (soft-delete of a block, e.g. an
+/// unmerge retracting a `BucketMergeRecord`). Tagged `("sigchain","retraction")`
+/// so it's applied to the `RETRACTED` table on every node that ingests it.
+const LABEL_RETRACTION: &str = "retraction";
 /// Label for the "token redeemed" audit record (`TokenConsumption`).
 pub const LABEL_TOKEN_REDEEM: &str = "token_redeem";
 
@@ -471,6 +475,28 @@ pub fn verify_envelope_authorship(
     verify_signed_envelope(&signed, trusted_attestations, trusted_node_pubkeys)
 }
 
+/// Authenticity check for a retraction block: the envelope must be a
+/// `Signed<T>` carrying a non-empty node signature that verifies against its
+/// declared author. Trust/authority of the signer is deferred (re-checked
+/// elsewhere) — this only rejects unsigned or tampered retractions.
+fn retraction_signature_ok(bytes: &[u8]) -> bool {
+    let Ok(signed) =
+        serde_ipld_dagcbor::from_slice::<memvault_core::Signed<serde_json::Value>>(bytes)
+    else {
+        return false;
+    };
+    if signed.signature.is_empty() {
+        return false;
+    }
+    let Ok(author): std::result::Result<[u8; 32], _> = signed.author.0.as_slice().try_into() else {
+        return false;
+    };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&author) else {
+        return false;
+    };
+    signed.verify(&vk).is_ok()
+}
+
 /// Verify a Signed<T> envelope's node signature plus its optional agent
 /// co-signature. Returns the most specific applicable status.
 fn verify_signed_envelope(
@@ -796,6 +822,30 @@ fn apply_sigchain_block(
             // No reindex: source blocks keep their original bucket_id and
             // were already indexed; only the alias + scope member-sets change.
             client.bump_alias_generation();
+        }
+        LABEL_RETRACTION => {
+            // A retraction block (local or synced). Apply it to the RETRACTED
+            // table so `is_retracted()` reflects it on every node, and bump the
+            // alias cache (a retracted bucket_merge == an unmerge that must take
+            // effect cluster-wide).
+            //
+            // SECURITY: authenticity gate. The retraction envelope must carry a
+            // valid node signature, or a peer could hide arbitrary blocks by
+            // injecting forged/unsigned retractions. Authority (signer is the
+            // target's author or an admin) is deferred — same model as merges /
+            // node attestations, which accept an authentic block and re-check
+            // authority later.
+            if !retraction_signature_ok(&bytes) {
+                tracing::warn!("sigchain watcher: rejecting retraction with missing/invalid signature");
+                return;
+            }
+            if let Some(view) = memvault_store::EnvelopeView::parse(&bytes) {
+                if let Some(target) = view.get_as::<Vec<u8>>("target_cid") {
+                    let tombstone = memvault_core::cid_from_bytes(&target).to_bytes();
+                    let _ = client.store().record_retraction(&target, &tombstone);
+                    client.bump_alias_generation();
+                }
+            }
         }
         LABEL_ADMIN_ADMISSION | LABEL_ADMIN_RETIREMENT => {
             // Admin-key set changed. SECURITY: never apply incrementally
