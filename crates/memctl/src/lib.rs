@@ -294,7 +294,8 @@ mod native {
         /// A cluster node participates in gossip, bitswap, and serves the REST API.
         /// This is different from an agent — nodes replicate data, agents consume it.
         Daemon {
-            /// Listen address (default: /ip4/0.0.0.0/tcp/0)
+            /// Listen address (default: /ip4/0.0.0.0/tcp/0). A wildcard address
+            /// also binds the other IP family (dual-stack IPv4 + IPv6).
             #[arg(long, default_value = "/ip4/0.0.0.0/tcp/0")]
             listen: String,
             /// Bootstrap peer multiaddrs (comma-separated)

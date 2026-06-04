@@ -103,8 +103,16 @@ pub async fn standalone_swarm(
         .build();
 
     swarm
-        .listen_on(listen_addr)
+        .listen_on(listen_addr.clone())
         .map_err(|e| NetError::Transport(e.to_string()))?;
+    // Dual-stack: also bind the opposite-family wildcard so the node is
+    // reachable over both IPv4 and IPv6 (e.g. /ip4/0.0.0.0/... → /ip6/::/...).
+    // Best-effort — IPv6 may be unavailable on the host.
+    if let Some(companion) = dual_family_companion(&listen_addr) {
+        if let Err(e) = swarm.listen_on(companion.clone()) {
+            tracing::warn!(%companion, error = %e, "could not also listen on companion family");
+        }
+    }
 
     // Seed bootstrap peers: register in Kademlia when the multiaddr carries a
     // /p2p/<peer> component (so bootstrap() has routing entries before Identify
@@ -120,4 +128,24 @@ pub async fn standalone_swarm(
     }
 
     Ok(swarm)
+}
+
+/// For a wildcard listen address, return the same protocol stack on the other
+/// IP family (`/ip4/0.0.0.0/...` ↔ `/ip6/::/...`). Returns `None` for a
+/// specific (non-unspecified) address — we don't invent a companion there.
+fn dual_family_companion(addr: &Multiaddr) -> Option<Multiaddr> {
+    use libp2p::multiaddr::Protocol;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let mut comps: Vec<Protocol> = addr.iter().collect();
+    match comps.first() {
+        Some(Protocol::Ip4(a)) if a.is_unspecified() => {
+            comps[0] = Protocol::Ip6(Ipv6Addr::UNSPECIFIED);
+        }
+        Some(Protocol::Ip6(a)) if a.is_unspecified() => {
+            comps[0] = Protocol::Ip4(Ipv4Addr::UNSPECIFIED);
+        }
+        _ => return None,
+    }
+    Some(comps.into_iter().collect())
 }
