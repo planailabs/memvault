@@ -102,18 +102,6 @@ fn pill_for_status(status: &str) -> Element {
 #[component]
 pub fn BucketList() -> Element {
     use_topbar("Buckets");
-    // Surface merged sources alongside retracted entries — both ride the
-    // "Retracted" topbar toggle.
-    let filters = crate::ui::filters::use_filters();
-    let mut buckets = use_server_future(move || {
-        let include_merged = filters.read().show_retracted;
-        async move { list_buckets(include_merged).await }
-    })?;
-    // use_server_future only re-runs on remount, not on signal change.
-    use_effect(move || {
-        let _ = filters.read();
-        buckets.restart();
-    });
     let mut show_create = use_signal(|| false);
     let mut new_name = use_signal(String::new);
 
@@ -166,21 +154,49 @@ pub fn BucketList() -> Element {
                 }
             }
 
-            match &*buckets.read() {
-                Some(Ok(list)) if !list.is_empty() => rsx! {
-                    BucketTable { list: list.clone() }
-                },
-                Some(Ok(_)) => rsx! {
+            // The data-dependent table sits in its own boundary so toggling the
+            // "Retracted" filter (which restarts the fetch) shows a contained
+            // loading box here instead of suspending the whole page chrome.
+            SuspenseBoundary {
+                fallback: |_| rsx! {
                     Card {
-                        div { class: "p-8 text-center text-fg-muted",
-                            "No buckets yet. Create one to get started."
-                        }
+                        div { class: "p-8 text-center text-fg-muted", "Loading buckets…" }
                     }
                 },
-                Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-                None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+                BucketListBody {}
             }
         }
+    }
+}
+
+#[component]
+fn BucketListBody() -> Element {
+    // Surface merged sources alongside retracted entries — both ride the
+    // "Retracted" topbar toggle.
+    let filters = crate::ui::filters::use_filters();
+    let mut buckets = use_server_future(move || {
+        let include_merged = filters.read().show_retracted;
+        async move { list_buckets(include_merged).await }
+    })?;
+    // use_server_future only re-runs on remount, not on signal change.
+    use_effect(move || {
+        let _ = filters.read();
+        buckets.restart();
+    });
+
+    match &*buckets.read() {
+        Some(Ok(list)) if !list.is_empty() => rsx! {
+            BucketTable { list: list.clone() }
+        },
+        Some(Ok(_)) => rsx! {
+            Card {
+                div { class: "p-8 text-center text-fg-muted",
+                    "No buckets yet. Create one to get started."
+                }
+            }
+        },
+        Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
+        None => rsx! { p { class: "text-fg-muted", "Loading..." } },
     }
 }
 

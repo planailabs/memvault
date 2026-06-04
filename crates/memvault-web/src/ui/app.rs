@@ -113,22 +113,21 @@ pub fn App() -> Element {
         });
     });
 
-    // Drop the pre-hydration loading banner once WASM has hydrated. Gated on a
-    // signal (not a one-shot JS `.remove()`) so Dioxus owns the node: a later
-    // suspense-driven re-render — e.g. a page restarting a `use_server_future` —
-    // can't resurrect a node we deleted behind Dioxus's back.
-    let mut hydrated = use_signal(|| false);
-    use_effect(move || hydrated.set(true));
+    // Remove pre-hydration loading banner once WASM has hydrated. Safe as a
+    // one-shot JS `.remove()` because all re-fetch suspense is contained in
+    // boundaries below this root (the Topbar and the routed page each have
+    // their own SuspenseBoundary), so App never re-renders to re-insert it.
+    use_effect(|| {
+        document::eval("document.getElementById('wasm-loading')?.remove();");
+    });
 
     rsx! {
         script { dangerous_inner_html: THEME_INIT_SCRIPT }
         document::Stylesheet { href: asset!("/public/tailwind.css") }
 
-        if !hydrated() {
-            div { id: "wasm-loading",
-                style: WASM_LOADING_STYLE,
-                dangerous_inner_html: WASM_LOADING_INNER,
-            }
+        div { id: "wasm-loading",
+            style: WASM_LOADING_STYLE,
+            dangerous_inner_html: WASM_LOADING_INNER,
         }
 
         Router::<Route> {}

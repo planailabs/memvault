@@ -30,7 +30,18 @@ pub fn Layout() -> Element {
         div { class: "flex h-screen bg-bg text-fg",
             Sidebar {}
             div { class: "flex-1 flex flex-col min-w-0",
-                Topbar {}
+                // Topbar has its own boundary: toggling a filter (e.g. Retracted)
+                // restarts its bucket/view fetches, and without this the suspense
+                // would bubble past the page boundary and blank the whole layout.
+                // While re-fetching it shows a fixed-height placeholder bar.
+                SuspenseBoundary {
+                    fallback: |_| rsx! {
+                        header { class: "topbar",
+                            div { class: "flex items-center gap-3 px-5 py-3 h-[49px]" }
+                        }
+                    },
+                    Topbar {}
+                }
                 main { class: "flex-1 overflow-y-auto p-5",
                     SuspenseBoundary {
                         fallback: |_| rsx! {
