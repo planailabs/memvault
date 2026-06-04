@@ -106,8 +106,16 @@ pub async fn standalone_swarm(
         .listen_on(listen_addr)
         .map_err(|e| NetError::Transport(e.to_string()))?;
 
-    // Dial bootstrap peers
+    // Seed bootstrap peers: register in Kademlia when the multiaddr carries a
+    // /p2p/<peer> component (so bootstrap() has routing entries before Identify
+    // completes), then dial.
     for addr in bootstrap_peers {
+        if let Some(peer) = addr.iter().find_map(|p| match p {
+            libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+            _ => None,
+        }) {
+            swarm.behaviour_mut().kad.add_address(&peer, addr.clone());
+        }
         let _ = swarm.dial(addr);
     }
 

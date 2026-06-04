@@ -303,6 +303,16 @@ mod native {
             /// HTTP API port for the embedded REST server
             #[arg(long, env = "MEMVAULT_API_PORT", default_value = "8401")]
             api_port: u16,
+            /// Force the Kademlia DHT into server mode. Recommended on
+            /// publicly-reachable nodes; otherwise libp2p auto-detects and a
+            /// NATed node can stay a client and undiscoverable via the DHT.
+            #[arg(long)]
+            kad_server: bool,
+            /// Seconds between Kademlia bootstrap rounds (a routing-table
+            /// refresh). 0 disables periodic bootstrap; > 0 also bootstraps
+            /// once at startup.
+            #[arg(long, default_value = "0")]
+            kad_bootstrap_interval_secs: u64,
         },
         /// Join this node to an existing cluster using a join token
         ///
@@ -2506,6 +2516,8 @@ mod native {
                 listen,
                 bootstrap,
                 api_port,
+                kad_server,
+                kad_bootstrap_interval_secs,
             } => {
                 // Open the store and reconcile PeerId
                 let store = make_store()?;
@@ -2675,6 +2687,8 @@ mod native {
 
                     let sync_config = memvault_swarm::SyncConfig {
                         cluster_id: cluster_id_bytes.clone(),
+                        kad_server,
+                        kad_bootstrap_interval_secs,
                         ..Default::default()
                     };
 
@@ -2708,6 +2722,8 @@ mod native {
 
                     let sync_config = memvault_swarm::SyncConfig {
                         cluster_id: cluster_id_bytes.clone(),
+                        kad_server,
+                        kad_bootstrap_interval_secs,
                         ..Default::default()
                     };
 

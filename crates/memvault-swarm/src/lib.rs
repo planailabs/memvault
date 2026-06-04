@@ -44,6 +44,11 @@ pub trait MemvaultHost {
     fn dial(&mut self, addr: Multiaddr);
     /// Register a known address for a peer in Kademlia.
     fn kad_add_address(&mut self, peer: &PeerId, addr: Multiaddr);
+    /// Force the Kademlia DHT into server mode.
+    fn kad_set_server_mode(&mut self);
+    /// Trigger a Kademlia bootstrap round (a self-lookup that refreshes and
+    /// expands the routing table). A no-known-peers error is logged, not fatal.
+    fn kad_bootstrap(&mut self);
     /// Send a `/ai-memvault/block/1.0` request.
     fn send_block_request(&mut self, peer: &PeerId, req: BlockRequest);
     /// Answer an inbound block request on its response channel.
@@ -67,6 +72,17 @@ impl MemvaultHost for StandaloneHost<'_> {
     }
     fn kad_add_address(&mut self, peer: &PeerId, addr: Multiaddr) {
         self.0.behaviour_mut().kad.add_address(peer, addr);
+    }
+    fn kad_set_server_mode(&mut self) {
+        self.0
+            .behaviour_mut()
+            .kad
+            .set_mode(Some(libp2p::kad::Mode::Server));
+    }
+    fn kad_bootstrap(&mut self) {
+        if let Err(e) = self.0.behaviour_mut().kad.bootstrap() {
+            tracing::debug!(error = %e, "kademlia bootstrap skipped (no known peers)");
+        }
     }
     fn send_block_request(&mut self, peer: &PeerId, req: BlockRequest) {
         self.0.behaviour_mut().block_exchange.send_request(peer, req);
@@ -98,6 +114,12 @@ pub struct SyncConfig {
     pub initial_sync_window_ns: u64,
     /// Maximum number of recent heads to request on connect.
     pub initial_sync_max_heads: usize,
+    /// Force the Kademlia DHT into server mode at startup. When false, libp2p
+    /// auto-detects mode from confirmed external addresses.
+    pub kad_server: bool,
+    /// Seconds between Kademlia bootstrap rounds. 0 disables periodic bootstrap;
+    /// when > 0 an initial bootstrap also runs at startup.
+    pub kad_bootstrap_interval_secs: u64,
 }
 
 impl Default for SyncConfig {
@@ -106,6 +128,8 @@ impl Default for SyncConfig {
             cluster_id: vec![0u8; 32],
             initial_sync_window_ns: 5 * 60 * 1_000_000_000,
             initial_sync_max_heads: 500,
+            kad_server: false,
+            kad_bootstrap_interval_secs: 0,
         }
     }
 }
@@ -322,6 +346,17 @@ impl MemvaultDriver {
     /// without mDNS/Kademlia discovery. Only the real admin returns Success,
     /// so dialing the wrong peer is harmless.
     pub fn on_start(&mut self, host: &mut impl MemvaultHost) {
+        // Kademlia policy first, so it applies whether or not a join token is
+        // pending: force server mode and kick an initial bootstrap if enabled.
+        if self.config.kad_server {
+            host.kad_set_server_mode();
+            tracing::info!("kademlia mode forced to server");
+        }
+        if self.config.kad_bootstrap_interval_secs > 0 {
+            tracing::info!("kademlia bootstrap initiated");
+            host.kad_bootstrap();
+        }
+
         let Some(token_str) = &self.join_config.pending_token else {
             return;
         };
@@ -343,6 +378,21 @@ impl MemvaultDriver {
                 }
             }
         }
+    }
+
+    /// The configured periodic Kademlia bootstrap interval, or `None` when
+    /// disabled (`kad_bootstrap_interval_secs == 0`). Loops use this to arm a
+    /// timer that fires [`Self::tick_kad_bootstrap`].
+    pub fn kad_bootstrap_interval(&self) -> Option<Duration> {
+        match self.config.kad_bootstrap_interval_secs {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        }
+    }
+
+    /// Run one periodic Kademlia bootstrap round.
+    pub fn tick_kad_bootstrap(&self, host: &mut impl MemvaultHost) {
+        host.kad_bootstrap();
     }
 
     /// A peer connected: request their heads, and redeem a pending token.
@@ -680,6 +730,17 @@ pub async fn run_sync_loop(
 
     driver.on_start(&mut StandaloneHost(swarm));
 
+    // Optional periodic Kademlia bootstrap (None when disabled). on_start
+    // already kicked the initial round, so consume the immediate tick.
+    let mut kad_bootstrap_timer = match driver.kad_bootstrap_interval() {
+        Some(d) => {
+            let mut t = tokio::time::interval(d);
+            t.tick().await;
+            Some(t)
+        }
+        None => None,
+    };
+
     loop {
         tokio::select! {
             event = swarm.next() => {
@@ -711,6 +772,13 @@ pub async fn run_sync_loop(
             _ = resync_timer.tick() => driver.tick_resync(&mut StandaloneHost(swarm)),
 
             _ = join_retry_timer.tick() => driver.tick_join_retry(&mut StandaloneHost(swarm)),
+
+            _ = async {
+                match kad_bootstrap_timer.as_mut() {
+                    Some(t) => { t.tick().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => driver.tick_kad_bootstrap(&mut StandaloneHost(swarm)),
 
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutting down...");
