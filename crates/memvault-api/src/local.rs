@@ -4811,6 +4811,7 @@ impl LocalClient {
             .store
             .query_by_tag("bucket_merge", &source_hex, 0, usize::MAX)
             .unwrap_or_default();
+        let want = canonical.0;
         let mut retracted_any = false;
         for cid in cids {
             if self.store.is_retracted(&cid).unwrap_or(false) {
@@ -4824,7 +4825,13 @@ impl LocalClient {
             else {
                 continue;
             };
-            if rec.canonical.0 == canonical.0 {
+            // The record stores the *direct* one-hop canonical, but callers
+            // (e.g. the UI) often pass the *terminal* canonical from
+            // `BucketInfo.merged_into` (= `canonical_of`, flattened through any
+            // chain). Match either: the direct target, or one whose chain
+            // resolves to the requested terminal. Retracting the source's
+            // direct edge detaches it regardless of how deep the chain was.
+            if rec.canonical.0 == want || self.canonical_of(&rec.canonical.0) == want {
                 self.retract(&cid, "bucket unmerge").await?;
                 retracted_any = true;
             }

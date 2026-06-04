@@ -2182,6 +2182,31 @@ async fn merge_into_phantom_canonical_keeps_source_visible() {
 }
 
 #[tokio::test]
+async fn unmerge_by_terminal_canonical_detaches_chained_source() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    let c = mk_bucket(&client, "c").await;
+
+    // A -> B -> C. A's direct edge is A->B, but BucketInfo.merged_into reports
+    // the terminal C — which is what the UI hands to unmerge.
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &c).unwrap();
+    assert_eq!(client.canonical_of(&a.0), c.0);
+
+    // Unmerge A using the terminal canonical C (not the direct parent B).
+    client.bucket_unmerge(&a, &c).await.unwrap();
+
+    // A is now standalone; B still folds into C.
+    assert_eq!(client.canonical_of(&a.0), a.0, "A detached from the chain");
+    assert_eq!(client.canonical_of(&b.0), c.0, "B still merged into C");
+
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    assert!(visible.iter().any(|bi| bi.id == a), "A visible again");
+    assert!(!visible.iter().any(|bi| bi.id == b), "B still hidden");
+}
+
+#[tokio::test]
 async fn merge_cycle_is_guarded() {
     let (_dir, client) = admin_client();
     let a = mk_bucket(&client, "a").await;
