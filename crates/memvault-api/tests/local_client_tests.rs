@@ -2245,6 +2245,46 @@ async fn unmerge_by_terminal_canonical_detaches_chained_source() {
 }
 
 #[tokio::test]
+async fn merge_union_in_list_entities_and_docs() {
+    use memvault_core::EntityId;
+    use memvault_doc::Entity;
+    let (_dir, client) = admin_client();
+    let canonical = mk_bucket(&client, "canonical").await;
+    let source = mk_bucket(&client, "source").await;
+
+    // A doc + an entity in the SOURCE bucket.
+    put_note(&client, &source, "source doc body").await;
+    let ent = Entity {
+        id: EntityId::random(),
+        kind: "note".into(),
+        props: Default::default(),
+        edges_out: vec![],
+    };
+    let ent_id = client
+        .add_entity_internal(ent, Visibility::Internal, Some(&source))
+        .await
+        .unwrap();
+
+    // Before the merge: the canonical lists none of the source's content.
+    let docs_before = client.list_docs(None, 100, Some(&canonical)).await.unwrap();
+    assert!(docs_before.is_empty(), "canonical has no docs pre-merge");
+    let ents_before = client.list_entities(100, Some(&canonical)).await.unwrap();
+    assert!(!ents_before.iter().any(|e| e.id == ent_id));
+
+    client.bucket_merge_sync(&[source.clone()], &canonical).unwrap();
+
+    // After the merge: a listing scoped to the canonical surfaces the source's
+    // doc + entity (the graph view + MCP list tools rely on this).
+    let docs = client.list_docs(None, 100, Some(&canonical)).await.unwrap();
+    assert_eq!(docs.len(), 1, "canonical lists the merged source's doc");
+    let ents = client.list_entities(100, Some(&canonical)).await.unwrap();
+    assert!(
+        ents.iter().any(|e| e.id == ent_id),
+        "canonical lists the merged source's entity"
+    );
+}
+
+#[tokio::test]
 async fn merge_cycle_is_guarded() {
     let (_dir, client) = admin_client();
     let a = mk_bucket(&client, "a").await;

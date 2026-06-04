@@ -5596,33 +5596,47 @@ impl MemvaultClient for LocalClient {
             // maintenance wiring has folded them into the registered set before
             // we read it — read-your-syncs, mirroring scoped_list/scoped_search.
             self.flush_index().await;
-            self.ensure_bucket_partition(bid).await?;
-            let bsid = memvault_core::bucket_scope_id(bid);
-            // include_active is always true; include_retracted gates the
-            // retracted partition. Unlimited at the store level — we filter to
-            // docs and page at `limit` after.
-            let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+            // Read-time merge union: the canonical's member-set plus those of the
+            // sources merged into it (each bucket keeps its own set). Mirrors
+            // `effective_bucket_set` so a listing scoped to a canonical surfaces
+            // merged-source docs.
+            let mut buckets = vec![bid.clone()];
+            buckets.extend(self.bucket_merge_members(&bid.0).into_iter().map(BucketId));
+            let mut seen = std::collections::HashSet::new();
             let mut summaries = Vec::new();
-            for (node_id, _wall) in &members {
-                if summaries.len() >= limit {
-                    break;
-                }
-                let Some(hex_id) = node_id.strip_prefix("doc:") else {
-                    continue;
-                };
-                let Some(arr) = hex::decode(hex_id)
-                    .ok()
-                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
-                else {
-                    continue;
-                };
-                if let Some(summary) = self.doc_summary(&DocId(arr)) {
-                    summaries.push(summary);
+            'outer: for b in &buckets {
+                self.ensure_bucket_partition(b).await?;
+                let bsid = memvault_core::bucket_scope_id(b);
+                // include_active is always true; include_retracted gates the
+                // retracted partition. Unlimited at the store level — we filter
+                // to docs and page at `limit` after.
+                let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+                for (node_id, _wall) in &members {
+                    if summaries.len() >= limit {
+                        break 'outer;
+                    }
+                    let Some(hex_id) = node_id.strip_prefix("doc:") else {
+                        continue;
+                    };
+                    let Some(arr) = hex::decode(hex_id)
+                        .ok()
+                        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(arr) {
+                        continue;
+                    }
+                    if let Some(summary) = self.doc_summary(&DocId(arr)) {
+                        summaries.push(summary);
+                    }
                 }
             }
             #[cfg(debug_assertions)]
-            self.debug_assert_bucket_parity(bid, include_retracted, "doc:")
-                .await;
+            for b in &buckets {
+                self.debug_assert_bucket_parity(b, include_retracted, "doc:")
+                    .await;
+            }
             return Ok(summaries);
         }
         self.list_docs_scan(tag_filter, limit, bucket, include_retracted)
@@ -5994,32 +6008,46 @@ impl MemvaultClient for LocalClient {
             // Read-your-syncs: drain pending reindex so maintenance has folded
             // synced/seeded nodes into the registered set before we read it.
             self.flush_index().await;
-            self.ensure_bucket_partition(bid).await?;
-            let bsid = memvault_core::bucket_scope_id(bid);
-            let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+            // Read-time merge union: the canonical's member-set plus those of the
+            // sources merged into it (each bucket keeps its own set). Mirrors
+            // `effective_bucket_set` so a listing scoped to a canonical surfaces
+            // merged-source entities (graph view + MCP list tools rely on this).
+            let mut buckets = vec![bid.clone()];
+            buckets.extend(self.bucket_merge_members(&bid.0).into_iter().map(BucketId));
+            let mut seen = std::collections::HashSet::new();
             let mut entities = Vec::new();
-            for (node_id, _wall) in &members {
-                if entities.len() >= limit {
-                    break;
-                }
-                let Some(hex_id) = node_id.strip_prefix("entity:") else {
-                    continue;
-                };
-                let Some(arr) = hex::decode(hex_id)
-                    .ok()
-                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
-                else {
-                    continue;
-                };
-                if let Ok(Some(entity)) =
-                    self.get_entity_async(&EntityId(arr), include_retracted).await
-                {
-                    entities.push(entity);
+            'outer: for b in &buckets {
+                self.ensure_bucket_partition(b).await?;
+                let bsid = memvault_core::bucket_scope_id(b);
+                let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+                for (node_id, _wall) in &members {
+                    if entities.len() >= limit {
+                        break 'outer;
+                    }
+                    let Some(hex_id) = node_id.strip_prefix("entity:") else {
+                        continue;
+                    };
+                    let Some(arr) = hex::decode(hex_id)
+                        .ok()
+                        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(arr) {
+                        continue;
+                    }
+                    if let Ok(Some(entity)) =
+                        self.get_entity_async(&EntityId(arr), include_retracted).await
+                    {
+                        entities.push(entity);
+                    }
                 }
             }
             #[cfg(debug_assertions)]
-            self.debug_assert_bucket_parity(bid, include_retracted, "entity:")
-                .await;
+            for b in &buckets {
+                self.debug_assert_bucket_parity(b, include_retracted, "entity:")
+                    .await;
+            }
             return Ok(entities);
         }
         self.list_entities_scan(limit, bucket, include_retracted).await
