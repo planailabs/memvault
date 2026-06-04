@@ -6269,8 +6269,56 @@ impl MemvaultClient for LocalClient {
             None
         };
         self.flush_index().await;
-        // Scan all index rows when scoped to a bucket: a global cap drops nodes
-        // of a bucket outside the global first-N (see standards/bucket-scoping.md).
+
+        // Bucket-scoped: enumerate the per-bucket member-set (O(bucket)) instead
+        // of scanning every index row and re-deriving each node's bucket. Mirrors
+        // scoped_list; completes the derived-indexes follow-up for list_all.
+        if let Some(bid) = bucket {
+            // Pre-genesis (no buckets) falls through to the scan below.
+            if !self.store.list_buckets().unwrap_or_default().is_empty() {
+                self.ensure_bucket_partition(bid).await?;
+                let bsid = memvault_core::bucket_scope_id(bid);
+                // ActiveOnly: include active members, exclude retracted.
+                let members = self.store.scope_members(&bsid, true, false, 0)?;
+                let mut out = Vec::new();
+                {
+                    let idx = self.index.read().await;
+                    for (node_id, _) in &members {
+                        let node_type = match node_id.split_once(':').map(|(p, _)| p) {
+                            Some("doc") => "doc",
+                            Some("entity") => "entity",
+                            Some("file") | Some("attachment") => "file",
+                            _ => continue,
+                        };
+                        let Some(label) =
+                            idx.resolve_label_mode(node_id, RetractionMode::ActiveOnly)
+                        else {
+                            continue;
+                        };
+                        let tags = idx.get_tags(node_id);
+                        if let Some(vt) = &view_tags {
+                            let in_view = vt
+                                .iter()
+                                .all(|(s, l)| tags.iter().any(|(ts, tl)| ts == s && tl == l));
+                            if !in_view {
+                                continue;
+                            }
+                        }
+                        out.push((node_id.clone(), node_type.to_string(), label, tags));
+                        if out.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                #[cfg(debug_assertions)]
+                self.debug_assert_bucket_parity(bid, false, "doc:").await;
+                return Ok(out);
+            }
+        }
+
+        // Accessible (all-buckets) / pre-genesis: scan all index rows. A global
+        // cap drops nodes of a bucket outside the global first-N, so fetch all
+        // when bucketed (see standards/bucket-scoping.md).
         let fetch = if bucket.is_some() { usize::MAX } else { limit * 2 };
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
@@ -6285,17 +6333,12 @@ impl MemvaultClient for LocalClient {
         if buckets.is_empty() {
             return Ok(all.into_iter().take(limit).collect()); // pre-genesis
         }
-        // Scoped to one bucket → keep only that bucket's nodes; otherwise keep
-        // any accessible bucket's nodes.
+        // Keep nodes in any accessible bucket.
         let accessible: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
-        let target: Option<Vec<u8>> = bucket.map(|b| b.0.to_vec());
         Ok(all
             .into_iter()
             .filter(|(node_id, _, _, _)| match self.inferred_bucket_for_node_id(node_id) {
-                Some(node_bucket) => match &target {
-                    Some(t) => node_bucket == *t,
-                    None => accessible.iter().any(|b| *b == node_bucket),
-                },
+                Some(node_bucket) => accessible.iter().any(|b| *b == node_bucket),
                 None => false,
             })
             .take(limit)

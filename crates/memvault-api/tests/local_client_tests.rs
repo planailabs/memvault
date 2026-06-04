@@ -2716,3 +2716,102 @@ async fn scoped_list_member_path_post_sync() {
     assert_eq!(post.len(), 1, "synced doc appears in B's scoped listing");
     assert_eq!(post[0].node_id, format!("doc:{}", hex::encode(doc_id.0)));
 }
+
+/// Follow-up: list_all over an explicit bucket uses the member-set fast path,
+/// returning that bucket's docs + entities (active only) and isolating across
+/// buckets, while honoring a view tag filter.
+#[tokio::test]
+async fn list_all_member_path_bucket_scoped() {
+    let (_dir, client) = make_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+
+    // A: a tagged doc, an untagged doc, an entity, and a doc to retract.
+    client
+        .put_doc(
+            Document::new(DocId::random(), "tagged".into(), BTreeMap::new()),
+            vec![("kind".into(), "note".into())],
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    client
+        .put_doc(
+            Document::new(DocId::random(), "untagged".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    client
+        .add_entity(
+            Entity {
+                id: EntityId::random(),
+                kind: "person".into(),
+                props: BTreeMap::new(),
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    let gone = DocId::random();
+    client
+        .put_doc(
+            Document::new(gone.clone(), "retract me".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    // B: one doc.
+    client
+        .put_doc(
+            Document::new(DocId::random(), "b doc".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&b),
+        )
+        .await
+        .unwrap();
+
+    client
+        .retract_node(&format!("doc:{}", hex::encode(gone.0)), "x")
+        .await
+        .unwrap();
+
+    // A unscoped-by-view: 2 active docs + 1 entity = 3 (retracted excluded).
+    let a_all = client.list_all(None, 100, Some(&a)).await.unwrap();
+    assert_eq!(a_all.len(), 3, "bucket A active nodes (no view)");
+    assert!(
+        !a_all.iter().any(|(nid, _, _, _)| *nid == format!("doc:{}", hex::encode(gone.0))),
+        "retracted doc excluded"
+    );
+
+    // B isolated → 1.
+    let b_all = client.list_all(None, 100, Some(&b)).await.unwrap();
+    assert_eq!(b_all.len(), 1, "bucket B isolated");
+
+    // View filter: only the ("kind","note")-tagged doc in A.
+    client
+        .create_view(memvault_api::View {
+            name: "notes".into(),
+            tags: vec![("kind".into(), "note".into())],
+            created_ns: 1,
+            cid: String::new(),
+            bucket_id: None,
+        })
+        .await
+        .unwrap();
+    let a_notes = client.list_all(Some("notes"), 100, Some(&a)).await.unwrap();
+    assert_eq!(a_notes.len(), 1, "only the view-matching doc");
+    assert_eq!(a_notes[0].1, "doc", "the matching node is a doc");
+    assert!(
+        a_notes[0].3.iter().any(|(s, l)| s == "kind" && l == "note"),
+        "the matching doc carries the view's tag"
+    );
+}
