@@ -4,7 +4,6 @@ use dioxus::prelude::*;
 use plan_ai_design::{Card, PageHeader, Pill, PillVariant, SectionHeading};
 use serde::{Deserialize, Serialize};
 
-use crate::ui::components::cid_display::CidDisplay;
 use crate::ui::topbar::use_topbar;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -338,7 +337,7 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                     if let Some(pk) = &tree.admin_pubkey {
                         div { class: "flex items-center gap-2",
                             Pill { variant: PillVariant::Ok, "admin" }
-                            CidDisplay { cid: pk.clone(), len: Some(16) }
+                            span { class: "font-mono text-xs break-all", "{pk}" }
                         }
                     } else {
                         p { class: "text-fg-muted",
@@ -372,7 +371,6 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                         } else {
                                             Pill { variant: PillVariant::Warn, "pre-genesis" }
                                         }
-                                        CidDisplay { cid: node.pubkey.clone(), len: Some(16) }
                                         if let Some(role) = &node.role {
                                             Pill { variant: PillVariant::Info, "{role}" }
                                         }
@@ -384,6 +382,8 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                                 "expires: {fmt_expiry(exp)}"
                                             }
                                         }
+                                        // Full id last.
+                                        span { class: "font-mono text-xs break-all", "{node.pubkey}" }
                                     }
                                     if node.agents.is_empty() {
                                         p { class: "text-fg-muted text-sm mt-2 ml-4",
@@ -405,7 +405,6 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                                     if agent.label.is_some() && !agent.agent_id.is_empty() {
                                                         span { class: "font-mono text-xs text-fg-muted", "({agent.agent_id})" }
                                                     }
-                                                    CidDisplay { cid: agent.pubkey.clone(), len: Some(12) }
                                                     Pill { variant: PillVariant::Info, "{agent.role}" }
                                                     span { class: "text-xs text-fg-muted",
                                                         "expires: {fmt_expiry(agent.not_after_ns)}"
@@ -415,6 +414,8 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                                         current: agent.display_name(),
                                                         on_saved: move |_| on_refresh.call(()),
                                                     }
+                                                    // Full id last, after rename.
+                                                    span { class: "font-mono text-xs break-all", "{agent.pubkey}" }
                                                 }
                                             }
                                         }
@@ -448,12 +449,11 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                         Pill { variant: PillVariant::Warn, "orphan" }
                                     }
                                     span { class: "font-mono text-sm", "{agent.agent_id}" }
-                                    CidDisplay { cid: agent.pubkey.clone(), len: Some(12) }
                                     Pill { variant: PillVariant::Info, "{agent.role}" }
-                                    span { class: "text-xs text-fg-muted",
-                                        "claims node "
-                                    }
-                                    CidDisplay { cid: agent.node_pubkey.clone(), len: Some(12) }
+                                    // Full ids last.
+                                    span { class: "font-mono text-xs break-all", "{agent.pubkey}" }
+                                    span { class: "text-xs text-fg-muted", "claims node" }
+                                    span { class: "font-mono text-xs break-all", "{agent.node_pubkey}" }
                                 }
                             }
                         }

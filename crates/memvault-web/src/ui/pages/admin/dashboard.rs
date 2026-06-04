@@ -122,11 +122,11 @@ fn AdminView(status: NodeStatusData, tokens: Vec<TokenRow>) -> Element {
                         tbody { class: "tbody",
                             tr {
                                 td { class: "td font-medium text-sm", {t!("admin-peer-id")} }
-                                td { class: "td", CidDisplay { cid: status.peer_id.clone(), len: Some(16) } }
+                                td { class: "td", span { class: "font-mono text-xs break-all", "{status.peer_id}" } }
                             }
                             tr {
                                 td { class: "td font-medium text-sm", {t!("admin-cluster-id")} }
-                                td { class: "td", CidDisplay { cid: status.cluster_id.clone(), len: Some(16) } }
+                                td { class: "td", span { class: "font-mono text-xs break-all", "{status.cluster_id}" } }
                             }
                         }
                     }
