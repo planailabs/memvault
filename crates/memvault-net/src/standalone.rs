@@ -105,12 +105,13 @@ pub async fn standalone_swarm(
     swarm
         .listen_on(listen_addr.clone())
         .map_err(|e| NetError::Transport(e.to_string()))?;
-    // Dual-stack: also bind the opposite-family wildcard so the node is
-    // reachable over both IPv4 and IPv6 (e.g. /ip4/0.0.0.0/... → /ip6/::/...).
-    // Best-effort — IPv6 may be unavailable on the host.
-    if let Some(companion) = dual_family_companion(&listen_addr) {
-        if let Err(e) = swarm.listen_on(companion.clone()) {
-            tracing::warn!(%companion, error = %e, "could not also listen on companion family");
+    // Also bind QUIC on the same family, and — when the address is a wildcard —
+    // the opposite IP family over both transports, so the node is reachable
+    // dual-stack (IPv4 + IPv6) and dual-transport (TCP + QUIC), matching the
+    // mac-mgmt daemon. Best-effort: IPv6 may be unavailable on the host.
+    for addr in companion_listen_addrs(&listen_addr) {
+        if let Err(e) = swarm.listen_on(addr.clone()) {
+            tracing::warn!(%addr, error = %e, "could not also listen (best-effort)");
         }
     }
 
@@ -130,22 +131,32 @@ pub async fn standalone_swarm(
     Ok(swarm)
 }
 
-/// For a wildcard listen address, return the same protocol stack on the other
-/// IP family (`/ip4/0.0.0.0/...` ↔ `/ip6/::/...`). Returns `None` for a
-/// specific (non-unspecified) address — we don't invent a companion there.
-fn dual_family_companion(addr: &Multiaddr) -> Option<Multiaddr> {
-    use libp2p::multiaddr::Protocol;
+/// Extra listen addresses to bind best-effort alongside a (TCP) listen address:
+/// QUIC on the same IP family, plus — when the address is a wildcard — the
+/// opposite IP family over both TCP and QUIC. The UDP port mirrors the TCP port
+/// (0 = ephemeral). Empty if the address has no leading IP component.
+fn companion_listen_addrs(addr: &Multiaddr) -> Vec<Multiaddr> {
+    use libp2p::multiaddr::Protocol::{self, Ip4, Ip6, QuicV1, Tcp, Udp};
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    let mut comps: Vec<Protocol> = addr.iter().collect();
-    match comps.first() {
-        Some(Protocol::Ip4(a)) if a.is_unspecified() => {
-            comps[0] = Protocol::Ip6(Ipv6Addr::UNSPECIFIED);
-        }
-        Some(Protocol::Ip6(a)) if a.is_unspecified() => {
-            comps[0] = Protocol::Ip4(Ipv4Addr::UNSPECIFIED);
-        }
-        _ => return None,
+    let Some(ip) = addr.iter().next() else {
+        return Vec::new();
+    };
+    let port = addr.iter().find_map(|p| if let Tcp(n) = p { Some(n) } else { None }).unwrap_or(0);
+    let tcp = |f: Protocol| Multiaddr::empty().with(f).with(Tcp(port));
+    let quic = |f: Protocol| Multiaddr::empty().with(f).with(Udp(port)).with(QuicV1);
+
+    // QUIC on the requested family (its TCP is already bound by the caller).
+    let mut out = vec![quic(ip.clone())];
+    // Wildcard → also the opposite family, both transports.
+    let companion = match ip {
+        Ip4(a) if a.is_unspecified() => Some(Ip6(Ipv6Addr::UNSPECIFIED)),
+        Ip6(a) if a.is_unspecified() => Some(Ip4(Ipv4Addr::UNSPECIFIED)),
+        _ => None,
+    };
+    if let Some(f) = companion {
+        out.push(tcp(f.clone()));
+        out.push(quic(f));
     }
-    Some(comps.into_iter().collect())
+    out
 }
