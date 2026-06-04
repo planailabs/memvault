@@ -90,6 +90,7 @@ pub struct RebuildReport {
     pub docs_indexed: usize,
     pub entities_indexed: usize,
     pub attachments_indexed: usize,
+    pub bucket_merges_reindexed: usize,
 }
 
 /// Perform a full deterministic rebuild of all derived state from BLOCKS.
@@ -331,6 +332,16 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     let (orphans, dupes) = repair_vfs_sync(store, client)?;
     report.vfs_orphans_linked = orphans;
     report.vfs_dupes_removed = dupes;
+
+    // ── Phase 4b: Re-tag untagged bucket-merge records (v14) ───────────
+    // Bare BucketMergeRecord blocks that synced in before the sync classifier
+    // knew about them never got their `bucket_merge` lookup tag; the generic
+    // reindex can't recover it from the struct body. Re-apply it so the alias
+    // overlay sees them.
+    match client.reindex_bucket_merges() {
+        Ok(n) => report.bucket_merges_reindexed = n,
+        Err(e) => tracing::warn!("bucket-merge reindex during rebuild failed: {e}"),
+    }
 
     // ── Phase 5: Rebuild text index (sync) ─────────────────────────────
 

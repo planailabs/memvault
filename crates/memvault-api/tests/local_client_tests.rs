@@ -2245,6 +2245,34 @@ async fn unmerge_by_terminal_canonical_detaches_chained_source() {
 }
 
 #[tokio::test]
+async fn reindex_bucket_merges_heals_untagged_records() {
+    let (_dir, client) = admin_client();
+    let canonical = mk_bucket(&client, "canonical").await;
+    let source = mk_bucket(&client, "source").await;
+
+    // Simulate a merge record that synced in UNTAGGED (a bare block with no
+    // bucket_merge index entry) — the pre-fix behaviour. Sign with the admin
+    // key the test client holds so verify_signature passes.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let rec = memvault_auth::sign_bucket_merge(&key, source.clone(), canonical.clone(), 123).unwrap();
+    let bytes = serde_ipld_dagcbor::to_vec(&rec).unwrap();
+    let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+    client.store().put_block(&cid, &bytes).unwrap();
+
+    // Invisible until reindexed.
+    client.bump_alias_generation();
+    assert!(client.bucket_merges().is_empty(), "untagged merge is invisible");
+    assert_eq!(client.canonical_of(&source.0), source.0);
+
+    // Heal, then the alias resolves.
+    assert_eq!(client.reindex_bucket_merges().unwrap(), 1);
+    assert_eq!(client.canonical_of(&source.0), canonical.0, "alias resolves after reindex");
+
+    // Idempotent: a second run repairs nothing (already indexed).
+    assert_eq!(client.reindex_bucket_merges().unwrap(), 0);
+}
+
+#[tokio::test]
 async fn merge_union_in_list_entities_and_docs() {
     use memvault_core::EntityId;
     use memvault_doc::Entity;

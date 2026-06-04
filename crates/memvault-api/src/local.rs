@@ -4921,6 +4921,56 @@ impl LocalClient {
 
     // -- Bucket merges (alias overlay) --
 
+    /// One-time repair for `BucketMergeRecord` blocks that landed in the store
+    /// untagged — synced before the `validate_sigchain_for_sync` arm existed, so
+    /// they were stored `AsIs` and `reindex_block` couldn't recover tags from
+    /// the bare struct. Re-applies the `("bucket_merge", <source>)` lookup tags
+    /// (plus `kind`/`sigchain`) via `insert_envelope` (idempotent on the block)
+    /// and bumps the alias generation so the union takes effect. Scans the
+    /// blockstore once; returns the number repaired.
+    pub fn reindex_bucket_merges(&self) -> Result<usize> {
+        let mut fixed = 0usize;
+        for (cid, data) in self.store.iter_blocks()? {
+            let Some(rec) =
+                memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
+            else {
+                continue;
+            };
+            if rec.source.0 == rec.canonical.0 || rec.verify_signature().is_err() {
+                continue;
+            }
+            let src_hex = hex::encode(rec.source.0);
+            // Skip records already indexed under their source.
+            let indexed = self
+                .store
+                .query_by_tag("bucket_merge", &src_hex, 0, usize::MAX)
+                .map(|cids| cids.iter().any(|c| c == &cid))
+                .unwrap_or(false);
+            if indexed {
+                continue;
+            }
+            let meta = memvault_store::EnvelopeMeta {
+                author: rec.issued_by_pubkey.to_vec(),
+                tags: vec![
+                    ("bucket_merge".to_string(), src_hex),
+                    ("kind".to_string(), "bucket_merge".to_string()),
+                    ("sigchain".to_string(), "bucket_merge".to_string()),
+                ],
+                wall_ns: rec.created_ns,
+                cluster_id: Some(self.cluster_id.clone()),
+                bucket_id: Some(rec.canonical.0.to_vec()),
+                ..Default::default()
+            };
+            self.store.insert_envelope(&cid, &data, &meta)?;
+            fixed += 1;
+        }
+        if fixed > 0 {
+            self.bump_alias_generation();
+            tracing::info!(repaired = fixed, "reindexed previously-untagged bucket merges");
+        }
+        Ok(fixed)
+    }
+
     /// Bump the alias generation so the next `bucket_alias_maps` call
     /// rebuilds from the `bucket_merge` side blocks. Called on local merge
     /// writes and from the `bucket_merge` notifier arm on synced records.

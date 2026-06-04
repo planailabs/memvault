@@ -59,4 +59,11 @@ pub use visibility::Visibility;
 /// gate keeps v12 and v13 nodes from syncing and diverging. The upgrade
 /// rebuild re-derives + auto-aliases legacy agent buckets onto the stable id
 /// (agent blocks keep their original signed bucket_id — never re-homed).
-pub const BLOCKSTORE_VERSION: u32 = 13;
+/// v14: re-index `BucketMergeRecord` side blocks that synced in untagged before
+/// the sync classifier (`validate_sigchain_for_sync`) learned about them — they
+/// were stored `AsIs` and the generic reindex couldn't recover tags from the
+/// bare struct, so the merge was invisible on the peer. The rebuild re-applies
+/// their `("bucket_merge", <source>)` lookup tags. Idempotent and node-agnostic:
+/// the tag key is derived from each record's own `created_ns`, so every node
+/// converges to the same index regardless of who runs it.
+pub const BLOCKSTORE_VERSION: u32 = 14;
