@@ -294,7 +294,7 @@ async fn create_grant(
 pub fn BucketDetail(id: String) -> Element {
     use_topbar("Bucket Detail");
     let fetch_id = id.clone();
-    let bucket = use_server_future(move || {
+    let mut bucket = use_server_future(move || {
         let id = fetch_id.clone();
         async move { get_bucket(id).await }
     })?;
@@ -364,6 +364,23 @@ pub fn BucketDetail(id: String) -> Element {
                             Pill { variant: PillVariant::Warn, "merged" }
                             span { class: "text-fg-muted", "This bucket is merged into " }
                             span { class: "font-mono text-xs", "{data.merged_into_hex}" }
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                onclick: {
+                                    let source = id.clone();
+                                    let canonical = data.merged_into_hex.clone();
+                                    move |_| {
+                                        let source = source.clone();
+                                        let canonical = canonical.clone();
+                                        spawn(async move {
+                                            if unmerge_source(canonical, source).await.is_ok() {
+                                                bucket.restart();
+                                            }
+                                        });
+                                    }
+                                },
+                                "Unmerge"
+                            }
                         }
                     }
                 }
