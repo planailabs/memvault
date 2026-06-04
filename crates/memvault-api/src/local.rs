@@ -3377,6 +3377,137 @@ impl LocalClient {
         limit: usize,
     ) -> Result<Vec<crate::types::NodeSummary>> {
         self.flush_index().await;
+        let known = self.all_bucket_id_arrays();
+        let eff = self.effective_bucket_set(&scope.buckets, &known);
+        if matches!(&eff, Some(s) if s.is_empty()) {
+            return Ok(Vec::new()); // explicit empty set → empty result
+        }
+
+        // O(bucket) fast path: an explicit, non-empty bucket set enumerates the
+        // per-bucket member-sets instead of scanning every index row and
+        // re-deriving each node's bucket. Gated on `entity_kind` being unset —
+        // the member-sets aren't partitioned by fine-grained entity kind, so a
+        // kind-filtered query keeps the index-scan path (which pushes the kind
+        // clause into Tantivy). The `Accessible` (None) case also scans, since
+        // it spans all buckets and never narrows by membership.
+        if let Some(set) = &eff {
+            if !set.is_empty() && scope.entity_kind.is_none() {
+                return self.scoped_list_members(scope, set, limit).await;
+            }
+        }
+        self.scoped_list_scan(scope, limit).await
+    }
+
+    /// Member-set enumeration backing [`Self::scoped_list`] for an explicit
+    /// bucket set. Enumerates the union of the buckets' `ScopeKind::Bucket`
+    /// member-sets, then applies the view-tag conjunction, node-kind, and
+    /// retraction filters from the live index. O(sum of bucket members).
+    async fn scoped_list_members(
+        &self,
+        scope: &memvault_core::QueryScope,
+        set: &std::collections::HashSet<[u8; 32]>,
+        limit: usize,
+    ) -> Result<Vec<crate::types::NodeSummary>> {
+        let view_tags = match &scope.view {
+            Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
+            None => None,
+        };
+        // Union the buckets' members (dedup across buckets).
+        let mut node_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for b in set {
+            self.ensure_bucket_partition(&BucketId(*b)).await?;
+            let bsid = memvault_core::bucket_scope_id(&BucketId(*b));
+            for (nid, _) in self.store.scope_members(
+                &bsid,
+                scope.retraction.includes_active(),
+                scope.retraction.includes_retracted(),
+                0,
+            )? {
+                node_ids.insert(nid);
+            }
+        }
+
+        let mut out = Vec::new();
+        {
+            let idx = self.index.read().await;
+            for node_id in &node_ids {
+                let node_type = match node_id.split_once(':').map(|(p, _)| p) {
+                    Some("doc") => "doc",
+                    Some("entity") => "entity",
+                    Some("file") | Some("attachment") => "file",
+                    _ => continue,
+                };
+                if let Some(kind) = scope.kind {
+                    if !kind.matches(node_type) {
+                        continue;
+                    }
+                }
+                // Resolve under the retraction mode — also drops nodes the index
+                // doesn't hold under this mode (keeps parity with the scan).
+                let Some(label) = idx.resolve_label_mode(node_id, scope.retraction) else {
+                    continue;
+                };
+                let tags = idx.get_tags(node_id);
+                // View tag conjunction.
+                if let Some(vt) = &view_tags {
+                    let in_view = vt
+                        .iter()
+                        .all(|(s, l)| tags.iter().any(|(ts, tl)| ts == s && tl == l));
+                    if !in_view {
+                        continue;
+                    }
+                }
+                let retracted = idx.is_retracted(node_id);
+                let detail = if scope.detail == memvault_core::DetailLevel::Full {
+                    self.node_detail(node_id, node_type).await
+                } else {
+                    None
+                };
+                out.push(crate::types::NodeSummary {
+                    node_id: node_id.clone(),
+                    node_type: node_type.to_string(),
+                    label,
+                    tags,
+                    retracted,
+                    detail,
+                });
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            // Parity: every node the authoritative index scan returns for this
+            // scope must be reachable via the member-set enumeration. Catches a
+            // bucket set that drifted out of sync with the index.
+            let scan = self.scoped_list_scan(scope, usize::MAX).await?;
+            let member_ids: std::collections::HashSet<&str> =
+                node_ids.iter().map(|s| s.as_str()).collect();
+            let missing: Vec<&String> = scan
+                .iter()
+                .map(|n| &n.node_id)
+                .filter(|id| !member_ids.contains(id.as_str()))
+                .collect();
+            debug_assert!(
+                missing.is_empty(),
+                "scoped_list member-set is missing nodes the authoritative scan \
+                 returned — maintenance drift: {missing:?}"
+            );
+        }
+
+        Ok(out)
+    }
+
+    /// Authoritative index-scan listing backing [`Self::scoped_list`]. Used for
+    /// the `Accessible` (all-buckets) case, `entity_kind`-filtered queries, and
+    /// as the source of truth the member-set fast path is validated against.
+    async fn scoped_list_scan(
+        &self,
+        scope: &memvault_core::QueryScope,
+        limit: usize,
+    ) -> Result<Vec<crate::types::NodeSummary>> {
         let view_tags = match &scope.view {
             Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
             None => None,

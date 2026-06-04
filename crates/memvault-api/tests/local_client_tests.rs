@@ -2663,3 +2663,56 @@ async fn bucket_member_set_pagination() {
     let all = client.list_docs(None, 100, Some(&bucket)).await.unwrap();
     assert_eq!(all.len(), 10, "membership universe is exhaustive");
 }
+
+/// QueryScope rewire: scoped_list over an explicit bucket set uses the
+/// member-set fast path. A doc synced in via reindex_block into an
+/// already-registered bucket appears in the scoped listing (the QueryScope
+/// analogue of the post-sync completeness test).
+#[tokio::test]
+async fn scoped_list_member_path_post_sync() {
+    use memvault_core::QueryScope;
+
+    let (_dir_a, client_a) = make_client();
+    let (_dir_b, client_b) = make_client();
+    client_b.install_sigchain_notifier();
+
+    let bucket = mk_bucket(&client_a, "shared").await;
+    let doc_id = DocId::random();
+    let cid = client_a
+        .put_doc(
+            Document::new(doc_id.clone(), "scoped sync body".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+
+    let scope = QueryScope::all().with_bucket(Some(bucket.clone()));
+
+    // Helper: copy a block from A to B and reindex it (the RBSR sync path).
+    let sync_block = |from: &Arc<LocalClient>, to: &Arc<LocalClient>, c: &[u8]| {
+        let block = from.store().get_block(c).unwrap().unwrap();
+        to.store().put_block(c, &block).unwrap();
+        to.store().reindex_block(c, &block).unwrap();
+    };
+
+    // scoped_list intersects the requested bucket with the *accessible* set,
+    // so B must first learn the bucket exists — sync its declaration block(s).
+    for (id, decl_cid) in client_a.store().list_buckets().unwrap() {
+        if id.as_slice() == bucket.0.as_slice() {
+            sync_block(&client_a, &client_b, &decl_cid);
+        }
+    }
+
+    // B registers the (empty) bucket partition via a scoped list.
+    let pre = client_b.list_scoped(&scope, 100).await.unwrap();
+    assert_eq!(pre.len(), 0, "B's scoped bucket is empty before the doc syncs");
+
+    // Sync the doc into B (maintenance wiring upserts it into the set).
+    sync_block(&client_a, &client_b, &cid);
+
+    let post = client_b.list_scoped(&scope, 100).await.unwrap();
+    assert_eq!(post.len(), 1, "synced doc appears in B's scoped listing");
+    assert_eq!(post[0].node_id, format!("doc:{}", hex::encode(doc_id.0)));
+}
