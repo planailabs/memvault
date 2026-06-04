@@ -1418,6 +1418,34 @@ fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSig
         }
     }
 
+    // BucketMergeRecord: admin/owner-signed alias edge (source → canonical).
+    // Verify the self-signature against the embedded issuer pubkey; defer the
+    // "issuer is authorised for both buckets" check (the alias build trusts an
+    // authentic record, same as a locally-written one). Without the
+    // `("bucket_merge", <source_hex>)` lookup tag the synced record falls to
+    // NotSigchain and `build_bucket_alias_maps` never sees it — the merge stays
+    // invisible on the peer (canonical_of doesn't resolve, the list union and
+    // `bucket_merges()` are empty). The `"sigchain"/"bucket_merge"` label also
+    // fires the receiver's alias-cache invalidation watcher. (Same class of bug
+    // as the Grant arm above.)
+    if let Ok(rec) = serde_ipld_dagcbor::from_slice::<memvault_auth::BucketMergeRecord>(bytes) {
+        if rec.source.0 != rec.canonical.0 && rec.issued_by_pubkey.iter().any(|&b| b != 0) {
+            if rec.verify_signature().is_err() {
+                return SyncSigchainVerdict::Drop {
+                    reason: "bucket_merge: bad signature",
+                };
+            }
+            return SyncSigchainVerdict::Accept {
+                label: "bucket_merge",
+                signer_pubkey: rec.issued_by_pubkey.to_vec(),
+                extra_tags: vec![
+                    ("bucket_merge".to_string(), hex::encode(rec.source.0)),
+                    ("kind".to_string(), "bucket_merge".to_string()),
+                ],
+            };
+        }
+    }
+
     SyncSigchainVerdict::NotSigchain
 }
 
@@ -2179,6 +2207,44 @@ fn handle_join_response(
         JoinResult::Refuse { reason, .. } => {
             tracing::debug!(%peer, ?reason, "join refused");
             false
+        }
+    }
+}
+
+#[cfg(test)]
+mod sync_classify_tests {
+    use super::*;
+
+    /// A synced BucketMergeRecord must be classified as a sigchain block and
+    /// re-tagged with `("bucket_merge", <source_hex>)` — otherwise it lands
+    /// untagged on the peer and the merge stays invisible (regression guard for
+    /// the missing `validate_sigchain_for_sync` arm).
+    #[test]
+    fn synced_bucket_merge_record_is_tagged_sigchain() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let source = memvault_core::BucketId([1u8; 32]);
+        let canonical = memvault_core::BucketId([2u8; 32]);
+        let rec = memvault_auth::sign_bucket_merge(&key, source.clone(), canonical, 42).unwrap();
+        let bytes = serde_ipld_dagcbor::to_vec(&rec).unwrap();
+
+        match vet_sync_block(&bytes, &JoinConfig::default(), None) {
+            SyncDisposition::AsSigchain(meta) => {
+                assert!(
+                    meta.tags
+                        .iter()
+                        .any(|(s, l)| s == "sigchain" && l == "bucket_merge"),
+                    "missing sigchain/bucket_merge tag: {:?}",
+                    meta.tags
+                );
+                assert!(
+                    meta.tags
+                        .iter()
+                        .any(|(s, l)| s == "bucket_merge" && *l == hex::encode(source.0)),
+                    "missing bucket_merge lookup tag: {:?}",
+                    meta.tags
+                );
+            }
+            _ => panic!("synced BucketMergeRecord was not classified AsSigchain"),
         }
     }
 }
