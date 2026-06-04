@@ -4975,22 +4975,30 @@ impl LocalClient {
     /// `("retraction", <target>)` + `("sigchain","retraction")` so it travels
     /// via RBSR and the `retraction` watcher arm applies it to `RETRACTED` on
     /// every node that ingests it. Idempotent — one block per target.
-    pub(crate) fn publish_retraction_block(
+    pub fn publish_retraction_block(
         &self,
         target_cid: &[u8],
         reason: &str,
+        authority: Option<([u8; 32], [u8; 64])>,
     ) -> Result<Vec<u8>> {
+        // Note: callers guard against redundant publishes (bucket_unmerge skips
+        // already-retracted records; backfill checks existence). We do NOT skip
+        // here on "a retraction exists" — a forged/unauthorised retraction must
+        // not block a later *authorised* one for the same target; the alias
+        // build honours whichever carries valid authority.
         let target_hex = hex::encode(target_cid);
-        if let Ok(existing) = self.store.query_by_tag("retraction", &target_hex, 0, 1) {
-            if let Some(cid) = existing.into_iter().next() {
-                return Ok(cid); // already published
-            }
-        }
         let wall_ns = memvault_core::wall_ns();
+        // An optional authority assertion: a signature over `target_cid` by a
+        // key authorised for the retraction (for a merge unmerge: the merge's
+        // `issued_by_pubkey` or an admin). The alias build verifies it so only
+        // an authorised party can unmerge — the envelope's own node/agent sig
+        // proves authenticity, not authority over the target.
         let payload = serde_json::json!({
             "kind": "retraction",
             "target_cid": target_cid,
             "reason": reason,
+            "authority_pubkey": authority.map(|(pk, _)| pk.to_vec()),
+            "authority_sig": authority.map(|(_, sig)| sig.to_vec()),
         });
         let tags = vec![
             ("retraction".to_string(), target_hex),
@@ -5011,6 +5019,84 @@ impl LocalClient {
         Ok(cid_bytes)
     }
 
+    /// Retract a block: immediate local effect (read-your-writes) plus a signed,
+    /// syncable retraction block (a local-only `RETRACTED` entry never
+    /// propagates). `authority` is an optional `(pubkey, sig-over-target)` proof
+    /// that the retractor is authorised over the target (see
+    /// [`Self::publish_retraction_block`]).
+    pub(crate) fn retract_with_authority(
+        &self,
+        target_cid: &[u8],
+        reason: &str,
+        authority: Option<([u8; 32], [u8; 64])>,
+    ) -> Result<Vec<u8>> {
+        let derived = cid_from_bytes(target_cid).to_bytes();
+        memvault_query::retract(&self.store, target_cid, &derived)?;
+        let rec_cid = self.publish_retraction_block(target_cid, reason, authority)?;
+        self.event_bus.publish(MemvaultEvent::Retracted {
+            cid: target_cid.to_vec(),
+        });
+        Ok(rec_cid)
+    }
+
+    /// Whether merge record `merge_cid` has an *authorised* retraction (an
+    /// unmerge). A retraction carrying an authority assertion is honoured only
+    /// if it's signed over `merge_cid` by the merge's `issued_by_pubkey` or a
+    /// current admin. A legacy retraction (no authority field) falls back to the
+    /// `RETRACTED` table so pre-feature unmerges keep working. Used by the alias
+    /// build to enforce that only an authorised party can unmerge.
+    fn merge_retraction_authorized(
+        &self,
+        merge_cid: &[u8],
+        rec: &memvault_auth::BucketMergeRecord,
+    ) -> bool {
+        use ed25519_dalek::Verifier;
+        let retr_cids = self
+            .store
+            .query_by_tag("retraction", &hex::encode(merge_cid), 0, usize::MAX)
+            .unwrap_or_default();
+        if retr_cids.is_empty() {
+            return false;
+        }
+        let admin_keys: Vec<[u8; 32]> = self
+            .admin_verifying_keys()
+            .iter()
+            .map(|k| k.to_bytes())
+            .collect();
+        let mut has_legacy = false;
+        for rcid in retr_cids {
+            let Ok(Some(rbytes)) = self.store.get_block(&rcid) else {
+                continue;
+            };
+            let Some(view) = memvault_store::EnvelopeView::parse(&rbytes) else {
+                continue;
+            };
+            let auth_pk = view.get_as::<Vec<u8>>("authority_pubkey");
+            let auth_sig = view.get_as::<Vec<u8>>("authority_sig");
+            match (auth_pk, auth_sig) {
+                (Some(pk), Some(sig)) if pk.len() == 32 && sig.len() == 64 => {
+                    let pk: [u8; 32] = pk.try_into().unwrap();
+                    // The authority key must be the merge's issuer or an admin.
+                    if pk != rec.issued_by_pubkey && !admin_keys.contains(&pk) {
+                        continue;
+                    }
+                    let sig: [u8; 64] = sig.try_into().unwrap();
+                    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pk) {
+                        if vk
+                            .verify(merge_cid, &ed25519_dalek::Signature::from_bytes(&sig))
+                            .is_ok()
+                        {
+                            return true; // authorised unmerge
+                        }
+                    }
+                    // present-but-invalid authority → ignore this retraction
+                }
+                _ => has_legacy = true, // no authority field → legacy
+            }
+        }
+        has_legacy && self.store.is_retracted(merge_cid).unwrap_or(false)
+    }
+
     /// Backfill syncable retraction blocks for local-only `RETRACTED` entries
     /// (recorded before retractions were published as blocks — e.g. unmerges
     /// that never propagated). Idempotent; returns the number published.
@@ -5025,7 +5111,10 @@ impl LocalClient {
             {
                 continue; // already has a retraction block
             }
-            if self.publish_retraction_block(&target_cid, "backfill").is_ok() {
+            if self
+                .publish_retraction_block(&target_cid, "backfill", None)
+                .is_ok()
+            {
                 published += 1;
             }
         }
@@ -5087,9 +5176,6 @@ impl LocalClient {
                 .query_by_tag("bucket_merge", source_hex, 0, usize::MAX)
                 .unwrap_or_default();
             for cid in cids {
-                if self.store.is_retracted(&cid).unwrap_or(false) {
-                    continue;
-                }
                 let Ok(Some(data)) = self.store.get_block(&cid) else {
                     continue;
                 };
@@ -5101,6 +5187,12 @@ impl LocalClient {
                 // Authenticity: a sync-injected record with a bad signature
                 // must not alter resolution.
                 if rec.verify_signature().is_err() {
+                    continue;
+                }
+                // An unmerge takes effect only via an *authorised* retraction
+                // (signed over the merge by its issuer or an admin) — a
+                // forged/unauthorised retraction can't reverse the merge.
+                if self.merge_retraction_authorized(&cid, &rec) {
                     continue;
                 }
                 // A self-edge (source == canonical) is meaningless; skip it
@@ -5440,7 +5532,14 @@ impl LocalClient {
             // resolves to the requested terminal. Retracting the source's
             // direct edge detaches it regardless of how deep the chain was.
             if rec.canonical.0 == want || self.canonical_of(&rec.canonical.0) == want {
-                self.retract(&cid, "bucket unmerge").await?;
+                // Assert authority: sign the merge record's CID with a key
+                // authorised on the canonical (admin / owner) so peers can
+                // verify the unmerge was authorised, not just authentic.
+                use ed25519_dalek::Signer;
+                let authority = self
+                    .pick_grant_signer(canonical)
+                    .map(|(signer, pk)| (pk, signer.sign(&cid).to_bytes()));
+                self.retract_with_authority(&cid, "bucket unmerge", authority)?;
                 retracted_any = true;
             }
         }
@@ -6553,20 +6652,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn retract(&self, target_cid: &[u8], reason: &str) -> Result<Vec<u8>> {
-        // Immediate local effect (read-your-writes); errors if already retracted.
-        let derived = cid_from_bytes(target_cid).to_bytes();
-        memvault_query::retract(&self.store, target_cid, &derived)?;
-
-        // Publish a signed, SYNCABLE retraction block so every peer applies it
-        // too. A local-only RETRACTED entry never propagates (so an unmerge
-        // would stay local). See standards/blockstore-not-redb.md.
-        let rec_cid = self.publish_retraction_block(target_cid, reason)?;
-
-        self.event_bus.publish(MemvaultEvent::Retracted {
-            cid: target_cid.to_vec(),
-        });
-
-        Ok(rec_cid)
+        self.retract_with_authority(target_cid, reason, None)
     }
 
     async fn retract_node_internal(&self, node_id: &str, reason: &str) -> Result<()> {

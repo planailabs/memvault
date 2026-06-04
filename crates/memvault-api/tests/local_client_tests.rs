@@ -2245,6 +2245,40 @@ async fn unmerge_by_terminal_canonical_detaches_chained_source() {
 }
 
 #[tokio::test]
+async fn unmerge_requires_authorized_retraction() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    let merge_cid = client
+        .store()
+        .query_by_tag("bucket_merge", &hex::encode(a.0), 0, 1)
+        .unwrap()[0]
+        .clone();
+    assert_eq!(client.canonical_of(&a.0), b.0);
+
+    // A retraction whose authority assertion is signed by an unauthorized key
+    // (not the merge's issuer, not an admin) must NOT reverse the merge.
+    client
+        .publish_retraction_block(&merge_cid, "forged", Some(([9u8; 32], [0u8; 64])))
+        .unwrap();
+    client.bump_alias_generation();
+    assert_eq!(
+        client.canonical_of(&a.0),
+        b.0,
+        "unauthorized retraction does not unmerge"
+    );
+
+    // A proper unmerge (signed by the canonical's authority) does reverse it.
+    client.bucket_unmerge(&a, &b).await.unwrap();
+    assert_eq!(
+        client.canonical_of(&a.0),
+        a.0,
+        "authorized unmerge reverses the merge"
+    );
+}
+
+#[tokio::test]
 async fn unmerge_emits_syncable_retraction_block() {
     let (_dir, client) = admin_client();
     let a = mk_bucket(&client, "a").await;
