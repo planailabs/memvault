@@ -5095,7 +5095,13 @@ impl MemvaultClient for LocalClient {
     ) -> Result<Vec<DocSummary>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
-        let scan_cap = limit.saturating_mul(10);
+        // Exhaustive membership universe: the set we test labels against must
+        // cover every block in the bucket, or a recent doc/entity (whose CIDs
+        // fall outside a capped window) is silently dropped from the listing.
+        // The RESULT is still capped at `limit` below (pagination). See
+        // standards: exhaustive-lookups. (Perf: the cluster-wide label scan
+        // here should route through the scoped index — see derived-indexes.)
+        let scan_cap = usize::MAX;
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
             if let Some(bid) = bucket {
                 let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
@@ -5549,7 +5555,13 @@ impl MemvaultClient for LocalClient {
     ) -> Result<Vec<Entity>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
-        let scan_cap = limit.saturating_mul(10);
+        // Exhaustive membership universe: the set we test labels against must
+        // cover every block in the bucket, or a recent doc/entity (whose CIDs
+        // fall outside a capped window) is silently dropped from the listing.
+        // The RESULT is still capped at `limit` below (pagination). See
+        // standards: exhaustive-lookups. (Perf: the cluster-wide label scan
+        // here should route through the scoped index — see derived-indexes.)
+        let scan_cap = usize::MAX;
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
             if let Some(bid) = bucket {
                 let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
