@@ -15,6 +15,7 @@ in the same change if the convention itself evolves.**
 | [wire-dtos.md](wire-dtos.md) | The "transmit existing shapes" rule: one serde shape per domain type, hex-encoded IDs via `memvault_api::wire`, no ad-hoc `json!` on the server and no `serde_json::Value` field-picking on the client. How to add a new endpoint. |
 | [bucket-scoping.md](bucket-scoping.md) | Every document/file/graph-entity operation is scoped to a concrete bucket; no implicit all-buckets surface for content reads/writes. |
 | [query-scope.md](query-scope.md) | `QueryScope` is the canonical read-query descriptor (bucket + view + retraction + kind + detail), threaded from the API surface to the store. |
+| [exhaustive-lookups.md](exhaustive-lookups.md) | Lookups whose correctness depends on seeing every match (resolution, membership, ACL, trust, dedup) must not carry a finite cap — use `usize::MAX`; caps are for caller-driven pagination only. |
 
 ## The two rules in one sentence each
 

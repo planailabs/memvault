@@ -26,7 +26,13 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
     bucket_id: &BucketId,
 ) -> Result<EntityId> {
     let bucket_hex = hex::encode(bucket_id.0);
-    let entities = client.list_entities(500, Some(bucket_id)).await?;
+    // Scan UNCAPPED: there is exactly one VFS root per bucket and it must be
+    // found deterministically. A fixed cap (e.g. 500) could drop the root in a
+    // bucket with more entities, making `ensure_root` mint a *second* root —
+    // then mkdir writes under one root while resolve/ls/tree read another
+    // ("created but not found", 500s). See standards: no correctness-bounding
+    // magic limits on lookups that must be exhaustive.
+    let entities = client.list_entities(usize::MAX, Some(bucket_id)).await?;
     let mut candidates: Vec<[u8; 32]> = Vec::new();
 
     for e in &entities {

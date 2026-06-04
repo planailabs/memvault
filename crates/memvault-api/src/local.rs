@@ -1101,7 +1101,8 @@ impl LocalClient {
         let mut pruned = 0usize;
         for cid in self
             .store
-            .query_by_tag("sigchain", "agent_att", 0, 4096)
+            // Exhaustive: prune must consider every attestation (see standards).
+            .query_by_tag("sigchain", "agent_att", 0, usize::MAX)
             .unwrap_or_default()
         {
             let Ok(Some(bytes)) = self.store.get_block(&cid) else {
@@ -4406,9 +4407,12 @@ impl LocalClient {
         bucket_id: &BucketId,
     ) -> Result<Vec<(Vec<u8>, memvault_auth::Grant)>> {
         let bucket_hex = hex::encode(bucket_id.0);
+        // Exhaustive: ACL decisions must see every grant on the bucket. A cap
+        // could silently drop a grant and mis-decide access (see standards:
+        // exhaustive-lookups).
         let cids = self
             .store
-            .query_by_tag("grant", &bucket_hex, 0, 1000)
+            .query_by_tag("grant", &bucket_hex, 0, usize::MAX)
             .unwrap_or_default();
 
         let mut grants = Vec::new();
@@ -5091,12 +5095,13 @@ impl MemvaultClient for LocalClient {
     ) -> Result<Vec<DocSummary>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
+        let scan_cap = limit.saturating_mul(10);
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
             if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
                 Some(bucket_cids.into_iter().collect())
             } else {
-                let all = self.accessible_bucket_cids(limit * 10)?;
+                let all = self.accessible_bucket_cids(scan_cap)?;
                 if all.is_empty() { None } else { Some(all) }
             };
 
@@ -5116,7 +5121,9 @@ impl MemvaultClient for LocalClient {
                 .into_iter()
                 .flat_map(|label| {
                     self.store
-                        .query_by_tag("doc", &label, 0, 10)
+                        // Exhaustive membership: any of this doc's CIDs may be
+                        // the bucket-matching one (see standards).
+                        .query_by_tag("doc", &label, 0, usize::MAX)
                         .unwrap_or_default()
                 })
                 .collect()
@@ -5529,12 +5536,13 @@ impl MemvaultClient for LocalClient {
     ) -> Result<Vec<Entity>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
+        let scan_cap = limit.saturating_mul(10);
         let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
             if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
                 Some(bucket_cids.into_iter().collect())
             } else {
-                let all = self.accessible_bucket_cids(limit * 10)?;
+                let all = self.accessible_bucket_cids(scan_cap)?;
                 if all.is_empty() { None } else { Some(all) }
             };
 
@@ -5558,7 +5566,8 @@ impl MemvaultClient for LocalClient {
             if let Some(ref bset) = bucket_cid_set {
                 let entity_cids = self
                     .store
-                    .query_by_tag("entity", &label, 0, 10)
+                    // Exhaustive membership (see standards: exhaustive-lookups).
+                    .query_by_tag("entity", &label, 0, usize::MAX)
                     .unwrap_or_default();
                 if !entity_cids.iter().any(|c| bset.contains(c)) {
                     continue;
@@ -5758,7 +5767,8 @@ impl MemvaultClient for LocalClient {
             .filter(|h| {
                 let (_, label) = Self::doc_tag(&h.doc_id);
                 self.store
-                    .query_by_tag("doc", &label, 0, 10)
+                    // Exhaustive membership (see standards: exhaustive-lookups).
+                    .query_by_tag("doc", &label, 0, usize::MAX)
                     .unwrap_or_default()
                     .iter()
                     .any(|c| accessible.contains(c))

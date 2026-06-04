@@ -2045,6 +2045,44 @@ fn admin_client() -> (tempfile::TempDir, Arc<LocalClient>) {
     (dir, client)
 }
 
+#[tokio::test]
+async fn vfs_mkdir_then_resolve_ls_tree() {
+    let (_dir, client) = admin_client();
+    let bucket = mk_bucket(&client, "vfs-probe").await;
+
+    // mkdir -p /probe/sub
+    let leaf = client.vfs_mkdir(&bucket, "/probe/sub").await.unwrap();
+
+    // The leaf dir must resolve, and so must the parent.
+    let parent = client
+        .vfs_resolve(&bucket, "/probe")
+        .await
+        .unwrap();
+    assert!(parent.is_some(), "/probe must resolve after mkdir");
+    let sub = client.vfs_resolve(&bucket, "/probe/sub").await.unwrap();
+    assert!(sub.is_some(), "/probe/sub must resolve after mkdir");
+    if let Some((memvault_core::NodeRef::Entity(eid), _)) = &sub {
+        assert_eq!(*eid, leaf, "resolved leaf matches mkdir return");
+    } else {
+        panic!("/probe/sub resolved to a non-entity: {sub:?}");
+    }
+
+    // ls on the parent must not error and must list the child.
+    let entries = client.vfs_ls(&bucket, "/probe", false).await.unwrap();
+    assert!(
+        entries.iter().any(|e| e.name == "sub"),
+        "ls /probe lists 'sub', got: {entries:?}"
+    );
+
+    // tree on the parent must not error.
+    let tree = client.vfs_tree(&bucket, "/probe", 10).await.unwrap();
+    assert!(tree.contains("sub"), "tree /probe includes sub:\n{tree}");
+
+    // ls/tree at root must work too.
+    let root_entries = client.vfs_ls(&bucket, "/", false).await.unwrap();
+    assert!(root_entries.iter().any(|e| e.name == "probe"));
+}
+
 async fn mk_bucket(client: &LocalClient, name: &str) -> memvault_core::BucketId {
     client
         .bucket_create(
