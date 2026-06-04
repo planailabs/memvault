@@ -3074,16 +3074,40 @@ impl LocalClient {
             .filter_map(|node_id| self.prepare_reindex(node_id))
             .collect();
 
-        let mut idx = self.index.write().await;
-        for p in prepared {
-            p.apply(&mut idx);
+        {
+            let mut idx = self.index.write().await;
+            for p in prepared {
+                p.apply(&mut idx);
+            }
+            if let Err(e) = idx.commit() {
+                tracing::warn!("tantivy flush commit failed: {e}");
+                // Retry on a later read. The in-memory writer already holds any
+                // adds applied above; only the commit needs to land.
+                self.index_dirty
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
-        if let Err(e) = idx.commit() {
-            tracing::warn!("tantivy flush commit failed: {e}");
-            // Retry on a later read. The in-memory writer already holds any
-            // adds applied above; only the commit needs to land.
-            self.index_dirty
-                .store(true, std::sync::atomic::Ordering::Release);
+
+        // Maintain the scoped member-sets for nodes that entered via sync /
+        // RBSR / external seeding (the `reindex_block` → notifier path). This
+        // is the load-bearing wiring from the per-bucket-member-index plan:
+        // without it a per-bucket / view×bucket set built locally would go
+        // stale on sync and silently drop peer-ingested content. Driving it
+        // from the *same* chokepoint that reindexes keeps "indexed" and "in
+        // member-set" updated together. Runs after the Tantivy write lock is
+        // released (it read-locks the freshly-committed index) and only touches
+        // already-registered partitions, so it is cheap when none are built.
+        if !pending.is_empty() {
+            let views: Vec<(Vec<u8>, Vec<(String, String)>)> = self
+                .list_views()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| (hex::decode(&v.cid).unwrap_or_default(), v.tags))
+                .collect();
+            for node_id in &pending {
+                self.sync_node_scopes_with(node_id, &views).await;
+            }
         }
     }
 
@@ -3703,6 +3727,15 @@ impl LocalClient {
         let Some(b) = bucket else {
             return; // unbucketed node: not part of any view×bucket partition
         };
+        // Per-bucket member-set (`ScopeKind::Bucket`): the node always belongs
+        // to its inferred bucket regardless of tags, so just refresh its
+        // active/retracted flag. Gated on registration like the view×bucket
+        // sets — only maintain a set that has been lazily built (see
+        // `ensure_bucket_partition`).
+        let bsid = memvault_core::bucket_scope_id(&BucketId(b));
+        if self.store.scope_is_registered(&bsid).unwrap_or(false) {
+            let _ = self.store.scope_member_upsert(&bsid, node_id, retracted, 0);
+        }
         for (vcid, vtags) in views {
             let vbsid = memvault_core::view_bucket_scope_id(vcid, &BucketId(b));
             if !self.store.scope_is_registered(&vbsid).unwrap_or(false) {
