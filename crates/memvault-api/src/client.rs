@@ -151,6 +151,19 @@ pub trait MemvaultClient: Send + Sync {
         crate::vfs::mkdir(self, bucket, path).await
     }
 
+    /// Read the cached VFS root for a bucket from the derived index (the hot
+    /// path for `ensure_root`, avoiding a full entity scan). Default `None`;
+    /// only the store-backed `LocalClient` maintains the index. HTTP/remote
+    /// clients don't run `ensure_root` locally, so the no-op is correct.
+    async fn vfs_root_cached(&self, _bucket: &BucketId) -> Result<Option<EntityId>> {
+        Ok(None)
+    }
+
+    /// Record the resolved VFS root for a bucket in the derived index.
+    async fn vfs_root_cache_put(&self, _bucket: &BucketId, _root: &EntityId) -> Result<()> {
+        Ok(())
+    }
+
     /// List a directory's entries (optionally recursive).
     async fn vfs_ls(
         &self,

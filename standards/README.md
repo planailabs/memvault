@@ -16,6 +16,7 @@ in the same change if the convention itself evolves.**
 | [bucket-scoping.md](bucket-scoping.md) | Every document/file/graph-entity operation is scoped to a concrete bucket; no implicit all-buckets surface for content reads/writes. |
 | [query-scope.md](query-scope.md) | `QueryScope` is the canonical read-query descriptor (bucket + view + retraction + kind + detail), threaded from the API surface to the store. |
 | [exhaustive-lookups.md](exhaustive-lookups.md) | Lookups whose correctness depends on seeing every match (resolution, membership, ACL, trust, dedup) must not carry a finite cap — use `usize::MAX`; caps are for caller-driven pagination only. |
+| [derived-indexes.md](derived-indexes.md) | Hot-path lookups must not scan every entity/doc/block — use a scoped `query_by_*`/`QueryScope`, or a derived index/cache table (cache over the store, repaired on read, safe when stale). |
 
 ## The two rules in one sentence each
 

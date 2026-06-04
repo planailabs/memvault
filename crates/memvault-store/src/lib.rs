@@ -77,6 +77,8 @@ impl MemvaultStore {
             // Scoped-index member-sets (scoped-indexes Phase 2)
             txn.open_table(tables::SCOPE_MEMBERS)?;
             txn.open_table(tables::SCOPE_REGISTRY)?;
+            // VFS root derived index
+            txn.open_table(tables::VFS_ROOT)?;
         }
         txn.commit()?;
 

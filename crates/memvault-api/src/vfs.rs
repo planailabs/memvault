@@ -26,12 +26,23 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
     bucket_id: &BucketId,
 ) -> Result<EntityId> {
     let bucket_hex = hex::encode(bucket_id.0);
-    // Scan UNCAPPED: there is exactly one VFS root per bucket and it must be
-    // found deterministically. A fixed cap (e.g. 500) could drop the root in a
-    // bucket with more entities, making `ensure_root` mint a *second* root —
-    // then mkdir writes under one root while resolve/ls/tree read another
-    // ("created but not found", 500s). See standards: no correctness-bounding
-    // magic limits on lookups that must be exhaustive.
+
+    // Fast path: the VFS root derived index (O(1)). Verify the cached id still
+    // points at a real vfs:dir; if so we're done. A stale/empty entry falls
+    // through to the reconciliation scan below, which repopulates it.
+    if let Some(cached) = client.vfs_root_cached(bucket_id).await? {
+        if let Ok(Some(e)) = client.get_entity(&cached).await {
+            if e.kind == VFS_DIR_KIND {
+                return Ok(cached);
+            }
+        }
+    }
+
+    // Reconciliation scan (source of truth, derived from the blockstore). Runs
+    // only on a cache miss/repair. UNCAPPED: there is exactly one VFS root per
+    // bucket and it must be found deterministically — a fixed cap could drop it
+    // and mint a duplicate root. See standards: exhaustive-lookups +
+    // derived-indexes.
     let entities = client.list_entities(usize::MAX, Some(bucket_id)).await?;
     let mut candidates: Vec<[u8; 32]> = Vec::new();
 
@@ -49,8 +60,11 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
     }
 
     if !candidates.is_empty() {
+        // Deterministic pick (reconciles "root exists multiple times") + cache.
         candidates.sort();
-        return Ok(EntityId(candidates[0]));
+        let root = EntityId(candidates[0]);
+        let _ = client.vfs_root_cache_put(bucket_id, &root).await;
+        return Ok(root);
     }
 
     // Create root for this bucket.
@@ -72,6 +86,7 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
             vec![("vfs".into(), "root".into()), ("bucket".into(), bucket_hex)],
         )
         .await?;
+    let _ = client.vfs_root_cache_put(bucket_id, &id).await;
     Ok(id)
 }
 

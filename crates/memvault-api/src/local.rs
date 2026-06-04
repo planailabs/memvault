@@ -5502,6 +5502,19 @@ impl MemvaultClient for LocalClient {
         self.get_entity_async(id, false).await
     }
 
+    async fn vfs_root_cached(&self, bucket: &BucketId) -> Result<Option<EntityId>> {
+        Ok(self
+            .store
+            .vfs_root_get(&bucket.0)?
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .map(EntityId))
+    }
+
+    async fn vfs_root_cache_put(&self, bucket: &BucketId, root: &EntityId) -> Result<()> {
+        self.store.vfs_root_put(&bucket.0, &root.0)?;
+        Ok(())
+    }
+
     async fn node_bucket(&self, node: &NodeRef) -> Result<Option<BucketId>> {
         Ok(self
             .inferred_node_bucket(node)
