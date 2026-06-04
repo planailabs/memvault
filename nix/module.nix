@@ -83,6 +83,20 @@ in
       default = [ ];
       description = "Additional arguments passed to `memctl daemon`.";
     };
+
+    extraEnv = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = {
+        RUST_LOG = "info,memvault_swarm=debug";
+        MEMVAULT_FORCE_FULLSTACK_UI = "1";
+      };
+      description = ''
+        Extra environment variables for the service, merged into the unit's
+        environment (these win over the module-managed defaults). For secrets
+        prefer `environmentFile`, which is not world-readable in the Nix store.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -97,7 +111,7 @@ in
         MEMVAULT_API_PORT = toString cfg.apiPort;
       } // lib.optionalAttrs (cfg.allowedOrigins != [ ]) {
         MEMVAULT_ALLOWED_ORIGINS = lib.concatStringsSep "," cfg.allowedOrigins;
-      };
+      } // cfg.extraEnv;
 
       serviceConfig = {
         ExecStart = lib.concatStringsSep " " ([

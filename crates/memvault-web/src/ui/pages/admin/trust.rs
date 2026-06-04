@@ -371,6 +371,7 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                         } else {
                                             Pill { variant: PillVariant::Warn, "pre-genesis" }
                                         }
+                                        span { class: "font-mono text-xs break-all", "{node.pubkey}" }
                                         if let Some(role) = &node.role {
                                             Pill { variant: PillVariant::Info, "{role}" }
                                         }
@@ -382,8 +383,6 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                                 "expires: {fmt_expiry(exp)}"
                                             }
                                         }
-                                        // Full id last.
-                                        span { class: "font-mono text-xs break-all", "{node.pubkey}" }
                                     }
                                     if node.agents.is_empty() {
                                         p { class: "text-fg-muted text-sm mt-2 ml-4",
@@ -405,6 +404,7 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                                     if agent.label.is_some() && !agent.agent_id.is_empty() {
                                                         span { class: "font-mono text-xs text-fg-muted", "({agent.agent_id})" }
                                                     }
+                                                    span { class: "font-mono text-xs break-all", "{agent.pubkey}" }
                                                     Pill { variant: PillVariant::Info, "{agent.role}" }
                                                     span { class: "text-xs text-fg-muted",
                                                         "expires: {fmt_expiry(agent.not_after_ns)}"
@@ -414,8 +414,6 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                                         current: agent.display_name(),
                                                         on_saved: move |_| on_refresh.call(()),
                                                     }
-                                                    // Full id last, after rename.
-                                                    span { class: "font-mono text-xs break-all", "{agent.pubkey}" }
                                                 }
                                             }
                                         }
@@ -449,10 +447,9 @@ fn TrustTreeView(tree: TrustTree, on_refresh: EventHandler<()>) -> Element {
                                         Pill { variant: PillVariant::Warn, "orphan" }
                                     }
                                     span { class: "font-mono text-sm", "{agent.agent_id}" }
-                                    Pill { variant: PillVariant::Info, "{agent.role}" }
-                                    // Full ids last.
                                     span { class: "font-mono text-xs break-all", "{agent.pubkey}" }
-                                    span { class: "text-xs text-fg-muted", "claims node" }
+                                    Pill { variant: PillVariant::Info, "{agent.role}" }
+                                    span { class: "text-xs text-fg-muted", "claims node " }
                                     span { class: "font-mono text-xs break-all", "{agent.node_pubkey}" }
                                 }
                             }

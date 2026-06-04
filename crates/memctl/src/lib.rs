@@ -314,6 +314,15 @@ mod native {
             #[arg(long, default_value = "0")]
             kad_bootstrap_interval_secs: u64,
         },
+        /// Print the libp2p peer id (e.g. to build a `/p2p/<id>` bootstrap addr)
+        ///
+        /// With no argument, prints this node's own peer id. Given one or more
+        /// multiaddrs, prints the peer id of each: the embedded `/p2p/<id>` if
+        /// present, otherwise this node's id (i.e. the id for that listen addr).
+        PeerId {
+            /// Optional multiaddr(s) to resolve a peer id for.
+            multiaddr: Vec<String>,
+        },
         /// Join this node to an existing cluster using a join token
         ///
         /// The token (issued by the cluster admin via `token issue`) carries
@@ -2511,6 +2520,44 @@ mod native {
                 let client = connect().connect().await?;
                 let rev_cid = client.revoke_grant(&cid_bytes, &reason).await?;
                 println!("{}", hex::encode(rev_cid));
+            }
+            Commands::PeerId { multiaddr } => {
+                // Resolve the node identity from the keystore ONLY — never the
+                // loose libp2p.key file, and never generate one.
+                let identity_dir = data_dir.join("identity");
+                let keystore = memvault_api::keystore_open::open_token_keystore(&identity_dir)
+                    .map_err(|e| anyhow::anyhow!("open keystore: {e}"))?;
+                let mut seed: [u8; 32] = keystore
+                    .get(memvault_api::node_key::NODE_SEED_KEYSTORE_KEY)
+                    .and_then(|b| <[u8; 32]>::try_from(b.get(..32)?).ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no node key in keystore (`nodesk` empty); run `memctl genesis` \
+                             or start the daemon to establish the node identity"
+                        )
+                    })?;
+                let local = libp2p::identity::Keypair::ed25519_from_bytes(&mut seed)
+                    .map_err(|e| anyhow::anyhow!("derive node keypair: {e}"))?
+                    .public()
+                    .to_peer_id();
+                if multiaddr.is_empty() {
+                    println!("{local}");
+                } else {
+                    for s in &multiaddr {
+                        let addr: libp2p::Multiaddr = s
+                            .parse()
+                            .map_err(|e| anyhow::anyhow!("invalid multiaddr {s}: {e}"))?;
+                        // The embedded /p2p/<id> if present, else this node's id.
+                        let peer = addr
+                            .iter()
+                            .find_map(|p| match p {
+                                libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+                                _ => None,
+                            })
+                            .unwrap_or(local);
+                        println!("{peer}");
+                    }
+                }
             }
             Commands::Daemon {
                 listen,
