@@ -839,6 +839,21 @@ fn apply_sigchain_block(
                 tracing::warn!("sigchain watcher: rejecting retraction with missing/invalid signature");
                 return;
             }
+            // Membership/authority: drop a retraction signed by a revoked or
+            // untrusted agent, or with a bad agent co-signature. A validly
+            // node-signed retraction whose signer isn't yet in the trust set is
+            // deferred-accepted (sync ordering) — same model as attestations.
+            // (Finer per-target authority — only the target's author or an admin
+            // may retract — would need the retraction to assert an explicit
+            // authority signature, since the envelope sig is the node/agent key,
+            // not the target's authoring authority. Tracked as a refinement.)
+            if matches!(
+                client.verify_envelope_authorship(cid),
+                Ok(AuthorshipStatus::AgentNotTrusted { .. } | AuthorshipStatus::BadSignature)
+            ) {
+                tracing::warn!("sigchain watcher: rejecting retraction from revoked/untrusted agent");
+                return;
+            }
             if let Some(view) = memvault_store::EnvelopeView::parse(&bytes) {
                 if let Some(target) = view.get_as::<Vec<u8>>("target_cid") {
                     let tombstone = memvault_core::cid_from_bytes(&target).to_bytes();
