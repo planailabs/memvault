@@ -2123,6 +2123,65 @@ async fn merge_chain_flattens_to_terminal() {
 }
 
 #[tokio::test]
+async fn merge_chain_list_shows_only_terminal() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    let c = mk_bucket(&client, "c").await;
+
+    // A -> B, then B -> C (recursive). Only the terminal C should survive the
+    // default listing; A and B are both merged sources.
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &c).unwrap();
+
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    let ids: std::collections::HashSet<_> = visible.iter().map(|bi| bi.id.clone()).collect();
+    assert!(ids.contains(&c), "terminal canonical C is visible");
+    assert!(!ids.contains(&a), "source A hidden");
+    assert!(
+        !ids.contains(&b),
+        "intermediate B hidden (merged into C, even though it's also a canonical of A)"
+    );
+
+    // C is the terminal — not itself marked merged.
+    let c_info = visible.iter().find(|bi| bi.id == c).unwrap();
+    assert_eq!(c_info.merged_into, None, "terminal canonical has no merged_into");
+
+    // With include_merged, all three appear and A/B point at their terminal C.
+    let all = client.bucket_list_filtered(true).await.unwrap();
+    let all_ids: std::collections::HashSet<_> = all.iter().map(|bi| bi.id.clone()).collect();
+    assert!(all_ids.contains(&a) && all_ids.contains(&b) && all_ids.contains(&c));
+    let a_info = all.iter().find(|bi| bi.id == a).unwrap();
+    let b_info = all.iter().find(|bi| bi.id == b).unwrap();
+    assert_eq!(a_info.merged_into, Some(c.clone()), "A resolves to terminal C");
+    assert_eq!(b_info.merged_into, Some(c.clone()), "B resolves to terminal C");
+}
+
+#[tokio::test]
+async fn merge_into_phantom_canonical_keeps_source_visible() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "orphan-source").await;
+    // Canonical that was never created as a bucket (no decl) — mirrors a merge
+    // into an unsynced/phantom target seen in the wild.
+    let phantom = memvault_core::BucketId([0x42u8; 32]);
+
+    client.bucket_merge_sync(&[a.clone()], &phantom).unwrap();
+    assert_eq!(client.canonical_of(&a.0), phantom.0, "A resolves to phantom");
+
+    // The phantom canonical can't be listed (no decl), so hiding A would orphan
+    // its data. A must stay visible in the default listing.
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    assert!(
+        visible.iter().any(|bi| bi.id == a),
+        "source stays visible when its canonical has no decl to surface"
+    );
+    assert!(
+        !visible.iter().any(|bi| bi.id == phantom),
+        "phantom canonical never appears (no decl)"
+    );
+}
+
+#[tokio::test]
 async fn merge_cycle_is_guarded() {
     let (_dir, client) = admin_client();
     let a = mk_bucket(&client, "a").await;
