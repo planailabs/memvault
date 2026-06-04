@@ -3663,6 +3663,335 @@ impl LocalClient {
         Ok(())
     }
 
+    /// Lazily build + register a per-bucket member-set (`ScopeKind::Bucket`) on
+    /// first access. No-op if already registered (thereafter maintained live by
+    /// [`Self::update_view_partitions`] on local writes and by [`Self::flush_index`]
+    /// for synced nodes).
+    ///
+    /// The set holds **every** node — document, entity, and file — whose blocks
+    /// land in the bucket, each with its current retracted flag. Membership is
+    /// derived from the authoritative, uncapped blockstore scan (the same
+    /// inference the scan-based listings use), so the set is a faithful cache
+    /// over the store (see `standards/derived-indexes.md`). Read paths filter
+    /// by node-id prefix and page at their own limit.
+    pub(crate) async fn ensure_bucket_partition(&self, bucket: &BucketId) -> Result<()> {
+        let bsid = memvault_core::bucket_scope_id(bucket);
+        if self.store.scope_is_registered(&bsid).unwrap_or(false) {
+            return Ok(());
+        }
+        self.flush_index().await;
+        // Authoritative membership universe: every CID bound to the bucket.
+        // Uncapped — a recent node whose CIDs fall outside a capped window must
+        // not be dropped (see `standards/exhaustive-lookups.md`).
+        let bucket_cids: std::collections::HashSet<Vec<u8>> = self
+            .store
+            .query_by_bucket(&bucket.0, 0, usize::MAX)?
+            .into_iter()
+            .collect();
+        // Enumerate every doc / entity / file label and keep the ones with at
+        // least one CID in the bucket. The `_manifest` tag's label is the hex
+        // manifest CID — the file node's surrogate id.
+        let mut members: Vec<String> = Vec::new();
+        for (scope, prefix) in [("doc", "doc:"), ("entity", "entity:"), ("_manifest", "file:")] {
+            for label in self.store.query_unique_labels(scope, usize::MAX)? {
+                let cids = self
+                    .store
+                    .query_by_tag(scope, &label, 0, usize::MAX)
+                    .unwrap_or_default();
+                if cids.iter().any(|c| bucket_cids.contains(c)) {
+                    members.push(format!("{prefix}{label}"));
+                }
+            }
+        }
+        // Resolve retracted flags from the committed index in one read pass.
+        let flags: Vec<(String, bool)> = {
+            let idx = self.index.read().await;
+            members
+                .into_iter()
+                .map(|nid| {
+                    let retracted = idx.is_retracted(&nid);
+                    (nid, retracted)
+                })
+                .collect()
+        };
+        for (nid, retracted) in &flags {
+            let _ = self.store.scope_member_upsert(&bsid, nid, *retracted, 0);
+        }
+        self.store.scope_register(
+            &bsid,
+            memvault_store::scope_members::ScopeKind::Bucket,
+            &[],
+            &bucket.0,
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Build a [`DocSummary`] for a document from its creation envelope.
+    /// Returns `None` if no `DocCreate` envelope can be recovered. Used by the
+    /// per-bucket member-set read path to hydrate enumerated doc ids.
+    fn doc_summary(&self, doc_id: &DocId) -> Option<DocSummary> {
+        let (_, label) = Self::doc_tag(doc_id);
+        let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX).ok()?;
+        for cid in &cids {
+            let Ok(Some(data)) = self.store.get_block(cid) else {
+                continue;
+            };
+            let Some(val) = memvault_store::deserialize_block(&data) else {
+                continue;
+            };
+            let Some(dc) = val.get("payload").and_then(|p| p.get("DocCreate")) else {
+                continue;
+            };
+            let title = dc
+                .get("frontmatter")
+                .and_then(|fm| fm.get("title"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string());
+            let tags: Vec<(String, String)> = val
+                .get("tags")
+                .and_then(|t| serde_json::from_value(t.clone()).ok())
+                .unwrap_or_default();
+            let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+            return Some(DocSummary {
+                id: doc_id.clone(),
+                cid: cid.clone(),
+                title,
+                tags,
+                updated_ns: wall_ns,
+                attachment_count: 0,
+            });
+        }
+        None
+    }
+
+    /// Authoritative scan-based document listing (pre-member-set behavior).
+    /// Retained as the fallback for tagged / cross-bucket queries and as the
+    /// source of truth the member-set is validated against.
+    async fn list_docs_scan(
+        &self,
+        tag_filter: Option<(String, String)>,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<DocSummary>> {
+        // Explicit bucket → scope to that bucket.
+        // None → scope to all accessible buckets (or unscoped pre-genesis).
+        // Exhaustive membership universe: the set we test labels against must
+        // cover every block in the bucket, or a recent doc/entity (whose CIDs
+        // fall outside a capped window) is silently dropped from the listing.
+        // The RESULT is still capped at `limit` below (pagination). See
+        // standards: exhaustive-lookups.
+        let scan_cap = usize::MAX;
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
+            if let Some(bid) = bucket {
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
+                Some(bucket_cids.into_iter().collect())
+            } else {
+                let all = self.accessible_bucket_cids(scan_cap)?;
+                if all.is_empty() { None } else { Some(all) }
+            };
+
+        let cids = if let Some((ref scope, ref label)) = tag_filter {
+            self.store.query_by_tag(scope, label, 0, limit * 5)?
+        } else {
+            // Scan all doc labels when bucket-scoped: a global cap would drop
+            // docs of any bucket outside the global first-N (same flaw as
+            // list_entities_ex). The result is capped at `limit` below.
+            let label_cap = if bucket_cid_set.is_some() {
+                usize::MAX
+            } else {
+                limit * 5
+            };
+            self.store
+                .query_unique_labels("doc", label_cap)?
+                .into_iter()
+                .flat_map(|label| {
+                    self.store
+                        // Exhaustive membership: any of this doc's CIDs may be
+                        // the bucket-matching one (see standards).
+                        .query_by_tag("doc", &label, 0, usize::MAX)
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
+
+        let mut summaries = Vec::new();
+        let mut seen_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
+
+        for cid in &cids {
+            if summaries.len() >= limit {
+                break;
+            }
+            // Skip CIDs not in the active bucket (when filtered).
+            if let Some(ref bset) = bucket_cid_set {
+                if !bset.contains(cid) {
+                    continue;
+                }
+            }
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Some(dc) = payload.get("DocCreate") {
+                            if let Ok(doc_id) =
+                                serde_json::from_value::<DocId>(dc["doc_id"].clone())
+                            {
+                                if seen_docs.insert(doc_id.clone()) {
+                                    let node_id = format!("doc:{}", hex::encode(doc_id.0));
+                                    if !include_retracted {
+                                        let idx = self.index.read().await;
+                                        if idx.is_retracted(&node_id) {
+                                            continue;
+                                        }
+                                        drop(idx);
+                                    }
+                                    let title = dc
+                                        .get("frontmatter")
+                                        .and_then(|fm| fm.get("title"))
+                                        .and_then(|t| t.as_str())
+                                        .map(|s| s.to_string());
+                                    let tags: Vec<(String, String)> = val
+                                        .get("tags")
+                                        .and_then(|t| serde_json::from_value(t.clone()).ok())
+                                        .unwrap_or_default();
+                                    let wall_ns =
+                                        val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                                    summaries.push(DocSummary {
+                                        id: doc_id,
+                                        cid: cid.clone(),
+                                        title,
+                                        tags,
+                                        updated_ns: wall_ns,
+                                        attachment_count: 0,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(summaries)
+    }
+
+    /// Authoritative scan-based entity listing (pre-member-set behavior).
+    /// Retained as the fallback for cross-bucket queries and as the source of
+    /// truth the member-set is validated against.
+    async fn list_entities_scan(
+        &self,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<Entity>> {
+        // Explicit bucket → scope to that bucket.
+        // None → scope to all accessible buckets (or unscoped pre-genesis).
+        // Exhaustive membership universe: the set we test labels against must
+        // cover every block in the bucket, or a recent doc/entity (whose CIDs
+        // fall outside a capped window) is silently dropped from the listing.
+        // The RESULT is still capped at `limit` below (pagination). See
+        // standards: exhaustive-lookups.
+        let scan_cap = usize::MAX;
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
+            if let Some(bid) = bucket {
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
+                Some(bucket_cids.into_iter().collect())
+            } else {
+                let all = self.accessible_bucket_cids(scan_cap)?;
+                if all.is_empty() { None } else { Some(all) }
+            };
+
+        // When scoped to a bucket, the global `limit` cap on labels would
+        // wrongly drop entities (including the per-bucket VFS root, which
+        // breaks `ensure_root` → mkdir/resolve) of any bucket whose entities
+        // fall outside the global first-`limit`. Scan all entity labels and
+        // cap the *filtered* result at `limit` instead.
+        let label_cap = if bucket_cid_set.is_some() {
+            usize::MAX
+        } else {
+            limit
+        };
+        let labels = self.store.query_unique_labels("entity", label_cap)?;
+        let mut entities = Vec::new();
+        for label in labels {
+            if entities.len() >= limit {
+                break;
+            }
+            // When bucket-filtered, check if any of this entity's CIDs are in the bucket.
+            if let Some(ref bset) = bucket_cid_set {
+                let entity_cids = self
+                    .store
+                    // Exhaustive membership (see standards: exhaustive-lookups).
+                    .query_by_tag("entity", &label, 0, usize::MAX)
+                    .unwrap_or_default();
+                if !entity_cids.iter().any(|c| bset.contains(c)) {
+                    continue;
+                }
+            }
+            let id_bytes = hex::decode(&label).unwrap_or_default();
+            if id_bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let entity_id = EntityId(arr);
+            if let Ok(Some(entity)) = self
+                .get_entity_async(&entity_id, include_retracted)
+                .await
+            {
+                entities.push(entity);
+            }
+        }
+        Ok(entities)
+    }
+
+    /// Debug-only invariant: every node the authoritative bucket scan returns
+    /// must be present in the per-bucket member-set. Catches maintenance drift
+    /// (a sync/write path that failed to update the set) before it can silently
+    /// drop content from a listing. `prefix` selects the node kind ("doc:",
+    /// "entity:", "file:"). Stripped from release builds.
+    #[cfg(debug_assertions)]
+    async fn debug_assert_bucket_parity(
+        &self,
+        bucket: &BucketId,
+        include_retracted: bool,
+        prefix: &str,
+    ) {
+        let bsid = memvault_core::bucket_scope_id(bucket);
+        let members: std::collections::HashSet<String> = self
+            .store
+            .scope_members(&bsid, true, include_retracted, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(nid, _)| nid)
+            .filter(|nid| nid.starts_with(prefix))
+            .collect();
+        let scan: std::collections::HashSet<String> = match prefix {
+            "doc:" => self
+                .list_docs_scan(None, usize::MAX, Some(bucket), include_retracted)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| format!("doc:{}", hex::encode(s.id.0)))
+                .collect(),
+            "entity:" => self
+                .list_entities_scan(usize::MAX, Some(bucket), include_retracted)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| format!("entity:{}", hex::encode(e.id.0)))
+                .collect(),
+            _ => return,
+        };
+        let missing: Vec<&String> = scan.difference(&members).collect();
+        debug_assert!(
+            missing.is_empty(),
+            "per-bucket member-set ({prefix}) is missing nodes the authoritative \
+             scan returned — maintenance drift: {missing:?}"
+        );
+    }
+
     /// Live member-set maintenance for a single node: refreshes its membership
     /// in every already-registered view×bucket partition from the current
     /// index state. Cheap (only touches built partitions) and best-effort.
@@ -5126,106 +5455,47 @@ impl MemvaultClient for LocalClient {
         bucket: Option<&BucketId>,
         include_retracted: bool,
     ) -> Result<Vec<DocSummary>> {
-        // Explicit bucket → scope to that bucket.
-        // None → scope to all accessible buckets (or unscoped pre-genesis).
-        // Exhaustive membership universe: the set we test labels against must
-        // cover every block in the bucket, or a recent doc/entity (whose CIDs
-        // fall outside a capped window) is silently dropped from the listing.
-        // The RESULT is still capped at `limit` below (pagination). See
-        // standards: exhaustive-lookups. (Perf: the cluster-wide label scan
-        // here should route through the scoped index — see derived-indexes.)
-        let scan_cap = usize::MAX;
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
-                Some(bucket_cids.into_iter().collect())
-            } else {
-                let all = self.accessible_bucket_cids(scan_cap)?;
-                if all.is_empty() { None } else { Some(all) }
-            };
-
-        let cids = if let Some((ref scope, ref label)) = tag_filter {
-            self.store.query_by_tag(scope, label, 0, limit * 5)?
-        } else {
-            // Scan all doc labels when bucket-scoped: a global cap would drop
-            // docs of any bucket outside the global first-N (same flaw as
-            // list_entities_ex). The result is capped at `limit` below.
-            let label_cap = if bucket_cid_set.is_some() {
-                usize::MAX
-            } else {
-                limit * 5
-            };
-            self.store
-                .query_unique_labels("doc", label_cap)?
-                .into_iter()
-                .flat_map(|label| {
-                    self.store
-                        // Exhaustive membership: any of this doc's CIDs may be
-                        // the bucket-matching one (see standards).
-                        .query_by_tag("doc", &label, 0, usize::MAX)
-                        .unwrap_or_default()
-                })
-                .collect()
-        };
-
-        let mut summaries = Vec::new();
-        let mut seen_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
-
-        for cid in &cids {
-            if summaries.len() >= limit {
-                break;
-            }
-            // Skip CIDs not in the active bucket (when filtered).
-            if let Some(ref bset) = bucket_cid_set {
-                if !bset.contains(cid) {
+        // Bucket-scoped, untagged listing: enumerate the per-bucket member-set
+        // (O(bucket)) instead of scanning every doc label in the cluster.
+        // Tagged queries already use the narrow `query_by_tag` path, which the
+        // member-set (not tag-partitioned) wouldn't improve. See the
+        // per-bucket-member-index plan / standards/derived-indexes.md.
+        if let (Some(bid), None) = (bucket, &tag_filter) {
+            // Drain any pending reindex (synced/seeded blocks) so the
+            // maintenance wiring has folded them into the registered set before
+            // we read it — read-your-syncs, mirroring scoped_list/scoped_search.
+            self.flush_index().await;
+            self.ensure_bucket_partition(bid).await?;
+            let bsid = memvault_core::bucket_scope_id(bid);
+            // include_active is always true; include_retracted gates the
+            // retracted partition. Unlimited at the store level — we filter to
+            // docs and page at `limit` after.
+            let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+            let mut summaries = Vec::new();
+            for (node_id, _wall) in &members {
+                if summaries.len() >= limit {
+                    break;
+                }
+                let Some(hex_id) = node_id.strip_prefix("doc:") else {
                     continue;
+                };
+                let Some(arr) = hex::decode(hex_id)
+                    .ok()
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                else {
+                    continue;
+                };
+                if let Some(summary) = self.doc_summary(&DocId(arr)) {
+                    summaries.push(summary);
                 }
             }
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Some(dc) = payload.get("DocCreate") {
-                            if let Ok(doc_id) =
-                                serde_json::from_value::<DocId>(dc["doc_id"].clone())
-                            {
-                                if seen_docs.insert(doc_id.clone()) {
-                                    let node_id = format!("doc:{}", hex::encode(doc_id.0));
-                                    if !include_retracted {
-                                        let idx = self.index.read().await;
-                                        if idx.is_retracted(&node_id) {
-                                            continue;
-                                        }
-                                        drop(idx);
-                                    }
-                                    let title = dc
-                                        .get("frontmatter")
-                                        .and_then(|fm| fm.get("title"))
-                                        .and_then(|t| t.as_str())
-                                        .map(|s| s.to_string());
-                                    let tags: Vec<(String, String)> = val
-                                        .get("tags")
-                                        .and_then(|t| serde_json::from_value(t.clone()).ok())
-                                        .unwrap_or_default();
-                                    let wall_ns =
-                                        val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                                    summaries.push(DocSummary {
-                                        id: doc_id,
-                                        cid: cid.clone(),
-                                        title,
-                                        tags,
-                                        updated_ns: wall_ns,
-                                        attachment_count: 0,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            #[cfg(debug_assertions)]
+            self.debug_assert_bucket_parity(bid, include_retracted, "doc:")
+                .await;
+            return Ok(summaries);
         }
-
-        Ok(summaries)
+        self.list_docs_scan(tag_filter, limit, bucket, include_retracted)
+            .await
     }
 
     async fn upload_file(
@@ -5586,66 +5856,42 @@ impl MemvaultClient for LocalClient {
         bucket: Option<&BucketId>,
         include_retracted: bool,
     ) -> Result<Vec<Entity>> {
-        // Explicit bucket → scope to that bucket.
-        // None → scope to all accessible buckets (or unscoped pre-genesis).
-        // Exhaustive membership universe: the set we test labels against must
-        // cover every block in the bucket, or a recent doc/entity (whose CIDs
-        // fall outside a capped window) is silently dropped from the listing.
-        // The RESULT is still capped at `limit` below (pagination). See
-        // standards: exhaustive-lookups. (Perf: the cluster-wide label scan
-        // here should route through the scoped index — see derived-indexes.)
-        let scan_cap = usize::MAX;
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
-                Some(bucket_cids.into_iter().collect())
-            } else {
-                let all = self.accessible_bucket_cids(scan_cap)?;
-                if all.is_empty() { None } else { Some(all) }
-            };
-
-        // When scoped to a bucket, the global `limit` cap on labels would
-        // wrongly drop entities (including the per-bucket VFS root, which
-        // breaks `ensure_root` → mkdir/resolve) of any bucket whose entities
-        // fall outside the global first-`limit`. Scan all entity labels and
-        // cap the *filtered* result at `limit` instead.
-        let label_cap = if bucket_cid_set.is_some() {
-            usize::MAX
-        } else {
-            limit
-        };
-        let labels = self.store.query_unique_labels("entity", label_cap)?;
-        let mut entities = Vec::new();
-        for label in labels {
-            if entities.len() >= limit {
-                break;
-            }
-            // When bucket-filtered, check if any of this entity's CIDs are in the bucket.
-            if let Some(ref bset) = bucket_cid_set {
-                let entity_cids = self
-                    .store
-                    // Exhaustive membership (see standards: exhaustive-lookups).
-                    .query_by_tag("entity", &label, 0, usize::MAX)
-                    .unwrap_or_default();
-                if !entity_cids.iter().any(|c| bset.contains(c)) {
+        // Bucket-scoped listing: enumerate the per-bucket member-set (O(bucket))
+        // instead of scanning every entity label in the cluster. See the
+        // per-bucket-member-index plan / standards/derived-indexes.md.
+        if let Some(bid) = bucket {
+            // Read-your-syncs: drain pending reindex so maintenance has folded
+            // synced/seeded nodes into the registered set before we read it.
+            self.flush_index().await;
+            self.ensure_bucket_partition(bid).await?;
+            let bsid = memvault_core::bucket_scope_id(bid);
+            let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+            let mut entities = Vec::new();
+            for (node_id, _wall) in &members {
+                if entities.len() >= limit {
+                    break;
+                }
+                let Some(hex_id) = node_id.strip_prefix("entity:") else {
                     continue;
+                };
+                let Some(arr) = hex::decode(hex_id)
+                    .ok()
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                else {
+                    continue;
+                };
+                if let Ok(Some(entity)) =
+                    self.get_entity_async(&EntityId(arr), include_retracted).await
+                {
+                    entities.push(entity);
                 }
             }
-            let id_bytes = hex::decode(&label).unwrap_or_default();
-            if id_bytes.len() != 32 {
-                continue;
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
-            let entity_id = EntityId(arr);
-            if let Ok(Some(entity)) = self
-                .get_entity_async(&entity_id, include_retracted)
-                .await
-            {
-                entities.push(entity);
-            }
+            #[cfg(debug_assertions)]
+            self.debug_assert_bucket_parity(bid, include_retracted, "entity:")
+                .await;
+            return Ok(entities);
         }
-        Ok(entities)
+        self.list_entities_scan(limit, bucket, include_retracted).await
     }
 
     // -- Links (cross-type edges) --

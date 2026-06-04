@@ -2479,3 +2479,187 @@ async fn merged_source_is_hidden_from_bucket_list() {
         "merged source still retrievable via bucket_get"
     );
 }
+
+// ── Per-bucket member-set index (per-bucket-member-index plan) ──────────────
+
+/// Test matrix #1 + #5: multi-bucket isolation via the per-bucket member-set,
+/// and that the first bucket-scoped list lazily builds + registers the set.
+#[tokio::test]
+async fn bucket_member_set_isolation_and_lazy_build() {
+    let (_dir, client) = make_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+
+    // Two docs + one entity in A; one doc in B.
+    for title in ["a-one", "a-two"] {
+        client
+            .put_doc(
+                Document::new(DocId::random(), title.into(), BTreeMap::new()),
+                vec![],
+                Visibility::Internal,
+                Some(&a),
+            )
+            .await
+            .unwrap();
+    }
+    client
+        .add_entity(
+            Entity {
+                id: EntityId::random(),
+                kind: "person".into(),
+                props: BTreeMap::new(),
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    client
+        .put_doc(
+            Document::new(DocId::random(), "b-one".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&b),
+        )
+        .await
+        .unwrap();
+
+    // Before any bucket-scoped list, the Bucket partition is unregistered.
+    let a_sid = memvault_core::bucket_scope_id(&a);
+    assert!(
+        !client.store().scope_is_registered(&a_sid).unwrap(),
+        "partition must not be registered before first scoped list"
+    );
+
+    // First list builds + registers the set (lazy build).
+    let a_docs = client.list_docs(None, 100, Some(&a)).await.unwrap();
+    assert_eq!(a_docs.len(), 2, "bucket A has exactly its two docs");
+    assert!(
+        client.store().scope_is_registered(&a_sid).unwrap(),
+        "first scoped list must register the Bucket partition"
+    );
+
+    let b_docs = client.list_docs(None, 100, Some(&b)).await.unwrap();
+    assert_eq!(b_docs.len(), 1, "bucket B has exactly its one doc");
+
+    // Entities are isolated too.
+    let a_ents = client.list_entities(100, Some(&a)).await.unwrap();
+    assert_eq!(a_ents.len(), 1, "bucket A has its one entity");
+    let b_ents = client.list_entities(100, Some(&b)).await.unwrap();
+    assert_eq!(b_ents.len(), 0, "bucket B has no entities");
+
+    // Second list returns the same result from the (now registered) set.
+    let a_docs2 = client.list_docs(None, 100, Some(&a)).await.unwrap();
+    assert_eq!(a_docs2.len(), 2, "registered set yields the same docs");
+}
+
+/// Test matrix #3: retraction modes against the member-set read path.
+#[tokio::test]
+async fn bucket_member_set_retraction() {
+    let (_dir, client) = make_client();
+    let bucket = mk_bucket(&client, "vault").await;
+
+    let keep = DocId::random();
+    let drop = DocId::random();
+    for id in [&keep, &drop] {
+        client
+            .put_doc(
+                Document::new(id.clone(), "note".into(), BTreeMap::new()),
+                vec![],
+                Visibility::Internal,
+                Some(&bucket),
+            )
+            .await
+            .unwrap();
+    }
+    // Register the set, then retract one doc (live maintenance flips its flag).
+    let _ = client.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    client
+        .retract_node(&format!("doc:{}", hex::encode(drop.0)), "test")
+        .await
+        .unwrap();
+
+    // ActiveOnly (include_retracted=false) excludes the retracted doc.
+    let active = client.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(active.len(), 1, "retracted doc excluded by default");
+    assert_eq!(active[0].id, keep, "the kept doc remains");
+
+    // include_retracted=true includes both.
+    let all = client
+        .list_docs_ex(None, 100, Some(&bucket), true)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2, "include_retracted lists both");
+}
+
+/// Test matrix #2: a node ingested via `reindex_block` (sync, no local write)
+/// into an already-registered bucket set appears in its bucket listing. This
+/// exercises the load-bearing flush_index → sync_node_scopes_with maintenance
+/// wiring (stage 1).
+#[tokio::test]
+async fn bucket_member_set_post_sync_completeness() {
+    let (_dir_a, client_a) = make_client();
+    let (_dir_b, client_b) = make_client();
+    client_b.install_sigchain_notifier();
+
+    // A owns a bucket and a doc in it.
+    let bucket = mk_bucket(&client_a, "shared").await;
+    let doc_id = DocId::random();
+    let mut fm = BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("Synced"));
+    let cid = client_a
+        .put_doc(
+            Document::new(doc_id.clone(), "synced body".into(), fm),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+
+    // B registers the (empty) bucket partition before the doc arrives.
+    let pre = client_b.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(pre.len(), 0, "B's bucket is empty before sync");
+    assert!(
+        client_b
+            .store()
+            .scope_is_registered(&memvault_core::bucket_scope_id(&bucket))
+            .unwrap(),
+        "B registered the partition on the empty list"
+    );
+
+    // Simulate RBSR sync of the doc block into B.
+    let block = client_a.store().get_block(&cid).unwrap().unwrap();
+    client_b.store().put_block(&cid, &block).unwrap();
+    assert!(client_b.store().reindex_block(&cid, &block).unwrap());
+
+    // The synced doc must now appear in B's bucket listing — even though the
+    // partition was already registered, the sync maintenance wiring upserted it.
+    let post = client_b.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(post.len(), 1, "synced doc appears in B's bucket listing");
+    assert_eq!(post[0].id, doc_id);
+}
+
+/// Test matrix #6: result paging is capped at `limit`, while the membership
+/// universe stays exhaustive (every doc is reachable across pages-worth calls).
+#[tokio::test]
+async fn bucket_member_set_pagination() {
+    let (_dir, client) = make_client();
+    let bucket = mk_bucket(&client, "many").await;
+    for i in 0..10 {
+        client
+            .put_doc(
+                Document::new(DocId::random(), format!("doc {i}"), BTreeMap::new()),
+                vec![],
+                Visibility::Internal,
+                Some(&bucket),
+            )
+            .await
+            .unwrap();
+    }
+    let capped = client.list_docs(None, 3, Some(&bucket)).await.unwrap();
+    assert_eq!(capped.len(), 3, "result capped at limit");
+    let all = client.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(all.len(), 10, "membership universe is exhaustive");
+}
