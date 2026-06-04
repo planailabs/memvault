@@ -396,8 +396,17 @@ pub trait MemvaultClient: Send + Sync {
         role: memvault_doc::BucketRole,
     ) -> Result<BucketId>;
 
-    /// List all buckets in the store.
-    async fn bucket_list(&self) -> Result<Vec<BucketInfo>>;
+    /// List buckets in the store. Merged source buckets are hidden when
+    /// `include_merged` is false (treated like retracted — they're surfaced
+    /// under their canonical). Pass `true` to include them, e.g. for audit
+    /// listings or an explicit "show merged" view.
+    async fn bucket_list_filtered(&self, include_merged: bool) -> Result<Vec<BucketInfo>>;
+
+    /// List visible buckets (merged sources hidden). Convenience wrapper over
+    /// [`bucket_list_filtered`].
+    async fn bucket_list(&self) -> Result<Vec<BucketInfo>> {
+        self.bucket_list_filtered(false).await
+    }
 
     /// Get a single bucket's info by ID.
     async fn bucket_get(&self, id: &BucketId) -> Result<Option<BucketInfo>>;

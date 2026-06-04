@@ -2271,3 +2271,30 @@ async fn merged_source_is_marked_in_bucket_info() {
     let ai = client.bucket_get(&a).await.unwrap().unwrap();
     assert_eq!(ai.merged_into, None, "canonical is not a merged source");
 }
+
+#[tokio::test]
+async fn merged_source_is_hidden_from_bucket_list() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "canonical").await;
+    let b = mk_bucket(&client, "source").await;
+
+    // Both buckets are listed before the merge.
+    let before = client.bucket_list().await.unwrap();
+    assert!(before.iter().any(|bi| bi.id == a), "canonical listed");
+    assert!(before.iter().any(|bi| bi.id == b), "source listed pre-merge");
+
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    // After the merge the source is hidden; the canonical stays visible.
+    let after = client.bucket_list().await.unwrap();
+    assert!(after.iter().any(|bi| bi.id == a), "canonical still listed");
+    assert!(
+        !after.iter().any(|bi| bi.id == b),
+        "merged source hidden from default listing"
+    );
+    // It remains directly retrievable by id.
+    assert!(
+        client.bucket_get(&b).await.unwrap().is_some(),
+        "merged source still retrievable via bucket_get"
+    );
+}

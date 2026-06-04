@@ -22,6 +22,9 @@ struct BucketRow {
     /// for cluster-owned buckets — bucket-detail uses "cluster" as
     /// the placeholder; the list keeps it blank for compactness.
     owner: String,
+    /// Hex canonical id this bucket is merged into, when it's a merged
+    /// source (only surfaced when the "Retracted" topbar toggle is on).
+    merged_into_hex: String,
 }
 
 impl BucketRow {
@@ -34,10 +37,12 @@ impl BucketRow {
 }
 
 #[server]
-async fn list_buckets() -> Result<Vec<BucketRow>, ServerFnError> {
+async fn list_buckets(include_merged: bool) -> Result<Vec<BucketRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
+    // Merged sources are hidden by default and surfaced together with retracted
+    // entries — driven by the "Retracted" topbar toggle.
     let buckets = client
-        .bucket_list()
+        .bucket_list_filtered(include_merged)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -61,6 +66,7 @@ async fn list_buckets() -> Result<Vec<BucketRow>, ServerFnError> {
                 cluster_hex: b.cluster_id.map(|c| hex::encode(c.0)).unwrap_or_default(),
                 envelope_count: b.envelope_count,
                 owner: b.owner_agent.map(|a| a.0).unwrap_or_default(),
+                merged_into_hex: b.merged_into.map(|c| hex::encode(c.0)).unwrap_or_default(),
             }
         })
         .collect())
@@ -96,7 +102,18 @@ fn pill_for_status(status: &str) -> Element {
 #[component]
 pub fn BucketList() -> Element {
     use_topbar("Buckets");
-    let buckets = use_server_future(list_buckets)?;
+    // Surface merged sources alongside retracted entries — both ride the
+    // "Retracted" topbar toggle.
+    let filters = crate::ui::filters::use_filters();
+    let mut buckets = use_server_future(move || {
+        let include_merged = filters.read().show_retracted;
+        async move { list_buckets(include_merged).await }
+    })?;
+    // use_server_future only re-runs on remount, not on signal change.
+    use_effect(move || {
+        let _ = filters.read();
+        buckets.restart();
+    });
     let mut show_create = use_signal(|| false);
     let mut new_name = use_signal(String::new);
 
@@ -226,6 +243,11 @@ fn BucketTable(list: ReadSignal<Vec<BucketRow>>) -> Element {
                         },
                         Td {
                             span { class: "font-medium text-fg-strong", "{b.name}" }
+                            if !b.merged_into_hex.is_empty() {
+                                span { class: "ml-2",
+                                    Pill { variant: PillVariant::Warn, "merged" }
+                                }
+                            }
                         }
                         Td { {pill_for_status(&b.status)} }
                         Td {

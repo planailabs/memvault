@@ -1172,11 +1172,16 @@ impl MemvaultClient for HttpApiClient {
         Ok(memvault_core::BucketId(arr))
     }
 
-    async fn bucket_list(&self) -> Result<Vec<BucketInfo>> {
+    async fn bucket_list_filtered(&self, include_merged: bool) -> Result<Vec<BucketInfo>> {
         // `BucketInfo` decodes directly (hex-id wire shape, see `standards/`).
+        let url = if include_merged {
+            self.url("/buckets?include_merged=true")
+        } else {
+            self.url("/buckets")
+        };
         let buckets = self
             .client
-            .get(self.url("/buckets"))
+            .get(url)
             .send()
             .await
             .map_err(map_reqwest)?

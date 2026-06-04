@@ -636,7 +636,11 @@ mod native {
             classification: String,
         },
         /// List buckets
-        List,
+        List {
+            /// Include buckets merged into a canonical (hidden by default).
+            #[arg(long)]
+            include_merged: bool,
+        },
         /// Show bucket details
         Show {
             /// Bucket ID (hex)
@@ -2182,9 +2186,9 @@ mod native {
                     .await?;
                 println!("Bucket created: {}", hex::encode(bucket_id.0));
             }
-            Commands::Bucket(BucketCommands::List) => {
+            Commands::Bucket(BucketCommands::List { include_merged }) => {
                 let client = connect().connect().await?;
-                let buckets = client.bucket_list().await?;
+                let buckets = client.bucket_list_filtered(include_merged).await?;
                 if buckets.is_empty() {
                     println!("No buckets.");
                 }
@@ -2196,12 +2200,18 @@ mod native {
                     } else {
                         "attached"
                     };
+                    // When showing merged sources, mark where each folds into.
+                    let merged = b
+                        .merged_into
+                        .map(|c| format!(" merged→{}", hex::encode(c.0)))
+                        .unwrap_or_default();
                     println!(
-                        "{} {} [{}] items={}",
+                        "{} {} [{}] items={}{}",
                         hex::encode(b.id.0),
                         b.name,
                         status,
-                        b.envelope_count
+                        b.envelope_count,
+                        merged
                     );
                 }
             }

@@ -6050,13 +6050,23 @@ impl MemvaultClient for LocalClient {
     }
 
 
-    async fn bucket_list(&self) -> Result<Vec<crate::types::BucketInfo>> {
+    async fn bucket_list_filtered(
+        &self,
+        include_merged: bool,
+    ) -> Result<Vec<crate::types::BucketInfo>> {
         let buckets = self.store.list_buckets()?;
         let mut infos = Vec::new();
 
         for (bucket_id_bytes, decl_cid) in buckets {
             let info = self.build_bucket_info(&bucket_id_bytes, &decl_cid)?;
             if let Some(info) = info {
+                // Merged sources are hidden from default listings (treated like
+                // retracted); the canonical bucket they fold into stays visible.
+                // Callers pass `include_merged` to surface them (audit / explicit
+                // "show merged" view).
+                if !include_merged && info.merged_into.is_some() {
+                    continue;
+                }
                 infos.push(info);
             }
         }

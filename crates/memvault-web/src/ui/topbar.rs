@@ -65,13 +65,16 @@ struct ViewOption {
 struct BucketOption {
     id_hex: String,
     name: String,
+    /// True when this is a merged source (only surfaced while the "Retracted"
+    /// toggle is on). Rendered with a "(merged)" suffix in the selector.
+    merged: bool,
 }
 
 #[server]
-async fn fetch_buckets() -> Result<Vec<BucketOption>, ServerFnError> {
+async fn fetch_buckets(include_merged: bool) -> Result<Vec<BucketOption>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let buckets = client
-        .bucket_list()
+        .bucket_list_filtered(include_merged)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(buckets
@@ -79,6 +82,7 @@ async fn fetch_buckets() -> Result<Vec<BucketOption>, ServerFnError> {
         .map(|b| BucketOption {
             id_hex: hex::encode(b.id.0),
             name: b.name.clone(),
+            merged: b.merged_into.is_some(),
         })
         .collect())
 }
@@ -108,7 +112,16 @@ pub fn Topbar() -> Element {
     let mut active_bucket = use_context::<ActiveBucketSignal>();
     let mut show_retracted = use_context::<ShowRetractedSignal>();
     let views_res = use_server_future(fetch_views)?;
-    let buckets_res = use_server_future(fetch_buckets)?;
+    // Surface merged buckets in the selector together with retracted entries —
+    // both ride the "Retracted" toggle. Re-fetch when it flips.
+    let mut buckets_res = use_server_future(move || {
+        let include_merged = show_retracted().0;
+        async move { fetch_buckets(include_merged).await }
+    })?;
+    use_effect(move || {
+        let _ = show_retracted();
+        buckets_res.restart();
+    });
 
     let current_name = active_view
         .read()
@@ -178,7 +191,8 @@ pub fn Topbar() -> Element {
                                 {
                                     let val = format!("{}:{}", b.id_hex, b.name);
                                     let selected = active_bucket.read().id.as_deref() == Some(b.id_hex.as_str());
-                                    rsx! { option { value: "{val}", selected: selected, "{b.name}" } }
+                                    let label = if b.merged { format!("{} (merged)", b.name) } else { b.name.clone() };
+                                    rsx! { option { value: "{val}", selected: selected, "{label}" } }
                                 }
                             }
                         }

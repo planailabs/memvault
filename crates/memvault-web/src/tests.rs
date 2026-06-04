@@ -393,7 +393,10 @@ impl MemvaultClient for MockClient {
     ) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
     }
-    async fn bucket_list(&self) -> memvault_api::Result<Vec<memvault_api::types::BucketInfo>> {
+    async fn bucket_list_filtered(
+        &self,
+        _include_merged: bool,
+    ) -> memvault_api::Result<Vec<memvault_api::types::BucketInfo>> {
         Ok(vec![])
     }
     async fn bucket_get(

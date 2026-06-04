@@ -35,14 +35,6 @@ pub async fn list_buckets(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListBucketsQuery>,
 ) -> Result<Json<Vec<memvault_api::types::BucketInfo>>, StatusCode> {
-    // `BucketInfo` carries hex-id wire encoding (see `standards/`), so it is
-    // transmitted as-is — no hand-built JSON.
-    let mut buckets = state
-        .client
-        .bucket_list()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     // Merged source buckets are hidden from the default listing — they're
     // surfaced under their canonical, so showing them too would double-count
     // and confuse. Treat them like retracted: visible only when explicitly
@@ -53,9 +45,13 @@ pub async fn list_buckets(
             role,
             Some(memvault_auth::AgentRole::Auditor) | Some(memvault_auth::AgentRole::Admin)
         );
-    if !show_merged {
-        buckets.retain(|b| b.merged_into.is_none());
-    }
+    // `BucketInfo` carries hex-id wire encoding (see `standards/`), so it is
+    // transmitted as-is — no hand-built JSON.
+    let buckets = state
+        .client
+        .bucket_list_filtered(show_merged)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(buckets))
 }
 

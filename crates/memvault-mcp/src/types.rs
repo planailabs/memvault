@@ -313,8 +313,13 @@ pub struct ViewDeleteParams {
 
 // -- Bucket tools --
 
-#[derive(Deserialize, JsonSchema)]
-pub struct BucketListParams {}
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct BucketListParams {
+    /// Include buckets that have been merged into a canonical (hidden by
+    /// default, like retracted entries). Defaults to false.
+    #[serde(default)]
+    pub include_merged: bool,
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct BucketCreateParams {

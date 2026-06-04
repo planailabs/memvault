@@ -985,10 +985,14 @@ impl MemvaultServer {
 
     #[tool(
         name = "memvault_bucket_list",
-        description = "List all buckets with status, name, and item count."
+        description = "List buckets with status, name, and item count. Merged \
+                       source buckets are hidden unless include_merged is true."
     )]
-    async fn bucket_list(&self) -> String {
-        match self.client.bucket_list().await {
+    async fn bucket_list(
+        &self,
+        Parameters(params): Parameters<crate::types::BucketListParams>,
+    ) -> String {
+        match self.client.bucket_list_filtered(params.include_merged).await {
             Ok(buckets) => serde_json::json!(buckets
                 .iter()
                 .map(|b| serde_json::json!({
@@ -1780,7 +1784,7 @@ mod tool_tests {
     #[tokio::test]
     async fn bucket_status_list_via_tools() {
         let srv = test_server().await;
-        assert_ok(&srv.bucket_list().await);
+        assert_ok(&srv.bucket_list(Parameters(crate::types::BucketListParams::default())).await);
         assert_ok(&srv.status().await);
         assert_ok(
             &srv.list_all(Parameters(crate::types::ListAllParams {
