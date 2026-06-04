@@ -2318,6 +2318,65 @@ async fn agent_bucket_migration_aliases_legacy_to_pubkey() {
 }
 
 #[tokio::test]
+async fn agent_bucket_migration_materializes_missing_canonical() {
+    use memvault_api::rebuild::{deterministic_agent_bucket_id, legacy_agent_bucket_id};
+
+    let (_dir, client) = make_client(); // cluster_id = "cluster-1"
+    let pk = [7u8; 32];
+    let canonical = deterministic_agent_bucket_id(&pk);
+    let legacy = legacy_agent_bucket_id(&[0u8; 32], &pk);
+
+    // Only the legacy bucket exists; the canonical was never created (the
+    // phantom-target case that hid the merged data from listings).
+    client
+        .bucket_create_inner_sync(
+            legacy.clone(),
+            "agent:old",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Agent,
+            Some(memvault_core::AgentName("old".into())),
+            Some(pk),
+        )
+        .unwrap();
+    put_note(&client, &legacy, "legacy agent data").await;
+    assert!(
+        client.bucket_get(&canonical).await.unwrap().is_none(),
+        "canonical does not exist yet"
+    );
+
+    // Migration creates the canonical, so the legacy data folds into a real,
+    // listable agent bucket instead of a phantom.
+    client.run_agent_bucket_migration();
+    let made = client.bucket_get(&canonical).await.unwrap();
+    assert!(made.is_some(), "migration materializes the canonical agent bucket");
+    assert_eq!(make_role(&made.unwrap()), "Agent", "created as an agent bucket");
+
+    // The canonical now appears in the default listing; the legacy source is
+    // hidden under it (not orphaned).
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    assert!(visible.iter().any(|b| b.id == canonical), "canonical listed");
+    assert!(
+        !visible.iter().any(|b| b.id == legacy),
+        "legacy source hidden under its (now real) canonical"
+    );
+
+    // Idempotent: re-running creates nothing new.
+    client.run_agent_bucket_migration();
+    let again = client.bucket_list_filtered(true).await.unwrap();
+    assert_eq!(
+        again.iter().filter(|b| b.id == canonical).count(),
+        1,
+        "exactly one canonical bucket"
+    );
+}
+
+fn make_role(b: &memvault_api::types::BucketInfo) -> String {
+    format!("{:?}", b.role)
+}
+
+#[tokio::test]
 async fn merged_source_is_marked_in_bucket_info() {
     let (_dir, client) = admin_client();
     let a = mk_bucket(&client, "canonical").await;

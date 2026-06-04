@@ -4581,13 +4581,102 @@ impl LocalClient {
         }
     }
 
-    /// Run the agent-bucket migration: force the alias maps to rebuild so
+    /// Write-path companion to [`Self::extend_with_agent_aliases`]: for every
+    /// agent pubkey that has a legacy (cluster-scoped) bucket but whose stable
+    /// deterministic canonical bucket has no decl yet, create that canonical so
+    /// the legacy data folds into a real, *listable* agent bucket instead of an
+    /// invisible phantom target (a merged source whose canonical can't be
+    /// shown would otherwise vanish from listings entirely). Idempotent — only
+    /// writes when the canonical is missing. Returns the number created.
+    ///
+    /// Needs the node signing key installed (the created decl is node-signed
+    /// with the agent as `owner_agent`, exactly like [`ensure_agent_bucket`]),
+    /// so call it at daemon startup after the key is set.
+    fn materialize_agent_alias_canonicals(&self) -> usize {
+        use std::collections::{HashMap, HashSet};
+
+        // Candidate pubkeys: every attested agent, plus any bucket's recorded
+        // owner-agent pubkey (covers agents whose attestation hasn't synced but
+        // whose legacy bucket this node holds). Remember a display name per
+        // pubkey from the owning decl so the created bucket is named sensibly.
+        let mut pubkeys: HashSet<[u8; 32]> = HashSet::new();
+        let mut name_hint: HashMap<[u8; 32], String> = HashMap::new();
+        if let Ok(atts) = crate::sigchain::scan_agent_attestations(self) {
+            for att in atts {
+                pubkeys.insert(att.agent_pubkey);
+                name_hint
+                    .entry(att.agent_pubkey)
+                    .or_insert_with(|| att.agent_id.0.clone());
+            }
+        }
+        for bid in self.all_bucket_id_arrays() {
+            if let Ok(Some(decl_cid)) = self.store.get_bucket(&bid) {
+                if let Ok(Some(block)) = self.store.get_block(&decl_cid) {
+                    if let Some(decl) = Self::parse_bucket_decl(&block) {
+                        if let Some(pk) = decl.owner_agent_pubkey {
+                            pubkeys.insert(pk);
+                            if let Some(owner) = decl.owner_agent {
+                                name_hint.entry(pk).or_insert(owner.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Legacy cluster contexts the old derivation could have used.
+        let mut clusters: Vec<Vec<u8>> = vec![vec![0u8; 32]];
+        if self.cluster_id.iter().any(|&b| b != 0) {
+            clusters.push(self.cluster_id.clone());
+        }
+
+        let mut created = 0usize;
+        for pk in pubkeys {
+            let canonical = crate::rebuild::deterministic_agent_bucket_id(&pk).0;
+            // Already a real bucket — nothing to materialize.
+            if self.store.get_bucket(&canonical).ok().flatten().is_some() {
+                continue;
+            }
+            // Only materialize when a legacy source actually exists for this
+            // pubkey (mirrors the alias guard: never invent an empty canonical).
+            let has_legacy = clusters.iter().any(|c| {
+                let old = crate::rebuild::legacy_agent_bucket_id(c, &pk).0;
+                old != canonical && self.store.get_bucket(&old).ok().flatten().is_some()
+            });
+            if !has_legacy {
+                continue;
+            }
+            let hint = name_hint
+                .get(&pk)
+                .cloned()
+                .unwrap_or_else(|| hex::encode(pk));
+            match self.ensure_agent_bucket_for_pubkey_sync(&pk, &hint) {
+                Ok(bid) => {
+                    created += 1;
+                    tracing::info!(
+                        agent_pubkey = %hex::encode(pk),
+                        bucket = %bid,
+                        "materialized canonical agent bucket for legacy alias target"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    agent_pubkey = %hex::encode(pk),
+                    "failed to materialize canonical agent bucket: {e}"
+                ),
+            }
+        }
+        created
+    }
+
+    /// Run the agent-bucket migration: materialize any missing canonical agent
+    /// buckets that legacy buckets alias onto (so the merged data surfaces
+    /// under a real, listable bucket), then force the alias maps to rebuild so
     /// the deterministic legacy→canonical agent aliases (see
-    /// [`Self::extend_with_agent_aliases`]) take effect. Idempotent — the
-    /// aliases are computed, not persisted, so re-running only rebuilds the
-    /// cache. A daemon may call this at startup; resolution also triggers it
-    /// lazily on first use.
+    /// [`Self::extend_with_agent_aliases`]) take effect. Idempotent. A daemon
+    /// calls this at startup after the node signing key is installed;
+    /// resolution also triggers the alias rebuild lazily on first use.
     pub fn run_agent_bucket_migration(&self) {
+        self.materialize_agent_alias_canonicals();
         self.bump_alias_generation();
     }
 
