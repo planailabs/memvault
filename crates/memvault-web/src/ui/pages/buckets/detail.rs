@@ -409,6 +409,15 @@ pub fn BucketDetail(id: String) -> Element {
                 }
             }
 
+            // Rename card (archived buckets refuse new writes)
+            if data.status != "archived" {
+                BucketRename {
+                    bucket_id: id.clone(),
+                    current_name: data.name.clone(),
+                    on_renamed: move |_| bucket.restart(),
+                }
+            }
+
             // Actions card
             Card {
                 div { class: "p-5 space-y-3",
@@ -453,6 +462,57 @@ pub fn BucketDetail(id: String) -> Element {
 
             // Bucket merges card (sources folded into this canonical)
             BucketMerges { bucket_id: id.clone() }
+        }
+    }
+}
+
+#[component]
+fn BucketRename(bucket_id: String, current_name: String, on_renamed: EventHandler<()>) -> Element {
+    let mut name = use_signal(|| current_name.clone());
+    let mut err = use_signal(|| Option::<String>::None);
+
+    rsx! {
+        Card {
+            div { class: "p-5 space-y-3",
+                SectionHeading { "Rename" }
+                div { class: "flex items-end gap-2",
+                    div { class: "flex-1",
+                        label { class: "text-xs text-fg-muted", "Bucket Name" }
+                        input {
+                            class: "input input-sm w-full mt-1",
+                            r#type: "text",
+                            value: "{name}",
+                            oninput: move |e| name.set(e.value()),
+                        }
+                    }
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        onclick: {
+                            let bid = bucket_id.clone();
+                            move |_| {
+                                let bid = bid.clone();
+                                let new_name = name.read().trim().to_string();
+                                if new_name.is_empty() {
+                                    return;
+                                }
+                                spawn(async move {
+                                    match rename_bucket(bid, new_name).await {
+                                        Ok(()) => {
+                                            err.set(None);
+                                            on_renamed.call(());
+                                        }
+                                        Err(e) => err.set(Some(e.to_string())),
+                                    }
+                                });
+                            }
+                        },
+                        "Save"
+                    }
+                }
+                if let Some(e) = err.read().as_ref() {
+                    p { class: "text-sm text-danger", "{e}" }
+                }
+            }
         }
     }
 }

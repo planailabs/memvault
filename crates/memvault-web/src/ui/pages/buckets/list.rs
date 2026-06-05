@@ -104,6 +104,9 @@ pub fn BucketList() -> Element {
     use_topbar("Buckets");
     let mut show_create = use_signal(|| false);
     let mut new_name = use_signal(String::new);
+    let mut create_err = use_signal(|| Option::<String>::None);
+    // Bumped after a successful create so the (child) bucket list refetches.
+    let refresh = use_signal(|| 0u32);
 
     rsx! {
         div { class: "space-y-4",
@@ -135,10 +138,17 @@ pub fn BucketList() -> Element {
                                 onclick: move |_| {
                                     let name = new_name.read().trim().to_string();
                                     if !name.is_empty() {
+                                        let mut refresh = refresh;
                                         spawn(async move {
-                                            let _ = create_bucket(name).await;
-                                            show_create.set(false);
-                                            new_name.set(String::new());
+                                            match create_bucket(name).await {
+                                                Ok(_) => {
+                                                    show_create.set(false);
+                                                    new_name.set(String::new());
+                                                    create_err.set(None);
+                                                    refresh.set(refresh() + 1);
+                                                }
+                                                Err(e) => create_err.set(Some(e.to_string())),
+                                            }
                                         });
                                     }
                                 },
@@ -146,9 +156,15 @@ pub fn BucketList() -> Element {
                             }
                             Button {
                                 variant: ButtonVariant::Secondary,
-                                onclick: move |_| show_create.set(false),
+                                onclick: move |_| {
+                                    show_create.set(false);
+                                    create_err.set(None);
+                                },
                                 "Cancel"
                             }
+                        }
+                        if let Some(e) = create_err.read().as_ref() {
+                            p { class: "text-sm text-danger", "{e}" }
                         }
                     }
                 }
@@ -163,14 +179,14 @@ pub fn BucketList() -> Element {
                         div { class: "p-8 text-center text-fg-muted", "Loading buckets…" }
                     }
                 },
-                BucketListBody {}
+                BucketListBody { refresh }
             }
         }
     }
 }
 
 #[component]
-fn BucketListBody() -> Element {
+fn BucketListBody(refresh: ReadSignal<u32>) -> Element {
     // Surface merged sources alongside retracted entries — both ride the
     // "Retracted" topbar toggle.
     let filters = crate::ui::filters::use_filters();
@@ -178,9 +194,11 @@ fn BucketListBody() -> Element {
         let include_merged = filters.read().show_retracted;
         async move { list_buckets(include_merged).await }
     })?;
-    // use_server_future only re-runs on remount, not on signal change.
+    // use_server_future only re-runs on remount, not on signal change. Refetch
+    // when the "Retracted" filter flips or after a bucket is created.
     use_effect(move || {
         let _ = filters.read();
+        let _ = refresh.read();
         buckets.restart();
     });
 
