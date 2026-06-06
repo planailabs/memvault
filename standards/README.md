@@ -18,6 +18,7 @@ in the same change if the convention itself evolves.**
 | [exhaustive-lookups.md](exhaustive-lookups.md) | Lookups whose correctness depends on seeing every match (resolution, membership, ACL, trust, dedup) must not carry a finite cap — use `usize::MAX`; caps are for caller-driven pagination only. |
 | [derived-indexes.md](derived-indexes.md) | Hot-path lookups must not scan every entity/doc/block — use a scoped `query_by_*`/`QueryScope`, or a derived index/cache table (cache over the store, repaired on read, safe when stale). |
 | [blockstore-not-redb.md](blockstore-not-redb.md) | Cluster-scoped state changes must emit a content-addressed block (it's the sync unit); redb side tables are derived indexes, rebuildable from blocks, and never sync. |
+| [block-ingestion.md](block-ingestion.md) | Every block — locally created or peer-synced — enters the store through the single `ingest_block` primitive; admission control (sign locally / `verify_cid`+`vet_sync_block` remotely) is a gate in front of that one path, never a second way to write a block. |
 | [sign-everything.md](sign-everything.md) | Any block that confers trust/authority/access/visibility must be signed, and the ingest path must verify the signature before acting (authority may be deferred; authenticity never). |
 
 ## The two rules in one sentence each
