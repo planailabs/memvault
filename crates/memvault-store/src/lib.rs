@@ -21,10 +21,10 @@ pub mod tables;
 
 pub use envelope_view::EnvelopeView;
 pub use error::StoreError;
-pub use insert::{EnvelopeMeta, deserialize_block, deserialize_block_as};
+pub use insert::{EnvelopeMeta, IngestMeta, deserialize_block, deserialize_block_as};
 
-/// Callback invoked after a block is indexed (either fresh via
-/// `insert_envelope` or re-indexed from synced data via `reindex_block`).
+/// Callback invoked after a block is indexed (every block enters via the
+/// single `ingest_block` path; `reindex_block` re-fires it on rebuild).
 /// Arguments are `(scope, label, cid)` — e.g. `("sigchain", "node_att", &cid)`.
 /// Called for **every** tag found on the block; receivers filter.
 ///
