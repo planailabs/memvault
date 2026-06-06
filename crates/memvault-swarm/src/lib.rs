@@ -1147,13 +1147,15 @@ enum SyncDisposition {
     /// Drop the block — signature invalid, cluster mismatch, or unknown
     /// admin. Better to fail closed than to store a forgery.
     Drop,
-    /// Store as opaque block (existing put_block + reindex_block path).
-    AsIs,
-    /// Store as a sigchain block with the given envelope tags. Tags are
-    /// what `reindex_block` would assign if it could parse the CBOR
-    /// shape — we set them explicitly here so the receiver's sigchain
-    /// index + watcher see the block.
-    AsSigchain(memvault_store::EnvelopeMeta),
+    /// Admit the block through the single `store.ingest_block` path with
+    /// the given [`memvault_store::IngestMeta`]. For ordinary content the
+    /// meta only stamps the receiving node's cluster (the bytes carry
+    /// tags/author/wall_ns themselves). For bare-struct sigchain blocks —
+    /// which aren't envelopes and carry no such fields — the meta also
+    /// supplies the synthetic `("sigchain", label)` marker, signer pubkey
+    /// and ingest time so the receiver's sigchain index + watcher see the
+    /// block.
+    Ingest(memvault_store::IngestMeta),
 }
 
 /// Does this libp2p peer correspond to a node currently attested by
@@ -1455,7 +1457,14 @@ fn vet_sync_block(
     author_peer_pubkey: Option<[u8; 32]>,
 ) -> SyncDisposition {
     match validate_sigchain_for_sync(bytes, join_config) {
-        SyncSigchainVerdict::NotSigchain => SyncDisposition::AsIs,
+        // Ordinary content envelope: the bytes carry tags/author/wall_ns;
+        // we only stamp the receiving node's cluster.
+        SyncSigchainVerdict::NotSigchain => {
+            SyncDisposition::Ingest(memvault_store::IngestMeta {
+                cluster_id: Some(join_config.cluster_id.to_vec()),
+                ..Default::default()
+            })
+        }
         SyncSigchainVerdict::Drop { reason } => {
             tracing::warn!(reason, "dropped sync'd sigchain block");
             SyncDisposition::Drop
@@ -1472,17 +1481,27 @@ fn vet_sync_block(
             let author = author_peer_pubkey
                 .map(|p| p.to_vec())
                 .unwrap_or(signer_pubkey);
-            let mut tags = vec![("sigchain".to_string(), label.to_string())];
-            tags.extend(extra_tags);
-            SyncDisposition::AsSigchain(memvault_store::EnvelopeMeta {
-                author,
-                tags,
-                wall_ns: now_ns,
+            let mut extra = vec![("sigchain".to_string(), label.to_string())];
+            extra.extend(extra_tags);
+            // Bare-struct sigchain block: not an envelope, so the synthetic
+            // tags/author/wall_ns are the only metadata the indexer gets.
+            SyncDisposition::Ingest(memvault_store::IngestMeta {
                 cluster_id: Some(join_config.cluster_id.to_vec()),
+                extra_tags: extra,
+                author: Some(author),
+                wall_ns: Some(now_ns),
                 ..Default::default()
             })
         }
     }
+}
+
+/// Did the gate recognise this block as a sigchain type (vs. ordinary
+/// content)? True when the synthetic `("sigchain", _)` marker was stamped.
+/// The join protocol uses this to insist a bootstrap/attestation block is
+/// genuinely a verified sigchain block before treating it as one.
+fn ingest_is_sigchain(meta: &memvault_store::IngestMeta) -> bool {
+    meta.extra_tags.iter().any(|(s, _)| s == "sigchain")
 }
 
 fn handle_block_response(
@@ -1525,35 +1544,24 @@ fn handle_block_response(
                 );
                 continue;
             }
-            // Gate sigchain block ingress: a synced NodeAttestation must
-            // verify against the pinned admin pubkey before being stored.
-            // Other shapes pass through to the existing path.
-            match vet_sync_block(&entry.data, join_config, None) {
+            // Admission gate: decide whether this synced block may enter the
+            // store and, for bare-struct sigchain blocks, what synthetic
+            // metadata to stamp (the `("sigchain", label)` marker + signer
+            // pubkey). The result is an `IngestMeta` — every accepted block,
+            // sigchain or content, then enters through the SAME
+            // `store.ingest_block` path local writes use. The receiving
+            // node's cluster is always stamped (the signed envelope carries
+            // no cluster_id), which also binds a synced BucketDecl live.
+            let ingest = match vet_sync_block(&entry.data, join_config, None) {
                 SyncDisposition::Drop => continue,
-                SyncDisposition::AsSigchain(meta) => {
-                    if let Err(e) = store.insert_envelope(&entry.cid, &entry.data, &meta) {
-                        tracing::warn!(
-                            cid = %hex::encode(&entry.cid), %e,
-                            "failed to insert synced sigchain block"
-                        );
-                        continue;
-                    }
-                }
-                SyncDisposition::AsIs => {
-                    if let Err(e) = store.put_block(&entry.cid, &entry.data) {
-                        tracing::warn!(cid = %hex::encode(&entry.cid), %e, "failed to store synced block");
-                        continue;
-                    }
-                    let _ = store.reindex_block(&entry.cid, &entry.data);
-                    // Bind a synced BucketDecl to our cluster live (current
-                    // Signed<T> decls carry no cluster_id, so otherwise it
-                    // would stay unbound until the next restart).
-                    let _ = store.reindex_bucket_decl(
-                        &entry.cid,
-                        &entry.data,
-                        Some(&join_config.cluster_id),
-                    );
-                }
+                SyncDisposition::Ingest(meta) => meta,
+            };
+            if let Err(e) = store.ingest_block(&entry.cid, &entry.data, &ingest) {
+                tracing::warn!(
+                    cid = %hex::encode(&entry.cid), %e,
+                    "failed to ingest synced block"
+                );
+                continue;
             }
             stored += 1;
             tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
@@ -2123,8 +2131,8 @@ fn handle_join_response(
             if let Some(adm) = &admission_block {
                 let adm_cid = memvault_core::cid_from_bytes(adm).to_bytes();
                 match vet_sync_block(adm, join_config, None) {
-                    SyncDisposition::AsSigchain(meta) => {
-                        if let Err(e) = store.insert_envelope(&adm_cid, adm, &meta) {
+                    SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
+                        if let Err(e) = store.ingest_block(&adm_cid, adm, &meta) {
                             tracing::warn!(%peer, %e, "failed to insert admission block");
                         } else {
                             tracing::info!(%peer, "stored admin admission from /join/1.0");
@@ -2145,8 +2153,8 @@ fn handle_join_response(
             for boot in &bootstrap_blocks {
                 let boot_cid = memvault_core::cid_from_bytes(boot).to_bytes();
                 match vet_sync_block(boot, join_config, None) {
-                    SyncDisposition::AsSigchain(meta) => {
-                        if let Err(e) = store.insert_envelope(&boot_cid, boot, &meta) {
+                    SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
+                        if let Err(e) = store.ingest_block(&boot_cid, boot, &meta) {
                             tracing::warn!(%peer, %e, "failed to insert bootstrap block");
                         }
                     }
@@ -2156,7 +2164,7 @@ fn handle_join_response(
                             "dropped bootstrap block: signature does not verify"
                         );
                     }
-                    SyncDisposition::AsIs => {
+                    SyncDisposition::Ingest(_) => {
                         tracing::debug!(
                             %peer,
                             "ignoring non-sigchain bootstrap block"
@@ -2177,8 +2185,8 @@ fn handle_join_response(
             let cid = memvault_core::cid_from_bytes(&attestation_block);
             let cid_bytes = cid.to_bytes();
             match vet_sync_block(&attestation_block, join_config, None) {
-                SyncDisposition::AsSigchain(meta) => {
-                    if let Err(e) = store.insert_envelope(&cid_bytes, &attestation_block, &meta) {
+                SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
+                    if let Err(e) = store.ingest_block(&cid_bytes, &attestation_block, &meta) {
                         tracing::warn!(%peer, %e, "failed to insert join attestation");
                         return false;
                     }
@@ -2193,7 +2201,7 @@ fn handle_join_response(
                     );
                     false
                 }
-                SyncDisposition::AsIs => {
+                SyncDisposition::Ingest(_) => {
                     // Shouldn't happen — admin minted a NodeAttestation,
                     // it has the right shape. Defensive fallback.
                     tracing::warn!(
@@ -2228,23 +2236,23 @@ mod sync_classify_tests {
         let bytes = serde_ipld_dagcbor::to_vec(&rec).unwrap();
 
         match vet_sync_block(&bytes, &JoinConfig::default(), None) {
-            SyncDisposition::AsSigchain(meta) => {
+            SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
                 assert!(
-                    meta.tags
+                    meta.extra_tags
                         .iter()
                         .any(|(s, l)| s == "sigchain" && l == "bucket_merge"),
                     "missing sigchain/bucket_merge tag: {:?}",
-                    meta.tags
+                    meta.extra_tags
                 );
                 assert!(
-                    meta.tags
+                    meta.extra_tags
                         .iter()
                         .any(|(s, l)| s == "bucket_merge" && *l == hex::encode(source.0)),
                     "missing bucket_merge lookup tag: {:?}",
-                    meta.tags
+                    meta.extra_tags
                 );
             }
-            _ => panic!("synced BucketMergeRecord was not classified AsSigchain"),
+            _ => panic!("synced BucketMergeRecord was not classified as a sigchain ingest"),
         }
     }
 }
