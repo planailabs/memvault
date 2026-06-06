@@ -397,12 +397,14 @@ fn old_view_without_bucket_id_deserializes() {
 async fn vfs_double_prefix_entity_id_handled() {
     let node = TestNode::new();
 
-    // Create an entity
+    // Create an entity. This test exercises double-prefix entity-id
+    // handling in get_tags, which is kind-agnostic — use a plain kind, not
+    // a managed VFS kind (the generic entity API rejects managed kinds).
     let mut props = BTreeMap::new();
     props.insert("name".to_string(), serde_json::json!("test-dir"));
     let entity = memvault_doc::Entity {
         id: EntityId::random(),
-        kind: memvault_api::vfs::VFS_DIR_KIND.to_string(),
+        kind: "person".to_string(),
         props,
         edges_out: vec![],
     };

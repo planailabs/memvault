@@ -270,6 +270,17 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     store
         .clear_secondary_indexes()
         .map_err(|e| ApiError::Other(format!("clear indexes: {e}")))?;
+    // The per-scope member-sets (SCOPE_MEMBERS/SCOPE_REGISTRY) are derived
+    // indexes too. A rebuild that re-derives BY_BUCKET/BY_TAG but leaves a
+    // previously-registered bucket partition in place would keep its stale
+    // membership: `ensure_bucket_partition` skips any already-registered
+    // scope, so a node adopted into a bucket during this rebuild (e.g. a
+    // legacy unbucketed entity) would be found by the authoritative scan
+    // yet missing from the member-set. Discard them so they rebuild lazily
+    // with correct membership on next access.
+    store
+        .scope_clear_all()
+        .map_err(|e| ApiError::Other(format!("clear scope member-sets: {e}")))?;
 
     let blocks = store
         .iter_blocks()
