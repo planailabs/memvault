@@ -6,7 +6,8 @@ use plan_ai_design::{Card, Dot, PageHeader, Pill, PillVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
+use super::canvas::display_label;
+use super::layout_engine::{ForceParams, ForceSimulation, GraphEdge, GraphNode};
 use crate::ui::app::Route;
 use crate::ui::components::cid_display::CidDisplay;
 use crate::ui::topbar::use_topbar;
@@ -50,8 +51,17 @@ struct EdgeDetail {
     edge_id: String,
     relation: String,
     direction: String,
+    /// Tag-label of the other end (`entity:<hex>`, `doc:<hex>`, `file:<hex>`).
     other_node: String,
-    other_label: Option<String>,
+    /// Human-readable name of the other end. Resolved server-side so the
+    /// sidebar can show "Atlas" instead of "entity:4aa14e2…".
+    other_label: String,
+    /// Kind of the other end ("person", "library", "document", …). Used
+    /// to pick a palette variant for the dot/pill in the row.
+    other_kind: String,
+    /// Node type discriminator ("entity" / "doc" / "file"), used so the
+    /// hover popover can route to the right detail page.
+    other_node_type: String,
 }
 
 // ── Server functions ───────────────────────────────────────────────────
@@ -140,14 +150,13 @@ async fn list_graph_nodes(
         .into_iter()
         .filter(|entity| entity.kind != memvault_core::VFS_DIR_KIND)
         .map(|entity| {
-            let label = entity
-                .props
-                .get("name")
-                .or_else(|| entity.props.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(&entity.kind)
-                .to_string();
             let id = format!("entity:{}", hex::encode(entity.id.0));
+            let label = display_label(
+                entity.props.get("name").and_then(|v| v.as_str()),
+                entity.props.get("title").and_then(|v| v.as_str()),
+                &entity.kind,
+                &id,
+            );
             NodeSummary {
                 id,
                 node_type: "entity".to_string(),
@@ -294,21 +303,65 @@ async fn get_node_detail(
         }
     };
 
-    // Get edges
+    // Get edges, resolving each "other end" so the sidebar can render
+    // a human label + kind dot instead of a raw `entity:<hex>` string.
     let mut edges = Vec::new();
     if let Ok(edge_list) = client.edges_of(&node_ref).await {
         for (source, edge) in edge_list {
-            let (direction, other_node) = if source == node_ref {
-                ("outgoing".to_string(), edge.target.tag_label())
+            let (direction, other_ref) = if source == node_ref {
+                ("outgoing".to_string(), edge.target.clone())
             } else {
-                ("incoming".to_string(), source.tag_label())
+                ("incoming".to_string(), source.clone())
+            };
+            let other_node = other_ref.tag_label();
+            let scope =
+                memvault_core::QueryScope::all().with_include_retracted(show_retracted);
+            let (other_node_type, other_kind, other_label) = match &other_ref {
+                memvault_core::NodeRef::Entity(eid) => {
+                    if let Ok(Some(e)) = client.get_entity_scoped(eid, &scope).await {
+                        let label = display_label(
+                            e.props.get("name").and_then(|v| v.as_str()),
+                            e.props.get("title").and_then(|v| v.as_str()),
+                            &e.kind,
+                            &other_node,
+                        );
+                        ("entity".to_string(), e.kind.clone(), label)
+                    } else {
+                        // Couldn't fetch the target — still avoid a raw hash.
+                        let label = display_label(None, None, "entity", &other_node);
+                        ("entity".to_string(), "entity".to_string(), label)
+                    }
+                }
+                memvault_core::NodeRef::Doc(did) => {
+                    let title = client
+                        .get_doc_scoped(did, &scope)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|d| d.frontmatter.get("title").and_then(|v| v.as_str()).map(String::from));
+                    let label = display_label(title.as_deref(), None, "document", &other_node);
+                    ("doc".to_string(), "document".to_string(), label)
+                }
+                memvault_core::NodeRef::Attachment(cid) => {
+                    let name = client
+                        .get_file_manifest(cid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .and_then(|v| v.get("filename").and_then(|f| f.as_str()).map(String::from));
+                    let label = display_label(name.as_deref(), None, "file", &other_node);
+                    ("file".to_string(), "file".to_string(), label)
+                }
             };
             edges.push(EdgeDetail {
                 edge_id: hex::encode(edge.id.0),
                 relation: edge.relation,
                 direction,
                 other_node,
-                other_label: None,
+                other_label,
+                other_kind,
+                other_node_type,
             });
         }
     }
@@ -395,10 +448,12 @@ async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<NodeSummary
 
 // ── Kind palette ──────────────────────────────────────────────────────
 //
-// Known kinds map to a `PillVariant` and reuse the same status palette
-// the rest of the app uses. Kinds outside that set fall back to a
-// deterministic hashed hue, so unrecognized node types still get a
-// distinct, stable color instead of all collapsing onto the muted swatch.
+// Every kind resolves to one of the six `PillVariant` slots in the
+// planai-design palette so the graph reads as part of the rest of the
+// app. Common kinds get hand-picked variants below; unknown kinds fall
+// through to a deterministic hash → variant cycle (same kind always
+// renders the same color, but two unfamiliar kinds may collide on the
+// same variant — that's the cost of staying inside a 6-color system).
 
 /// Display kind for a node: the entity kind for entities, the node_type
 /// ("doc"/"file") otherwise.
@@ -410,68 +465,71 @@ fn display_kind_for<'a>(node_type: &'a str, kind: &'a str) -> &'a str {
     }
 }
 
-/// `PillVariant` for a display-kind that has a dedicated mapping, or
-/// `None` for kinds outside the known set (which fall back to a hashed
-/// hue in the SVG palette).
+/// All six palette slots in a fixed order — used as the target set when
+/// hashing unknown kinds. Keep `Muted` last so first-time hash collisions
+/// land on the more vivid slots first.
+const PALETTE_CYCLE: [PillVariant; 6] = [
+    PillVariant::Info,
+    PillVariant::Accent,
+    PillVariant::Ok,
+    PillVariant::Warn,
+    PillVariant::Bad,
+    PillVariant::Muted,
+];
+
+/// Hand-picked `PillVariant` for a display-kind. `None` means the kind
+/// falls through to the hash-cycle.
 fn kind_variant_opt(display_kind: &str) -> Option<PillVariant> {
     Some(match display_kind {
-        "person" => PillVariant::Info,
-        "project" => PillVariant::Accent,
-        "concept" => PillVariant::Ok,
-        "doc" | "document" => PillVariant::Warn,
-        "file" | "attachment" => PillVariant::Muted,
+        // Entities — the most common kinds we see in real graphs.
+        "person" | "team" => PillVariant::Info,
+        "project" | "server" => PillVariant::Accent,
+        "concept" | "library" => PillVariant::Ok,
+        "doc" | "document" | "tool" => PillVariant::Warn,
+        "database" => PillVariant::Bad,
+        "file" | "attachment" | "standard" | "topic" => PillVariant::Muted,
         _ => return None,
     })
 }
 
-/// `PillVariant` for a display-kind; unknown kinds fall back to `Muted`
-/// for `Pill`/`Dot` components, which can only render a fixed variant.
+/// `PillVariant` for a display-kind. Falls back to a deterministic
+/// hash → palette-cycle mapping so unfamiliar kinds still pick up a
+/// stable, on-brand color.
 fn kind_variant(display_kind: &str) -> PillVariant {
-    kind_variant_opt(display_kind).unwrap_or(PillVariant::Muted)
-}
-
-/// Deterministic HSL color from a string hash. Picks a hue on the color
-/// wheel, keeps saturation/lightness in a pleasant range. Used for kinds
-/// outside the known palette so they still get a distinct, stable hue.
-fn hash_color(s: &str) -> String {
+    if let Some(v) = kind_variant_opt(display_kind) {
+        return v;
+    }
     let mut h: u32 = 0;
-    for b in s.bytes() {
+    for b in display_kind.bytes() {
         h = h.wrapping_mul(31).wrapping_add(b as u32);
     }
-    let hue = h % 360;
-    format!("hsl({hue}, 55%, 55%)")
+    PALETTE_CYCLE[(h as usize) % PALETTE_CYCLE.len()]
 }
 
-/// SVG `(fill, stroke)` pair for a display-kind. Known kinds reuse the
-/// status palette; unknown kinds get a deterministic hashed hue.
-fn kind_svg_palette(display_kind: &str) -> (String, String) {
-    match kind_variant_opt(display_kind) {
-        Some(PillVariant::Info) => ("rgb(var(--c-info-soft))".into(), "rgb(var(--c-info))".into()),
-        Some(PillVariant::Accent) => ("rgb(var(--c-brand-soft))".into(), "rgb(var(--c-brand))".into()),
-        Some(PillVariant::Ok) => ("rgb(var(--c-success-soft))".into(), "rgb(var(--c-success))".into()),
-        Some(PillVariant::Warn) => ("rgb(var(--c-warn-soft))".into(), "rgb(var(--c-warn-strong))".into()),
-        Some(PillVariant::Bad) => ("rgb(var(--c-danger-soft))".into(), "rgb(var(--c-danger))".into()),
-        Some(PillVariant::Muted) => ("rgb(var(--c-surface-2))".into(), "rgb(var(--c-fg-faint))".into()),
-        None => {
-            let c = hash_color(display_kind);
-            (c.clone(), c)
-        }
+/// SVG `(fill, stroke)` pair for a display-kind, sourced entirely from
+/// the design-token palette.
+fn kind_svg_palette(display_kind: &str) -> (&'static str, &'static str) {
+    match kind_variant(display_kind) {
+        PillVariant::Info => ("rgb(var(--c-info-soft))", "rgb(var(--c-info))"),
+        PillVariant::Accent => ("rgb(var(--c-brand-soft))", "rgb(var(--c-brand))"),
+        PillVariant::Ok => ("rgb(var(--c-success-soft))", "rgb(var(--c-success))"),
+        PillVariant::Warn => ("rgb(var(--c-warn-soft))", "rgb(var(--c-warn-strong))"),
+        PillVariant::Bad => ("rgb(var(--c-danger-soft))", "rgb(var(--c-danger))"),
+        PillVariant::Muted => ("rgb(var(--c-surface-2))", "rgb(var(--c-fg-faint))"),
     }
 }
 
 /// Full-saturation halo color for a display-kind. Opacity is applied at
 /// the use site so the same color drives both the field halo (low α) and
-/// the brand "selected" emphasis (higher α via the brand variant). Unknown
-/// kinds use their hashed hue.
-fn kind_halo_color(display_kind: &str) -> String {
-    match kind_variant_opt(display_kind) {
-        Some(PillVariant::Info) => "rgb(var(--c-info))".into(),
-        Some(PillVariant::Accent) => "rgb(var(--c-brand))".into(),
-        Some(PillVariant::Ok) => "rgb(var(--c-success))".into(),
-        Some(PillVariant::Warn) => "rgb(var(--c-warn))".into(),
-        Some(PillVariant::Bad) => "rgb(var(--c-danger))".into(),
-        Some(PillVariant::Muted) => "rgb(var(--c-fg-faint))".into(),
-        None => hash_color(display_kind),
+/// the brand "selected" emphasis (higher α via the brand variant).
+fn kind_halo_color(display_kind: &str) -> &'static str {
+    match kind_variant(display_kind) {
+        PillVariant::Info => "rgb(var(--c-info))",
+        PillVariant::Accent => "rgb(var(--c-brand))",
+        PillVariant::Ok => "rgb(var(--c-success))",
+        PillVariant::Warn => "rgb(var(--c-warn))",
+        PillVariant::Bad => "rgb(var(--c-danger))",
+        PillVariant::Muted => "rgb(var(--c-fg-faint))",
     }
 }
 
@@ -611,6 +669,31 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut kind_filter = use_signal(|| None::<String>);
     let mut focus_node = use_signal(|| None::<String>);
     let mut detail = use_signal(|| None::<NodeDetail>);
+    let mut force_params = use_signal(ForceParams::default);
+    let mut forces_open = use_signal(|| false);
+
+    // Push force-param changes into the simulation and reheat so the
+    // canvas relaxes into the new layout instead of jumping. Gated on
+    // `sim_ran` so the very first run (which already does its own warmup
+    // below) doesn't double up.
+    use_effect(move || {
+        let p = *force_params.read();
+        if !*sim_ran.peek() {
+            return;
+        }
+        let mut s = sim.write();
+        if s.params == p {
+            return;
+        }
+        s.params = p;
+        s.reheat();
+        for _ in 0..120 {
+            if s.is_settled() {
+                break;
+            }
+            s.tick();
+        }
+    });
 
     // Run simulation client-side only (use_effect doesn't fire during SSR).
     use_effect(move || {
@@ -862,6 +945,17 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                     button {
                         class: "btn btn-xs btn-secondary ml-auto",
                         onclick: move |_| {
+                            let now_open = !*forces_open.peek();
+                            forces_open.set(now_open);
+                        },
+                        {t!("graph-forces")}
+                        span { class: "ml-1 font-mono text-fg-faint",
+                            if forces_open() { "▾" } else { "▸" }
+                        }
+                    }
+                    button {
+                        class: "btn btn-xs btn-secondary",
+                        onclick: move |_| {
                             let s = sim.read();
                             viewport.set(Viewport::fit_to_nodes(&s.nodes));
                         },
@@ -872,6 +966,81 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                             class: "btn btn-xs btn-secondary",
                             onclick: move |_| focus_node.set(None),
                             {t!("graph-show-all")}
+                        }
+                    }
+                }
+
+                // Collapsible force-tuning bar. Sliders map 1:1 onto the
+                // three forces the engine exposes; `Reset` snaps every
+                // value back to `ForceParams::default()`.
+                if forces_open() {
+                    {
+                        let p = *force_params.read();
+                        // The repulsion knob is shown as a positive
+                        // "strength" so dragging right always *increases*
+                        // the force. The stored value stays negative.
+                        let repel = -p.repulsion_strength;
+                        rsx! {
+                            Card { class: "px-3 py-2",
+                                div { class: "flex items-center gap-4 flex-wrap text-xs",
+                                    div { class: "flex items-center gap-2",
+                                        span { class: "kicker", {t!("graph-force-link")} }
+                                        input {
+                                            r#type: "range",
+                                            min: "0", max: "0.4", step: "0.005",
+                                            value: "{p.link_strength}",
+                                            class: "w-32",
+                                            oninput: move |e: Event<FormData>| {
+                                                if let Ok(v) = e.value().parse::<f64>() {
+                                                    force_params.write().link_strength = v;
+                                                }
+                                            },
+                                        }
+                                        span { class: "font-mono text-fg-faint w-12 text-right",
+                                            "{p.link_strength:.3}"
+                                        }
+                                    }
+                                    div { class: "flex items-center gap-2",
+                                        span { class: "kicker", {t!("graph-force-center")} }
+                                        input {
+                                            r#type: "range",
+                                            min: "0", max: "0.08", step: "0.001",
+                                            value: "{p.center_strength}",
+                                            class: "w-32",
+                                            oninput: move |e: Event<FormData>| {
+                                                if let Ok(v) = e.value().parse::<f64>() {
+                                                    force_params.write().center_strength = v;
+                                                }
+                                            },
+                                        }
+                                        span { class: "font-mono text-fg-faint w-12 text-right",
+                                            "{p.center_strength:.3}"
+                                        }
+                                    }
+                                    div { class: "flex items-center gap-2",
+                                        span { class: "kicker", {t!("graph-force-repel")} }
+                                        input {
+                                            r#type: "range",
+                                            min: "200", max: "6000", step: "50",
+                                            value: "{repel}",
+                                            class: "w-32",
+                                            oninput: move |e: Event<FormData>| {
+                                                if let Ok(v) = e.value().parse::<f64>() {
+                                                    force_params.write().repulsion_strength = -v;
+                                                }
+                                            },
+                                        }
+                                        span { class: "font-mono text-fg-faint w-14 text-right",
+                                            "{repel:.0}"
+                                        }
+                                    }
+                                    button {
+                                        class: "btn btn-xs btn-ghost ml-auto",
+                                        onclick: move |_| force_params.set(ForceParams::default()),
+                                        {t!("graph-forces-reset")}
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1302,13 +1471,21 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 {t!("graph-section-incoming", count: incoming.len())}
                                             }
                                             for edge in &incoming {
-                                                div { class: "flex items-center justify-between gap-2 py-1",
-                                                    span { class: "font-mono text-xs text-fg-muted bg-surface-2 px-1.5 py-0.5 rounded border border-line",
-                                                        "{edge.relation}"
-                                                    }
-                                                    span { class: "text-xs text-fg truncate text-right",
-                                                        "{edge.other_node}"
-                                                    }
+                                                NeighborEdgeRow {
+                                                    key: "in-{edge.edge_id}",
+                                                    edge: (*edge).clone(),
+                                                    on_open: {
+                                                        let nid = edge.other_node.clone();
+                                                        move |_| {
+                                                            selected.set(Some(nid.clone()));
+                                                            let nid = nid.clone();
+                                                            spawn(async move {
+                                                                if let Ok(d) = get_node_detail(nid, show_retracted().0).await {
+                                                                    detail.set(Some(d));
+                                                                }
+                                                            });
+                                                        }
+                                                    },
                                                 }
                                             }
                                         }
@@ -1321,13 +1498,21 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 {t!("graph-section-outgoing", count: outgoing.len())}
                                             }
                                             for edge in &outgoing {
-                                                div { class: "flex items-center justify-between gap-2 py-1",
-                                                    span { class: "font-mono text-xs text-fg-muted bg-surface-2 px-1.5 py-0.5 rounded border border-line",
-                                                        "{edge.relation}"
-                                                    }
-                                                    span { class: "text-xs text-fg truncate text-right",
-                                                        "{edge.other_node}"
-                                                    }
+                                                NeighborEdgeRow {
+                                                    key: "out-{edge.edge_id}",
+                                                    edge: (*edge).clone(),
+                                                    on_open: {
+                                                        let nid = edge.other_node.clone();
+                                                        move |_| {
+                                                            selected.set(Some(nid.clone()));
+                                                            let nid = nid.clone();
+                                                            spawn(async move {
+                                                                if let Ok(d) = get_node_detail(nid, show_retracted().0).await {
+                                                                    detail.set(Some(d));
+                                                                }
+                                                            });
+                                                        }
+                                                    },
                                                 }
                                             }
                                         }
@@ -1363,6 +1548,62 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                         }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A single row in the right-panel's Incoming / Outgoing lists.
+///
+/// Shows `[relation pill]  [• human label]` and, on hover, floats a
+/// small card to the left with the neighbor's kind, full label, and
+/// truncated id. Clicking anywhere on the row asks the parent to
+/// re-load the right panel with that neighbor — the graph stays in
+/// place, but the inspector follows the edge.
+#[component]
+fn NeighborEdgeRow(edge: EdgeDetail, on_open: EventHandler<()>) -> Element {
+    let display_kind = display_kind_for(&edge.other_node_type, &edge.other_kind).to_string();
+    let variant = kind_variant(&display_kind);
+    rsx! {
+        div {
+            class: "group relative",
+            div {
+                class: "flex items-center justify-between gap-2 py-1 px-1 -mx-1 rounded cursor-pointer hover:bg-surface-2 transition-colors",
+                onclick: move |_| on_open.call(()),
+                span { class: "font-mono text-xs text-fg-muted bg-surface-2 px-1.5 py-0.5 rounded border border-line shrink-0",
+                    "{edge.relation}"
+                }
+                span { class: "flex items-center gap-1.5 min-w-0",
+                    Dot { variant }
+                    span { class: "text-xs text-fg truncate text-right", title: "{edge.other_label}",
+                        "{edge.other_label}"
+                    }
+                }
+            }
+            // Hover card — anchored to the row's right edge, opens to
+            // the left into the canvas area (the right panel is hugged
+            // to the viewport edge, so a popover on that side would
+            // clip). CSS-only: visibility flips on `group-hover`.
+            div {
+                class: "absolute right-full top-0 mr-2 w-56 z-20 \
+                        opacity-0 invisible group-hover:opacity-100 group-hover:visible \
+                        transition-opacity duration-100 pointer-events-none",
+                div {
+                    class: "rounded-md border border-line bg-surface shadow-lg p-3 space-y-2",
+                    div { class: "flex items-center gap-2",
+                        Pill { variant,
+                            Dot { variant }
+                            "{display_kind}"
+                        }
+                    }
+                    div { class: "text-sm font-medium text-fg-strong break-words",
+                        "{edge.other_label}"
+                    }
+                    div { class: "kicker", "id" }
+                    div { class: "font-mono text-xs text-fg-muted break-all",
+                        "{edge.other_node}"
                     }
                 }
             }
