@@ -158,11 +158,19 @@ mod tests {
     }
 
     #[test]
-    fn fade_hides_small_nodes_at_mid_threshold() {
-        // radius 16 at zoom 1.0 -> 16, below the ~30 cutoff for 0.5.
-        assert!(!should_show_label(1.0, 16.0, 0.5, false));
-        // radius 32 hub at zoom 1.0 -> 32, above cutoff.
-        assert!(should_show_label(1.0, 32.0, 0.5, false));
+    fn zoom_reveals_labels() {
+        // Behavior, not magic numbers: a given node is hidden when zoomed
+        // far out and shown when zoomed in (at the mid threshold).
+        let r = 22.0; // a typical connected-node radius
+        assert!(!should_show_label(0.1, r, 0.5, false));
+        assert!(should_show_label(5.0, r, 0.5, false));
+    }
+
+    #[test]
+    fn higher_threshold_hides_more() {
+        // At fixed zoom+radius, raising the threshold can only remove labels.
+        assert!(should_show_label(1.0, 22.0, 0.0, false)); // threshold 0 -> always
+        assert!(!should_show_label(1.0, 22.0, 1.0, false)); // threshold 1 -> mid node hidden at 1×
     }
 
     #[test]
@@ -203,7 +211,12 @@ Replace the four stub bodies with:
 
 ```rust
 pub fn fade_scale(threshold: f64) -> f64 {
-    threshold.clamp(0.0, 1.0) * 60.0
+    // Cutoff for `zoom * radius`. The 24.0 constant is tuned so that at the
+    // default fade (0.5 -> cutoff 12) and a typical fit-view zoom (~0.4),
+    // only well-connected nodes (radius >= 30, i.e. many edges) label, while
+    // at 1× most connected nodes (radius >= 12) label. Re-tune in Task 7's
+    // manual check against the real vault if too few / too many labels show.
+    threshold.clamp(0.0, 1.0) * 24.0
 }
 
 pub fn should_show_label(zoom: f64, radius: f64, threshold: f64, forced: bool) -> bool {
@@ -529,18 +542,18 @@ let label = entity
     .to_string();
 ```
 
-Replace with (note: `node_ref` here is the entity's tag-label string used as the node `id`; use whatever local holds `entity:<hex>` — if it is `id`, pass `&id`):
+Note: this is inside a `.map(|entity| { ... })` closure whose only input is `entity`; the node `id` (`format!("entity:{}", hex::encode(entity.id.0))`) is built on the line *after* the label, so neither `id` nor a `node_ref` is in scope at the label site. Build the ref inline for the 4th arg:
 
 ```rust
 let label = display_label(
     entity.props.get("name").and_then(|v| v.as_str()),
     entity.props.get("title").and_then(|v| v.as_str()),
     &entity.kind,
-    &node_ref.tag_label(),
+    &format!("entity:{}", hex::encode(entity.id.0)),
 );
 ```
 
-If the surrounding code does not have `node_ref` in scope, pass the already-built id string for this node (the `entity:<hex>` value). The key requirement: the 4th arg is the node's `entity:<hex>` ref.
+(Or hoist the existing `let id = format!(...)` line above the label and pass `&id`. The 4th arg must be the node's `entity:<hex>` ref so the `<kind> · <short-id>` fallback can derive the short id.)
 
 - [ ] **Step 3: Use it in `get_node_detail` (entity branch)**
 
@@ -621,7 +634,7 @@ Replace the `force_params` signal + the horizontal forces bar with a `settings: 
 
 Append to `controls.rs`. Each control writes through to the signal and calls `save_settings`; `on_reset` restores defaults.
 
-`Signal<GraphSettings>` is `Copy`, so each handler captures `settings` directly and writes through it — do **not** share one `update` closure across handlers (it would be moved into the first handler and fail to compile). Each slider's `on_input` mutates one field, clamps, and persists:
+`Signal<GraphSettings>` is `Copy`, so each handler captures `settings` directly and writes through it — do **not** share one `update` closure across handlers (it would be moved into the first handler and fail to compile). Each slider's `on_input` mutates one field and clamps; **persistence is centralized** in a single `use_effect` in `GraphView` (Task 6 Step 2), so handlers don't call `save_settings` themselves:
 
 ```rust
 /// Floating, grouped settings panel (Display + Forces). Toggled by the
@@ -641,53 +654,49 @@ pub fn SettingsPanel(settings: Signal<GraphSettings>) -> Element {
                     onchange: move |e: Event<FormData>| {
                         let v = e.checked();
                         settings.write().show_arrows = v;
-                        save_settings(&settings.read());
                     },
                 }
             }
             Slider {
                 label: t!("graph-display-fade"), min: 0.0, max: 1.0, step: 0.02,
                 value: s.label_fade, fmt: format!("{:.2}", s.label_fade),
-                on_input: move |v| { { let mut w = settings.write(); w.label_fade = v; w.clamp(); } save_settings(&settings.read()); },
+                on_input: move |v| { { let mut w = settings.write(); w.label_fade = v; w.clamp(); } },
             }
             Slider {
                 label: t!("graph-display-node-size"), min: 0.25, max: 3.0, step: 0.05,
                 value: s.node_scale, fmt: format!("{:.2}×", s.node_scale),
-                on_input: move |v| { { let mut w = settings.write(); w.node_scale = v; w.clamp(); } save_settings(&settings.read()); },
+                on_input: move |v| { { let mut w = settings.write(); w.node_scale = v; w.clamp(); } },
             }
             Slider {
                 label: t!("graph-display-link-thickness"), min: 0.25, max: 4.0, step: 0.05,
                 value: s.link_thickness, fmt: format!("{:.2}×", s.link_thickness),
-                on_input: move |v| { { let mut w = settings.write(); w.link_thickness = v; w.clamp(); } save_settings(&settings.read()); },
+                on_input: move |v| { { let mut w = settings.write(); w.link_thickness = v; w.clamp(); } },
             }
             // ── Forces ───────────────────────────────────────────────
             div { class: "kicker pt-1 border-t border-line", {t!("graph-group-forces")} }
             Slider {
                 label: t!("graph-force-center"), min: 0.0, max: 0.08, step: 0.001,
                 value: s.center_strength, fmt: format!("{:.3}", s.center_strength),
-                on_input: move |v| { { let mut w = settings.write(); w.center_strength = v; w.clamp(); } save_settings(&settings.read()); },
+                on_input: move |v| { { let mut w = settings.write(); w.center_strength = v; w.clamp(); } },
             }
             Slider {
                 label: t!("graph-force-repel"), min: 200.0, max: 6000.0, step: 50.0,
                 value: s.repulsion, fmt: format!("{:.0}", s.repulsion),
-                on_input: move |v| { { let mut w = settings.write(); w.repulsion = v; w.clamp(); } save_settings(&settings.read()); },
+                on_input: move |v| { { let mut w = settings.write(); w.repulsion = v; w.clamp(); } },
             }
             Slider {
                 label: t!("graph-force-link"), min: 0.0, max: 0.4, step: 0.005,
                 value: s.link_strength, fmt: format!("{:.3}", s.link_strength),
-                on_input: move |v| { { let mut w = settings.write(); w.link_strength = v; w.clamp(); } save_settings(&settings.read()); },
+                on_input: move |v| { { let mut w = settings.write(); w.link_strength = v; w.clamp(); } },
             }
             Slider {
                 label: t!("graph-force-distance"), min: 30.0, max: 400.0, step: 5.0,
                 value: s.link_distance, fmt: format!("{:.0}", s.link_distance),
-                on_input: move |v| { { let mut w = settings.write(); w.link_distance = v; w.clamp(); } save_settings(&settings.read()); },
+                on_input: move |v| { { let mut w = settings.write(); w.link_distance = v; w.clamp(); } },
             }
             button {
                 class: "btn btn-xs btn-ghost w-full",
-                onclick: move |_| {
-                    settings.set(GraphSettings::default());
-                    save_settings(&GraphSettings::default());
-                },
+                onclick: move |_| settings.set(GraphSettings::default()),
                 {t!("graph-forces-reset")}
             }
         }
@@ -695,7 +704,7 @@ pub fn SettingsPanel(settings: Signal<GraphSettings>) -> Element {
 }
 ```
 
-> If `e.checked()` is unavailable in this Dioxus version, use `let v = e.value() == "true" || e.value() == "on";` instead.
+(`e.checked()` is the right call here — it's already used on `Event<FormData>` elsewhere in this codebase, e.g. `src/ui/topbar.rs` and `src/ui/pages/buckets/detail.rs`.)
 
 /// One labeled range row: caption, slider, live value.
 #[component]
@@ -735,7 +744,7 @@ fn Slider(
 Add import near the other graph `use` lines:
 
 ```rust
-use super::controls::{load_settings, GraphSettings, SettingsPanel};
+use super::controls::{load_settings, save_settings, GraphSettings, SettingsPanel};
 ```
 
 Replace the declaration (≈line 693):
@@ -748,11 +757,24 @@ with:
 
 ```rust
 let mut settings = use_signal(GraphSettings::default);
-// Load persisted settings client-side (use_effect doesn't run during SSR).
+```
+
+Then add two effects (place them after `sim_ran` is declared, near the other `use_effect`s). The first loads persisted settings on mount; the second persists on every change. `use_effect` only runs client-side, so it never touches `localStorage` during SSR:
+
+```rust
+// Load persisted settings once on mount (client-side only).
 use_effect(move || {
     settings.set(load_settings());
 });
+// Persist settings whenever they change. Reads `settings` reactively, so it
+// re-runs on each edit; writes are tiny synchronous localStorage sets.
+use_effect(move || {
+    let s = *settings.read();
+    save_settings(&s);
+});
 ```
+
+(If per-pixel slider writes ever matter, debounce this with `gloo-timers` — a dep already in the crate. Not needed at this scale.)
 
 Rename the `forces_open` signal to `settings_open` (≈line 694):
 
@@ -818,7 +840,7 @@ if settings_open() {
 - [ ] **Step 6: Verify it builds (WASM)**
 
 Run: `cd crates/memvault-web && dx build`
-Expected: build succeeds. Fix any leftover references to `force_params` / `forces_open` (search the file for both and ensure none remain).
+Expected: build succeeds. Fix any leftover references to `force_params` / `forces_open` (search the file for both and ensure none remain). `ForceParams` is no longer named directly in `explorer.rs` (it's produced via `to_force_params()`), so drop it from the `use super::layout_engine::{...}` line to avoid an unused-import warning.
 
 - [ ] **Step 7: Manual check**
 
@@ -840,7 +862,7 @@ git commit -m "feat(graph): floating settings panel, persisted, replaces forces 
 
 - [ ] **Step 1: Import the fade helper**
 
-Add to the `use super::canvas::...` import:
+**Replace** the `use super::canvas::display_label;` line added in Task 5 (do not add a second line — that would duplicate-import `display_label`) with:
 
 ```rust
 use super::canvas::{display_label, should_show_label};
@@ -862,14 +884,16 @@ In both the kind-halo loop (≈line 1230) and the node loop (≈lines 1323+), co
 let r = node.radius * cfg.node_scale;
 ```
 
-Then replace `node.radius` usages **inside rendering** with `r`:
-- Halo: `let r = node.radius + 14.0;` → `let r = node.radius * cfg.node_scale + 14.0;`
+Then replace `node.radius` usages **inside rendering** with the scaled value `r` everywhere geometry is drawn so nothing visually mismatches:
+- Kind-halo loop (≈1230): `let r = node.radius + 14.0;` → `let r = node.radius * cfg.node_scale + 14.0;`
+- Selection-halo loop (≈1248): `let r = node.radius + 28.0;` → `let r = node.radius * cfg.node_scale + 28.0;`
 - Circle: `r: "{node.radius}"` → `r: "{r}"`
 - Doc rect: `node.radius` → `r` in the four geometry expressions.
 - File polygon: `let r = node.radius;` → `let r = node.radius * cfg.node_scale;`
 - Label y-offset: `y: "{node.y + node.radius + 18.0}"` → `y: "{node.y + r + 18.0}"`.
+- Edge endpoint shorten (edge loop, ≈1272): `let shorten = tn.radius + 4.0;` → `let shorten = tn.radius * cfg.node_scale + 4.0;` (so arrowheads land on the scaled node edge, not inside/short of it).
 
-(Do **not** scale the collision/physics radius — only the rendered geometry.)
+(Do **not** scale the collision/physics radius in `layout_engine.rs` — only the rendered geometry here. `cfg` is bound in Step 2.)
 
 - [ ] **Step 4: Link thickness + arrows toggle**
 
@@ -931,9 +955,11 @@ if should_show_label(vp.zoom, r, cfg.label_fade, forced) {
 Run: `cd crates/memvault-web && dx build`
 Expected: success. If `marker` type mismatches (String vs &str), ensure all three branches return `String` as shown.
 
-- [ ] **Step 7: Manual check**
+- [ ] **Step 7: Manual check + fade tuning**
 
-On `/graph`: at 1.0× only hub labels show (no more overlapping wall of text); the Text-fade slider reveals/hides more labels; Node-size and Link-thickness sliders visibly rescale; toggling Arrows removes/restores arrowheads. The selected node always keeps its label.
+On `/graph` against the reference vault: at the default view a *readable subset* of labels shows (well-connected nodes), not a wall of text and not a blank canvas; sliding Text-fade left reveals more, right hides more; Node-size and Link-thickness sliders visibly rescale; toggling Arrows removes/restores arrowheads. The selected node always keeps its label.
+
+**Tune the fade constant here.** If the default view shows *no* labels (too aggressive) or *all* of them (too weak), adjust the `* 24.0` multiplier in `canvas::fade_scale` (lower = more labels). Re-run `cargo test -p memvault-web canvas::tests` after — the tests assert behavior (zoom reveals, higher threshold hides), not the exact constant, so they should still pass. Note: label truncation is by character count (~32 chars), a pragmatic approximation of the spec's "max width with ellipsis" — true SVG text-width measurement isn't available without a DOM round-trip, and char-count is sufficient to stop sprawl.
 
 - [ ] **Step 8: Commit**
 
@@ -999,6 +1025,14 @@ let node_opacity = if dimmed { 0.15 } else { 1.0 };
 ```
 
 Add `opacity: "{node_opacity}",` as an attribute on the `g { ... }` element.
+
+Also dim the **kind-halos**, which are drawn in a separate earlier loop (≈1223) and would otherwise stay bright under dimmed nodes. Change that loop's header `for node in nodes.iter()` to `for (idx, node) in nodes.iter().enumerate()`, and change its `opacity: "0.10",` to a computed value:
+
+```rust
+let halo_opacity = if highlight.as_ref().map_or(false, |h| !h.contains(&idx)) { 0.02 } else { 0.10 };
+```
+
+then `opacity: "{halo_opacity}",`. (The selection halo only renders for the selected node and can stay as-is.)
 
 - [ ] **Step 5: Dim non-incident edges**
 
@@ -1176,7 +1210,8 @@ pub fn GraphCanvas(
 
 To make this compile, the items the SVG block references must be visible from `canvas.rs`:
 - In `layout_engine.rs`, add `PartialEq` to the `derive(...)` on both `GraphNode` and `GraphEdge` (Dioxus component props require `PartialEq`; their `f64` fields support it). Confirm with `cargo test -p memvault-web --no-run`.
-- In `explorer.rs`, change `struct NodeDetail`, `struct Viewport`, and the server fns `get_node_detail` / `expand_node` from private to `pub(crate)` (or `pub(super)`), and make `Viewport`/`NodeDetail` fields/methods used by the SVG `pub(crate)` as needed.
+- In `explorer.rs`, change `struct NodeDetail`, `struct Viewport`, and the server fns `get_node_detail` / `expand_node` from private to `pub(crate)` (or `pub(super)`). `Viewport`'s fields (`zoom`, `offset_x`, `offset_y`) are currently private and are read inside the moved block — widen them (and any `Viewport` methods used, e.g. `fit_to_nodes`) to `pub(crate)` too. Same for any `NodeDetail` fields the panel reads.
+- Note on cost: passing `nodes`/`edges` as `Vec<_>` by value clones them once per render. The current inline code already clones at the same point (`let all_nodes = s.nodes.clone();`, `explorer.rs:763-764`), so this is not a new clone per frame — it's the same one, now at the prop boundary. Acceptable at a few-hundred nodes; revisit if profiling shows it hot.
 - Move the free helper fns the SVG uses — `display_kind_for`, `kind_variant`, `kind_svg_palette`, `kind_halo_color` — to `pub(crate)` (keep them in `explorer.rs` and `use super::explorer::...`, or relocate into `canvas.rs`; pick one and be consistent).
 
 - [ ] **Step 3: Replace the inlined SVG in `explorer.rs`**
