@@ -28,6 +28,9 @@ pub enum ApiError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("invalid: {0}")]
+    Invalid(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

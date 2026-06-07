@@ -104,7 +104,8 @@ pub fn apply_doc_ops(ops: &[Op]) -> Result<Document> {
             | Op::BucketArchive { .. }
             | Op::BucketAttach { .. }
             | Op::BucketGrantAgent { .. }
-            | Op::BucketRevokeAgent { .. } => {}
+            | Op::BucketRevokeAgent { .. }
+            | Op::AgentRename { .. } => {}
         }
     }
 
@@ -200,7 +201,8 @@ pub fn apply_graph_ops(ops: &[Op]) -> Result<GraphState> {
             | Op::BucketArchive { .. }
             | Op::BucketAttach { .. }
             | Op::BucketGrantAgent { .. }
-            | Op::BucketRevokeAgent { .. } => {}
+            | Op::BucketRevokeAgent { .. }
+            | Op::AgentRename { .. } => {}
         }
     }
 

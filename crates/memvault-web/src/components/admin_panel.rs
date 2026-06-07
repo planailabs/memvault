@@ -2,11 +2,9 @@
 
 use serde::Serialize;
 
-use crate::api::admin::{NodeStatusResponse, TokenStatusResponse};
-
 /// Combined admin panel view.
 #[derive(Serialize)]
 pub struct AdminPanelView {
-    pub status: NodeStatusResponse,
-    pub tokens: Vec<TokenStatusResponse>,
+    pub status: memvault_api::NodeStatus,
+    pub tokens: Vec<memvault_api::TokenStatus>,
 }

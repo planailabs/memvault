@@ -134,7 +134,7 @@ mod tests {
         sign_admin_genesis, sign_agent_attestation, sign_agent_revocation, sign_node_revocation,
     };
     use ed25519_dalek::SigningKey;
-    use memvault_core::{AgentId, ClusterId, PeerId};
+    use memvault_core::{AgentName, ClusterId, PeerId};
     use rand::RngCore;
 
     fn make_key() -> SigningKey {
@@ -174,7 +174,7 @@ mod tests {
         let agent_pk = make_key().verifying_key().to_bytes();
         let att = sign_agent_attestation(
             &node,
-            AgentId("u".into()),
+            AgentName("u".into()),
             agent_pk,
             crate::AgentRole::AgentHost,
             u64::MAX,

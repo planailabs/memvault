@@ -14,7 +14,13 @@
 //!      standard memvault identity directory layout via
 //!      `memvault_api::agent_identity::write_identity_dir`. Subsequent
 //!      MCP server runs pick up the credential by setting
-//!      `MEMVAULT_AGENT_ID=<agent_id>`.
+//!      `MEMVAULT_AGENT_ID=<agent_id>` (and `MEMVAULT_IDENTITY_DIR`
+//!      if the dir is not the default).
+//!
+//! Every flag reads the same env var the server-side run path uses,
+//! so a single `export MEMVAULT_URL=… MEMVAULT_AGENT_ID=… MEMVAULT_IDENTITY_DIR=…`
+//! is enough to drive both `mcp enroll …` (writes the credential) and
+//! `mcp` (reads it).
 
 use std::path::PathBuf;
 
@@ -24,20 +30,35 @@ use clap::Args;
 #[derive(Args, Debug)]
 pub struct EnrollArgs {
     /// Base URL of the remote memvault server, e.g. `https://node.example`.
-    #[arg(long)]
+    /// Alias `--url` and env var match the server-side `ClientArgs` so the
+    /// same `MEMVAULT_URL` works for both `mcp enroll` and `mcp` (the
+    /// server). Required (no default — enroll must point somewhere).
+    #[arg(long, alias = "url", env = "MEMVAULT_URL")]
     pub server: String,
-    /// Agent / join token issued by the cluster (mvjoin1:…).
-    #[arg(long)]
+    /// Agent / join token issued by the cluster (mvjoin1:…). Also reads
+    /// `MEMVAULT_TOKEN`.
+    #[arg(long, env = "MEMVAULT_TOKEN")]
     pub token: String,
-    /// Agent identifier (e.g. "openclaw", "hermes").
-    #[arg(long)]
+    /// Agent identifier (e.g. "openclaw", "hermes"). Mirrors
+    /// `MEMVAULT_AGENT_ID` used by the server-side CLI.
+    #[arg(long, env = "MEMVAULT_AGENT_ID")]
     pub agent_id: String,
-    /// Identity directory (default: `<data-dir>/agents/<agent-id>/`).
-    #[arg(long)]
+    /// Identity directory to WRITE the new credential to. Defaults to
+    /// `<data-dir>/agents/<agent-id>/`. Mirrors `MEMVAULT_IDENTITY_DIR`
+    /// used by the server-side CLI — so the same env var configures
+    /// both writing (enroll) and reading (running the MCP server).
+    #[arg(long, env = "MEMVAULT_IDENTITY_DIR")]
     pub identity_dir: Option<PathBuf>,
     /// Base data directory (default: platform `data_local_dir/memvault`).
+    /// Only used to derive the default `--identity-dir` when neither
+    /// `--identity-dir` nor `MEMVAULT_IDENTITY_DIR` is set.
     #[arg(long, env = "MEMVAULT_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
+    /// Attestation lifetime in seconds. Omit (the default) for an
+    /// attestation that never expires; pass e.g. `--ttl-secs 2592000`
+    /// for a 30-day credential.
+    #[arg(long)]
+    pub ttl_secs: Option<u64>,
 }
 
 pub async fn run(args: EnrollArgs) -> Result<()> {
@@ -73,6 +94,7 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
         "token": args.token,
         "agent_id": args.agent_id,
         "public_key": hex::encode(agent_pubkey),
+        "ttl_secs": args.ttl_secs,
     });
 
     let client = reqwest::Client::builder()
@@ -133,6 +155,12 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let expiry = if attestation.not_after_ns == u64::MAX {
+        "never".to_string()
+    } else {
+        format!("{} (unix ns)", attestation.not_after_ns)
+    };
+
     std::fs::create_dir_all(&identity_dir)?;
     memvault_api::agent_identity::write_identity_dir(&identity_dir, &agent_sk)
         .map_err(|e| anyhow!("write identity dir: {e}"))?;
@@ -143,6 +171,7 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
     println!("  Identity dir: {}", identity_dir.display());
     println!("  Public key:   {}", hex::encode(agent_pubkey));
     println!("  Attestation:  {att_cid}");
+    println!("  Expires:      {expiry}");
 
     Ok(())
 }

@@ -9,6 +9,7 @@ pub mod harness;
 mod tests {
     pub mod acl;
     pub mod agent_enrollment;
+    pub mod agent_rename;
     pub mod basic;
     pub mod block_sync_divergence;
     pub mod bucket_sync;

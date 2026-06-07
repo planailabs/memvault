@@ -15,7 +15,7 @@
 //! [`NodeAttestation`]: crate::NodeAttestation
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use memvault_core::AgentId;
+use memvault_core::AgentName;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -30,7 +30,7 @@ pub struct AgentAttestation {
     /// this pubkey in the cluster's sig-chain to confirm it's a trusted node.
     pub node_pubkey: [u8; 32],
     /// Human-readable agent identifier (display / audit).
-    pub agent_id: AgentId,
+    pub agent_id: AgentName,
     /// Ed25519 public key the agent will sign JWTs with.
     pub agent_pubkey: [u8; 32],
     /// What the agent is allowed to do (Admin / AgentHost / Auditor / Service).
@@ -47,7 +47,7 @@ pub struct AgentAttestation {
 #[derive(Serialize)]
 struct AgentAttestationSigningPayload<'a> {
     node_pubkey: &'a [u8; 32],
-    agent_id: &'a AgentId,
+    agent_id: &'a AgentName,
     agent_pubkey: &'a [u8; 32],
     role: &'a AgentRole,
     not_after_ns: u64,
@@ -93,7 +93,7 @@ impl AgentAttestation {
 /// Build an `AgentAttestation` and sign it with the node's private key.
 pub fn sign_agent_attestation(
     node_key: &SigningKey,
-    agent_id: AgentId,
+    agent_id: AgentName,
     agent_pubkey: [u8; 32],
     role: AgentRole,
     not_after_ns: u64,
@@ -128,7 +128,7 @@ mod tests {
         let agent = make_key();
         let att = sign_agent_attestation(
             &node,
-            AgentId("alice".to_string()),
+            AgentName("alice".to_string()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,
@@ -144,7 +144,7 @@ mod tests {
         let agent = make_key();
         let mut att = sign_agent_attestation(
             &node,
-            AgentId("alice".to_string()),
+            AgentName("alice".to_string()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,
@@ -162,7 +162,7 @@ mod tests {
         let other_agent = make_key();
         let mut att = sign_agent_attestation(
             &node,
-            AgentId("alice".to_string()),
+            AgentName("alice".to_string()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,

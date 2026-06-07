@@ -22,6 +22,9 @@ struct BucketRow {
     /// for cluster-owned buckets — bucket-detail uses "cluster" as
     /// the placeholder; the list keeps it blank for compactness.
     owner: String,
+    /// Hex canonical id this bucket is merged into, when it's a merged
+    /// source (only surfaced when the "Retracted" topbar toggle is on).
+    merged_into_hex: String,
 }
 
 impl BucketRow {
@@ -34,10 +37,12 @@ impl BucketRow {
 }
 
 #[server]
-async fn list_buckets() -> Result<Vec<BucketRow>, ServerFnError> {
+async fn list_buckets(include_merged: bool) -> Result<Vec<BucketRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
+    // Merged sources are hidden by default and surfaced together with retracted
+    // entries — driven by the "Retracted" topbar toggle.
     let buckets = client
-        .bucket_list()
+        .bucket_list_filtered(include_merged)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -61,6 +66,7 @@ async fn list_buckets() -> Result<Vec<BucketRow>, ServerFnError> {
                 cluster_hex: b.cluster_id.map(|c| hex::encode(c.0)).unwrap_or_default(),
                 envelope_count: b.envelope_count,
                 owner: b.owner_agent.map(|a| a.0).unwrap_or_default(),
+                merged_into_hex: b.merged_into.map(|c| hex::encode(c.0)).unwrap_or_default(),
             }
         })
         .collect())
@@ -96,9 +102,11 @@ fn pill_for_status(status: &str) -> Element {
 #[component]
 pub fn BucketList() -> Element {
     use_topbar("Buckets");
-    let buckets = use_server_future(list_buckets)?;
     let mut show_create = use_signal(|| false);
     let mut new_name = use_signal(String::new);
+    let mut create_err = use_signal(|| Option::<String>::None);
+    // Bumped after a successful create so the (child) bucket list refetches.
+    let refresh = use_signal(|| 0u32);
 
     rsx! {
         div { class: "space-y-4",
@@ -130,10 +138,17 @@ pub fn BucketList() -> Element {
                                 onclick: move |_| {
                                     let name = new_name.read().trim().to_string();
                                     if !name.is_empty() {
+                                        let mut refresh = refresh;
                                         spawn(async move {
-                                            let _ = create_bucket(name).await;
-                                            show_create.set(false);
-                                            new_name.set(String::new());
+                                            match create_bucket(name).await {
+                                                Ok(_) => {
+                                                    show_create.set(false);
+                                                    new_name.set(String::new());
+                                                    create_err.set(None);
+                                                    refresh.set(refresh() + 1);
+                                                }
+                                                Err(e) => create_err.set(Some(e.to_string())),
+                                            }
                                         });
                                     }
                                 },
@@ -141,46 +156,82 @@ pub fn BucketList() -> Element {
                             }
                             Button {
                                 variant: ButtonVariant::Secondary,
-                                onclick: move |_| show_create.set(false),
+                                onclick: move |_| {
+                                    show_create.set(false);
+                                    create_err.set(None);
+                                },
                                 "Cancel"
                             }
+                        }
+                        if let Some(e) = create_err.read().as_ref() {
+                            p { class: "text-sm text-danger", "{e}" }
                         }
                     }
                 }
             }
 
-            match &*buckets.read() {
-                Some(Ok(list)) if !list.is_empty() => rsx! {
-                    BucketTable { list: list.clone() }
-                },
-                Some(Ok(_)) => rsx! {
+            // The data-dependent table sits in its own boundary so toggling the
+            // "Retracted" filter (which restarts the fetch) shows a contained
+            // loading box here instead of suspending the whole page chrome.
+            SuspenseBoundary {
+                fallback: |_| rsx! {
                     Card {
-                        div { class: "p-8 text-center text-fg-muted",
-                            "No buckets yet. Create one to get started."
-                        }
+                        div { class: "p-8 text-center text-fg-muted", "Loading buckets…" }
                     }
                 },
-                Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
-                None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+                BucketListBody { refresh }
             }
         }
     }
 }
 
 #[component]
-fn BucketTable(list: Vec<BucketRow>) -> Element {
+fn BucketListBody(refresh: ReadSignal<u32>) -> Element {
+    // Surface merged sources alongside retracted entries — both ride the
+    // "Retracted" topbar toggle.
+    let filters = crate::ui::filters::use_filters();
+    let mut buckets = use_server_future(move || {
+        let include_merged = filters.read().show_retracted;
+        async move { list_buckets(include_merged).await }
+    })?;
+    // use_server_future only re-runs on remount, not on signal change. Refetch
+    // when the "Retracted" filter flips or after a bucket is created.
+    use_effect(move || {
+        let _ = filters.read();
+        let _ = refresh.read();
+        buckets.restart();
+    });
+
+    match &*buckets.read() {
+        Some(Ok(list)) if !list.is_empty() => rsx! {
+            BucketTable { list: list.clone() }
+        },
+        Some(Ok(_)) => rsx! {
+            Card {
+                div { class: "p-8 text-center text-fg-muted",
+                    "No buckets yet. Create one to get started."
+                }
+            }
+        },
+        Some(Err(e)) => rsx! { p { class: "text-danger", "Error: {e}" } },
+        None => rsx! { p { class: "text-fg-muted", "Loading..." } },
+    }
+}
+
+#[component]
+fn BucketTable(list: ReadSignal<Vec<BucketRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 20usize);
     let sort = use_signal::<SortState>(|| ("name".to_string(), true));
 
-    let list_clone = list.clone();
     let filtered = use_memo(move || {
+        // Read `list` reactively so the table refreshes when the parent re-fetches.
+        let list = list.read();
         let q = search.read().to_lowercase();
         let mut items: Vec<BucketRow> = if q.is_empty() {
-            list_clone.clone()
+            list.clone()
         } else {
-            list_clone
-                .iter()
+            list.iter()
                 .filter(|b| b.matches_search(&q))
                 .cloned()
                 .collect()
@@ -197,7 +248,7 @@ fn BucketTable(list: Vec<BucketRow>) -> Element {
         items
     });
 
-    let total = list.len();
+    let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
     let shown = filtered_count.min(limit_val);
@@ -226,6 +277,11 @@ fn BucketTable(list: Vec<BucketRow>) -> Element {
                         },
                         Td {
                             span { class: "font-medium text-fg-strong", "{b.name}" }
+                            if !b.merged_into_hex.is_empty() {
+                                span { class: "ml-2",
+                                    Pill { variant: PillVariant::Warn, "merged" }
+                                }
+                            }
                         }
                         Td { {pill_for_status(&b.status)} }
                         Td {

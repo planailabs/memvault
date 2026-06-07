@@ -21,6 +21,7 @@ pub(crate) fn domain_sign<T: serde::Serialize>(
     Ok(out)
 }
 pub mod agent_attestation;
+pub mod bucket_merge;
 pub mod sigchain_shape;
 pub mod agent_revocation;
 pub mod node_attestation;
@@ -44,6 +45,7 @@ pub use admin_keys::{
     sign_admin_pop, sign_admin_retirement, verify_admin_pop,
 };
 pub use agent_attestation::{AgentAttestation, sign_agent_attestation};
+pub use bucket_merge::{BucketMergeRecord, sign_bucket_merge};
 pub use agent_revocation::{
     AgentRevocation, NodeRevocation, sign_agent_revocation, sign_node_revocation,
 };

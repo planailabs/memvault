@@ -2,6 +2,9 @@
   description = "memvault — local-first, peer-to-peer knowledge base";
 
   inputs = {
+    # Include git submodules (e.g. plan-ai-design) in the flake source.
+    self.submodules = true;
+
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -89,7 +92,7 @@
           pkgs.libiconv
         ];
 
-        inherit (pkgs) memctl dioxus-cli-patched;
+        inherit (pkgs) memctl memvault-mcp dioxus-cli-patched;
 
         # Standalone unpacked MacOSX SDK so cargo-zigbuild can satisfy
         # `-framework CoreFoundation` etc when cross-compiling Apple targets
@@ -136,6 +139,7 @@
         packages = {
           default = memctl;
           memctl = memctl;
+          memvault-mcp = memvault-mcp;
           dioxus-cli-patched = dioxus-cli-patched;
           macosx-sdk = macosx-sdk;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {

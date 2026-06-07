@@ -39,6 +39,27 @@ pub fn cid_from_string(s: &str) -> Result<Cid> {
     s.parse::<Cid>().map_err(|e| Error::Cid(e.to_string()))
 }
 
+/// Canonical CID string from raw CID bytes (the on-wire form for CID fields —
+/// see `standards/api-wire-conventions.md` §1b). Not bare hex.
+pub fn cid_string_from_bytes(bytes: &[u8]) -> Result<String> {
+    let cid = Cid::read_bytes(std::io::Cursor::new(bytes))
+        .map_err(|e| Error::Cid(format!("cannot parse CID bytes: {e}")))?;
+    Ok(cid.to_string())
+}
+
+/// Raw CID bytes from a canonical CID string.
+pub fn cid_bytes_from_string(s: &str) -> Result<Vec<u8>> {
+    Ok(cid_from_string(s)?.to_bytes())
+}
+
+/// Parse CID bytes from the canonical CID string, falling back to legacy bare
+/// hex. Used on the input side of the wire so canonical CID strings are
+/// preferred while older hex callers (and existing UI links) keep working.
+pub fn cid_bytes_lenient(s: &str) -> Result<Vec<u8>> {
+    cid_bytes_from_string(s)
+        .or_else(|_| hex::decode(s).map_err(|e| Error::Cid(format!("not a CID or hex: {e}"))))
+}
+
 /// Verify that a CID's hash matches the given data.
 ///
 /// Parses the CID from bytes, extracts the hash algorithm from the

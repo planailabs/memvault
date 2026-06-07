@@ -267,6 +267,24 @@ impl MemvaultStore {
         Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
     }
 
+    /// Read the cached VFS root entity id for a bucket (derived index).
+    pub fn vfs_root_get(&self, bucket_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(VFS_ROOT)?;
+        Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Record the resolved VFS root entity id for a bucket (derived index).
+    pub fn vfs_root_put(&self, bucket_id: &[u8], entity_id: &[u8]) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(VFS_ROOT)?;
+            table.insert(bucket_id, entity_id)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
 
     /// Store a bucket declaration CID in the BUCKETS table.
     pub fn put_bucket(&self, bucket_id: &[u8], decl_cid: &[u8]) -> Result<(), StoreError> {

@@ -18,26 +18,41 @@ fn main() {
     }
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir
+    // Sibling crates (memvault-extract-guest, memvault-extract-abi) live
+    // next to this crate at `<workspace>/crates/<name>`. That holds in
+    // both layouts memvault ships in:
+    //   - standalone memvault repo: `<workspace>/crates/memvault-extract`
+    //   - mac-mgmt monorepo:        `<workspace>/memvault/crates/memvault-extract`
+    // Use the parent of the manifest dir (`crates/`) as the anchor and
+    // resolve the workspace root by walking up to the nearest Cargo.toml
+    // that declares a `[workspace]`, which gives the right target dir in
+    // both cases.
+    let crates_dir = manifest_dir
         .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("memvault-extract should live under memvault/crates")
+        .expect("memvault-extract should live under <workspace>/crates")
         .to_path_buf();
-    let guest_manifest = workspace_root.join("memvault/crates/memvault-extract-guest/Cargo.toml");
-    let guest_lock = workspace_root.join("memvault/crates/memvault-extract-guest/Cargo.lock");
-    let guest_src = workspace_root.join("memvault/crates/memvault-extract-guest/src");
-    let abi_src = workspace_root.join("memvault/crates/memvault-extract-abi/src");
+    let workspace_root = find_workspace_root(&crates_dir);
+    let guest_manifest = crates_dir.join("memvault-extract-guest/Cargo.toml");
+    let guest_lock = crates_dir.join("memvault-extract-guest/Cargo.lock");
+    let guest_src = crates_dir.join("memvault-extract-guest/src");
+    let abi_src = crates_dir.join("memvault-extract-abi/src");
     let inputs = [&guest_manifest, &guest_lock, &guest_src, &abi_src];
     for input in inputs {
         emit_rerun_if_changed(input);
     }
 
-    // Always use the workspace-root target dir for the guest WASM,
-    // ignoring CARGO_TARGET_DIR. The Procfile sets per-node target dirs
-    // (e.g. target/node_a, target/node_b) to avoid lock conflicts, but
-    // the guest WASM is a shared prebuilt artifact in the default target/.
-    let target_dir = workspace_root.join("target");
+    // Build the guest WASM in its OWN target directory under
+    // `<workspace>/target/extract-guest/`, NOT the workspace-root
+    // `target/`. Using the same target dir as the outer build deadlocks
+    // when this build.rs runs while that outer build is still holding
+    // its `target/` lock — the nested `cargo build` blocks on the same
+    // lock forever (observed in NixOS sandbox builds; see the sync
+    // NixOS test). A dedicated sub-target sidesteps the race.
+    //
+    // The Procfile previously sliced per-node target dirs for the same
+    // reason; this is the same fix applied to the build-script-spawned
+    // wasm compile.
+    let target_dir = workspace_root.join("target").join("extract-guest");
     let wasm_path = target_dir.join("wasm32-unknown-unknown/release/memvault_extract_guest.wasm");
 
     if should_rebuild_wasm(&wasm_path, &inputs) {
@@ -66,6 +81,26 @@ fn main() {
         "cargo:rustc-env=MEMVAULT_EXTRACT_GUEST_WASM={}",
         wasm_path.display()
     );
+}
+
+/// Walk upward from `start` until we find a Cargo.toml containing
+/// `[workspace]`. Falls back to `start` if nothing is found (e.g. when
+/// build.rs runs from an exotic CARGO_MANIFEST_DIR with no workspace).
+fn find_workspace_root(start: &Path) -> PathBuf {
+    let mut current = start.to_path_buf();
+    loop {
+        let manifest = current.join("Cargo.toml");
+        if manifest.is_file() {
+            if let Ok(content) = fs::read_to_string(&manifest) {
+                if content.contains("[workspace]") {
+                    return current;
+                }
+            }
+        }
+        if !current.pop() {
+            return start.to_path_buf();
+        }
+    }
 }
 
 fn assert_wasm_exists(path: &Path) {

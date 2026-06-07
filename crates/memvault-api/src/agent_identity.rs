@@ -17,7 +17,7 @@ use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use memvault_auth::{AgentRole, JoinToken, TokenRole, encode_token_string};
-use memvault_core::{AgentId, ClusterId, PeerId};
+use memvault_core::{AgentName, ClusterId, PeerId};
 
 use crate::error::{ApiError, Result};
 
@@ -27,7 +27,7 @@ use crate::error::{ApiError, Result};
 /// sigchain via the agent's pubkey.
 #[derive(Debug, Clone)]
 pub struct AgentIdentity {
-    pub agent_id: AgentId,
+    pub agent_id: AgentName,
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
 }
@@ -59,7 +59,7 @@ impl AgentIdentity {
             .to_string();
 
         Ok(Self {
-            agent_id: AgentId(agent_id_str),
+            agent_id: AgentName(agent_id_str),
             signing_key,
             verifying_key,
         })
@@ -100,7 +100,7 @@ impl AgentIdentity {
 
         let attestation = memvault_auth::sign_agent_attestation(
             node_signing_key,
-            AgentId(agent_id.to_string()),
+            AgentName(agent_id.to_string()),
             verifying_key.to_bytes(),
             role,
             not_after_ns,
@@ -111,7 +111,7 @@ impl AgentIdentity {
 
         Ok((
             Self {
-                agent_id: AgentId(agent_id.to_string()),
+                agent_id: AgentName(agent_id.to_string()),
                 signing_key,
                 verifying_key,
             },
@@ -163,7 +163,9 @@ impl AgentIdentity {
     /// `scope`: space-separated OAuth-style scopes ("read write" / "admin" / etc.).
     /// `ttl_secs`: lifetime in seconds; typical values 300 (short-lived) — 3600.
     pub fn issue_jwt(&self, scope: &str, ttl_secs: u64) -> Result<String> {
-        memvault_auth::jwt::issue(&self.signing_key, &self.agent_id.0, scope, ttl_secs)
+        // `agent_id` is intentionally NOT passed — `iss` is canonicalized
+        // server-side from the on-chain attestation (keyed by pubkey).
+        memvault_auth::jwt::issue(&self.signing_key, scope, ttl_secs)
             .map_err(|e| ApiError::Other(format!("issue_jwt: {e}")))
     }
 }
@@ -328,7 +330,7 @@ pub fn enroll_local_agent_in_keystore(
     let now_ns = memvault_core::time::wall_ns();
     let attestation = memvault_auth::sign_agent_attestation(
         &node_signing_key,
-        AgentId(agent_id.to_string()),
+        AgentName(agent_id.to_string()),
         verifying_key.to_bytes(),
         role,
         now_ns.saturating_add(ttl_ns),
@@ -339,7 +341,7 @@ pub fn enroll_local_agent_in_keystore(
     client.set_agent_attestation_cid(attestation_cid);
 
     Ok(AgentIdentity {
-        agent_id: AgentId(agent_id.to_string()),
+        agent_id: AgentName(agent_id.to_string()),
         signing_key,
         verifying_key,
     })
@@ -425,16 +427,36 @@ pub fn enroll_remote_agent(
     token_str: &str,
     agent_id: &str,
     agent_pubkey: [u8; 32],
+    // Attestation lifetime in nanoseconds. `u64::MAX` = never expires
+    // (the default). Independent of the join token's own expiry.
+    ttl_ns: u64,
 ) -> Result<EnrollResult> {
     // Decode + verify the token.
     let token = memvault_auth::decode_token_string(token_str)
         .map_err(|e| ApiError::Other(format!("decode token: {e}")))?;
-    let admin_vk = client
-        .admin_verifying_key()
-        .ok_or_else(|| ApiError::Other("no admin pubkey on this node".into()))?;
-    token
-        .verify_signature(&admin_vk)
-        .map_err(|_| ApiError::Other("token signature does not verify".into()))?;
+    // Verify the token signature against any admin verifying key the
+    // cluster has ever known (anchor + admitted + retired). On a peer
+    // node that joined via `cluster-join`, the local keystore pins the
+    // admin pubkey but holds no admin SECRET — so the singular
+    // `admin_verifying_key()` (which returns a held signing key's
+    // pubkey) is None, while the plural `admin_verifying_keys()` returns
+    // exactly the pinned anchor we need to verify the token against.
+    let admin_keys = client.admin_verifying_keys();
+    if admin_keys.is_empty() {
+        return Err(ApiError::Other("no admin pubkey on this node".into()));
+    }
+    let mut signature_verified = false;
+    for vk in &admin_keys {
+        if token.verify_signature(vk).is_ok() {
+            signature_verified = true;
+            break;
+        }
+    }
+    if !signature_verified {
+        return Err(ApiError::Other(
+            "token signature does not verify against any known admin key".into(),
+        ));
+    }
     let now_ns = memvault_core::wall_ns();
     token
         .verify_time_bounds(now_ns)
@@ -489,10 +511,10 @@ pub fn enroll_remote_agent(
         .ok_or_else(|| ApiError::Other("no node signing key configured".into()))?;
     let attestation = memvault_auth::sign_agent_attestation(
         node_sk,
-        AgentId(agent_id.to_string()),
+        AgentName(agent_id.to_string()),
         agent_pubkey,
         agent_role,
-        token.not_after_ns,
+        now_ns.saturating_add(ttl_ns),
     )
     .map_err(|e| ApiError::Other(format!("sign attestation: {e}")))?;
     let attestation_cid = crate::sigchain::publish_agent_attestation(client, &attestation)?;

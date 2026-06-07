@@ -326,6 +326,48 @@ pub(crate) struct WriteSigner<'a> {
     pub agent_attestation: Option<Vec<u8>>,
 }
 
+/// Resolved bucket-merge alias maps, rebuilt from the `bucket_merge` side
+/// blocks (plus deterministic agent aliases). `alias` is the one-hop
+/// `source → canonical` edge set; `members` is the flattened, transitive
+/// `terminal-canonical → [all sources]` inverse. See `canonical_of`.
+#[derive(Debug, Default)]
+pub(crate) struct AliasMaps {
+    /// One-hop edges: `source → direct canonical`.
+    alias: std::collections::HashMap<[u8; 32], [u8; 32]>,
+    /// Flattened inverse: `terminal canonical → [every source resolving to it]`.
+    members: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>>,
+}
+
+impl AliasMaps {
+    /// Follow the alias chain from `b` to its terminal canonical, with a
+    /// visited-set cycle guard (a cycle drops the closing edge and stops).
+    fn canonical_of(&self, b: [u8; 32]) -> [u8; 32] {
+        let mut cur = b;
+        let mut visited = std::collections::HashSet::new();
+        while let Some(&next) = self.alias.get(&cur) {
+            if !visited.insert(cur) {
+                break; // cycle: stop at the closing edge
+            }
+            if next == cur {
+                break;
+            }
+            cur = next;
+        }
+        cur
+    }
+
+    /// Build the flattened `members` inverse from the one-hop `alias` map.
+    fn build_members(&mut self) {
+        let sources: Vec<[u8; 32]> = self.alias.keys().copied().collect();
+        for s in sources {
+            let term = self.canonical_of(s);
+            if term != s {
+                self.members.entry(term).or_default().push(s);
+            }
+        }
+    }
+}
+
 /// LocalClient implements MemvaultClient by calling directly into the store.
 pub struct LocalClient {
     store: Arc<MemvaultStore>,
@@ -367,6 +409,15 @@ pub struct LocalClient {
     /// forces recompute (admin set changed). Grants are immutable, so a
     /// same-generation hit is always correct.
     grant_sig_cache: std::sync::RwLock<std::collections::HashMap<Vec<u8>, (u64, bool)>>,
+    /// Bumped whenever a `BucketMergeRecord` is written locally or arrives
+    /// via sync (the `bucket_merge` notifier arm in `install_sigchain_notifier`).
+    /// The alias-map cache records the generation it was built under and
+    /// rebuilds on mismatch — the same staleness scheme as `admin_key_generation`.
+    alias_generation: std::sync::atomic::AtomicU64,
+    /// Cached bucket-merge alias maps as `(generation_at_build, maps)`. A
+    /// generation mismatch forces a rebuild from the `bucket_merge` side
+    /// blocks (small N). See `bucket_alias_maps` / `canonical_of`.
+    alias_cache: std::sync::RwLock<Option<(u64, std::sync::Arc<AliasMaps>)>>,
     /// Optional node signing key — the daemon's libp2p ed25519 private key,
     /// used to sign agent attestations and agent revocations. Distinct from
     /// the admin key on non-genesis-admin daemons. Write-once via `OnceLock`.
@@ -516,6 +567,8 @@ impl LocalClient {
             admin_key_state: std::sync::RwLock::new(memvault_auth::AdminKeyState::default()),
             admin_key_generation: std::sync::atomic::AtomicU64::new(0),
             grant_sig_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+            alias_generation: std::sync::atomic::AtomicU64::new(0),
+            alias_cache: std::sync::RwLock::new(None),
             node_signing_key: std::sync::OnceLock::new(),
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
@@ -539,11 +592,17 @@ impl LocalClient {
         client
     }
 
-    /// Create a LocalClient and run a blockstore rebuild if the version
-    /// is outdated.  This is the recommended entry point — use `new()`
-    /// only when you need to skip the rebuild (e.g. tests).
-    /// Create a LocalClient and run a sync blockstore rebuild if the
-    /// version is outdated.  This is the recommended entry point.
+    /// Create a LocalClient.  This is the recommended entry point.
+    ///
+    /// The blockstore rebuild is intentionally **not** run here.  The rebuild
+    /// re-signs migrated legacy envelopes with the node signing key, which is
+    /// not available at construction time.  Running it here would bail out —
+    /// and never stamp the schema version — on any store that carries legacy
+    /// pre-bucket data, leaving it to retry-and-fail on every boot.  Callers
+    /// load the node key and then call [`install_node_key_and_rebuild`]
+    /// once, which is the correct ordering.
+    ///
+    /// [`install_node_key_and_rebuild`]: Self::install_node_key_and_rebuild
     pub fn open(
         store: Arc<MemvaultStore>,
         quotas: Arc<RwLock<QuotaManager>>,
@@ -551,11 +610,36 @@ impl LocalClient {
         peer_id: Vec<u8>,
         cluster_id: Vec<u8>,
     ) -> Result<Self> {
-        let client = Self::new(store, quotas, event_bus, peer_id, cluster_id);
-        if let Err(e) = client.rebuild_if_needed() {
-            tracing::warn!("blockstore rebuild error on open: {e}");
+        Ok(Self::new(store, quotas, event_bus, peer_id, cluster_id))
+    }
+
+    /// Install the node signing key (when available) and then run a deferred
+    /// blockstore rebuild — the correct startup ordering.
+    ///
+    /// The rebuild must re-sign migrated legacy envelopes with the node key,
+    /// so the key has to be set *before* the rebuild runs; [`open`] defers the
+    /// rebuild to this call for exactly that reason.  Pass `None` when no node
+    /// key is available (pre-genesis, or a store with nothing to migrate) —
+    /// the rebuild still runs and is a no-op when the schema version is
+    /// already current.  A rebuild error is logged and swallowed so a degraded
+    /// store still starts; the version stays un-stamped so the next boot
+    /// retries.
+    ///
+    /// [`open`]: Self::open
+    pub fn install_node_key_and_rebuild(
+        &self,
+        key: Option<ed25519_dalek::SigningKey>,
+    ) -> Option<crate::rebuild::RebuildReport> {
+        if let Some(key) = key {
+            self.set_node_signing_key(key);
         }
-        Ok(client)
+        match self.rebuild_if_needed() {
+            Ok(report) => report,
+            Err(e) => {
+                tracing::warn!("blockstore rebuild error: {e}");
+                None
+            }
+        }
     }
 
     /// Register an admin signing secret this node holds. Idempotent per
@@ -725,6 +809,12 @@ impl LocalClient {
             let _ = std::fs::remove_file(&admin_path);
             tracing::info!("migrated admin.key into keystore");
         }
+
+        // libp2p.key → keystore `nodesk` (design A-1: node key = libp2p key).
+        // Mirrors the admin.key migration: read the loose seed, store it in the
+        // keystore, delete the file. No-op when there is no loose file (e.g. the
+        // production daemon, which derives its node key from the host PEM).
+        let _ = crate::node_key::node_seed_from_keystore_or_file(&self.keystore, identity_dir);
 
         // cluster_admin_genesis.cbor → keystore `genesis`
         let gen_path = identity_dir.join("cluster_admin_genesis.cbor");
@@ -934,6 +1024,107 @@ impl LocalClient {
         self.trust_state()
             .and_then(|s| s.node_trust.read().ok().map(|m| m.contains_key(pubkey)))
             .unwrap_or(false)
+    }
+
+    /// Whether an agent's **attesting node** is trusted to confer that
+    /// agent's identity. True iff the attesting node is either:
+    ///   * THIS node's own key — self-trust, covering the pre-genesis
+    ///     window before an admin has attested us (the daemon's own `_ui`
+    ///     admin agent must work immediately); or
+    ///   * named as a cluster member by an admin-signed `NodeAttestation`
+    ///     in the store.
+    ///
+    /// Used by ACL to reject **orphaned** agent attestations — ones signed
+    /// by an ephemeral, never-attested node identity (e.g. a throwaway
+    /// instance that gossiped its `_ui` Admin attestation into the cluster).
+    /// Such an attestation must never confer access, not even role=Admin.
+    ///
+    /// Conservative: with no admin keys known yet (pre-genesis / standalone)
+    /// there is nothing to attest against, so the gate is inactive and only
+    /// self-trust applies — a standalone node still serves its own agents.
+    pub fn is_attesting_node_trusted(&self, node_pubkey: &[u8; 32]) -> bool {
+        // Self-trust.
+        if self
+            .node_verifying_key()
+            .map(|k| k.to_bytes())
+            .as_ref()
+            == Some(node_pubkey)
+        {
+            return true;
+        }
+        // A revoked node never confers trust.
+        if self.is_node_revoked(node_pubkey) {
+            return false;
+        }
+        let admin_keys = self.admin_verifying_keys();
+        if admin_keys.is_empty() {
+            // No cluster admin context — nothing to verify attestations
+            // against; don't gate (only self-trust, handled above, applies).
+            return true;
+        }
+        // Require an admin-signed NodeAttestation naming this node.
+        for cid in self
+            .store
+            .query_by_tag("sigchain", "node_att", 0, 1024)
+            .unwrap_or_default()
+        {
+            let Ok(Some(bytes)) = self.store.get_block(&cid) else {
+                continue;
+            };
+            let Ok(att) =
+                serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
+            else {
+                continue;
+            };
+            if att.member.0.as_slice() != node_pubkey {
+                continue;
+            }
+            if admin_keys.iter().any(|k| att.verify_signature(k).is_ok()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Delete orphaned agent attestation blocks — ones whose attesting node
+    /// is not trusted (`is_attesting_node_trusted`: neither this node's own
+    /// key nor an admin-attested cluster member). Returns the number pruned.
+    ///
+    /// Safe to run on a SETTLED trust view (e.g. at startup after
+    /// `bootstrap_cluster_trust`): orphans are inert (never trusted, ACL- and
+    /// JWT-rejected), so removing them only clears cruft. A legitimate agent
+    /// whose node attestation hasn't synced yet would re-sync via RBSR, so a
+    /// premature prune is self-healing rather than lossy. On a pre-genesis /
+    /// standalone node (no admin keys) `is_attesting_node_trusted` returns
+    /// true for everything, so nothing is pruned.
+    pub fn prune_orphaned_agent_attestations(&self) -> Result<usize> {
+        let mut pruned = 0usize;
+        for cid in self
+            .store
+            // Exhaustive: prune must consider every attestation (see standards).
+            .query_by_tag("sigchain", "agent_att", 0, usize::MAX)
+            .unwrap_or_default()
+        {
+            let Ok(Some(bytes)) = self.store.get_block(&cid) else {
+                continue;
+            };
+            let Ok(att) =
+                serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&bytes)
+            else {
+                continue;
+            };
+            if !self.is_attesting_node_trusted(&att.node_pubkey) {
+                if self.store.delete_block(&cid).unwrap_or(false) {
+                    pruned += 1;
+                    tracing::debug!(
+                        agent = %att.agent_id.0,
+                        node = %hex::encode(att.node_pubkey),
+                        "pruned orphaned agent attestation"
+                    );
+                }
+            }
+        }
+        Ok(pruned)
     }
 
     /// Pick a signing key this node may legitimately use to issue or
@@ -1485,7 +1676,7 @@ impl LocalClient {
     /// ID + explicit owner so the bucket is locatable on later runs.
     #[allow(clippy::too_many_arguments)]
     (bucket_create_inner_sync, bucket_create_inner_async)
-    fn(&self, bucket_id: memvault_core::BucketId, name: &str, description: Option<&str>, default_visibility: Visibility, default_classification: memvault_core::classification::Classification, role: memvault_doc::BucketRole, owner_agent_override: Option<memvault_core::AgentId>, owner_agent_pubkey: Option<[u8; 32]>) -> Result<memvault_core::BucketId>
+    fn(&self, bucket_id: memvault_core::BucketId, name: &str, description: Option<&str>, default_visibility: Visibility, default_classification: memvault_core::classification::Classification, role: memvault_doc::BucketRole, owner_agent_override: Option<memvault_core::AgentName>, owner_agent_pubkey: Option<[u8; 32]>) -> Result<memvault_core::BucketId>
     {
         use memvault_doc::BucketDecl;
 
@@ -1573,7 +1764,7 @@ impl LocalClient {
     /// needing a follow-up grant.
     pub async fn bucket_create_as(
         &self,
-        owner_agent: memvault_core::AgentId,
+        owner_agent: memvault_core::AgentName,
         owner_agent_pubkey: Option<[u8; 32]>,
         name: &str,
         description: Option<&str>,
@@ -1614,7 +1805,7 @@ impl LocalClient {
         agent_pubkey: &[u8],
         name_hint: &str,
     ) -> Result<memvault_core::BucketId> {
-        let agent_id_for_owner = memvault_core::AgentId(name_hint.to_string());
+        let agent_id_for_owner = memvault_core::AgentName(name_hint.to_string());
         self.ensure_agent_bucket_inner(agent_pubkey, name_hint, agent_id_for_owner)
     }
 
@@ -1626,7 +1817,7 @@ impl LocalClient {
     /// `ensure_agent_bucket_for_pubkey`.
     pub async fn ensure_agent_bucket_for(
         &self,
-        agent_id: &memvault_core::AgentId,
+        agent_id: &memvault_core::AgentName,
     ) -> Result<memvault_core::BucketId> {
         let attestations = crate::sigchain::scan_agent_attestations(self)?;
         let attestation = attestations
@@ -1648,10 +1839,9 @@ impl LocalClient {
         &self,
         agent_pubkey: &[u8],
         name_hint: &str,
-        owner_agent: memvault_core::AgentId,
+        owner_agent: memvault_core::AgentName,
     ) -> Result<memvault_core::BucketId> {
-        let bucket_id =
-            crate::rebuild::deterministic_agent_bucket_id(&self.cluster_id, agent_pubkey);
+        let bucket_id = crate::rebuild::deterministic_agent_bucket_id(agent_pubkey);
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
         if self
             .store
@@ -1861,7 +2051,7 @@ impl LocalClient {
             .unwrap_or(false)
     }
 
-    pub fn agent_id(&self) -> Option<&memvault_core::AgentId> {
+    pub fn agent_id(&self) -> Option<&memvault_core::AgentName> {
         self.agent_identity.get().map(|i| &i.agent_id)
     }
 
@@ -2036,6 +2226,13 @@ impl LocalClient {
             .query_by_bucket(bucket_id_bytes, 0, usize::MAX)?
             .len() as u64;
 
+        // If this bucket has been merged into a canonical, record the target
+        // (a self-resolution means it's not a merged source).
+        let merged_into = <[u8; 32]>::try_from(bucket_id_bytes).ok().and_then(|arr| {
+            let canonical = self.canonical_of(&arr);
+            (canonical != arr).then_some(memvault_core::BucketId(canonical))
+        });
+
         Ok(Some(crate::types::BucketInfo {
             id: decl.bucket_id,
             name: decl.name,
@@ -2050,6 +2247,7 @@ impl LocalClient {
             created_ns: decl.created_ns,
             envelope_count,
             role: decl.role,
+            merged_into,
         }))
     }
 
@@ -2876,16 +3074,40 @@ impl LocalClient {
             .filter_map(|node_id| self.prepare_reindex(node_id))
             .collect();
 
-        let mut idx = self.index.write().await;
-        for p in prepared {
-            p.apply(&mut idx);
+        {
+            let mut idx = self.index.write().await;
+            for p in prepared {
+                p.apply(&mut idx);
+            }
+            if let Err(e) = idx.commit() {
+                tracing::warn!("tantivy flush commit failed: {e}");
+                // Retry on a later read. The in-memory writer already holds any
+                // adds applied above; only the commit needs to land.
+                self.index_dirty
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
-        if let Err(e) = idx.commit() {
-            tracing::warn!("tantivy flush commit failed: {e}");
-            // Retry on a later read. The in-memory writer already holds any
-            // adds applied above; only the commit needs to land.
-            self.index_dirty
-                .store(true, std::sync::atomic::Ordering::Release);
+
+        // Maintain the scoped member-sets for nodes that entered via sync /
+        // RBSR / external seeding (the `reindex_block` → notifier path). This
+        // is the load-bearing wiring from the per-bucket-member-index plan:
+        // without it a per-bucket / view×bucket set built locally would go
+        // stale on sync and silently drop peer-ingested content. Driving it
+        // from the *same* chokepoint that reindexes keeps "indexed" and "in
+        // member-set" updated together. Runs after the Tantivy write lock is
+        // released (it read-locks the freshly-committed index) and only touches
+        // already-registered partitions, so it is cheap when none are built.
+        if !pending.is_empty() {
+            let views: Vec<(Vec<u8>, Vec<(String, String)>)> = self
+                .list_views()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| (hex::decode(&v.cid).unwrap_or_default(), v.tags))
+                .collect();
+            for node_id in &pending {
+                self.sync_node_scopes_with(node_id, &views).await;
+            }
         }
     }
 
@@ -3099,7 +3321,21 @@ impl LocalClient {
         match sel {
             memvault_core::BucketSelector::Accessible => None,
             memvault_core::BucketSelector::Only(req) => {
-                Some(req.iter().map(|b| b.0).filter(|b| known.contains(b)).collect())
+                // Expand each requested (canonical) bucket with the sources
+                // merged into it, so a query scoped to the canonical pulls
+                // source-tagged blocks too (§5). Blocks keep their original
+                // signed bucket_id; nothing is rewritten. Intersect with the
+                // known set so a merge can never widen access beyond what
+                // this node actually holds.
+                let mut out = std::collections::HashSet::new();
+                for b in req {
+                    out.insert(b.0);
+                    for m in self.bucket_merge_members(&b.0) {
+                        out.insert(m);
+                    }
+                }
+                out.retain(|b| known.contains(b));
+                Some(out)
             }
         }
     }
@@ -3141,6 +3377,137 @@ impl LocalClient {
         limit: usize,
     ) -> Result<Vec<crate::types::NodeSummary>> {
         self.flush_index().await;
+        let known = self.all_bucket_id_arrays();
+        let eff = self.effective_bucket_set(&scope.buckets, &known);
+        if matches!(&eff, Some(s) if s.is_empty()) {
+            return Ok(Vec::new()); // explicit empty set → empty result
+        }
+
+        // O(bucket) fast path: an explicit, non-empty bucket set enumerates the
+        // per-bucket member-sets instead of scanning every index row and
+        // re-deriving each node's bucket. Gated on `entity_kind` being unset —
+        // the member-sets aren't partitioned by fine-grained entity kind, so a
+        // kind-filtered query keeps the index-scan path (which pushes the kind
+        // clause into Tantivy). The `Accessible` (None) case also scans, since
+        // it spans all buckets and never narrows by membership.
+        if let Some(set) = &eff {
+            if !set.is_empty() && scope.entity_kind.is_none() {
+                return self.scoped_list_members(scope, set, limit).await;
+            }
+        }
+        self.scoped_list_scan(scope, limit).await
+    }
+
+    /// Member-set enumeration backing [`Self::scoped_list`] for an explicit
+    /// bucket set. Enumerates the union of the buckets' `ScopeKind::Bucket`
+    /// member-sets, then applies the view-tag conjunction, node-kind, and
+    /// retraction filters from the live index. O(sum of bucket members).
+    async fn scoped_list_members(
+        &self,
+        scope: &memvault_core::QueryScope,
+        set: &std::collections::HashSet<[u8; 32]>,
+        limit: usize,
+    ) -> Result<Vec<crate::types::NodeSummary>> {
+        let view_tags = match &scope.view {
+            Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
+            None => None,
+        };
+        // Union the buckets' members (dedup across buckets).
+        let mut node_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for b in set {
+            self.ensure_bucket_partition(&BucketId(*b)).await?;
+            let bsid = memvault_core::bucket_scope_id(&BucketId(*b));
+            for (nid, _) in self.store.scope_members(
+                &bsid,
+                scope.retraction.includes_active(),
+                scope.retraction.includes_retracted(),
+                0,
+            )? {
+                node_ids.insert(nid);
+            }
+        }
+
+        let mut out = Vec::new();
+        {
+            let idx = self.index.read().await;
+            for node_id in &node_ids {
+                let node_type = match node_id.split_once(':').map(|(p, _)| p) {
+                    Some("doc") => "doc",
+                    Some("entity") => "entity",
+                    Some("file") | Some("attachment") => "file",
+                    _ => continue,
+                };
+                if let Some(kind) = scope.kind {
+                    if !kind.matches(node_type) {
+                        continue;
+                    }
+                }
+                // Resolve under the retraction mode — also drops nodes the index
+                // doesn't hold under this mode (keeps parity with the scan).
+                let Some(label) = idx.resolve_label_mode(node_id, scope.retraction) else {
+                    continue;
+                };
+                let tags = idx.get_tags(node_id);
+                // View tag conjunction.
+                if let Some(vt) = &view_tags {
+                    let in_view = vt
+                        .iter()
+                        .all(|(s, l)| tags.iter().any(|(ts, tl)| ts == s && tl == l));
+                    if !in_view {
+                        continue;
+                    }
+                }
+                let retracted = idx.is_retracted(node_id);
+                let detail = if scope.detail == memvault_core::DetailLevel::Full {
+                    self.node_detail(node_id, node_type).await
+                } else {
+                    None
+                };
+                out.push(crate::types::NodeSummary {
+                    node_id: node_id.clone(),
+                    node_type: node_type.to_string(),
+                    label,
+                    tags,
+                    retracted,
+                    detail,
+                });
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            // Parity: every node the authoritative index scan returns for this
+            // scope must be reachable via the member-set enumeration. Catches a
+            // bucket set that drifted out of sync with the index.
+            let scan = self.scoped_list_scan(scope, usize::MAX).await?;
+            let member_ids: std::collections::HashSet<&str> =
+                node_ids.iter().map(|s| s.as_str()).collect();
+            let missing: Vec<&String> = scan
+                .iter()
+                .map(|n| &n.node_id)
+                .filter(|id| !member_ids.contains(id.as_str()))
+                .collect();
+            debug_assert!(
+                missing.is_empty(),
+                "scoped_list member-set is missing nodes the authoritative scan \
+                 returned — maintenance drift: {missing:?}"
+            );
+        }
+
+        Ok(out)
+    }
+
+    /// Authoritative index-scan listing backing [`Self::scoped_list`]. Used for
+    /// the `Accessible` (all-buckets) case, `entity_kind`-filtered queries, and
+    /// as the source of truth the member-set fast path is validated against.
+    async fn scoped_list_scan(
+        &self,
+        scope: &memvault_core::QueryScope,
+        limit: usize,
+    ) -> Result<Vec<crate::types::NodeSummary>> {
         let view_tags = match &scope.view {
             Some(n) => self.resolve_view_coord(n).await?.map(|(_, t)| t),
             None => None,
@@ -3151,14 +3518,23 @@ impl LocalClient {
             return Ok(Vec::new()); // explicit empty set → empty result
         }
 
-        let fetch = if limit == usize::MAX {
+        // When scoped to specific buckets, scan all index rows: a global cap
+        // would drop items of a bucket whose nodes fall outside the global
+        // first-N (same flaw as list_docs_ex/list_entities_ex). The result is
+        // capped at `limit` in the loop below. See standards/bucket-scoping.md.
+        let fetch = if limit == usize::MAX || eff.is_some() {
             usize::MAX
         } else {
             limit.saturating_mul(4).max(limit)
         };
         let rows = {
             let idx = self.index.read().await;
-            idx.list_all_mode(view_tags.as_deref(), scope.retraction, fetch)
+            idx.list_all_mode(
+                view_tags.as_deref(),
+                scope.entity_kind.as_deref(),
+                scope.retraction,
+                fetch,
+            )
         };
         let mut out = Vec::new();
         for (node_id, node_type, label, tags, retracted) in rows {
@@ -3291,7 +3667,8 @@ impl LocalClient {
             let view_set: Option<std::collections::HashSet<String>> = view_tags
                 .as_ref()
                 .map(|t| idx.members_of_view_mode(t, scope.retraction).into_iter().collect());
-            let hits = idx.search_unified_mode(query, scope.retraction, fetch);
+            let hits =
+                idx.search_unified_mode(query, scope.entity_kind.as_deref(), scope.retraction, fetch);
             (hits, view_set)
         };
         let mut out = Vec::new();
@@ -3357,6 +3734,7 @@ impl LocalClient {
             buckets: scope.buckets.clone(),
             retraction: memvault_core::RetractionMode::IncludeRetracted,
             kind: scope.kind,
+            entity_kind: scope.entity_kind.clone(),
             // Counting never needs per-node detail.
             detail: memvault_core::DetailLevel::Summary,
         };
@@ -3414,6 +3792,335 @@ impl LocalClient {
             0,
         )?;
         Ok(())
+    }
+
+    /// Lazily build + register a per-bucket member-set (`ScopeKind::Bucket`) on
+    /// first access. No-op if already registered (thereafter maintained live by
+    /// [`Self::update_view_partitions`] on local writes and by [`Self::flush_index`]
+    /// for synced nodes).
+    ///
+    /// The set holds **every** node — document, entity, and file — whose blocks
+    /// land in the bucket, each with its current retracted flag. Membership is
+    /// derived from the authoritative, uncapped blockstore scan (the same
+    /// inference the scan-based listings use), so the set is a faithful cache
+    /// over the store (see `standards/derived-indexes.md`). Read paths filter
+    /// by node-id prefix and page at their own limit.
+    pub(crate) async fn ensure_bucket_partition(&self, bucket: &BucketId) -> Result<()> {
+        let bsid = memvault_core::bucket_scope_id(bucket);
+        if self.store.scope_is_registered(&bsid).unwrap_or(false) {
+            return Ok(());
+        }
+        self.flush_index().await;
+        // Authoritative membership universe: every CID bound to the bucket.
+        // Uncapped — a recent node whose CIDs fall outside a capped window must
+        // not be dropped (see `standards/exhaustive-lookups.md`).
+        let bucket_cids: std::collections::HashSet<Vec<u8>> = self
+            .store
+            .query_by_bucket(&bucket.0, 0, usize::MAX)?
+            .into_iter()
+            .collect();
+        // Enumerate every doc / entity / file label and keep the ones with at
+        // least one CID in the bucket. The `_manifest` tag's label is the hex
+        // manifest CID — the file node's surrogate id.
+        let mut members: Vec<String> = Vec::new();
+        for (scope, prefix) in [("doc", "doc:"), ("entity", "entity:"), ("_manifest", "file:")] {
+            for label in self.store.query_unique_labels(scope, usize::MAX)? {
+                let cids = self
+                    .store
+                    .query_by_tag(scope, &label, 0, usize::MAX)
+                    .unwrap_or_default();
+                if cids.iter().any(|c| bucket_cids.contains(c)) {
+                    members.push(format!("{prefix}{label}"));
+                }
+            }
+        }
+        // Resolve retracted flags from the committed index in one read pass.
+        let flags: Vec<(String, bool)> = {
+            let idx = self.index.read().await;
+            members
+                .into_iter()
+                .map(|nid| {
+                    let retracted = idx.is_retracted(&nid);
+                    (nid, retracted)
+                })
+                .collect()
+        };
+        for (nid, retracted) in &flags {
+            let _ = self.store.scope_member_upsert(&bsid, nid, *retracted, 0);
+        }
+        self.store.scope_register(
+            &bsid,
+            memvault_store::scope_members::ScopeKind::Bucket,
+            &[],
+            &bucket.0,
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Build a [`DocSummary`] for a document from its creation envelope.
+    /// Returns `None` if no `DocCreate` envelope can be recovered. Used by the
+    /// per-bucket member-set read path to hydrate enumerated doc ids.
+    fn doc_summary(&self, doc_id: &DocId) -> Option<DocSummary> {
+        let (_, label) = Self::doc_tag(doc_id);
+        let cids = self.store.query_by_tag("doc", &label, 0, usize::MAX).ok()?;
+        for cid in &cids {
+            let Ok(Some(data)) = self.store.get_block(cid) else {
+                continue;
+            };
+            let Some(val) = memvault_store::deserialize_block(&data) else {
+                continue;
+            };
+            let Some(dc) = val.get("payload").and_then(|p| p.get("DocCreate")) else {
+                continue;
+            };
+            let title = dc
+                .get("frontmatter")
+                .and_then(|fm| fm.get("title"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string());
+            let tags: Vec<(String, String)> = val
+                .get("tags")
+                .and_then(|t| serde_json::from_value(t.clone()).ok())
+                .unwrap_or_default();
+            let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+            return Some(DocSummary {
+                id: doc_id.clone(),
+                cid: cid.clone(),
+                title,
+                tags,
+                updated_ns: wall_ns,
+                attachment_count: 0,
+            });
+        }
+        None
+    }
+
+    /// Authoritative scan-based document listing (pre-member-set behavior).
+    /// Retained as the fallback for tagged / cross-bucket queries and as the
+    /// source of truth the member-set is validated against.
+    async fn list_docs_scan(
+        &self,
+        tag_filter: Option<(String, String)>,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<DocSummary>> {
+        // Explicit bucket → scope to that bucket.
+        // None → scope to all accessible buckets (or unscoped pre-genesis).
+        // Exhaustive membership universe: the set we test labels against must
+        // cover every block in the bucket, or a recent doc/entity (whose CIDs
+        // fall outside a capped window) is silently dropped from the listing.
+        // The RESULT is still capped at `limit` below (pagination). See
+        // standards: exhaustive-lookups.
+        let scan_cap = usize::MAX;
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
+            if let Some(bid) = bucket {
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
+                Some(bucket_cids.into_iter().collect())
+            } else {
+                let all = self.accessible_bucket_cids(scan_cap)?;
+                if all.is_empty() { None } else { Some(all) }
+            };
+
+        let cids = if let Some((ref scope, ref label)) = tag_filter {
+            self.store.query_by_tag(scope, label, 0, limit * 5)?
+        } else {
+            // Scan all doc labels when bucket-scoped: a global cap would drop
+            // docs of any bucket outside the global first-N (same flaw as
+            // list_entities_ex). The result is capped at `limit` below.
+            let label_cap = if bucket_cid_set.is_some() {
+                usize::MAX
+            } else {
+                limit * 5
+            };
+            self.store
+                .query_unique_labels("doc", label_cap)?
+                .into_iter()
+                .flat_map(|label| {
+                    self.store
+                        // Exhaustive membership: any of this doc's CIDs may be
+                        // the bucket-matching one (see standards).
+                        .query_by_tag("doc", &label, 0, usize::MAX)
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
+
+        let mut summaries = Vec::new();
+        let mut seen_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
+
+        for cid in &cids {
+            if summaries.len() >= limit {
+                break;
+            }
+            // Skip CIDs not in the active bucket (when filtered).
+            if let Some(ref bset) = bucket_cid_set {
+                if !bset.contains(cid) {
+                    continue;
+                }
+            }
+            if let Some(data) = self.store.get_block(cid)? {
+                if let Some(val) = memvault_store::deserialize_block(&data) {
+                    if let Some(payload) = val.get("payload") {
+                        if let Some(dc) = payload.get("DocCreate") {
+                            if let Ok(doc_id) =
+                                serde_json::from_value::<DocId>(dc["doc_id"].clone())
+                            {
+                                if seen_docs.insert(doc_id.clone()) {
+                                    let node_id = format!("doc:{}", hex::encode(doc_id.0));
+                                    if !include_retracted {
+                                        let idx = self.index.read().await;
+                                        if idx.is_retracted(&node_id) {
+                                            continue;
+                                        }
+                                        drop(idx);
+                                    }
+                                    let title = dc
+                                        .get("frontmatter")
+                                        .and_then(|fm| fm.get("title"))
+                                        .and_then(|t| t.as_str())
+                                        .map(|s| s.to_string());
+                                    let tags: Vec<(String, String)> = val
+                                        .get("tags")
+                                        .and_then(|t| serde_json::from_value(t.clone()).ok())
+                                        .unwrap_or_default();
+                                    let wall_ns =
+                                        val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                                    summaries.push(DocSummary {
+                                        id: doc_id,
+                                        cid: cid.clone(),
+                                        title,
+                                        tags,
+                                        updated_ns: wall_ns,
+                                        attachment_count: 0,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(summaries)
+    }
+
+    /// Authoritative scan-based entity listing (pre-member-set behavior).
+    /// Retained as the fallback for cross-bucket queries and as the source of
+    /// truth the member-set is validated against.
+    async fn list_entities_scan(
+        &self,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<Entity>> {
+        // Explicit bucket → scope to that bucket.
+        // None → scope to all accessible buckets (or unscoped pre-genesis).
+        // Exhaustive membership universe: the set we test labels against must
+        // cover every block in the bucket, or a recent doc/entity (whose CIDs
+        // fall outside a capped window) is silently dropped from the listing.
+        // The RESULT is still capped at `limit` below (pagination). See
+        // standards: exhaustive-lookups.
+        let scan_cap = usize::MAX;
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
+            if let Some(bid) = bucket {
+                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
+                Some(bucket_cids.into_iter().collect())
+            } else {
+                let all = self.accessible_bucket_cids(scan_cap)?;
+                if all.is_empty() { None } else { Some(all) }
+            };
+
+        // When scoped to a bucket, the global `limit` cap on labels would
+        // wrongly drop entities (including the per-bucket VFS root, which
+        // breaks `ensure_root` → mkdir/resolve) of any bucket whose entities
+        // fall outside the global first-`limit`. Scan all entity labels and
+        // cap the *filtered* result at `limit` instead.
+        let label_cap = if bucket_cid_set.is_some() {
+            usize::MAX
+        } else {
+            limit
+        };
+        let labels = self.store.query_unique_labels("entity", label_cap)?;
+        let mut entities = Vec::new();
+        for label in labels {
+            if entities.len() >= limit {
+                break;
+            }
+            // When bucket-filtered, check if any of this entity's CIDs are in the bucket.
+            if let Some(ref bset) = bucket_cid_set {
+                let entity_cids = self
+                    .store
+                    // Exhaustive membership (see standards: exhaustive-lookups).
+                    .query_by_tag("entity", &label, 0, usize::MAX)
+                    .unwrap_or_default();
+                if !entity_cids.iter().any(|c| bset.contains(c)) {
+                    continue;
+                }
+            }
+            let id_bytes = hex::decode(&label).unwrap_or_default();
+            if id_bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            let entity_id = EntityId(arr);
+            if let Ok(Some(entity)) = self
+                .get_entity_async(&entity_id, include_retracted)
+                .await
+            {
+                entities.push(entity);
+            }
+        }
+        Ok(entities)
+    }
+
+    /// Debug-only invariant: every node the authoritative bucket scan returns
+    /// must be present in the per-bucket member-set. Catches maintenance drift
+    /// (a sync/write path that failed to update the set) before it can silently
+    /// drop content from a listing. `prefix` selects the node kind ("doc:",
+    /// "entity:", "file:"). Stripped from release builds.
+    #[cfg(debug_assertions)]
+    async fn debug_assert_bucket_parity(
+        &self,
+        bucket: &BucketId,
+        include_retracted: bool,
+        prefix: &str,
+    ) {
+        let bsid = memvault_core::bucket_scope_id(bucket);
+        let members: std::collections::HashSet<String> = self
+            .store
+            .scope_members(&bsid, true, include_retracted, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(nid, _)| nid)
+            .filter(|nid| nid.starts_with(prefix))
+            .collect();
+        let scan: std::collections::HashSet<String> = match prefix {
+            "doc:" => self
+                .list_docs_scan(None, usize::MAX, Some(bucket), include_retracted)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| format!("doc:{}", hex::encode(s.id.0)))
+                .collect(),
+            "entity:" => self
+                .list_entities_scan(usize::MAX, Some(bucket), include_retracted)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| format!("entity:{}", hex::encode(e.id.0)))
+                .collect(),
+            _ => return,
+        };
+        let missing: Vec<&String> = scan.difference(&members).collect();
+        debug_assert!(
+            missing.is_empty(),
+            "per-bucket member-set ({prefix}) is missing nodes the authoritative \
+             scan returned — maintenance drift: {missing:?}"
+        );
     }
 
     /// Live member-set maintenance for a single node: refreshes its membership
@@ -3480,6 +4187,15 @@ impl LocalClient {
         let Some(b) = bucket else {
             return; // unbucketed node: not part of any view×bucket partition
         };
+        // Per-bucket member-set (`ScopeKind::Bucket`): the node always belongs
+        // to its inferred bucket regardless of tags, so just refresh its
+        // active/retracted flag. Gated on registration like the view×bucket
+        // sets — only maintain a set that has been lazily built (see
+        // `ensure_bucket_partition`).
+        let bsid = memvault_core::bucket_scope_id(&BucketId(b));
+        if self.store.scope_is_registered(&bsid).unwrap_or(false) {
+            let _ = self.store.scope_member_upsert(&bsid, node_id, retracted, 0);
+        }
         for (vcid, vtags) in views {
             let vbsid = memvault_core::view_bucket_scope_id(vcid, &BucketId(b));
             if !self.store.scope_is_registered(&vbsid).unwrap_or(false) {
@@ -4093,9 +4809,19 @@ impl LocalClient {
         let bucket_hex = hex::encode(bucket_id.0);
         let meta = memvault_store::EnvelopeMeta {
             author: self.effective_author(),
+            // `("grant", <bucket_hex>)` is what `list_bucket_grants`
+            // queries by; `("kind", "grant")` is the kind index entry.
+            // `("sigchain", "grant")` is what makes the
+            // `install_sigchain_notifier` callback fire — without it the
+            // block lands in the local store but never triggers a
+            // gossipsub head announcement, so peers only learn about
+            // the grant on the next RBSR cycle (or never, if no other
+            // sigchain block is written before the RBSR partner pool
+            // turns over). Sister sigchain helpers tag the same way.
             tags: vec![
                 ("grant".to_string(), bucket_hex),
                 ("kind".to_string(), "grant".to_string()),
+                ("sigchain".to_string(), "grant".to_string()),
             ],
             wall_ns: now_ns,
             causal: vec![],
@@ -4174,9 +4900,12 @@ impl LocalClient {
         bucket_id: &BucketId,
     ) -> Result<Vec<(Vec<u8>, memvault_auth::Grant)>> {
         let bucket_hex = hex::encode(bucket_id.0);
+        // Exhaustive: ACL decisions must see every grant on the bucket. A cap
+        // could silently drop a grant and mis-decide access (see standards:
+        // exhaustive-lookups).
         let cids = self
             .store
-            .query_by_tag("grant", &bucket_hex, 0, 1000)
+            .query_by_tag("grant", &bucket_hex, 0, usize::MAX)
             .unwrap_or_default();
 
         let mut grants = Vec::new();
@@ -4188,6 +4917,639 @@ impl LocalClient {
             }
         }
         Ok(grants)
+    }
+
+    // -- Bucket merges (alias overlay) --
+
+    /// One-time repair for `BucketMergeRecord` blocks that landed in the store
+    /// untagged — synced before the `validate_sigchain_for_sync` arm existed, so
+    /// they were stored `AsIs` and `reindex_block` couldn't recover tags from
+    /// the bare struct. Re-applies the `("bucket_merge", <source>)` lookup tags
+    /// (plus `kind`/`sigchain`) via `insert_envelope` (idempotent on the block)
+    /// and bumps the alias generation so the union takes effect. Scans the
+    /// blockstore once; returns the number repaired.
+    pub fn reindex_bucket_merges(&self) -> Result<usize> {
+        let mut fixed = 0usize;
+        for (cid, data) in self.store.iter_blocks()? {
+            let Some(rec) =
+                memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
+            else {
+                continue;
+            };
+            if rec.source.0 == rec.canonical.0 || rec.verify_signature().is_err() {
+                continue;
+            }
+            let src_hex = hex::encode(rec.source.0);
+            // Skip records already indexed under their source.
+            let indexed = self
+                .store
+                .query_by_tag("bucket_merge", &src_hex, 0, usize::MAX)
+                .map(|cids| cids.iter().any(|c| c == &cid))
+                .unwrap_or(false);
+            if indexed {
+                continue;
+            }
+            let meta = memvault_store::EnvelopeMeta {
+                author: rec.issued_by_pubkey.to_vec(),
+                tags: vec![
+                    ("bucket_merge".to_string(), src_hex),
+                    ("kind".to_string(), "bucket_merge".to_string()),
+                    ("sigchain".to_string(), "bucket_merge".to_string()),
+                ],
+                wall_ns: rec.created_ns,
+                cluster_id: Some(self.cluster_id.clone()),
+                bucket_id: Some(rec.canonical.0.to_vec()),
+                ..Default::default()
+            };
+            self.store.insert_envelope(&cid, &data, &meta)?;
+            fixed += 1;
+        }
+        if fixed > 0 {
+            self.bump_alias_generation();
+            tracing::info!(repaired = fixed, "reindexed previously-untagged bucket merges");
+        }
+        Ok(fixed)
+    }
+
+    /// Publish a signed, syncable retraction block for `target_cid`. Tagged
+    /// `("retraction", <target>)` + `("sigchain","retraction")` so it travels
+    /// via RBSR and the `retraction` watcher arm applies it to `RETRACTED` on
+    /// every node that ingests it. Idempotent — one block per target.
+    pub fn publish_retraction_block(
+        &self,
+        target_cid: &[u8],
+        reason: &str,
+        authority: Option<([u8; 32], [u8; 64])>,
+    ) -> Result<Vec<u8>> {
+        // Note: callers guard against redundant publishes (bucket_unmerge skips
+        // already-retracted records; backfill checks existence). We do NOT skip
+        // here on "a retraction exists" — a forged/unauthorised retraction must
+        // not block a later *authorised* one for the same target; the alias
+        // build honours whichever carries valid authority.
+        let target_hex = hex::encode(target_cid);
+        let wall_ns = memvault_core::wall_ns();
+        // An optional authority assertion: a signature over `target_cid` by a
+        // key authorised for the retraction (for a merge unmerge: the merge's
+        // `issued_by_pubkey` or an admin). The alias build verifies it so only
+        // an authorised party can unmerge — the envelope's own node/agent sig
+        // proves authenticity, not authority over the target.
+        let payload = serde_json::json!({
+            "kind": "retraction",
+            "target_cid": target_cid,
+            "reason": reason,
+            "authority_pubkey": authority.map(|(pk, _)| pk.to_vec()),
+            "authority_sig": authority.map(|(_, sig)| sig.to_vec()),
+        });
+        let tags = vec![
+            ("retraction".to_string(), target_hex),
+            ("sigchain".to_string(), "retraction".to_string()),
+            ("kind".to_string(), "retraction".to_string()),
+        ];
+        let (cid_bytes, envelope_bytes) =
+            self.build_signed_envelope(payload, &tags, Visibility::Internal, wall_ns, None)?;
+        let meta = memvault_store::EnvelopeMeta {
+            author: self.effective_author(),
+            tags,
+            wall_ns,
+            cluster_id: Some(self.cluster_id.clone()),
+            ..Default::default()
+        };
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        Ok(cid_bytes)
+    }
+
+    /// Retract a block: immediate local effect (read-your-writes) plus a signed,
+    /// syncable retraction block (a local-only `RETRACTED` entry never
+    /// propagates). `authority` is an optional `(pubkey, sig-over-target)` proof
+    /// that the retractor is authorised over the target (see
+    /// [`Self::publish_retraction_block`]).
+    pub(crate) fn retract_with_authority(
+        &self,
+        target_cid: &[u8],
+        reason: &str,
+        authority: Option<([u8; 32], [u8; 64])>,
+    ) -> Result<Vec<u8>> {
+        let derived = cid_from_bytes(target_cid).to_bytes();
+        memvault_query::retract(&self.store, target_cid, &derived)?;
+        let rec_cid = self.publish_retraction_block(target_cid, reason, authority)?;
+        self.event_bus.publish(MemvaultEvent::Retracted {
+            cid: target_cid.to_vec(),
+        });
+        Ok(rec_cid)
+    }
+
+    /// Whether merge record `merge_cid` has an *authorised* retraction (an
+    /// unmerge). A retraction carrying an authority assertion is honoured only
+    /// if it's signed over `merge_cid` by the merge's `issued_by_pubkey` or a
+    /// current admin. A legacy retraction (no authority field) falls back to the
+    /// `RETRACTED` table so pre-feature unmerges keep working. Used by the alias
+    /// build to enforce that only an authorised party can unmerge.
+    fn merge_retraction_authorized(
+        &self,
+        merge_cid: &[u8],
+        rec: &memvault_auth::BucketMergeRecord,
+    ) -> bool {
+        use ed25519_dalek::Verifier;
+        let retr_cids = self
+            .store
+            .query_by_tag("retraction", &hex::encode(merge_cid), 0, usize::MAX)
+            .unwrap_or_default();
+        if retr_cids.is_empty() {
+            return false;
+        }
+        let admin_keys: Vec<[u8; 32]> = self
+            .admin_verifying_keys()
+            .iter()
+            .map(|k| k.to_bytes())
+            .collect();
+        let mut has_legacy = false;
+        for rcid in retr_cids {
+            let Ok(Some(rbytes)) = self.store.get_block(&rcid) else {
+                continue;
+            };
+            let Some(view) = memvault_store::EnvelopeView::parse(&rbytes) else {
+                continue;
+            };
+            let auth_pk = view.get_as::<Vec<u8>>("authority_pubkey");
+            let auth_sig = view.get_as::<Vec<u8>>("authority_sig");
+            match (auth_pk, auth_sig) {
+                (Some(pk), Some(sig)) if pk.len() == 32 && sig.len() == 64 => {
+                    let pk: [u8; 32] = pk.try_into().unwrap();
+                    // The authority key must be the merge's issuer or an admin.
+                    if pk != rec.issued_by_pubkey && !admin_keys.contains(&pk) {
+                        continue;
+                    }
+                    let sig: [u8; 64] = sig.try_into().unwrap();
+                    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pk) {
+                        if vk
+                            .verify(merge_cid, &ed25519_dalek::Signature::from_bytes(&sig))
+                            .is_ok()
+                        {
+                            return true; // authorised unmerge
+                        }
+                    }
+                    // present-but-invalid authority → ignore this retraction
+                }
+                _ => has_legacy = true, // no authority field → legacy
+            }
+        }
+        has_legacy && self.store.is_retracted(merge_cid).unwrap_or(false)
+    }
+
+    /// Backfill syncable retraction blocks for local-only `RETRACTED` entries
+    /// (recorded before retractions were published as blocks — e.g. unmerges
+    /// that never propagated). Idempotent; returns the number published.
+    pub fn backfill_retraction_blocks(&self) -> Result<usize> {
+        let mut published = 0usize;
+        for (target_cid, _tombstone) in self.store.iter_retracted()? {
+            if self
+                .store
+                .query_by_tag("retraction", &hex::encode(&target_cid), 0, 1)
+                .map(|c| !c.is_empty())
+                .unwrap_or(false)
+            {
+                continue; // already has a retraction block
+            }
+            if self
+                .publish_retraction_block(&target_cid, "backfill", None)
+                .is_ok()
+            {
+                published += 1;
+            }
+        }
+        Ok(published)
+    }
+
+    /// Bump the alias generation so the next `bucket_alias_maps` call
+    /// rebuilds from the `bucket_merge` side blocks. Called on local merge
+    /// writes and from the `bucket_merge` notifier arm on synced records.
+    pub fn bump_alias_generation(&self) {
+        self.alias_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Ok(mut c) = self.alias_cache.write() {
+            *c = None;
+        }
+        // Derived scope member-sets are computed against the union, so a
+        // changed alias set invalidates them too.
+        let _ = self.store.scope_clear_all();
+    }
+
+    /// Load + build the bucket-merge alias maps, cached against
+    /// `alias_generation`. Rebuilds from the `bucket_merge` side blocks on
+    /// a generation mismatch (small N).
+    pub(crate) fn bucket_alias_maps(&self) -> std::sync::Arc<AliasMaps> {
+        let cur_gen = self
+            .alias_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        if let Ok(c) = self.alias_cache.read() {
+            if let Some((g, maps)) = c.as_ref() {
+                if *g == cur_gen {
+                    return std::sync::Arc::clone(maps);
+                }
+            }
+        }
+        let maps = std::sync::Arc::new(self.build_bucket_alias_maps());
+        if let Ok(mut c) = self.alias_cache.write() {
+            *c = Some((cur_gen, std::sync::Arc::clone(&maps)));
+        }
+        maps
+    }
+
+    /// Scan the `bucket_merge` side blocks and fold them into a one-hop
+    /// alias map (newest non-retracted record wins per source), then
+    /// flatten the transitive `members` inverse. Each record's signature
+    /// is verified against its embedded issuer; the issuer's *authority*
+    /// was checked at write time (`bucket_merge_sync`) / is re-checkable
+    /// but not re-run here (mirrors how grant authority is trusted once a
+    /// grant is in the store, with signature authenticity still enforced).
+    fn build_bucket_alias_maps(&self) -> AliasMaps {
+        let mut newest: std::collections::HashMap<[u8; 32], (u64, [u8; 32])> =
+            std::collections::HashMap::new();
+        let sources = self
+            .store
+            .query_unique_labels("bucket_merge", usize::MAX)
+            .unwrap_or_default();
+        for source_hex in &sources {
+            let cids = self
+                .store
+                .query_by_tag("bucket_merge", source_hex, 0, usize::MAX)
+                .unwrap_or_default();
+            for cid in cids {
+                let Ok(Some(data)) = self.store.get_block(&cid) else {
+                    continue;
+                };
+                let Some(rec) =
+                    memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
+                else {
+                    continue;
+                };
+                // Authenticity: a sync-injected record with a bad signature
+                // must not alter resolution.
+                if rec.verify_signature().is_err() {
+                    continue;
+                }
+                // An unmerge takes effect only via an *authorised* retraction
+                // (signed over the merge by its issuer or an admin) — a
+                // forged/unauthorised retraction can't reverse the merge.
+                if self.merge_retraction_authorized(&cid, &rec) {
+                    continue;
+                }
+                // A self-edge (source == canonical) is meaningless; skip it
+                // so it can never seed a trivial cycle.
+                if rec.source.0 == rec.canonical.0 {
+                    continue;
+                }
+                let e = newest.entry(rec.source.0).or_insert((0, rec.canonical.0));
+                if rec.created_ns >= e.0 {
+                    *e = (rec.created_ns, rec.canonical.0);
+                }
+            }
+        }
+        let mut maps = AliasMaps::default();
+        for (source, (_ts, canonical)) in newest {
+            maps.alias.insert(source, canonical);
+        }
+        // Fold in deterministic agent aliases (no signed record needed):
+        // legacy cluster-scoped agent bucket ids → the pubkey-derived id.
+        self.extend_with_agent_aliases(&mut maps.alias);
+        maps.build_members();
+        maps
+    }
+
+    /// Auto-alias pass: add deterministic `legacy_agent_bucket_id →
+    /// deterministic_agent_bucket_id` edges that need no signed record
+    /// (owner-implied — the same agent pubkey owns both ends). For every
+    /// known agent pubkey `P`, the new derivation homes its bucket at
+    /// `f(P)` (cluster-independent); its data may sit in a legacy bucket
+    /// `legacy_f(c, P)` for some prior cluster context `c`. We alias each
+    /// existing legacy bucket onto `f(P)` so the old data surfaces under
+    /// the stable canonical.
+    ///
+    /// Cluster contexts covered: pre-genesis (`[0;32]`) and the current
+    /// cluster_id — the two ids the old derivation actually produced.
+    /// (ClusterGenesis-history rotation and AgentKeyRotation chains are not
+    /// enumerable from stored state today; left as future inputs.)
+    ///
+    /// Deterministic + per-node: every node computes the same edges, so no
+    /// authority signature is needed (unlike a generic `BucketMergeRecord`).
+    /// `or_insert` so a signed merge for the same source always wins.
+    fn extend_with_agent_aliases(&self, alias: &mut std::collections::HashMap<[u8; 32], [u8; 32]>) {
+        // Candidate agent pubkeys: every attested agent, plus any bucket's
+        // recorded owner-agent pubkey (covers agents whose attestation this
+        // node hasn't synced but whose bucket it holds).
+        let mut pubkeys: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        if let Ok(atts) = crate::sigchain::scan_agent_attestations(self) {
+            for att in atts {
+                pubkeys.insert(att.agent_pubkey);
+            }
+        }
+        // Read owner pubkeys straight from each BucketDecl — NOT via
+        // bucket_info_sync/build_bucket_info, which now calls canonical_of
+        // and would recurse back into this alias build.
+        for bid in self.all_bucket_id_arrays() {
+            if let Ok(Some(decl_cid)) = self.store.get_bucket(&bid) {
+                if let Ok(Some(block)) = self.store.get_block(&decl_cid) {
+                    if let Some(decl) = Self::parse_bucket_decl(&block) {
+                        if let Some(pk) = decl.owner_agent_pubkey {
+                            pubkeys.insert(pk);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Legacy cluster contexts the old derivation could have used.
+        let mut clusters: Vec<Vec<u8>> = vec![vec![0u8; 32]];
+        if self.cluster_id.iter().any(|&b| b != 0) {
+            clusters.push(self.cluster_id.clone());
+        }
+
+        for pk in pubkeys {
+            let canonical = crate::rebuild::deterministic_agent_bucket_id(&pk).0;
+            for c in &clusters {
+                let old = crate::rebuild::legacy_agent_bucket_id(c, &pk).0;
+                if old == canonical {
+                    continue;
+                }
+                // Only alias a legacy id that actually exists as a bucket on
+                // this node — never invent an edge to an empty source.
+                if self.store.get_bucket(&old).ok().flatten().is_some() {
+                    alias.entry(old).or_insert(canonical);
+                }
+            }
+        }
+    }
+
+    /// Write-path companion to [`Self::extend_with_agent_aliases`]: for every
+    /// agent pubkey that has a legacy (cluster-scoped) bucket but whose stable
+    /// deterministic canonical bucket has no decl yet, create that canonical so
+    /// the legacy data folds into a real, *listable* agent bucket instead of an
+    /// invisible phantom target (a merged source whose canonical can't be
+    /// shown would otherwise vanish from listings entirely). Idempotent — only
+    /// writes when the canonical is missing. Returns the number created.
+    ///
+    /// Needs the node signing key installed (the created decl is node-signed
+    /// with the agent as `owner_agent`, exactly like [`ensure_agent_bucket`]),
+    /// so call it at daemon startup after the key is set.
+    fn materialize_agent_alias_canonicals(&self) -> usize {
+        use std::collections::{HashMap, HashSet};
+
+        // Candidate pubkeys: every attested agent, plus any bucket's recorded
+        // owner-agent pubkey (covers agents whose attestation hasn't synced but
+        // whose legacy bucket this node holds). Remember a display name per
+        // pubkey from the owning decl so the created bucket is named sensibly.
+        let mut pubkeys: HashSet<[u8; 32]> = HashSet::new();
+        let mut name_hint: HashMap<[u8; 32], String> = HashMap::new();
+        if let Ok(atts) = crate::sigchain::scan_agent_attestations(self) {
+            for att in atts {
+                pubkeys.insert(att.agent_pubkey);
+                name_hint
+                    .entry(att.agent_pubkey)
+                    .or_insert_with(|| att.agent_id.0.clone());
+            }
+        }
+        for bid in self.all_bucket_id_arrays() {
+            if let Ok(Some(decl_cid)) = self.store.get_bucket(&bid) {
+                if let Ok(Some(block)) = self.store.get_block(&decl_cid) {
+                    if let Some(decl) = Self::parse_bucket_decl(&block) {
+                        if let Some(pk) = decl.owner_agent_pubkey {
+                            pubkeys.insert(pk);
+                            if let Some(owner) = decl.owner_agent {
+                                name_hint.entry(pk).or_insert(owner.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Legacy cluster contexts the old derivation could have used.
+        let mut clusters: Vec<Vec<u8>> = vec![vec![0u8; 32]];
+        if self.cluster_id.iter().any(|&b| b != 0) {
+            clusters.push(self.cluster_id.clone());
+        }
+
+        let mut created = 0usize;
+        for pk in pubkeys {
+            let canonical = crate::rebuild::deterministic_agent_bucket_id(&pk).0;
+            // Already a real bucket — nothing to materialize.
+            if self.store.get_bucket(&canonical).ok().flatten().is_some() {
+                continue;
+            }
+            // Only materialize when a legacy source actually exists for this
+            // pubkey (mirrors the alias guard: never invent an empty canonical).
+            let has_legacy = clusters.iter().any(|c| {
+                let old = crate::rebuild::legacy_agent_bucket_id(c, &pk).0;
+                old != canonical && self.store.get_bucket(&old).ok().flatten().is_some()
+            });
+            if !has_legacy {
+                continue;
+            }
+            let hint = name_hint
+                .get(&pk)
+                .cloned()
+                .unwrap_or_else(|| hex::encode(pk));
+            match self.ensure_agent_bucket_for_pubkey_sync(&pk, &hint) {
+                Ok(bid) => {
+                    created += 1;
+                    tracing::info!(
+                        agent_pubkey = %hex::encode(pk),
+                        bucket = %bid,
+                        "materialized canonical agent bucket for legacy alias target"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    agent_pubkey = %hex::encode(pk),
+                    "failed to materialize canonical agent bucket: {e}"
+                ),
+            }
+        }
+        created
+    }
+
+    /// Run the agent-bucket migration: materialize any missing canonical agent
+    /// buckets that legacy buckets alias onto (so the merged data surfaces
+    /// under a real, listable bucket), then force the alias maps to rebuild so
+    /// the deterministic legacy→canonical agent aliases (see
+    /// [`Self::extend_with_agent_aliases`]) take effect. Idempotent. A daemon
+    /// calls this at startup after the node signing key is installed;
+    /// resolution also triggers the alias rebuild lazily on first use.
+    pub fn run_agent_bucket_migration(&self) {
+        self.materialize_agent_alias_canonicals();
+        self.bump_alias_generation();
+    }
+
+    /// Resolve a bucket id to its terminal canonical, following the merge
+    /// alias chain (with a cycle guard). A bucket with no alias resolves to
+    /// itself.
+    pub fn canonical_of(&self, bucket_id: &[u8; 32]) -> [u8; 32] {
+        self.bucket_alias_maps().canonical_of(*bucket_id)
+    }
+
+    /// All source bucket ids that resolve (transitively) into `canonical`.
+    /// Empty if `canonical` is not a merge target.
+    pub fn bucket_merge_members(&self, canonical: &[u8; 32]) -> Vec<[u8; 32]> {
+        self.bucket_alias_maps()
+            .members
+            .get(canonical)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// List all `source → canonical` merge edges (one-hop), for surfaces.
+    pub fn bucket_merges(&self) -> Vec<(BucketId, BucketId)> {
+        self.bucket_alias_maps()
+            .alias
+            .iter()
+            .map(|(s, c)| (BucketId(*s), BucketId(*c)))
+            .collect()
+    }
+
+    /// Merge each `source` bucket into `canonical`: store one signed
+    /// `bucket_merge` side block per source. Authority (§8): the node must
+    /// hold a signing key that is authorised on the canonical **and** on
+    /// every source — an `AgentRole::Admin` key (authorised everywhere) or
+    /// the bucket owner / attesting node key for those specific buckets.
+    /// Returns the stored record CIDs.
+    pub fn bucket_merge_sync(
+        &self,
+        sources: &[BucketId],
+        canonical: &BucketId,
+    ) -> Result<Vec<Vec<u8>>> {
+        let now_ns = memvault_core::wall_ns();
+        // The signer must be authorised on the canonical. `pick_grant_signer`
+        // returns an admin key when held (authorised everywhere) else the
+        // canonical's owner/attester key.
+        let (signer, issuer_pubkey) = self.pick_grant_signer(canonical).ok_or_else(|| {
+            ApiError::Forbidden("no merge-signing authority for canonical bucket".into())
+        })?;
+        use ed25519_dalek::Signer;
+
+        let mut cids = Vec::new();
+        for source in sources {
+            if source.0 == canonical.0 {
+                return Err(ApiError::Other(
+                    "cannot merge a bucket into itself".into(),
+                ));
+            }
+            // The same issuer must also be authorised on the source bucket,
+            // so an owner of the canonical can't annex a bucket they don't
+            // control. Admin issuers pass unconditionally.
+            let (owner_agent_pubkey, owner_node_pubkey) = match self.bucket_info_sync(source) {
+                Ok(Some(info)) => (info.owner_agent_pubkey, info.owner_node_pubkey),
+                _ => (None, None),
+            };
+            if !self.grant_issuer_authorized(
+                &issuer_pubkey,
+                now_ns,
+                owner_agent_pubkey.as_ref(),
+                owner_node_pubkey.as_ref(),
+            ) {
+                return Err(ApiError::Forbidden(format!(
+                    "issuer not authorised to merge source bucket {source}"
+                )));
+            }
+
+            let mut rec = memvault_auth::BucketMergeRecord {
+                source: source.clone(),
+                canonical: canonical.clone(),
+                created_ns: now_ns,
+                issued_by_pubkey: issuer_pubkey,
+                signature: [0u8; 64],
+            };
+            let signing_bytes = rec
+                .signing_bytes()
+                .map_err(|e| ApiError::Other(format!("merge record signing failed: {e}")))?;
+            rec.signature = signer.sign(&signing_bytes).to_bytes();
+
+            let rec_bytes = serde_ipld_dagcbor::to_vec(&rec)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            let cid_bytes = memvault_core::cid_from_bytes(&rec_bytes).to_bytes();
+            let source_hex = hex::encode(source.0);
+            let meta = memvault_store::EnvelopeMeta {
+                author: self.effective_author(),
+                // `("bucket_merge", <source_hex>)` makes the edge queryable
+                // by source (`canonical_of`) and discoverable via
+                // `query_unique_labels`. `("sigchain", "bucket_merge")` both
+                // fires the notifier (gossip head announce + alias-cache
+                // invalidation on peers) and routes the block into the audit
+                // decode path (§8.1).
+                tags: vec![
+                    ("bucket_merge".to_string(), source_hex),
+                    ("kind".to_string(), "bucket_merge".to_string()),
+                    ("sigchain".to_string(), "bucket_merge".to_string()),
+                ],
+                wall_ns: now_ns,
+                causal: vec![],
+                provenance: vec![],
+                // Home the record on the canonical so it travels with the
+                // bucket it governs.
+                cluster_id: Some(self.cluster_id.clone()),
+                bucket_id: Some(canonical.0.to_vec()),
+                ..Default::default()
+            };
+            self.store.insert_envelope(&cid_bytes, &rec_bytes, &meta)?;
+            tracing::info!(
+                source = %source,
+                canonical = %canonical,
+                cid = %hex::encode(&cid_bytes),
+                "bucket merge recorded"
+            );
+            cids.push(cid_bytes);
+        }
+        self.bump_alias_generation();
+        Ok(cids)
+    }
+
+    /// Reverse a merge: retract the `source → canonical` record(s) so the
+    /// union stops including `source`. Reversible; the source's blocks are
+    /// untouched (they were never re-homed).
+    pub async fn bucket_unmerge(&self, source: &BucketId, canonical: &BucketId) -> Result<()> {
+        let source_hex = hex::encode(source.0);
+        let cids = self
+            .store
+            .query_by_tag("bucket_merge", &source_hex, 0, usize::MAX)
+            .unwrap_or_default();
+        let want = canonical.0;
+        let mut retracted_any = false;
+        for cid in cids {
+            if self.store.is_retracted(&cid).unwrap_or(false) {
+                continue;
+            }
+            let Ok(Some(data)) = self.store.get_block(&cid) else {
+                continue;
+            };
+            let Some(rec) =
+                memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
+            else {
+                continue;
+            };
+            // The record stores the *direct* one-hop canonical, but callers
+            // (e.g. the UI) often pass the *terminal* canonical from
+            // `BucketInfo.merged_into` (= `canonical_of`, flattened through any
+            // chain). Match either: the direct target, or one whose chain
+            // resolves to the requested terminal. Retracting the source's
+            // direct edge detaches it regardless of how deep the chain was.
+            if rec.canonical.0 == want || self.canonical_of(&rec.canonical.0) == want {
+                // Assert authority: sign the merge record's CID with a key
+                // authorised on the canonical (admin / owner) so peers can
+                // verify the unmerge was authorised, not just authentic.
+                use ed25519_dalek::Signer;
+                let authority = self
+                    .pick_grant_signer(canonical)
+                    .map(|(signer, pk)| (pk, signer.sign(&cid).to_bytes()));
+                self.retract_with_authority(&cid, "bucket unmerge", authority)?;
+                retracted_any = true;
+            }
+        }
+        if !retracted_any {
+            return Err(ApiError::Other(format!(
+                "no merge edge {source} → {canonical} to reverse"
+            )));
+        }
+        self.bump_alias_generation();
+        Ok(())
     }
 
     /// Revoke a previously-issued bucket grant.
@@ -4434,86 +5796,61 @@ impl MemvaultClient for LocalClient {
         bucket: Option<&BucketId>,
         include_retracted: bool,
     ) -> Result<Vec<DocSummary>> {
-        // Explicit bucket → scope to that bucket.
-        // None → scope to all accessible buckets (or unscoped pre-genesis).
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
-                Some(bucket_cids.into_iter().collect())
-            } else {
-                let all = self.accessible_bucket_cids(limit * 10)?;
-                if all.is_empty() { None } else { Some(all) }
-            };
-
-        let cids = if let Some((ref scope, ref label)) = tag_filter {
-            self.store.query_by_tag(scope, label, 0, limit * 5)?
-        } else {
-            self.store
-                .query_unique_labels("doc", limit * 5)?
-                .into_iter()
-                .flat_map(|label| {
-                    self.store
-                        .query_by_tag("doc", &label, 0, 10)
-                        .unwrap_or_default()
-                })
-                .collect()
-        };
-
-        let mut summaries = Vec::new();
-        let mut seen_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
-
-        for cid in &cids {
-            // Skip CIDs not in the active bucket (when filtered).
-            if let Some(ref bset) = bucket_cid_set {
-                if !bset.contains(cid) {
-                    continue;
-                }
-            }
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Some(dc) = payload.get("DocCreate") {
-                            if let Ok(doc_id) =
-                                serde_json::from_value::<DocId>(dc["doc_id"].clone())
-                            {
-                                if seen_docs.insert(doc_id.clone()) {
-                                    let node_id = format!("doc:{}", hex::encode(doc_id.0));
-                                    if !include_retracted {
-                                        let idx = self.index.read().await;
-                                        if idx.is_retracted(&node_id) {
-                                            continue;
-                                        }
-                                        drop(idx);
-                                    }
-                                    let title = dc
-                                        .get("frontmatter")
-                                        .and_then(|fm| fm.get("title"))
-                                        .and_then(|t| t.as_str())
-                                        .map(|s| s.to_string());
-                                    let tags: Vec<(String, String)> = val
-                                        .get("tags")
-                                        .and_then(|t| serde_json::from_value(t.clone()).ok())
-                                        .unwrap_or_default();
-                                    let wall_ns =
-                                        val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                                    summaries.push(DocSummary {
-                                        id: doc_id,
-                                        cid: cid.clone(),
-                                        title,
-                                        tags,
-                                        updated_ns: wall_ns,
-                                        attachment_count: 0,
-                                    });
-                                }
-                            }
-                        }
+        // Bucket-scoped, untagged listing: enumerate the per-bucket member-set
+        // (O(bucket)) instead of scanning every doc label in the cluster.
+        // Tagged queries already use the narrow `query_by_tag` path, which the
+        // member-set (not tag-partitioned) wouldn't improve. See the
+        // per-bucket-member-index plan / standards/derived-indexes.md.
+        if let (Some(bid), None) = (bucket, &tag_filter) {
+            // Drain any pending reindex (synced/seeded blocks) so the
+            // maintenance wiring has folded them into the registered set before
+            // we read it — read-your-syncs, mirroring scoped_list/scoped_search.
+            self.flush_index().await;
+            // Read-time merge union: the canonical's member-set plus those of the
+            // sources merged into it (each bucket keeps its own set). Mirrors
+            // `effective_bucket_set` so a listing scoped to a canonical surfaces
+            // merged-source docs.
+            let mut buckets = vec![bid.clone()];
+            buckets.extend(self.bucket_merge_members(&bid.0).into_iter().map(BucketId));
+            let mut seen = std::collections::HashSet::new();
+            let mut summaries = Vec::new();
+            'outer: for b in &buckets {
+                self.ensure_bucket_partition(b).await?;
+                let bsid = memvault_core::bucket_scope_id(b);
+                // include_active is always true; include_retracted gates the
+                // retracted partition. Unlimited at the store level — we filter
+                // to docs and page at `limit` after.
+                let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+                for (node_id, _wall) in &members {
+                    if summaries.len() >= limit {
+                        break 'outer;
+                    }
+                    let Some(hex_id) = node_id.strip_prefix("doc:") else {
+                        continue;
+                    };
+                    let Some(arr) = hex::decode(hex_id)
+                        .ok()
+                        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(arr) {
+                        continue;
+                    }
+                    if let Some(summary) = self.doc_summary(&DocId(arr)) {
+                        summaries.push(summary);
                     }
                 }
             }
+            #[cfg(debug_assertions)]
+            for b in &buckets {
+                self.debug_assert_bucket_parity(b, include_retracted, "doc:")
+                    .await;
+            }
+            return Ok(summaries);
         }
-
-        Ok(summaries)
+        self.list_docs_scan(tag_filter, limit, bucket, include_retracted)
+            .await
     }
 
     async fn upload_file(
@@ -4745,7 +6082,7 @@ impl MemvaultClient for LocalClient {
         Ok(None)
     }
 
-    async fn add_entity(
+    async fn add_entity_internal(
         &self,
         entity: Entity,
         vis: Visibility,
@@ -4786,8 +6123,67 @@ impl MemvaultClient for LocalClient {
         Ok(entity_id)
     }
 
+    async fn skill_rename(&self, id: &EntityId, new_name: &str) -> Result<()> {
+        let mut props: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        props.insert(
+            memvault_core::SKILL_NAME_PROP.to_string(),
+            serde_json::Value::String(new_name.to_string()),
+        );
+        let op = Op::EntityUpdate {
+            entity_id: id.clone(),
+            props,
+        };
+        let entity_label: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let tags = vec![("entity".to_string(), entity_label)];
+        let inferred_bucket = self
+            .inferred_entity_bucket(id)
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .map(BucketId);
+        self.store_op(&op, &tags, &Visibility::Internal, inferred_bucket.as_ref())?;
+
+        // Reindex so search reflects the new name: remove the stale entity doc,
+        // then re-add the merged entity (delete+add in one commit, mirroring the
+        // retract/tag-update paths).
+        if let Ok(Some(entity)) = self.get_entity_async(id, false).await {
+            let bucket_hex = self.inferred_entity_bucket(id).map(hex::encode);
+            let mut idx = self.index.write().await;
+            let _ = idx.remove(&hex::encode(id.0));
+            let _ = idx.index_entity(
+                id,
+                &entity.kind,
+                &entity.props,
+                &tags,
+                bucket_hex.as_deref(),
+                memvault_core::wall_ns(),
+            );
+            self.commit_or_defer(&mut idx);
+        }
+        Ok(())
+    }
+
     async fn get_entity(&self, id: &EntityId) -> Result<Option<Entity>> {
         self.get_entity_async(id, false).await
+    }
+
+    async fn vfs_root_cached(&self, bucket: &BucketId) -> Result<Option<EntityId>> {
+        Ok(self
+            .store
+            .vfs_root_get(&bucket.0)?
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .map(EntityId))
+    }
+
+    async fn vfs_root_cache_put(&self, bucket: &BucketId, root: &EntityId) -> Result<()> {
+        self.store.vfs_root_put(&bucket.0, &root.0)?;
+        Ok(())
+    }
+
+    async fn node_bucket(&self, node: &NodeRef) -> Result<Option<BucketId>> {
+        Ok(self
+            .inferred_node_bucket(node)
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .map(BucketId))
     }
 
     async fn entity_history(&self, id: &EntityId) -> Result<Vec<AuditRecord>> {
@@ -4815,45 +6211,56 @@ impl MemvaultClient for LocalClient {
         bucket: Option<&BucketId>,
         include_retracted: bool,
     ) -> Result<Vec<Entity>> {
-        // Explicit bucket → scope to that bucket.
-        // None → scope to all accessible buckets (or unscoped pre-genesis).
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, limit * 10)?;
-                Some(bucket_cids.into_iter().collect())
-            } else {
-                let all = self.accessible_bucket_cids(limit * 10)?;
-                if all.is_empty() { None } else { Some(all) }
-            };
-
-        let labels = self.store.query_unique_labels("entity", limit)?;
-        let mut entities = Vec::new();
-        for label in labels {
-            // When bucket-filtered, check if any of this entity's CIDs are in the bucket.
-            if let Some(ref bset) = bucket_cid_set {
-                let entity_cids = self
-                    .store
-                    .query_by_tag("entity", &label, 0, 10)
-                    .unwrap_or_default();
-                if !entity_cids.iter().any(|c| bset.contains(c)) {
-                    continue;
+        // Bucket-scoped listing: enumerate the per-bucket member-set (O(bucket))
+        // instead of scanning every entity label in the cluster. See the
+        // per-bucket-member-index plan / standards/derived-indexes.md.
+        if let Some(bid) = bucket {
+            // Read-your-syncs: drain pending reindex so maintenance has folded
+            // synced/seeded nodes into the registered set before we read it.
+            self.flush_index().await;
+            // Read-time merge union: the canonical's member-set plus those of the
+            // sources merged into it (each bucket keeps its own set). Mirrors
+            // `effective_bucket_set` so a listing scoped to a canonical surfaces
+            // merged-source entities (graph view + MCP list tools rely on this).
+            let mut buckets = vec![bid.clone()];
+            buckets.extend(self.bucket_merge_members(&bid.0).into_iter().map(BucketId));
+            let mut seen = std::collections::HashSet::new();
+            let mut entities = Vec::new();
+            'outer: for b in &buckets {
+                self.ensure_bucket_partition(b).await?;
+                let bsid = memvault_core::bucket_scope_id(b);
+                let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+                for (node_id, _wall) in &members {
+                    if entities.len() >= limit {
+                        break 'outer;
+                    }
+                    let Some(hex_id) = node_id.strip_prefix("entity:") else {
+                        continue;
+                    };
+                    let Some(arr) = hex::decode(hex_id)
+                        .ok()
+                        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(arr) {
+                        continue;
+                    }
+                    if let Ok(Some(entity)) =
+                        self.get_entity_async(&EntityId(arr), include_retracted).await
+                    {
+                        entities.push(entity);
+                    }
                 }
             }
-            let id_bytes = hex::decode(&label).unwrap_or_default();
-            if id_bytes.len() != 32 {
-                continue;
+            #[cfg(debug_assertions)]
+            for b in &buckets {
+                self.debug_assert_bucket_parity(b, include_retracted, "entity:")
+                    .await;
             }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
-            let entity_id = EntityId(arr);
-            if let Ok(Some(entity)) = self
-                .get_entity_async(&entity_id, include_retracted)
-                .await
-            {
-                entities.push(entity);
-            }
+            return Ok(entities);
         }
-        Ok(entities)
+        self.list_entities_scan(limit, bucket, include_retracted).await
     }
 
     // -- Links (cross-type edges) --
@@ -5002,7 +6409,7 @@ impl MemvaultClient for LocalClient {
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
         let hits: Vec<SearchHit> = idx
-            .search_unified_mode(query, mode, limit * 2)
+            .search_unified_mode(query, None, mode, limit * 2)
             .into_iter()
             .filter(|h| h.node_type == "doc")
             .filter_map(|h| {
@@ -5033,7 +6440,8 @@ impl MemvaultClient for LocalClient {
             .filter(|h| {
                 let (_, label) = Self::doc_tag(&h.doc_id);
                 self.store
-                    .query_by_tag("doc", &label, 0, 10)
+                    // Exhaustive membership (see standards: exhaustive-lookups).
+                    .query_by_tag("doc", &label, 0, usize::MAX)
                     .unwrap_or_default()
                     .iter()
                     .any(|c| accessible.contains(c))
@@ -5050,7 +6458,7 @@ impl MemvaultClient for LocalClient {
         self.flush_index().await;
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
-        let hits = idx.search_unified_mode(query, mode, limit * 2);
+        let hits = idx.search_unified_mode(query, None, mode, limit * 2);
         drop(idx);
 
         let buckets = self.store.list_buckets().unwrap_or_default();
@@ -5087,6 +6495,7 @@ impl MemvaultClient for LocalClient {
         &self,
         view_name: Option<&str>,
         limit: usize,
+        bucket: Option<&BucketId>,
     ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
         let view_tags = if let Some(name) = view_name {
             let view = self
@@ -5098,10 +6507,61 @@ impl MemvaultClient for LocalClient {
             None
         };
         self.flush_index().await;
+
+        // Bucket-scoped: enumerate the per-bucket member-set (O(bucket)) instead
+        // of scanning every index row and re-deriving each node's bucket. Mirrors
+        // scoped_list; completes the derived-indexes follow-up for list_all.
+        if let Some(bid) = bucket {
+            // Pre-genesis (no buckets) falls through to the scan below.
+            if !self.store.list_buckets().unwrap_or_default().is_empty() {
+                self.ensure_bucket_partition(bid).await?;
+                let bsid = memvault_core::bucket_scope_id(bid);
+                // ActiveOnly: include active members, exclude retracted.
+                let members = self.store.scope_members(&bsid, true, false, 0)?;
+                let mut out = Vec::new();
+                {
+                    let idx = self.index.read().await;
+                    for (node_id, _) in &members {
+                        let node_type = match node_id.split_once(':').map(|(p, _)| p) {
+                            Some("doc") => "doc",
+                            Some("entity") => "entity",
+                            Some("file") | Some("attachment") => "file",
+                            _ => continue,
+                        };
+                        let Some(label) =
+                            idx.resolve_label_mode(node_id, RetractionMode::ActiveOnly)
+                        else {
+                            continue;
+                        };
+                        let tags = idx.get_tags(node_id);
+                        if let Some(vt) = &view_tags {
+                            let in_view = vt
+                                .iter()
+                                .all(|(s, l)| tags.iter().any(|(ts, tl)| ts == s && tl == l));
+                            if !in_view {
+                                continue;
+                            }
+                        }
+                        out.push((node_id.clone(), node_type.to_string(), label, tags));
+                        if out.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                #[cfg(debug_assertions)]
+                self.debug_assert_bucket_parity(bid, false, "doc:").await;
+                return Ok(out);
+            }
+        }
+
+        // Accessible (all-buckets) / pre-genesis: scan all index rows. A global
+        // cap drops nodes of a bucket outside the global first-N, so fetch all
+        // when bucketed (see standards/bucket-scoping.md).
+        let fetch = if bucket.is_some() { usize::MAX } else { limit * 2 };
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
         let all: Vec<(String, String, String, Vec<(String, String)>)> = idx
-            .list_all_mode(view_tags.as_deref(), mode, limit * 2)
+            .list_all_mode(view_tags.as_deref(), None, mode, fetch)
             .into_iter()
             .map(|(id, ty, label, tags, _retracted)| (id, ty, label, tags))
             .collect();
@@ -5111,15 +6571,13 @@ impl MemvaultClient for LocalClient {
         if buckets.is_empty() {
             return Ok(all.into_iter().take(limit).collect()); // pre-genesis
         }
-        let bucket_ids: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
+        // Keep nodes in any accessible bucket.
+        let accessible: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
         Ok(all
             .into_iter()
-            .filter(|(node_id, _, _, _)| {
-                if let Some(node_bucket) = self.inferred_bucket_for_node_id(node_id) {
-                    bucket_ids.iter().any(|b| *b == node_bucket)
-                } else {
-                    false
-                }
+            .filter(|(node_id, _, _, _)| match self.inferred_bucket_for_node_id(node_id) {
+                Some(node_bucket) => accessible.iter().any(|b| *b == node_bucket),
+                None => false,
             })
             .take(limit)
             .collect())
@@ -5193,19 +6651,11 @@ impl MemvaultClient for LocalClient {
         Ok(query_audit(&self.store, &query)?)
     }
 
-    async fn retract(&self, target_cid: &[u8], _reason: &str) -> Result<Vec<u8>> {
-        let tombstone_cid = cid_from_bytes(target_cid);
-        let tombstone_bytes = tombstone_cid.to_bytes();
-        memvault_query::retract(&self.store, target_cid, &tombstone_bytes)?;
-
-        self.event_bus.publish(MemvaultEvent::Retracted {
-            cid: target_cid.to_vec(),
-        });
-
-        Ok(tombstone_bytes)
+    async fn retract(&self, target_cid: &[u8], reason: &str) -> Result<Vec<u8>> {
+        self.retract_with_authority(target_cid, reason, None)
     }
 
-    async fn retract_node(&self, node_id: &str, reason: &str) -> Result<()> {
+    async fn retract_node_internal(&self, node_id: &str, reason: &str) -> Result<()> {
         self.store_annotation(
             node_id,
             "retraction",
@@ -5414,16 +6864,36 @@ impl MemvaultClient for LocalClient {
     }
 
 
-    async fn bucket_list(&self) -> Result<Vec<crate::types::BucketInfo>> {
+    async fn bucket_list_filtered(
+        &self,
+        include_merged: bool,
+    ) -> Result<Vec<crate::types::BucketInfo>> {
         let buckets = self.store.list_buckets()?;
         let mut infos = Vec::new();
 
         for (bucket_id_bytes, decl_cid) in buckets {
-            let info = self.build_bucket_info(&bucket_id_bytes, &decl_cid)?;
-            if let Some(info) = info {
+            if let Some(info) = self.build_bucket_info(&bucket_id_bytes, &decl_cid)? {
                 infos.push(info);
             }
         }
+
+        if include_merged {
+            return Ok(infos);
+        }
+
+        // Merged sources are hidden from default listings (treated like
+        // retracted) — but ONLY when their terminal canonical is itself present
+        // in this listing. If the canonical has no decl here (a phantom target,
+        // or one whose decl hasn't synced to this node), keep the source visible
+        // so its data isn't orphaned — otherwise the merged buckets vanish
+        // entirely (source hidden + canonical absent). Callers that want every
+        // source pass `include_merged`.
+        let present: std::collections::HashSet<[u8; 32]> =
+            infos.iter().map(|i| i.id.0).collect();
+        infos.retain(|i| match &i.merged_into {
+            Some(canonical) => !present.contains(&canonical.0),
+            None => true,
+        });
 
         Ok(infos)
     }
@@ -5505,6 +6975,89 @@ impl MemvaultClient for LocalClient {
         }
 
         tracing::info!(bucket = %id, new_name, "bucket renamed");
+        Ok(())
+    }
+
+    async fn bucket_merge(
+        &self,
+        sources: &[memvault_core::BucketId],
+        canonical: &memvault_core::BucketId,
+    ) -> Result<()> {
+        self.bucket_merge_sync(sources, canonical)?;
+        Ok(())
+    }
+
+    async fn bucket_unmerge(
+        &self,
+        source: &memvault_core::BucketId,
+        canonical: &memvault_core::BucketId,
+    ) -> Result<()> {
+        LocalClient::bucket_unmerge(self, source, canonical).await
+    }
+
+    async fn bucket_merges(
+        &self,
+    ) -> Result<Vec<(memvault_core::BucketId, memvault_core::BucketId)>> {
+        Ok(LocalClient::bucket_merges(self))
+    }
+
+    async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()> {
+        let agent_hex = hex::encode(agent_pubkey);
+
+        // A relabel is node-signed and only takes effect when signed by the
+        // agent's *attesting node* (see `sigchain::agent_label`). Reject up
+        // front if this node can't make it stick — otherwise the write would
+        // succeed but the label would be silently ignored on read. This makes
+        // the no-op observable to every caller (CLI / MCP / HTTP / web).
+        let node_pk = self
+            .node_signing_key()
+            .map(|k| k.verifying_key().to_bytes())
+            .ok_or_else(|| ApiError::Forbidden("node signing key not set".into()))?;
+        match crate::sigchain::sole_attesting_node(self, agent_pubkey)? {
+            Some(att) if att == node_pk => {}
+            Some(_) => {
+                return Err(ApiError::Forbidden(format!(
+                    "agent {agent_hex} is attested by a different node; \
+                     issue the relabel on its attesting node"
+                )));
+            }
+            None => {
+                return Err(ApiError::Forbidden(format!(
+                    "agent {agent_hex} has no unambiguous attestation on this node; \
+                     cannot relabel"
+                )));
+            }
+        }
+
+        let wall_ns = memvault_core::wall_ns();
+        let tags = vec![
+            ("kind".to_string(), "agent-rename".to_string()),
+            ("agent".to_string(), agent_hex.clone()),
+        ];
+        // `payload.AgentRename` shape matches audit parsing
+        // (`memvault_query::audit::parse_audit_record`). Display-only metadata:
+        // the rebuilt `agent_labels` index reads this; access control never does.
+        let payload = serde_json::json!({
+            "AgentRename": {
+                "agent_pubkey": agent_pubkey.to_vec(),
+                "new_label": new_label,
+                "wall_ns": wall_ns,
+            }
+        });
+        let (cid_bytes, envelope_bytes) =
+            self.build_signed_envelope(payload, &tags, Visibility::Internal, wall_ns, None)?;
+        let meta = memvault_store::insert::EnvelopeMeta {
+            author: self.effective_author(),
+            tags,
+            wall_ns,
+            causal: vec![],
+            provenance: vec![],
+            cluster_id: Some(self.cluster_id.clone()),
+            ..Default::default()
+        };
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        tracing::info!(agent = %agent_hex, new_label, "agent relabeled");
         Ok(())
     }
 
@@ -5837,17 +7390,30 @@ impl MemvaultClient for LocalClient {
             .ok_or_else(|| ApiError::Other("no legacy bucket configured".into()))
     }
 
-    async fn ensure_agent_bucket(&self, agent_id: &str) -> Result<BucketId> {
-        let aid = memvault_core::AgentId(agent_id.to_string());
-        self.ensure_agent_bucket_for(&aid).await
-    }
-
-    async fn ensure_agent_bucket_for_pubkey(
+    async fn ensure_agent_bucket(
         &self,
         agent_pubkey: &[u8],
         name_hint: &str,
     ) -> Result<BucketId> {
+        // Delegate to the inherent pubkey-keyed helper (also used by the
+        // server-side HTTP handlers and the enroll path).
         LocalClient::ensure_agent_bucket_for_pubkey(self, agent_pubkey, name_hint).await
+    }
+
+    async fn bucket_grant(
+        &self,
+        bucket_id: &BucketId,
+        audience: memvault_auth::GrantAudience,
+        actions: Vec<memvault_auth::Action>,
+        ttl_secs: u64,
+    ) -> Result<Vec<u8>> {
+        // Reuse the existing signed-and-stored grant path; `pick_grant_signer`
+        // inside picks admin / owner-agent / node key for us.
+        LocalClient::issue_bucket_grant(self, bucket_id, audience, actions, ttl_secs).await
+    }
+
+    async fn revoke_grant(&self, grant_cid: &[u8], reason: &str) -> Result<Vec<u8>> {
+        LocalClient::revoke_bucket_grant(self, grant_cid, reason).await
     }
 }
 

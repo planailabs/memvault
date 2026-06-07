@@ -22,9 +22,14 @@ async fn spawn_swarm() -> (
 ) {
     let keypair = libp2p::identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
-    let mut swarm = standalone_swarm(keypair, "/ip4/127.0.0.1/tcp/0".parse().unwrap(), vec![])
-        .await
-        .unwrap();
+    let mut swarm = standalone_swarm(
+        keypair,
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        vec![],
+        vec![0u8; 32],
+    )
+    .await
+    .unwrap();
 
     let addr = loop {
         match swarm.next().await.unwrap() {
@@ -84,7 +89,7 @@ async fn publish_and_receive_admin(
     publisher
         .behaviour_mut()
         .gossipsub
-        .publish(gossip::admin_topic(), data)
+        .publish(gossip::admin_topic_for(&[0u8; 32]), data)
         .unwrap();
 
     timeout(Duration::from_secs(5), async {

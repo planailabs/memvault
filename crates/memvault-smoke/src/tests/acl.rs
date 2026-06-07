@@ -8,7 +8,7 @@ use rand::RngCore;
 use memvault_api::MemvaultClient;
 use memvault_api::acl;
 use memvault_auth::{Action, AgentRole, Grant, GrantAudience, sign_agent_attestation};
-use memvault_core::{AgentId, BucketId, PeerId, Visibility};
+use memvault_core::{AgentName, BucketId, PeerId, Visibility};
 
 use crate::harness::TestNode;
 
@@ -19,7 +19,7 @@ async fn setup_agent(
     node: &TestNode,
     agent_name: &str,
     role: AgentRole,
-) -> ([u8; 32], AgentId) {
+) -> ([u8; 32], AgentName) {
     let node_sk = node
         .client
         .node_signing_key()
@@ -33,7 +33,7 @@ async fn setup_agent(
 
     let attestation = sign_agent_attestation(
         &node_sk,
-        AgentId(agent_name.to_string()),
+        AgentName(agent_name.to_string()),
         agent_pk,
         role,
         u64::MAX,
@@ -43,7 +43,7 @@ async fn setup_agent(
     memvault_api::sigchain::publish_agent_attestation(&node.client, &attestation)
         .expect("publish attestation");
 
-    (agent_pk, AgentId(agent_name.to_string()))
+    (agent_pk, AgentName(agent_name.to_string()))
 }
 
 /// Create a plain bucket owned by no specific agent — the default case
@@ -103,13 +103,13 @@ async fn allow_peer_audience() {
 #[tokio::test]
 async fn allow_agent_audience() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "named-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "named-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "named-bucket").await;
 
     node.client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Write],
             u64::MAX,
         )
@@ -242,14 +242,14 @@ async fn bucket_create_as_sets_owner_and_grants_access() {
 #[tokio::test]
 async fn revoked_grant_denied() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "revoke-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "revoke-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "revoke-bucket").await;
 
     let grant_cid = node
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id.clone()),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read, Action::Write],
             u64::MAX,
         )
@@ -293,7 +293,7 @@ async fn revoked_grant_denied() {
 #[tokio::test]
 async fn revocation_is_grant_specific() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "two-grant-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "two-grant-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "two-grant-bucket").await;
 
     // Two grants, same audience, same actions — only the first is revoked.
@@ -301,7 +301,7 @@ async fn revocation_is_grant_specific() {
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id.clone()),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read],
             u64::MAX,
         )
@@ -311,7 +311,7 @@ async fn revocation_is_grant_specific() {
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read],
             u64::MAX,
         )
@@ -810,14 +810,14 @@ async fn future_dated_grant_denied() {
 #[tokio::test]
 async fn synced_grant_revocation_applies_on_scan() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) = setup_agent(&node, "syncrev-agent", AgentRole::AgentHost).await;
+    let (agent_pk, _) = setup_agent(&node, "syncrev-agent", AgentRole::AgentHost).await;
     let bucket = make_bucket(&node, "syncrev-bucket").await;
 
     let grant_cid = node
         .client
         .issue_bucket_grant(
             &bucket,
-            GrantAudience::Agent(agent_id),
+            GrantAudience::AgentKey(agent_pk),
             vec![Action::Read],
             u64::MAX,
         )
@@ -946,7 +946,7 @@ async fn setup_agent_keyed(
     node: &TestNode,
     name: &str,
     role: AgentRole,
-) -> (SigningKey, [u8; 32], AgentId) {
+) -> (SigningKey, [u8; 32], AgentName) {
     let node_sk = node.client.node_signing_key().expect("node key").clone();
     let mut seed = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
@@ -954,20 +954,20 @@ async fn setup_agent_keyed(
     let agent_pk = agent_sk.verifying_key().to_bytes();
     let att = sign_agent_attestation(
         &node_sk,
-        AgentId(name.to_string()),
+        AgentName(name.to_string()),
         agent_pk,
         role,
         u64::MAX,
     )
     .expect("sign attestation");
     memvault_api::sigchain::publish_agent_attestation(&node.client, &att).expect("publish");
-    (agent_sk, agent_pk, AgentId(name.to_string()))
+    (agent_sk, agent_pk, AgentName(name.to_string()))
 }
 
 async fn make_owned_bucket(
     node: &TestNode,
     name: &str,
-    owner: AgentId,
+    owner: AgentName,
     owner_pk: [u8; 32],
 ) -> BucketId {
     node.client
@@ -1300,4 +1300,340 @@ async fn conflicting_attestations_deny_host_authority() {
     let err = acl::check_bucket_access(&node.client, &grantee_pk, &bucket, Action::Read)
         .expect_err("host authority must be denied under conflicting attestations");
     assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+// ── Phase 1: AgentKey(pubkey) audience ──────────────────────────────────
+// The canonical, collision-free agent grant. Access matches the caller's
+// verified ed25519 pubkey directly, so two nodes' same-named agents never
+// share access the way a legacy Agent(string) grant would.
+
+#[tokio::test]
+async fn agentkey_grant_allows_matching_pubkey() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "ak-agent", AgentRole::AgentHost).await;
+    let bucket = make_bucket(&node, "ak-bucket").await;
+
+    node.client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::AgentKey(agent_pk),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("issue agentkey grant");
+
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect("AgentKey grant for the matching pubkey should pass");
+    // Read-only grant: Write still denied.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect_err("Write must require a Write grant");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn agentkey_grant_denies_other_pubkey() {
+    let node = TestNode::new();
+    // Two agents sharing the SAME agent_id label "alice" but different
+    // pubkeys — the exact cross-node collision an Agent(string) grant can't
+    // distinguish. An AgentKey grant must bind to one pubkey only.
+    let (alice_a_pk, _) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    let (alice_b_pk, _) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    assert_ne!(alice_a_pk, alice_b_pk, "the two alices must differ by key");
+    let bucket = make_bucket(&node, "ak-deny-bucket").await;
+
+    node.client
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::AgentKey(alice_a_pk),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("issue agentkey grant for alice_a");
+
+    acl::check_bucket_access(&node.client, &alice_a_pk, &bucket, Action::Read)
+        .expect("alice_a (granted pubkey) should pass");
+    let err = acl::check_bucket_access(&node.client, &alice_b_pk, &bucket, Action::Read)
+        .expect_err("alice_b (same label, different pubkey) must be denied");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn owner_bypass_uses_owner_pubkey_not_label() {
+    let node = TestNode::new();
+    let (owner_pk, owner_id) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    // A second "alice" on a different key must NOT inherit ownership.
+    let (other_pk, _) = setup_agent(&node, "alice", AgentRole::AgentHost).await;
+    assert_ne!(owner_pk, other_pk);
+
+    let bucket = node
+        .client
+        .ensure_agent_bucket_for_pubkey(&owner_pk, &owner_id.0)
+        .await
+        .expect("ensure agent bucket");
+
+    // Real owner bypasses without a grant.
+    acl::check_bucket_access(&node.client, &owner_pk, &bucket, Action::Write)
+        .expect("real owner pubkey bypasses");
+    // Same-label impostor is denied (no grant, owner pubkey mismatch).
+    let err = acl::check_bucket_access(&node.client, &other_pk, &bucket, Action::Read)
+        .expect_err("same-label different-pubkey must not inherit ownership");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn legacy_owner_pubkey_absent_falls_back_to_label() {
+    let node = TestNode::new();
+    let (agent_pk, agent_id) = setup_agent(&node, "legacy-owner", AgentRole::AgentHost).await;
+
+    // Legacy bucket: owner_agent recorded, owner_agent_pubkey absent (None).
+    let bucket = node
+        .client
+        .bucket_create_as(
+            agent_id,
+            None, // no owner pubkey → legacy shape
+            "legacy-owned",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .expect("create legacy owned bucket");
+
+    // With no owner pubkey on record, owner-bypass falls back to the agent_id
+    // string so the owner still gets in (back-compat).
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect("legacy label fallback owner bypass");
+}
+
+/// Bucket merge + ACL: a grant on the **canonical** authorizes access to a
+/// **source's** content (the merge normalizes source → canonical in
+/// `check_bucket_access`), and a source with no grant of its own is denied
+/// until the merge lands. Proves canonical-governs ACL semantics.
+#[tokio::test]
+async fn grant_on_canonical_authorizes_merged_source() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "merge-acl-agent", AgentRole::AgentHost).await;
+    let canonical = make_bucket(&node, "canonical-bucket").await;
+    let source = make_bucket(&node, "source-bucket").await;
+
+    // Grant the agent Read on the canonical only.
+    node.client
+        .issue_bucket_grant(
+            &canonical,
+            GrantAudience::AgentKey(agent_pk),
+            vec![Action::Read],
+            u64::MAX,
+        )
+        .await
+        .expect("issue canonical grant");
+
+    // Before the merge: the agent has no grant on the source → denied.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &source, Action::Read)
+        .expect_err("source has no grant of its own");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+
+    // Merge the source into the canonical.
+    node.client
+        .bucket_merge_sync(&[source.clone()], &canonical)
+        .expect("merge source into canonical");
+
+    // After the merge: an access check against the source normalizes to the
+    // canonical, where the agent's Read grant now authorizes it.
+    acl::check_bucket_access(&node.client, &agent_pk, &source, Action::Read)
+        .expect("canonical grant authorizes source content after merge");
+
+    // The grant scope is still honored: Write was never granted.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &source, Action::Write)
+        .expect_err("Write still requires a Write grant on the canonical");
+    assert!(matches!(err, memvault_api::ApiError::Forbidden(_)));
+}
+
+/// Orphaned attestation rejection: an agent attested by a node that was
+/// NEVER attested into the cluster must confer NO access — not even
+/// role=Admin. This is the ephemeral-identity-churn footgun (a throwaway
+/// instance gossiping its `_ui` Admin agent into the cluster). The
+/// attestation's own signature is valid; what's missing is a trusted
+/// attesting node.
+#[tokio::test]
+async fn orphan_admin_agent_is_denied() {
+    let node = TestNode::new();
+
+    // A foreign node identity that holds no NodeAttestation in this cluster.
+    let foreign_node = SigningKey::from_bytes(&[0x42u8; 32]);
+
+    // Mint an Admin agent attestation signed by that orphan node.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let agent_pk = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    let att = memvault_auth::sign_agent_attestation(
+        &foreign_node,
+        AgentName("evil_ui".to_string()),
+        agent_pk,
+        AgentRole::Admin,
+        u64::MAX,
+    )
+    .expect("sign orphan attestation");
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &att)
+        .expect("publish orphan attestation");
+
+    let bucket = make_bucket(&node, "victim-bucket").await;
+
+    // Self-consistent + role=Admin, yet denied: the attesting node is orphaned.
+    let err = acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
+        .expect_err("orphaned Admin attestation must not confer access");
+    assert!(
+        matches!(err, memvault_api::ApiError::Forbidden(_)),
+        "expected Forbidden for orphaned attestation, got {err:?}"
+    );
+}
+
+/// Self-trust counterpart: the node's OWN agent (attested by its own node
+/// key) is honored even with no admin NodeAttestation for itself yet —
+/// the daemon's own `_ui` admin must work through the bootstrap window.
+#[tokio::test]
+async fn self_attested_admin_agent_is_allowed() {
+    let node = TestNode::new();
+    let (agent_pk, _) = setup_agent(&node, "ui-admin", AgentRole::Admin).await;
+    let bucket = make_bucket(&node, "self-bucket").await;
+    // Attested by the local node key (self-trust) → Admin bypass applies.
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
+        .expect("self-attested Admin agent must pass");
+}
+
+/// The startup orphan sweep removes orphaned attestations but keeps
+/// legitimate (self-attested) ones.
+#[tokio::test]
+async fn prune_orphaned_agent_attestations_sweeps_orphans_only() {
+    let node = TestNode::new();
+
+    // A legit self-attested agent (attesting node = this node).
+    let (legit_pk, _) = setup_agent(&node, "legit-ui", AgentRole::Admin).await;
+
+    // An orphan attested by a node never attested into the cluster.
+    let foreign_node = SigningKey::from_bytes(&[0x77u8; 32]);
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let orphan_pk = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    let att = memvault_auth::sign_agent_attestation(
+        &foreign_node,
+        AgentName("orphan-ui".to_string()),
+        orphan_pk,
+        AgentRole::Admin,
+        u64::MAX,
+    )
+    .expect("sign orphan");
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &att)
+        .expect("publish orphan");
+
+    // Sweep.
+    let pruned = node
+        .client
+        .prune_orphaned_agent_attestations()
+        .expect("prune");
+    assert_eq!(pruned, 1, "exactly the orphan is pruned");
+
+    // The orphan attestation is gone; the legit one survives.
+    assert!(
+        memvault_api::sigchain::find_agent_attestation(&node.client, &orphan_pk)
+            .unwrap()
+            .is_none(),
+        "orphan attestation removed"
+    );
+    assert!(
+        memvault_api::sigchain::find_agent_attestation(&node.client, &legit_pk)
+            .unwrap()
+            .is_some(),
+        "legit self-attested agent kept"
+    );
+}
+
+/// Post-genesis local agent end-to-end: a founder node, after the real
+/// `bootstrap_cluster_trust`, must SELF-ATTEST its own node key as
+/// `Attested` (not leave it `PreGenesis`). Otherwise a fresh agent enrolled
+/// locally — attested by that node — fails `jwt::verify` with 401
+/// ("PreGenesis trust returned but admin keys are configured"), which is
+/// what broke the MCP's `/buckets/agent` call. This pins the invariant.
+#[tokio::test]
+async fn post_genesis_founder_self_attests_and_local_agent_is_trusted() {
+    use std::sync::Arc;
+    use ed25519_dalek::SigningKey;
+    use memvault_auth::jwt::NodeTrust;
+    use memvault_core::ClusterId;
+    use tokio::sync::RwLock;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        memvault_store::MemvaultStore::open(dir.path().join("blocks.redb")).unwrap(),
+    );
+    let cluster_id = ClusterId([3u8; 32]);
+    store.set_local_cluster_id(&cluster_id.0).unwrap();
+    let mut peer_id = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut peer_id);
+    store.set_local_peer_id(&peer_id).unwrap();
+
+    let client = Arc::new(memvault_api::LocalClient::new(
+        Arc::clone(&store),
+        Arc::new(RwLock::new(memvault_query::QuotaManager::default())),
+        Arc::new(memvault_api::EventBus::new(64)),
+        peer_id,
+        cluster_id.0.to_vec(),
+    ));
+    let admin_sk = SigningKey::from_bytes(&[5u8; 32]);
+    client.set_admin_signing_key(admin_sk.clone());
+    let genesis =
+        memvault_auth::sign_admin_genesis(&admin_sk, cluster_id.clone(), memvault_core::wall_ns())
+            .unwrap();
+    client.set_pinned_admin_genesis(genesis);
+    let node_sk = SigningKey::from_bytes(&[9u8; 32]);
+    let node_pk = node_sk.verifying_key().to_bytes();
+    client.set_node_signing_key(node_sk);
+
+    // Real bootstrap: holding the admin key, the founder must self-attest.
+    let boot = memvault_api::bootstrap::bootstrap_cluster_trust(&client).expect("bootstrap");
+
+    // The local node must be Attested, not PreGenesis.
+    {
+        let nt = boot.trust_state.node_trust.read().unwrap();
+        match nt.get(&node_pk) {
+            Some(NodeTrust::Attested(_)) => {}
+            other => panic!("post-genesis founder node must be Attested, got {other:?}"),
+        }
+    }
+
+    // A fresh local agent is attested by this (Attested) node, so its
+    // attestation chains to a trusted node — `jwt::verify` would accept it.
+    let agent = memvault_api::agent_identity::enroll_local_agent_in_keystore(
+        &client,
+        "mcp",
+        AgentRole::Admin,
+        u64::MAX,
+    )
+    .expect("enroll local agent");
+    let att = memvault_api::sigchain::find_agent_attestation(&client, &agent.verifying_key.to_bytes())
+        .unwrap()
+        .expect("agent attestation present");
+    assert_eq!(
+        att.node_pubkey, node_pk,
+        "local agent is attested by the local node key"
+    );
+    assert_eq!(att.not_after_ns, u64::MAX, "enrolled never-expiry");
+
+    // "Test again": mint a JWT and run the daemon's exact verification. A
+    // never-expiry attestation authenticates — the contrast with a lapsed
+    // one, which jwt::verify rejects as "agent attestation: attestation
+    // expired" (the real cause of the MCP's /buckets/agent 401).
+    let token = agent.issue_jwt("read write admin", 300).expect("mint jwt");
+    let admin_keys = vec![admin_sk.verifying_key()];
+    let node_trust = boot.trust_state.node_trust.read().unwrap().clone();
+    let claims = memvault_auth::jwt::verify(
+        &token,
+        &admin_keys,
+        |pk| memvault_api::sigchain::find_agent_attestation(&client, pk).ok().flatten(),
+        |npk| node_trust.get(npk).cloned(),
+    )
+    .expect("never-expiry local agent must authenticate");
+    assert_eq!(claims.iss, "mcp");
 }

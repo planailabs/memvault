@@ -1,46 +1,24 @@
 # NixOS integration test for memvault cluster sync.
 #
 # Two nodes (a, b) form one cluster, and each enrols its own agent so the
-# write/read paths can stay on the HTTP API while the daemons keep running:
-#
-#   1. node_a runs `memctl genesis`, enrols a writer agent, and mints a
-#      node-join token for node_b plus a reader-agent token
-#   2. node_b runs `memctl cluster-join` and enrols the reader agent
-#   3. both daemons start
-#   4. node_a's writer agent imports a markdown doc via `memctl --url
-#      http://localhost:8401 import-docs` (HTTP path → goes through the
-#      running daemon — no redb file-lock contention)
-#   5. libp2p mDNS + bitswap + gossipsub replicate blocks to node_b
-#   6. node_b's reader agent polls `memctl --url ... export` until the
-#      doc body appears in the exported tree
+# write/read paths can stay on the HTTP API while the daemons keep running.
 #
 # Build / run with:
 #   nix build .#checks.x86_64-linux.sync -L
 { pkgs, ... }:
 
 let
-  # API-only memctl build — skips the dx fullstack/WASM client and just
-  # compiles the native daemon (memvault-web/server, axum, dioxus SSR).
-  memctl-test = pkgs.rustPlatform.buildRustPackage {
-    pname = "memctl-test";
-    version = "0.1.0";
-    src = ./..;
-    cargoLock = {
-      lockFile = ../Cargo.lock;
-      outputHashes = import ../extra-hashes.nix;
-    };
-    cargoBuildFlags = [ "-p" "memctl" ];
-    doCheck = false;
-    nativeBuildInputs = [ pkgs.pkg-config ];
-    buildInputs = [ pkgs.openssl ];
-    meta.mainProgram = "memctl";
-  };
+  # Use the shared slim memctl from the overlay rather than redeclaring
+  # the derivation here. `pkgs.memctl-slim` skips the dx fullstack /
+  # WASM client pipeline but still serves the API + SSR routes the
+  # daemon needs — adequate for the HTTP integration paths this test
+  # exercises.
+  memctl-test = pkgs.memctl-slim;
 
   commonNode = { pkgs, ... }: {
     environment.systemPackages = [
       memctl-test
       pkgs.jq
-      pkgs.gnugrep
     ];
     # Allow libp2p TCP + mDNS between the two test machines.
     networking.firewall.enable = false;
@@ -85,10 +63,17 @@ pkgs.testers.nixosTest {
     ))
 
     node_a.log("Enrolling writer agent on node_a")
-    node_a.succeed(
+    writer_enroll_out = node_a.succeed(
         f"memctl agent enroll --token '{writer_token}' --agent-id writer"
     )
     node_a.succeed("test -f /var/lib/memvault/agents/writer/private_key.pem")
+    bucket_match = re.search(r"Bucket:\s*([0-9a-f]{64})", writer_enroll_out)
+    assert bucket_match, (
+        "could not parse writer bucket id from enroll output:\n"
+        + writer_enroll_out
+    )
+    writer_bucket = bucket_match.group(1)
+    node_a.log(f"Writer bucket = {writer_bucket}")
 
     node_a.log("Issuing node-join token for node_b")
     node_token = last_token(node_a.succeed(
@@ -129,21 +114,42 @@ pkgs.testers.nixosTest {
     node_a.succeed(f"printf '%s' '{doc_text}' > /tmp/sync-test.md")
 
     node_a.log("Importing doc as writer agent over HTTP")
-    import_out = node_a.succeed(
+    import_rc, import_out = node_a.execute(
         "memctl --url http://localhost:8401 "
         "--identity-dir /var/lib/memvault/agents/writer "
         "import-docs --visibility public /tmp/sync-test.md 2>&1"
     )
-    # import-docs prints `  <path> -> <node_id>` per file
+    if import_rc != 0:
+        node_a.log(f"import-docs failed (rc={import_rc}):\n{import_out}")
+        node_a.log("--- node_a daemon log (tail) ---")
+        node_a.log(node_a.succeed("tail -200 /tmp/daemon.log"))
+        raise Exception(f"import-docs exited {import_rc}")
     m = re.search(r"-> (\S+)", import_out)
     assert m, f"could not parse imported doc id from:\n{import_out}"
     node_id = m.group(1)
     node_a.log(f"Doc imported with id={node_id}")
 
-    # ── 5. Poll until node_b's reader agent can export the doc ──────
-    # `memctl export` over HTTP pulls everything the reader can see; we
-    # grep the exported tree for the original body to confirm the block
-    # made it across via libp2p (bitswap + gossipsub head announcements).
+    # ── 4b. Grant reader Read on writer's bucket (via HTTP, signed by
+    # the daemon's admin authority on node_a). Crucially, the resulting
+    # grant block must propagate via the sigchain so node_b can use it
+    # for ACL evaluation — exercising that propagation is the whole
+    # point of the test.
+    node_a.log(
+        f"Issuing read grant on writer's bucket {writer_bucket} for "
+        f"audience=reader"
+    )
+    grant_cid = node_a.succeed(
+        "memctl --url http://localhost:8401 "
+        "--identity-dir /var/lib/memvault/agents/writer "
+        f"grant create {writer_bucket} "
+        "--agent reader --actions read --ttl 86400"
+    ).strip().splitlines()[-1].strip()
+    assert re.fullmatch(r"[0-9a-f]+", grant_cid), \
+        f"unexpected grant create output: {grant_cid!r}"
+    node_a.log(f"Grant published with cid={grant_cid}")
+
+    # ── 5. Poll until node_b's reader agent can export the doc through
+    # the sync'd grant.
     synced = False
     for attempt in range(180):
         node_b.execute("rm -rf /tmp/export && mkdir -p /tmp/export")
@@ -172,6 +178,20 @@ pkgs.testers.nixosTest {
         node_b.log(node_b.succeed("tail -200 /tmp/daemon.log"))
         node_b.log("--- node_b last export log ---")
         node_b.log(node_b.succeed("cat /tmp/export.log || true"))
+        node_b.log("--- node_b grants on writer's bucket (via reader's JWT) ---")
+        rc, out = node_b.execute(
+            "memctl --url http://localhost:8401 "
+            "--identity-dir /var/lib/memvault/agents/reader "
+            f"grant list {writer_bucket} 2>&1"
+        )
+        node_b.log(f"(rc={rc})\n{out}")
+        node_b.log("--- node_a grants on writer's bucket (via writer's JWT) ---")
+        rc, out = node_a.execute(
+            "memctl --url http://localhost:8401 "
+            "--identity-dir /var/lib/memvault/agents/writer "
+            f"grant list {writer_bucket} 2>&1"
+        )
+        node_a.log(f"(rc={rc})\n{out}")
         raise Exception(
             "node_b's reader agent never observed the doc within 180s"
         )

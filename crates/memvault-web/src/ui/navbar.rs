@@ -23,6 +23,7 @@ pub fn Sidebar() -> Element {
             NavLink { to: Route::FileExplorer {}, label: t!("nav-files") }
             NavLink { to: Route::VfsExplorer {}, label: t!("nav-vfs") }
             NavLink { to: Route::BucketList {}, label: "Buckets".to_string() }
+            NavLink { to: Route::SkillList {}, label: "Skills".to_string() }
 
             // Operations section
             div { class: "px-3 pt-6 pb-1",

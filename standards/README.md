@@ -1,0 +1,31 @@
+# memvault standards
+
+Uniform conventions for memvault's API and wire surfaces, **derived from the
+existing code** (HTTP server in `memvault-web`, the `MemvaultClient` trait +
+HTTP client in `memvault-api`, the MCP tools in `memvault-mcp`, and the domain
+types in `memvault-core` / `memvault-doc`).
+
+These are the source of truth. When you add or change an endpoint, a client
+method, an MCP tool, or a return type, **honour these standards and update them
+in the same change if the convention itself evolves.**
+
+| Document | Scope |
+|----------|-------|
+| [api-wire-conventions.md](api-wire-conventions.md) | How values are encoded on the wire: IDs, node labels, tags, list/get/create/error envelopes, bucket scoping, auth. |
+| [wire-dtos.md](wire-dtos.md) | The "transmit existing shapes" rule: one serde shape per domain type, hex-encoded IDs via `memvault_api::wire`, no ad-hoc `json!` on the server and no `serde_json::Value` field-picking on the client. How to add a new endpoint. |
+| [bucket-scoping.md](bucket-scoping.md) | Every document/file/graph-entity operation is scoped to a concrete bucket; no implicit all-buckets surface for content reads/writes. |
+| [query-scope.md](query-scope.md) | `QueryScope` is the canonical read-query descriptor (bucket + view + retraction + kind + detail), threaded from the API surface to the store. |
+| [exhaustive-lookups.md](exhaustive-lookups.md) | Lookups whose correctness depends on seeing every match (resolution, membership, ACL, trust, dedup) must not carry a finite cap — use `usize::MAX`; caps are for caller-driven pagination only. |
+| [derived-indexes.md](derived-indexes.md) | Hot-path lookups must not scan every entity/doc/block — use a scoped `query_by_*`/`QueryScope`, or a derived index/cache table (cache over the store, repaired on read, safe when stale). |
+| [blockstore-not-redb.md](blockstore-not-redb.md) | Cluster-scoped state changes must emit a content-addressed block (it's the sync unit); redb side tables are derived indexes, rebuildable from blocks, and never sync. |
+| [block-ingestion.md](block-ingestion.md) | Every block — locally created or peer-synced — enters the store through the single `ingest_block` primitive; admission control (sign locally / `verify_cid`+`vet_sync_block` remotely) is a gate in front of that one path, never a second way to write a block. |
+| [sign-everything.md](sign-everything.md) | Any block that confers trust/authority/access/visibility must be signed, and the ingest path must verify the signature before acting (authority may be deferred; authenticity never). |
+
+## The two rules in one sentence each
+
+1. **One shape per type.** A domain type has exactly one wire shape; the server
+   serializes it and the client deserializes it with `serde` — neither side
+   hand-rolls JSON.
+2. **IDs are strings, never byte arrays.** Node references are `"type:hex"`
+   labels; standalone IDs/CIDs are bare lowercase hex. Raw `[u8; 32]` JSON
+   arrays must never appear on the wire.

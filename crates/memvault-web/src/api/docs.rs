@@ -46,16 +46,6 @@ pub struct DocResponse {
     pub updated_ns: u64,
 }
 
-#[derive(Serialize)]
-pub struct DocSummaryResponse {
-    pub id: String,
-    pub cid: String,
-    pub title: Option<String>,
-    pub tags: Vec<(String, String)>,
-    pub updated_ns: u64,
-    pub attachment_count: usize,
-}
-
 #[derive(Deserialize)]
 pub struct UpdateDocRequest {
     pub ops: Vec<TextOpRequest>,
@@ -73,7 +63,7 @@ pub async fn list_docs(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListDocsQuery>,
-) -> Result<Json<Vec<DocSummaryResponse>>, ApiError> {
+) -> Result<Json<Vec<memvault_api::DocSummary>>, ApiError> {
     let tag_filter = match (params.tag_ns, params.tag_val) {
         (Some(ns), Some(val)) => Some((ns, val)),
         _ => None,
@@ -100,19 +90,9 @@ pub async fn list_docs(
         .list_docs_ex(tag_filter, limit, bucket_id.as_ref(), include_retracted)
         .await?;
 
-    let results: Vec<DocSummaryResponse> = docs
-        .into_iter()
-        .map(|d| DocSummaryResponse {
-            id: format!("doc:{}", hex::encode(d.id.0)),
-            cid: hex::encode(&d.cid),
-            title: d.title,
-            tags: d.tags,
-            updated_ns: d.updated_ns,
-            attachment_count: d.attachment_count,
-        })
-        .collect();
-
-    Ok(Json(results))
+    // `DocSummary` carries its own wire encoding (hex id, CID-string cid); the
+    // client decodes it directly — no hand-built response (see `standards/`).
+    Ok(Json(docs))
 }
 
 /// POST /api/v1/docs
@@ -123,7 +103,7 @@ pub async fn create_doc(
 ) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
     let vis = parse_visibility_str(req.visibility.as_deref());
 
-    let bucket_id = req.bucket.as_deref().and_then(|h| {
+    let bucket_id = match req.bucket.as_deref().and_then(|h| {
         let bytes = hex::decode(h).ok()?;
         if bytes.len() != 32 {
             return None;
@@ -131,11 +111,33 @@ pub async fn create_doc(
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Some(memvault_core::BucketId(arr))
-    });
-
-    if let Some(bid) = &bucket_id {
-        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
-    }
+    }) {
+        Some(bid) => {
+            crate::api::auth::enforce_bucket_action(
+                &auth.claims,
+                &bid,
+                memvault_auth::Action::Write,
+            )?;
+            bid
+        }
+        None => {
+            // Auto-resolve to the caller's agent bucket — mirrors what
+            // memctl's local `put` path does via `resolve_target_bucket`.
+            // The HTTP write path used to 500 with "bucket required" here;
+            // matching the CLI behaviour means well-behaved clients like
+            // `memctl import-docs` (which doesn't thread bucket from the
+            // CLI) "just work".
+            let pubkey_bytes = hex::decode(&auth.claims.sub)
+                .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+            state
+                .client
+                .ensure_agent_bucket(&pubkey_bytes, &auth.claims.iss)
+                .await
+                .map_err(|e| {
+                    ApiError::internal(format!("ensure agent bucket: {e}"))
+                })?
+        }
+    };
 
     let result = memvault_api::docs::create_doc(
         state.client.as_ref(),
@@ -145,7 +147,7 @@ pub async fn create_doc(
         req.tags.clone(),
         vis,
         req.vfs_path.as_deref(),
-        bucket_id.as_ref(),
+        Some(&bucket_id),
     )
     .await?;
     tracing::info!(doc_id = %result.node_id, "API: doc created");
@@ -249,14 +251,18 @@ pub async fn doc_history(
     let results: Vec<serde_json::Value> = records
         .into_iter()
         .map(|r| {
+            // cid + agent_attestation are CIDs → canonical CID string (standards/).
             let mut row = serde_json::json!({
-                "cid": hex::encode(&r.cid),
+                "cid": memvault_core::cid_string_from_bytes(&r.cid)
+                    .unwrap_or_else(|_| hex::encode(&r.cid)),
                 "op_kind": r.op_kind,
                 "wall_ns": r.wall_ns,
                 "author": hex::encode(&r.author),
             });
             if let Some(cid) = r.agent_attestation.as_ref() {
-                row["agent_attestation"] = serde_json::Value::String(hex::encode(cid));
+                row["agent_attestation"] = serde_json::Value::String(
+                    memvault_core::cid_string_from_bytes(cid).unwrap_or_else(|_| hex::encode(cid)),
+                );
             }
             row
         })

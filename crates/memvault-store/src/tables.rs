@@ -87,3 +87,10 @@ pub const SCOPE_MEMBERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("s
 /// counts in O(1), and know which view×bucket partitions have been lazily
 /// built already.
 pub const SCOPE_REGISTRY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("scope_registry");
+
+/// VFS root derived index: key = bucket_id (32 bytes), value = the bucket's
+/// VFS root entity id (32 bytes). A cache over the blockstore so `ensure_root`
+/// is O(1) instead of scanning every entity in the bucket. Populated/repaired
+/// by the (uncapped, dedup) reconciliation scan in `vfs::ensure_root`; safe to
+/// be stale or absent — the scan is the source of truth.
+pub const VFS_ROOT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vfs_root");

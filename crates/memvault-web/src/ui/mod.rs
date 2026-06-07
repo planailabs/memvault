@@ -8,5 +8,6 @@ pub mod filters;
 pub mod layout;
 pub mod navbar;
 pub mod pages;
+pub mod session;
 pub mod state;
 pub mod topbar;

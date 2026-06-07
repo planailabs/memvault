@@ -35,4 +35,13 @@ mime_guess = "2"
 ed25519-dalek = "2"
 rand = "0.8"
 reqwest = { workspace = true, features = ["json"] }
+# The workspace's reqwest uses `rustls-no-provider`; install the ring
+# provider at startup (see `lib::run`).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde_ipld_dagcbor = "0.6"
+
+[dev-dependencies]
+# In-crate test (src/server.rs `tool_tests`): drives the rmcp tool methods
+# against an enrolled-agent in-process LocalClient. Only memvault-store is not
+# already a normal dependency.
+memvault-store = { path = "../memvault-store" }

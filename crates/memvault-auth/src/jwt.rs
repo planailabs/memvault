@@ -98,19 +98,21 @@ fn now_ns() -> u64 {
 
 /// Issue a JWT signed by `signing_key` (the agent's private key).
 ///
-/// The verifier will look up the agent's [`AgentAttestation`] from its
-/// local sigchain by `sub` — no attestation embed needed in the token.
-/// `agent_id` is a human-readable label carried in `iss` (display /
-/// audit only; not authoritative).
-pub fn issue(
-    signing_key: &SigningKey,
-    agent_id: &str,
-    scope: &str,
-    ttl_secs: u64,
-) -> Result<String> {
+/// The verifier looks up the agent's [`AgentAttestation`] from its local
+/// sigchain by `sub` (the pubkey) — no attestation embed needed. `iss` is
+/// left EMPTY: it is a display label, not an identity, and the verifier
+/// canonicalizes it from the on-chain attestation, so a client-provided
+/// name only risks an `iss`-mismatch rejection.
+pub fn issue(signing_key: &SigningKey, scope: &str, ttl_secs: u64) -> Result<String> {
     let now = now_secs();
     let claims = AgentTokenClaims {
-        iss: agent_id.to_string(),
+        // `iss` is a display label, not an identity — the agent IS its
+        // pubkey (`sub`). The verifier canonicalizes `iss` from the on-chain
+        // attestation (looked up by `sub`), so the client must NOT provide a
+        // name here: doing so was the source of "iss != attestation.agent_id"
+        // 401s when a client's local name (e.g. identity-dir basename) drifted
+        // from the enrolled agent_id.
+        iss: String::new(),
         sub: hex::encode(signing_key.verifying_key().to_bytes()),
         iat: now,
         exp: now + ttl_secs,
@@ -205,7 +207,7 @@ where
         return Err(AuthError::InvalidToken(format!("unsupported alg: {header}")));
     }
 
-    let claims: AgentTokenClaims = serde_json::from_slice(&payload_bytes)
+    let mut claims: AgentTokenClaims = serde_json::from_slice(&payload_bytes)
         .map_err(|e| AuthError::InvalidToken(format!("claims json: {e}")))?;
 
     // Parse the agent pubkey from `sub`.
@@ -240,14 +242,17 @@ where
             "lookup returned attestation for a different pubkey".into(),
         ));
     }
-    // `iss` is cosmetic but we cross-check it as a sanity guard against
-    // confused-deputy: an honest agent's iss matches its attestation's
-    // agent_id. Mismatch is a sign of a manually-constructed token.
-    if claims.iss != agent_att.agent_id.0 {
-        return Err(AuthError::InvalidToken(
-            "iss does not match attestation.agent_id".into(),
-        ));
-    }
+    // `iss` is a display LABEL, not an identity. The authoritative identity
+    // is `sub` (the agent pubkey), verified above against the token
+    // signature, and the attestation — looked up by that pubkey — carries
+    // the canonical `agent_id`. A forger cannot fake the token without the
+    // agent's private key regardless of `iss`, so enforcing `iss ==
+    // agent_id` added no security; it only 401'd a legitimate key-holder
+    // whose client-side `iss` was stale (e.g. a renamed/copied identity
+    // dir, whose basename drives `AgentIdentity`'s agent_id). Instead of
+    // rejecting, adopt the on-chain agent_id as the authoritative `iss` so
+    // downstream display/audit always shows the canonical name.
+    claims.iss = agent_att.agent_id.0.clone();
 
     // Verify the agent attestation's signature against its embedded
     // `node_pubkey` (a node-signed promise to admit this agent).
@@ -330,7 +335,7 @@ mod tests {
     use crate::node_attestation::AttestationOrigin;
     use crate::role::AgentRole;
     use ed25519_dalek::SigningKey;
-    use memvault_core::{AgentId, ClusterId, PeerId};
+    use memvault_core::{AgentName, ClusterId, PeerId};
     use rand::RngCore;
 
     fn make_key() -> SigningKey {
@@ -361,13 +366,13 @@ mod tests {
         let n_att = node_att(&admin, &node);
         let a_att = sign_agent_attestation(
             &node,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", scope, ttl).unwrap();
+        let tok = issue(&agent, scope, ttl).unwrap();
         (tok, admin.verifying_key(), n_att, a_att)
     }
 
@@ -380,13 +385,13 @@ mod tests {
         // Agent attestation that expired long ago (not_after_ns = 1).
         let a_att = sign_agent_attestation(
             &node,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             1,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let tok = issue(&agent, "read", 300).unwrap();
         let err = verify(
             &tok,
             &[admin.verifying_key()],
@@ -412,13 +417,13 @@ mod tests {
         n_att.signature = admin.sign(&n_att.signing_bytes().unwrap()).to_bytes();
         let a_att = sign_agent_attestation(
             &node,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let tok = issue(&agent, "read", 300).unwrap();
         let err = verify(
             &tok,
             &[admin.verifying_key()],
@@ -451,13 +456,13 @@ mod tests {
         let agent = make_key();
         let a_att = sign_agent_attestation(
             &key,
-            AgentId("alice".into()),
+            AgentName("alice".into()),
             agent.verifying_key().to_bytes(),
             AgentRole::AgentHost,
             u64::MAX,
         )
         .unwrap();
-        let tok = issue(&agent, "alice", "read", 300).unwrap();
+        let tok = issue(&agent, "read", 300).unwrap();
         let claims = verify(
             &tok,
             &[],
@@ -466,6 +471,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(claims.iss, "alice");
+    }
+
+    /// `iss` is canonicalized from the on-chain attestation, not enforced
+    /// against the token. The client now mints an empty `iss` (and even a
+    /// stale client-provided one would be tolerated) — `sub` (pubkey) is the
+    /// identity; the returned claims carry the canonical agent_id.
+    #[test]
+    fn iss_is_canonicalized_from_attestation() {
+        let admin = make_key();
+        let node = make_key();
+        let agent = make_key();
+        let n_att = node_att(&admin, &node);
+        // On-chain attestation says the agent is "alice".
+        let a_att = sign_agent_attestation(
+            &node,
+            AgentName("alice".into()),
+            agent.verifying_key().to_bytes(),
+            AgentRole::AgentHost,
+            u64::MAX,
+        )
+        .unwrap();
+        // Client mints with no iss; verify fills it from the attestation.
+        let tok = issue(&agent, "read", 300).unwrap();
+        let claims = verify(
+            &tok,
+            &[admin.verifying_key()],
+            |_| Some(a_att.clone()),
+            |_| Some(NodeTrust::Attested(n_att.clone())),
+        )
+        .expect("iss mismatch must not reject a signature-valid token");
+        assert_eq!(claims.iss, "alice", "iss canonicalized to on-chain agent_id");
     }
 
     #[test]

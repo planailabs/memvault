@@ -183,6 +183,10 @@ pub struct QueryScope {
     pub retraction: RetractionMode,
     /// Restrict to a single node kind (doc / file / entity). `None` = all kinds.
     pub kind: Option<NodeKind>,
+    /// Restrict to entities of a single fine-grained `kind` (e.g. "skill").
+    /// `None` = no entity-kind filter. Applies only to graph entities; pushed
+    /// into the index as an exact-match clause, not a post-filter.
+    pub entity_kind: Option<String>,
     /// How much per-node detail a scoped listing returns.
     pub detail: DetailLevel,
 }
@@ -228,6 +232,12 @@ impl QueryScope {
     /// Builder: restrict to a single node kind.
     pub fn with_kind(mut self, kind: Option<NodeKind>) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Builder: restrict to entities of a single fine-grained kind.
+    pub fn with_entity_kind(mut self, entity_kind: Option<String>) -> Self {
+        self.entity_kind = entity_kind;
         self
     }
 

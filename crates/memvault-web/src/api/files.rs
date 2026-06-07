@@ -117,7 +117,7 @@ pub async fn upload_file(
     if let Some(bid) = &bucket_id {
         crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
     }
-    let (_cid, node_id) = memvault_api::files::upload_file(
+    let (manifest_cid, node_id) = memvault_api::files::upload_file(
         state.client.as_ref(),
         &data,
         Some(&name),
@@ -133,7 +133,11 @@ pub async fn upload_file(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "cid": node_id,
+            // `cid` is the canonical manifest CID string; `node_id` is the
+            // "file:<hex>" node label (see standards/ §1).
+            "cid": memvault_core::cid_string_from_bytes(&manifest_cid)
+                .unwrap_or_else(|_| hex::encode(&manifest_cid)),
+            "node_id": node_id,
             "name": name,
         })),
     ))
@@ -145,7 +149,9 @@ pub async fn download_file(
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+    // Canonical form is the CID string; legacy bare hex is still accepted.
+    let cid = memvault_core::cid_bytes_lenient(&cid_hex)
+        .map_err(|_| ApiError::bad_request("Invalid CID"))?;
     crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
 
     let data = state.client.read_file(&cid).await?;
@@ -162,7 +168,9 @@ pub async fn file_manifest(
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
+    // Canonical form is the CID string; legacy bare hex is still accepted.
+    let cid = memvault_core::cid_bytes_lenient(&cid_hex)
+        .map_err(|_| ApiError::bad_request("Invalid CID"))?;
     crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
 
     match state.client.get_file_manifest(&cid).await? {
@@ -173,6 +181,67 @@ pub async fn file_manifest(
         )),
         None => Err(ApiError::not_found("Manifest not found")),
     }
+}
+
+/// POST /api/v1/files/:cid/pin — pin a file so it is never GC'd.
+pub async fn pin_file(
+    auth: RequireWrite,
+    State(state): State<Arc<AppState>>,
+    Path(cid_hex): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    // Canonical form is the CID string; legacy bare hex is still accepted.
+    let cid = memvault_core::cid_bytes_lenient(&cid_hex)
+        .map_err(|_| ApiError::bad_request("Invalid CID"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Write)?;
+    state.client.pin_file(&cid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /api/v1/files/:cid/pin — remove a pin.
+pub async fn unpin_file(
+    auth: RequireWrite,
+    State(state): State<Arc<AppState>>,
+    Path(cid_hex): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    // Canonical form is the CID string; legacy bare hex is still accepted.
+    let cid = memvault_core::cid_bytes_lenient(&cid_hex)
+        .map_err(|_| ApiError::bad_request("Invalid CID"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Write)?;
+    state.client.unpin_file(&cid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/files/:cid/extracted-text — extracted plain text, if any.
+pub async fn extracted_text(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(cid_hex): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Canonical form is the CID string; legacy bare hex is still accepted.
+    let cid = memvault_core::cid_bytes_lenient(&cid_hex)
+        .map_err(|_| ApiError::bad_request("Invalid CID"))?;
+    crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
+    let text = state.client.read_extracted_text(&cid).await?;
+    Ok(Json(serde_json::json!({ "text": text })))
+}
+
+/// GET /api/v1/pins — list pinned files as [{ cid, name }].
+pub async fn list_pinned(
+    _auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let pins = state.client.list_pinned().await?;
+    let result: Vec<serde_json::Value> = pins
+        .into_iter()
+        .map(|(cid, name)| {
+            serde_json::json!({
+                "cid": memvault_core::cid_string_from_bytes(&cid)
+                    .unwrap_or_else(|_| hex::encode(&cid)),
+                "name": name,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!(result)))
 }
 
 /// DELETE /api/v1/docs/:id/files/:name — detach file (no-op in new system)

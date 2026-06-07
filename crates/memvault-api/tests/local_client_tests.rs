@@ -189,6 +189,253 @@ async fn add_entity_and_traverse() {
 }
 
 #[tokio::test]
+async fn skill_publish_get_list_rename_roundtrip() {
+    let (_dir, client) = make_client();
+
+    let spec = memvault_api::SkillSpec {
+        name: "Code Review".to_string(),
+        description: Some("Review a diff for bugs".to_string()),
+        trigger: Some("when asked to review code".to_string()),
+        instruction_body: Some("# Code Review\nRun the linter, then read the diff.".to_string()),
+    };
+    let skill_id = client
+        .skill_publish(spec, Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    // get() assembles the manifest plus the linked instruction doc.
+    let bundle = client.skill_get(&skill_id).await.unwrap().expect("skill exists");
+    assert_eq!(bundle.info.name, "Code Review");
+    assert_eq!(bundle.info.description.as_deref(), Some("Review a diff for bugs"));
+    assert_eq!(bundle.instructions.len(), 1);
+    assert_eq!(bundle.instructions[0].relation, memvault_core::SKILL_INSTRUCTION_REL);
+    assert!(bundle.instructions[0].node.starts_with("doc:"));
+
+    // A plain (non-skill) entity must not appear in skill_list.
+    let other = Entity {
+        id: EntityId::random(),
+        kind: "person".to_string(),
+        props: BTreeMap::new(),
+        edges_out: vec![],
+    };
+    client.add_entity(other, Visibility::Internal, None).await.unwrap();
+
+    let skills = client.skill_list(100, None).await.unwrap();
+    assert_eq!(skills.len(), 1, "only the skill, not the person entity");
+    assert_eq!(skills[0].id, skill_id);
+    assert_eq!(skills[0].name, "Code Review");
+
+    // Link a script resource with a bundle path + exec bit.
+    let file_cid = client
+        .upload_file(
+            b"#!/bin/sh\necho hi\n",
+            Some("run.sh"),
+            "text/x-shellscript",
+            vec![],
+            "internal",
+            None,
+        )
+        .await
+        .unwrap();
+    let edge_id = client
+        .skill_link_resource(
+            &skill_id,
+            &NodeRef::Attachment(file_cid.clone()),
+            memvault_core::SKILL_RESOURCE_REL,
+            Some("scripts/run.sh"),
+            true,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+
+    let bundle = client.skill_get(&skill_id).await.unwrap().unwrap();
+    assert_eq!(bundle.resources.len(), 1);
+    assert_eq!(bundle.resources[0].path.as_deref(), Some("scripts/run.sh"));
+    assert!(bundle.resources[0].executable);
+
+    // Unlink the resource.
+    client.skill_unlink_resource(&skill_id, &edge_id).await.unwrap();
+    let bundle = client.skill_get(&skill_id).await.unwrap().unwrap();
+    assert_eq!(bundle.resources.len(), 0);
+
+    // Rename via EntityUpdate; both get() and list() reflect it.
+    client.skill_rename(&skill_id, "Diff Review").await.unwrap();
+    let bundle = client.skill_get(&skill_id).await.unwrap().unwrap();
+    assert_eq!(bundle.info.name, "Diff Review");
+    let skills = client.skill_list(100, None).await.unwrap();
+    assert_eq!(skills[0].name, "Diff Review");
+
+    // Delete (retract): no longer listed.
+    client.skill_delete(&skill_id, "obsolete").await.unwrap();
+    let skills = client.skill_list(100, None).await.unwrap();
+    assert_eq!(skills.len(), 0);
+}
+
+#[tokio::test]
+async fn reserved_kinds_rejected_by_validated_node_api() {
+    let (_dir, client) = make_client();
+
+    // The validated `add_entity` (what user-facing surfaces call) rejects
+    // managed kinds; the raw `add_entity_internal` (VFS/skill transport) allows
+    // them. An ordinary kind passes validation.
+    for kind in ["skill", "vfs:dir"] {
+        let e = Entity {
+            id: EntityId::random(),
+            kind: kind.to_string(),
+            props: BTreeMap::new(),
+            edges_out: vec![],
+        };
+        let err = client
+            .add_entity(e, Visibility::Internal, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, memvault_api::ApiError::Invalid(_)),
+            "kind {kind:?} must be rejected by the validated add_entity, got {err:?}"
+        );
+    }
+    let person = Entity {
+        id: EntityId::random(),
+        kind: "person".to_string(),
+        props: BTreeMap::new(),
+        edges_out: vec![],
+    };
+    let id = client
+        .add_entity(person, Visibility::Internal, None)
+        .await
+        .expect("ordinary kind is allowed");
+
+    // Validated retract refuses a reserved entity. Build a skill via its
+    // dedicated API, then confirm the generic retract_node rejects it.
+    let skill_id = client
+        .skill_publish(
+            memvault_api::SkillSpec {
+                name: "X".into(),
+                description: None,
+                trigger: None,
+                instruction_body: None,
+            },
+            Visibility::Internal,
+            None,
+        )
+        .await
+        .unwrap();
+    let err = client
+        .retract_node(&format!("entity:{}", hex::encode(skill_id.0)), "x")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, memvault_api::ApiError::Invalid(_)));
+    // A non-reserved entity retracts fine through the validated API.
+    client
+        .retract_node(&format!("entity:{}", hex::encode(id.0)), "x")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn skill_hydrate_materializes_bundle() {
+    let (_dir, client) = make_client();
+
+    let spec = memvault_api::SkillSpec {
+        name: "Deploy".to_string(),
+        description: None,
+        trigger: None,
+        instruction_body: Some("# Deploy\nRun scripts/run.sh".to_string()),
+    };
+    let skill_id = client
+        .skill_publish(spec, Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    let script = b"#!/bin/sh\necho deploying\n";
+    let cid = client
+        .upload_file(script, Some("run.sh"), "text/x-shellscript", vec![], "internal", None)
+        .await
+        .unwrap();
+    client
+        .skill_link_resource(
+            &skill_id,
+            &NodeRef::Attachment(cid),
+            memvault_core::SKILL_RESOURCE_REL,
+            Some("scripts/run.sh"),
+            true,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+
+    let out = tempfile::tempdir().unwrap();
+    let report = memvault_api::skill_hydrate::hydrate_skill(
+        client.as_ref(),
+        &skill_id,
+        out.path(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // SKILL.md (instruction) + scripts/run.sh (resource) both written.
+    let skill_md = std::fs::read_to_string(out.path().join("SKILL.md")).unwrap();
+    assert!(skill_md.contains("Run scripts/run.sh"));
+    let run_sh = std::fs::read(out.path().join("scripts/run.sh")).unwrap();
+    assert_eq!(run_sh, script);
+    assert_eq!(report.written.len(), 2);
+
+    // Trust gate: the test harness writes as the node (no bound agent
+    // identity), so the manifest carries no agent attestation — the executable
+    // bit is withheld even though set_executable=true was requested.
+    assert!(!report.author_attested, "node-authored skill is not attested");
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.contains("not attested")),
+        "withholding the exec bit is reported, got {:?}",
+        report.skipped
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(out.path().join("scripts/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0,
+            "executable bit withheld for an unattested author"
+        );
+    }
+
+    // Path traversal is rejected (defense-in-depth on the join helper).
+    let evil = tempfile::tempdir().unwrap();
+    // Re-link a resource with a traversal path and confirm hydrate errors.
+    client
+        .skill_link_resource(
+            &skill_id,
+            &NodeRef::Attachment(client
+                .upload_file(b"x", Some("x"), "text/plain", vec![], "internal", None)
+                .await
+                .unwrap()),
+            memvault_core::SKILL_RESOURCE_REL,
+            Some("../escape.sh"),
+            false,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+    let res = memvault_api::skill_hydrate::hydrate_skill(
+        client.as_ref(),
+        &skill_id,
+        evil.path(),
+        false,
+    )
+    .await;
+    assert!(res.is_err(), "traversal path must be rejected");
+}
+
+#[tokio::test]
 async fn search_after_indexing() {
     let (_dir, client) = make_client();
 
@@ -245,7 +492,6 @@ async fn event_bus_publish_subscribe() {
 
 #[tokio::test]
 async fn quota_manager_integration() {
-    use memvault_core::AgentId;
     use memvault_query::AgentQuota;
 
     let dir = tempfile::tempdir().unwrap();
@@ -264,7 +510,7 @@ async fn quota_manager_integration() {
         b"cluster-1".to_vec(),
     ));
 
-    let agent = AgentId("test-agent".to_string());
+    let agent = [0x11u8; 32]; // agent ed25519 pubkey (quota is keyed by pubkey)
 
     // Check that writes are allowed initially
     {
@@ -1783,5 +2029,937 @@ async fn deferred_commit_is_searchable_after_read() {
     assert!(
         hits.iter().any(|h| h.doc_id == doc_id),
         "deferred write must be searchable after a read flushes it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bucket merge (alias overlay)
+// ---------------------------------------------------------------------------
+
+/// Test helper: a client that holds an admin key, so `bucket_merge_sync`'s
+/// authority check (`pick_grant_signer`) resolves to an admin signer
+/// (authorised on every bucket).
+fn admin_client() -> (tempfile::TempDir, Arc<LocalClient>) {
+    let (dir, client) = make_client();
+    client.set_admin_signing_key(ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
+    (dir, client)
+}
+
+#[tokio::test]
+async fn vfs_mkdir_then_resolve_ls_tree() {
+    let (_dir, client) = admin_client();
+    let bucket = mk_bucket(&client, "vfs-probe").await;
+
+    // mkdir -p /probe/sub
+    let leaf = client.vfs_mkdir(&bucket, "/probe/sub").await.unwrap();
+
+    // The leaf dir must resolve, and so must the parent.
+    let parent = client
+        .vfs_resolve(&bucket, "/probe")
+        .await
+        .unwrap();
+    assert!(parent.is_some(), "/probe must resolve after mkdir");
+    let sub = client.vfs_resolve(&bucket, "/probe/sub").await.unwrap();
+    assert!(sub.is_some(), "/probe/sub must resolve after mkdir");
+    if let Some((memvault_core::NodeRef::Entity(eid), _)) = &sub {
+        assert_eq!(*eid, leaf, "resolved leaf matches mkdir return");
+    } else {
+        panic!("/probe/sub resolved to a non-entity: {sub:?}");
+    }
+
+    // ls on the parent must not error and must list the child.
+    let entries = client.vfs_ls(&bucket, "/probe", false).await.unwrap();
+    assert!(
+        entries.iter().any(|e| e.name == "sub"),
+        "ls /probe lists 'sub', got: {entries:?}"
+    );
+
+    // tree on the parent must not error.
+    let tree = client.vfs_tree(&bucket, "/probe", 10).await.unwrap();
+    assert!(tree.contains("sub"), "tree /probe includes sub:\n{tree}");
+
+    // ls/tree at root must work too.
+    let root_entries = client.vfs_ls(&bucket, "/", false).await.unwrap();
+    assert!(root_entries.iter().any(|e| e.name == "probe"));
+}
+
+async fn mk_bucket(client: &LocalClient, name: &str) -> memvault_core::BucketId {
+    client
+        .bucket_create(
+            name,
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Standard,
+        )
+        .await
+        .unwrap()
+}
+
+async fn put_note(client: &LocalClient, bucket: &memvault_core::BucketId, body: &str) {
+    let doc = Document::new(DocId::random(), body.to_string(), BTreeMap::new());
+    client
+        .put_doc(doc, vec![], Visibility::Internal, Some(bucket))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn merge_read_union_for_docs() {
+    use memvault_core::QueryScope;
+    let (_dir, client) = admin_client();
+
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+    put_note(&client, &a, "in A").await;
+    put_note(&client, &b, "in B").await;
+
+    // Before the merge: a query scoped to A sees only A's doc.
+    let only_a = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(only_a.len(), 1, "A alone before merge");
+
+    // Merge B into A.
+    let cids = client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+    assert_eq!(cids.len(), 1, "one merge record per source");
+
+    // After the merge: a query scoped to the canonical A returns the union.
+    let union = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(union.len(), 2, "canonical A surfaces B's content after merge");
+
+    // canonical_of / members reflect the edge.
+    assert_eq!(client.canonical_of(&b.0), a.0, "B resolves to A");
+    assert_eq!(client.canonical_of(&a.0), a.0, "A resolves to itself");
+    assert_eq!(client.bucket_merge_members(&a.0), vec![b.0], "A members = [B]");
+}
+
+#[tokio::test]
+async fn merge_chain_flattens_to_terminal() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    let c = mk_bucket(&client, "c").await;
+
+    // A -> B, B -> C. canonical_of(A) must flatten to C.
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &c).unwrap();
+
+    assert_eq!(client.canonical_of(&a.0), c.0, "A flattens through B to C");
+    assert_eq!(client.canonical_of(&b.0), c.0, "B resolves to C");
+
+    // members(C) is the transitive closure {A, B}.
+    let mut members = client.bucket_merge_members(&c.0);
+    members.sort();
+    let mut expected = vec![a.0, b.0];
+    expected.sort();
+    assert_eq!(members, expected, "C members = transitive {{A, B}}");
+}
+
+#[tokio::test]
+async fn merge_chain_list_shows_only_terminal() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    let c = mk_bucket(&client, "c").await;
+
+    // A -> B, then B -> C (recursive). Only the terminal C should survive the
+    // default listing; A and B are both merged sources.
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &c).unwrap();
+
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    let ids: std::collections::HashSet<_> = visible.iter().map(|bi| bi.id.clone()).collect();
+    assert!(ids.contains(&c), "terminal canonical C is visible");
+    assert!(!ids.contains(&a), "source A hidden");
+    assert!(
+        !ids.contains(&b),
+        "intermediate B hidden (merged into C, even though it's also a canonical of A)"
+    );
+
+    // C is the terminal — not itself marked merged.
+    let c_info = visible.iter().find(|bi| bi.id == c).unwrap();
+    assert_eq!(c_info.merged_into, None, "terminal canonical has no merged_into");
+
+    // With include_merged, all three appear and A/B point at their terminal C.
+    let all = client.bucket_list_filtered(true).await.unwrap();
+    let all_ids: std::collections::HashSet<_> = all.iter().map(|bi| bi.id.clone()).collect();
+    assert!(all_ids.contains(&a) && all_ids.contains(&b) && all_ids.contains(&c));
+    let a_info = all.iter().find(|bi| bi.id == a).unwrap();
+    let b_info = all.iter().find(|bi| bi.id == b).unwrap();
+    assert_eq!(a_info.merged_into, Some(c.clone()), "A resolves to terminal C");
+    assert_eq!(b_info.merged_into, Some(c.clone()), "B resolves to terminal C");
+}
+
+#[tokio::test]
+async fn merge_into_phantom_canonical_keeps_source_visible() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "orphan-source").await;
+    // Canonical that was never created as a bucket (no decl) — mirrors a merge
+    // into an unsynced/phantom target seen in the wild.
+    let phantom = memvault_core::BucketId([0x42u8; 32]);
+
+    client.bucket_merge_sync(&[a.clone()], &phantom).unwrap();
+    assert_eq!(client.canonical_of(&a.0), phantom.0, "A resolves to phantom");
+
+    // The phantom canonical can't be listed (no decl), so hiding A would orphan
+    // its data. A must stay visible in the default listing.
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    assert!(
+        visible.iter().any(|bi| bi.id == a),
+        "source stays visible when its canonical has no decl to surface"
+    );
+    assert!(
+        !visible.iter().any(|bi| bi.id == phantom),
+        "phantom canonical never appears (no decl)"
+    );
+}
+
+#[tokio::test]
+async fn unmerge_by_terminal_canonical_detaches_chained_source() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    let c = mk_bucket(&client, "c").await;
+
+    // A -> B -> C. A's direct edge is A->B, but BucketInfo.merged_into reports
+    // the terminal C — which is what the UI hands to unmerge.
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &c).unwrap();
+    assert_eq!(client.canonical_of(&a.0), c.0);
+
+    // Unmerge A using the terminal canonical C (not the direct parent B).
+    client.bucket_unmerge(&a, &c).await.unwrap();
+
+    // A is now standalone; B still folds into C.
+    assert_eq!(client.canonical_of(&a.0), a.0, "A detached from the chain");
+    assert_eq!(client.canonical_of(&b.0), c.0, "B still merged into C");
+
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    assert!(visible.iter().any(|bi| bi.id == a), "A visible again");
+    assert!(!visible.iter().any(|bi| bi.id == b), "B still hidden");
+}
+
+#[tokio::test]
+async fn unmerge_requires_authorized_retraction() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    let merge_cid = client
+        .store()
+        .query_by_tag("bucket_merge", &hex::encode(a.0), 0, 1)
+        .unwrap()[0]
+        .clone();
+    assert_eq!(client.canonical_of(&a.0), b.0);
+
+    // A retraction whose authority assertion is signed by an unauthorized key
+    // (not the merge's issuer, not an admin) must NOT reverse the merge.
+    client
+        .publish_retraction_block(&merge_cid, "forged", Some(([9u8; 32], [0u8; 64])))
+        .unwrap();
+    client.bump_alias_generation();
+    assert_eq!(
+        client.canonical_of(&a.0),
+        b.0,
+        "unauthorized retraction does not unmerge"
+    );
+
+    // A proper unmerge (signed by the canonical's authority) does reverse it.
+    client.bucket_unmerge(&a, &b).await.unwrap();
+    assert_eq!(
+        client.canonical_of(&a.0),
+        a.0,
+        "authorized unmerge reverses the merge"
+    );
+}
+
+#[tokio::test]
+async fn unmerge_emits_syncable_retraction_block() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    assert_eq!(client.canonical_of(&a.0), b.0);
+
+    // Unmerge retracts the merge record. The retraction must be a SYNCABLE
+    // block (so peers converge), not just a local RETRACTED-table entry.
+    client.bucket_unmerge(&a, &b).await.unwrap();
+    assert_eq!(client.canonical_of(&a.0), a.0, "alias dropped locally");
+    let retr = client
+        .store()
+        .query_by_tag("sigchain", "retraction", 0, usize::MAX)
+        .unwrap();
+    assert!(!retr.is_empty(), "unmerge emitted a syncable retraction block");
+}
+
+#[tokio::test]
+async fn backfill_retraction_blocks_heals_local_only_and_is_idempotent() {
+    let (_dir, client) = admin_client();
+    // Simulate a pre-fix local-only retraction (RETRACTED table, no block).
+    let target = memvault_core::cid_from_bytes(b"some-merge-record").to_bytes();
+    client.store().record_retraction(&target, &target).unwrap();
+    assert!(
+        client
+            .store()
+            .query_by_tag("retraction", &hex::encode(&target), 0, 1)
+            .unwrap()
+            .is_empty(),
+        "no syncable block yet"
+    );
+
+    assert_eq!(
+        client.backfill_retraction_blocks().unwrap(),
+        1,
+        "backfill publishes a block for the local-only retraction"
+    );
+    assert_eq!(
+        client.backfill_retraction_blocks().unwrap(),
+        0,
+        "idempotent — already has a block"
+    );
+}
+
+#[tokio::test]
+async fn reindex_bucket_merges_heals_untagged_records() {
+    let (_dir, client) = admin_client();
+    let canonical = mk_bucket(&client, "canonical").await;
+    let source = mk_bucket(&client, "source").await;
+
+    // Simulate a merge record that synced in UNTAGGED (a bare block with no
+    // bucket_merge index entry) — the pre-fix behaviour. Sign with the admin
+    // key the test client holds so verify_signature passes.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let rec = memvault_auth::sign_bucket_merge(&key, source.clone(), canonical.clone(), 123).unwrap();
+    let bytes = serde_ipld_dagcbor::to_vec(&rec).unwrap();
+    let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+    client.store().put_block(&cid, &bytes).unwrap();
+
+    // Invisible until reindexed.
+    client.bump_alias_generation();
+    assert!(client.bucket_merges().is_empty(), "untagged merge is invisible");
+    assert_eq!(client.canonical_of(&source.0), source.0);
+
+    // Heal, then the alias resolves.
+    assert_eq!(client.reindex_bucket_merges().unwrap(), 1);
+    assert_eq!(client.canonical_of(&source.0), canonical.0, "alias resolves after reindex");
+
+    // Idempotent: a second run repairs nothing (already indexed).
+    assert_eq!(client.reindex_bucket_merges().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn merge_union_in_list_entities_and_docs() {
+    use memvault_core::EntityId;
+    use memvault_doc::Entity;
+    let (_dir, client) = admin_client();
+    let canonical = mk_bucket(&client, "canonical").await;
+    let source = mk_bucket(&client, "source").await;
+
+    // A doc + an entity in the SOURCE bucket.
+    put_note(&client, &source, "source doc body").await;
+    let ent = Entity {
+        id: EntityId::random(),
+        kind: "note".into(),
+        props: Default::default(),
+        edges_out: vec![],
+    };
+    let ent_id = client
+        .add_entity_internal(ent, Visibility::Internal, Some(&source))
+        .await
+        .unwrap();
+
+    // Before the merge: the canonical lists none of the source's content.
+    let docs_before = client.list_docs(None, 100, Some(&canonical)).await.unwrap();
+    assert!(docs_before.is_empty(), "canonical has no docs pre-merge");
+    let ents_before = client.list_entities(100, Some(&canonical)).await.unwrap();
+    assert!(!ents_before.iter().any(|e| e.id == ent_id));
+
+    client.bucket_merge_sync(&[source.clone()], &canonical).unwrap();
+
+    // After the merge: a listing scoped to the canonical surfaces the source's
+    // doc + entity (the graph view + MCP list tools rely on this).
+    let docs = client.list_docs(None, 100, Some(&canonical)).await.unwrap();
+    assert_eq!(docs.len(), 1, "canonical lists the merged source's doc");
+    let ents = client.list_entities(100, Some(&canonical)).await.unwrap();
+    assert!(
+        ents.iter().any(|e| e.id == ent_id),
+        "canonical lists the merged source's entity"
+    );
+}
+
+#[tokio::test]
+async fn merge_cycle_is_guarded() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    let b = mk_bucket(&client, "b").await;
+
+    // A -> B then B -> A: canonical_of must terminate (no infinite loop).
+    client.bucket_merge_sync(&[a.clone()], &b).unwrap();
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    // Both resolve to *some* terminal without hanging; the closing edge of
+    // the cycle is dropped by the visited-set guard.
+    let ca = client.canonical_of(&a.0);
+    let cb = client.canonical_of(&b.0);
+    assert!(ca == a.0 || ca == b.0);
+    assert!(cb == a.0 || cb == b.0);
+}
+
+#[tokio::test]
+async fn unmerge_drops_source_from_union() {
+    use memvault_core::QueryScope;
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+    put_note(&client, &a, "in A").await;
+    put_note(&client, &b, "in B").await;
+
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+    let union = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(union.len(), 2, "merged union");
+
+    // Reverse the merge; the union drops back to A's own content.
+    client.bucket_unmerge(&b, &a).await.unwrap();
+    assert_eq!(client.canonical_of(&b.0), b.0, "B resolves to itself again");
+    let after = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1, "unmerge drops B from A's union");
+}
+
+#[tokio::test]
+async fn merge_into_self_is_rejected() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "a").await;
+    assert!(
+        client.bucket_merge_sync(&[a.clone()], &a).is_err(),
+        "cannot merge a bucket into itself"
+    );
+}
+
+#[tokio::test]
+async fn merge_appears_in_audit_log() {
+    use memvault_query::{AuditQuery, OpKind};
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    let rows = client
+        .audit(AuditQuery {
+            op_kind: Some(OpKind::BucketMerge),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().any(|r| r.op_kind == OpKind::BucketMerge),
+        "merge surfaces as OpKind::BucketMerge in the audit log"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Agent-bucket migration (deterministic legacy → pubkey auto-alias)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agent_bucket_migration_aliases_legacy_to_pubkey() {
+    use memvault_api::rebuild::{deterministic_agent_bucket_id, legacy_agent_bucket_id};
+    use memvault_core::QueryScope;
+
+    let (_dir, client) = make_client(); // cluster_id = "cluster-1"
+    let pk = [3u8; 32]; // agent pubkey
+
+    // The stable canonical id is f(pubkey); a pre-genesis legacy id mixed in
+    // the (then zero) cluster_id. They differ — that's the orphaning bug.
+    let canonical = deterministic_agent_bucket_id(&pk);
+    let legacy = legacy_agent_bucket_id(&[0u8; 32], &pk);
+    assert_ne!(canonical.0, legacy.0, "legacy and canonical ids differ");
+
+    // Materialize a legacy agent bucket as the old code would have: explicit
+    // id, owner = pk, with a doc in it.
+    client
+        .bucket_create_inner_sync(
+            legacy.clone(),
+            "agent:old",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Agent,
+            Some(memvault_core::AgentName("old".into())),
+            Some(pk),
+        )
+        .unwrap();
+    put_note(&client, &legacy, "legacy agent data").await;
+
+    // Create the canonical bucket the new way (f(pubkey)) + a fresh doc.
+    let made = client
+        .ensure_agent_bucket_for_pubkey_sync(&pk, "agent")
+        .unwrap();
+    assert_eq!(made.0, canonical.0, "new derivation homes at f(pubkey)");
+    put_note(&client, &canonical, "new agent data").await;
+
+    // Run the (idempotent) migration: the legacy id resolves under canonical.
+    client.run_agent_bucket_migration();
+    assert_eq!(
+        client.canonical_of(&legacy.0),
+        canonical.0,
+        "legacy bucket aliases onto the pubkey-derived canonical"
+    );
+
+    // A query scoped to the canonical surfaces both legacy and new data.
+    let union = client
+        .list_scoped(&QueryScope::all().with_bucket(Some(canonical.clone())), 100)
+        .await
+        .unwrap();
+    assert_eq!(union.len(), 2, "canonical surfaces legacy + new agent data");
+
+    // Idempotent: re-running changes nothing.
+    client.run_agent_bucket_migration();
+    assert_eq!(client.canonical_of(&legacy.0), canonical.0);
+}
+
+#[tokio::test]
+async fn agent_bucket_migration_materializes_missing_canonical() {
+    use memvault_api::rebuild::{deterministic_agent_bucket_id, legacy_agent_bucket_id};
+
+    let (_dir, client) = make_client(); // cluster_id = "cluster-1"
+    let pk = [7u8; 32];
+    let canonical = deterministic_agent_bucket_id(&pk);
+    let legacy = legacy_agent_bucket_id(&[0u8; 32], &pk);
+
+    // Only the legacy bucket exists; the canonical was never created (the
+    // phantom-target case that hid the merged data from listings).
+    client
+        .bucket_create_inner_sync(
+            legacy.clone(),
+            "agent:old",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            BucketRole::Agent,
+            Some(memvault_core::AgentName("old".into())),
+            Some(pk),
+        )
+        .unwrap();
+    put_note(&client, &legacy, "legacy agent data").await;
+    assert!(
+        client.bucket_get(&canonical).await.unwrap().is_none(),
+        "canonical does not exist yet"
+    );
+
+    // Migration creates the canonical, so the legacy data folds into a real,
+    // listable agent bucket instead of a phantom.
+    client.run_agent_bucket_migration();
+    let made = client.bucket_get(&canonical).await.unwrap();
+    assert!(made.is_some(), "migration materializes the canonical agent bucket");
+    assert_eq!(make_role(&made.unwrap()), "Agent", "created as an agent bucket");
+
+    // The canonical now appears in the default listing; the legacy source is
+    // hidden under it (not orphaned).
+    let visible = client.bucket_list_filtered(false).await.unwrap();
+    assert!(visible.iter().any(|b| b.id == canonical), "canonical listed");
+    assert!(
+        !visible.iter().any(|b| b.id == legacy),
+        "legacy source hidden under its (now real) canonical"
+    );
+
+    // Idempotent: re-running creates nothing new.
+    client.run_agent_bucket_migration();
+    let again = client.bucket_list_filtered(true).await.unwrap();
+    assert_eq!(
+        again.iter().filter(|b| b.id == canonical).count(),
+        1,
+        "exactly one canonical bucket"
+    );
+}
+
+fn make_role(b: &memvault_api::types::BucketInfo) -> String {
+    format!("{:?}", b.role)
+}
+
+#[tokio::test]
+async fn merged_source_is_marked_in_bucket_info() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "canonical").await;
+    let b = mk_bucket(&client, "source").await;
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    // The source records its canonical; the canonical is unmarked.
+    let bi = client.bucket_get(&b).await.unwrap().unwrap();
+    assert_eq!(bi.merged_into, Some(a.clone()), "source marks its canonical");
+    let ai = client.bucket_get(&a).await.unwrap().unwrap();
+    assert_eq!(ai.merged_into, None, "canonical is not a merged source");
+}
+
+#[tokio::test]
+async fn merged_source_is_hidden_from_bucket_list() {
+    let (_dir, client) = admin_client();
+    let a = mk_bucket(&client, "canonical").await;
+    let b = mk_bucket(&client, "source").await;
+
+    // Both buckets are listed before the merge.
+    let before = client.bucket_list().await.unwrap();
+    assert!(before.iter().any(|bi| bi.id == a), "canonical listed");
+    assert!(before.iter().any(|bi| bi.id == b), "source listed pre-merge");
+
+    client.bucket_merge_sync(&[b.clone()], &a).unwrap();
+
+    // After the merge the source is hidden; the canonical stays visible.
+    let after = client.bucket_list().await.unwrap();
+    assert!(after.iter().any(|bi| bi.id == a), "canonical still listed");
+    assert!(
+        !after.iter().any(|bi| bi.id == b),
+        "merged source hidden from default listing"
+    );
+    // It remains directly retrievable by id.
+    assert!(
+        client.bucket_get(&b).await.unwrap().is_some(),
+        "merged source still retrievable via bucket_get"
+    );
+}
+
+// ── Per-bucket member-set index (per-bucket-member-index plan) ──────────────
+
+/// Test matrix #1 + #5: multi-bucket isolation via the per-bucket member-set,
+/// and that the first bucket-scoped list lazily builds + registers the set.
+#[tokio::test]
+async fn bucket_member_set_isolation_and_lazy_build() {
+    let (_dir, client) = make_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+
+    // Two docs + one entity in A; one doc in B.
+    for title in ["a-one", "a-two"] {
+        client
+            .put_doc(
+                Document::new(DocId::random(), title.into(), BTreeMap::new()),
+                vec![],
+                Visibility::Internal,
+                Some(&a),
+            )
+            .await
+            .unwrap();
+    }
+    client
+        .add_entity(
+            Entity {
+                id: EntityId::random(),
+                kind: "person".into(),
+                props: BTreeMap::new(),
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    client
+        .put_doc(
+            Document::new(DocId::random(), "b-one".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&b),
+        )
+        .await
+        .unwrap();
+
+    // Before any bucket-scoped list, the Bucket partition is unregistered.
+    let a_sid = memvault_core::bucket_scope_id(&a);
+    assert!(
+        !client.store().scope_is_registered(&a_sid).unwrap(),
+        "partition must not be registered before first scoped list"
+    );
+
+    // First list builds + registers the set (lazy build).
+    let a_docs = client.list_docs(None, 100, Some(&a)).await.unwrap();
+    assert_eq!(a_docs.len(), 2, "bucket A has exactly its two docs");
+    assert!(
+        client.store().scope_is_registered(&a_sid).unwrap(),
+        "first scoped list must register the Bucket partition"
+    );
+
+    let b_docs = client.list_docs(None, 100, Some(&b)).await.unwrap();
+    assert_eq!(b_docs.len(), 1, "bucket B has exactly its one doc");
+
+    // Entities are isolated too.
+    let a_ents = client.list_entities(100, Some(&a)).await.unwrap();
+    assert_eq!(a_ents.len(), 1, "bucket A has its one entity");
+    let b_ents = client.list_entities(100, Some(&b)).await.unwrap();
+    assert_eq!(b_ents.len(), 0, "bucket B has no entities");
+
+    // Second list returns the same result from the (now registered) set.
+    let a_docs2 = client.list_docs(None, 100, Some(&a)).await.unwrap();
+    assert_eq!(a_docs2.len(), 2, "registered set yields the same docs");
+}
+
+/// Test matrix #3: retraction modes against the member-set read path.
+#[tokio::test]
+async fn bucket_member_set_retraction() {
+    let (_dir, client) = make_client();
+    let bucket = mk_bucket(&client, "vault").await;
+
+    let keep = DocId::random();
+    let drop = DocId::random();
+    for id in [&keep, &drop] {
+        client
+            .put_doc(
+                Document::new(id.clone(), "note".into(), BTreeMap::new()),
+                vec![],
+                Visibility::Internal,
+                Some(&bucket),
+            )
+            .await
+            .unwrap();
+    }
+    // Register the set, then retract one doc (live maintenance flips its flag).
+    let _ = client.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    client
+        .retract_node(&format!("doc:{}", hex::encode(drop.0)), "test")
+        .await
+        .unwrap();
+
+    // ActiveOnly (include_retracted=false) excludes the retracted doc.
+    let active = client.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(active.len(), 1, "retracted doc excluded by default");
+    assert_eq!(active[0].id, keep, "the kept doc remains");
+
+    // include_retracted=true includes both.
+    let all = client
+        .list_docs_ex(None, 100, Some(&bucket), true)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2, "include_retracted lists both");
+}
+
+/// Test matrix #2: a node ingested via `reindex_block` (sync, no local write)
+/// into an already-registered bucket set appears in its bucket listing. This
+/// exercises the load-bearing flush_index → sync_node_scopes_with maintenance
+/// wiring (stage 1).
+#[tokio::test]
+async fn bucket_member_set_post_sync_completeness() {
+    let (_dir_a, client_a) = make_client();
+    let (_dir_b, client_b) = make_client();
+    client_b.install_sigchain_notifier();
+
+    // A owns a bucket and a doc in it.
+    let bucket = mk_bucket(&client_a, "shared").await;
+    let doc_id = DocId::random();
+    let mut fm = BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("Synced"));
+    let cid = client_a
+        .put_doc(
+            Document::new(doc_id.clone(), "synced body".into(), fm),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+
+    // B registers the (empty) bucket partition before the doc arrives.
+    let pre = client_b.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(pre.len(), 0, "B's bucket is empty before sync");
+    assert!(
+        client_b
+            .store()
+            .scope_is_registered(&memvault_core::bucket_scope_id(&bucket))
+            .unwrap(),
+        "B registered the partition on the empty list"
+    );
+
+    // Simulate RBSR sync of the doc block into B.
+    let block = client_a.store().get_block(&cid).unwrap().unwrap();
+    client_b.store().put_block(&cid, &block).unwrap();
+    assert!(client_b.store().reindex_block(&cid, &block).unwrap());
+
+    // The synced doc must now appear in B's bucket listing — even though the
+    // partition was already registered, the sync maintenance wiring upserted it.
+    let post = client_b.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(post.len(), 1, "synced doc appears in B's bucket listing");
+    assert_eq!(post[0].id, doc_id);
+}
+
+/// Test matrix #6: result paging is capped at `limit`, while the membership
+/// universe stays exhaustive (every doc is reachable across pages-worth calls).
+#[tokio::test]
+async fn bucket_member_set_pagination() {
+    let (_dir, client) = make_client();
+    let bucket = mk_bucket(&client, "many").await;
+    for i in 0..10 {
+        client
+            .put_doc(
+                Document::new(DocId::random(), format!("doc {i}"), BTreeMap::new()),
+                vec![],
+                Visibility::Internal,
+                Some(&bucket),
+            )
+            .await
+            .unwrap();
+    }
+    let capped = client.list_docs(None, 3, Some(&bucket)).await.unwrap();
+    assert_eq!(capped.len(), 3, "result capped at limit");
+    let all = client.list_docs(None, 100, Some(&bucket)).await.unwrap();
+    assert_eq!(all.len(), 10, "membership universe is exhaustive");
+}
+
+/// QueryScope rewire: scoped_list over an explicit bucket set uses the
+/// member-set fast path. A doc synced in via reindex_block into an
+/// already-registered bucket appears in the scoped listing (the QueryScope
+/// analogue of the post-sync completeness test).
+#[tokio::test]
+async fn scoped_list_member_path_post_sync() {
+    use memvault_core::QueryScope;
+
+    let (_dir_a, client_a) = make_client();
+    let (_dir_b, client_b) = make_client();
+    client_b.install_sigchain_notifier();
+
+    let bucket = mk_bucket(&client_a, "shared").await;
+    let doc_id = DocId::random();
+    let cid = client_a
+        .put_doc(
+            Document::new(doc_id.clone(), "scoped sync body".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+
+    let scope = QueryScope::all().with_bucket(Some(bucket.clone()));
+
+    // Helper: copy a block from A to B and reindex it (the RBSR sync path).
+    let sync_block = |from: &Arc<LocalClient>, to: &Arc<LocalClient>, c: &[u8]| {
+        let block = from.store().get_block(c).unwrap().unwrap();
+        to.store().put_block(c, &block).unwrap();
+        to.store().reindex_block(c, &block).unwrap();
+    };
+
+    // scoped_list intersects the requested bucket with the *accessible* set,
+    // so B must first learn the bucket exists — sync its declaration block(s).
+    for (id, decl_cid) in client_a.store().list_buckets().unwrap() {
+        if id.as_slice() == bucket.0.as_slice() {
+            sync_block(&client_a, &client_b, &decl_cid);
+        }
+    }
+
+    // B registers the (empty) bucket partition via a scoped list.
+    let pre = client_b.list_scoped(&scope, 100).await.unwrap();
+    assert_eq!(pre.len(), 0, "B's scoped bucket is empty before the doc syncs");
+
+    // Sync the doc into B (maintenance wiring upserts it into the set).
+    sync_block(&client_a, &client_b, &cid);
+
+    let post = client_b.list_scoped(&scope, 100).await.unwrap();
+    assert_eq!(post.len(), 1, "synced doc appears in B's scoped listing");
+    assert_eq!(post[0].node_id, format!("doc:{}", hex::encode(doc_id.0)));
+}
+
+/// Follow-up: list_all over an explicit bucket uses the member-set fast path,
+/// returning that bucket's docs + entities (active only) and isolating across
+/// buckets, while honoring a view tag filter.
+#[tokio::test]
+async fn list_all_member_path_bucket_scoped() {
+    let (_dir, client) = make_client();
+    let a = mk_bucket(&client, "alpha").await;
+    let b = mk_bucket(&client, "beta").await;
+
+    // A: a tagged doc, an untagged doc, an entity, and a doc to retract.
+    client
+        .put_doc(
+            Document::new(DocId::random(), "tagged".into(), BTreeMap::new()),
+            vec![("kind".into(), "note".into())],
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    client
+        .put_doc(
+            Document::new(DocId::random(), "untagged".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    client
+        .add_entity(
+            Entity {
+                id: EntityId::random(),
+                kind: "person".into(),
+                props: BTreeMap::new(),
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    let gone = DocId::random();
+    client
+        .put_doc(
+            Document::new(gone.clone(), "retract me".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    // B: one doc.
+    client
+        .put_doc(
+            Document::new(DocId::random(), "b doc".into(), BTreeMap::new()),
+            vec![],
+            Visibility::Internal,
+            Some(&b),
+        )
+        .await
+        .unwrap();
+
+    client
+        .retract_node(&format!("doc:{}", hex::encode(gone.0)), "x")
+        .await
+        .unwrap();
+
+    // A unscoped-by-view: 2 active docs + 1 entity = 3 (retracted excluded).
+    let a_all = client.list_all(None, 100, Some(&a)).await.unwrap();
+    assert_eq!(a_all.len(), 3, "bucket A active nodes (no view)");
+    assert!(
+        !a_all.iter().any(|(nid, _, _, _)| *nid == format!("doc:{}", hex::encode(gone.0))),
+        "retracted doc excluded"
+    );
+
+    // B isolated → 1.
+    let b_all = client.list_all(None, 100, Some(&b)).await.unwrap();
+    assert_eq!(b_all.len(), 1, "bucket B isolated");
+
+    // View filter: only the ("kind","note")-tagged doc in A.
+    client
+        .create_view(memvault_api::View {
+            name: "notes".into(),
+            tags: vec![("kind".into(), "note".into())],
+            created_ns: 1,
+            cid: String::new(),
+            bucket_id: None,
+        })
+        .await
+        .unwrap();
+    let a_notes = client.list_all(Some("notes"), 100, Some(&a)).await.unwrap();
+    assert_eq!(a_notes.len(), 1, "only the view-matching doc");
+    assert_eq!(a_notes[0].1, "doc", "the matching node is a doc");
+    assert!(
+        a_notes[0].3.iter().any(|(s, l)| s == "kind" && l == "note"),
+        "the matching doc carries the view's tag"
     );
 }

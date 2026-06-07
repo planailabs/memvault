@@ -45,7 +45,8 @@ async fn list_vfs_entries(
     let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
         .map_err(|e| ServerFnError::new(format!("invalid bucket: {e}")))?;
 
-    let entries = memvault_api::vfs::ls(&*client, &bucket, &path, false)
+    let entries = client
+        .vfs_ls(&bucket, &path, false)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -71,7 +72,8 @@ async fn vfs_mkdir(path: String, bucket_hex: String) -> Result<String, ServerFnE
     let client = crate::ui::state::client()?;
     let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
         .map_err(|e| ServerFnError::new(format!("invalid bucket: {e}")))?;
-    let id = memvault_api::vfs::mkdir(&*client, &bucket, &path)
+    let id = client
+        .vfs_mkdir(&bucket, &path)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(format!("entity:{}", hex::encode(id.0)))
@@ -310,19 +312,19 @@ fn render_grid_card(entry: &VfsRow, mut path: Signal<String>) -> Element {
 }
 
 #[component]
-fn VfsTable(list: Vec<VfsRow>, path: Signal<String>) -> Element {
+fn VfsTable(list: ReadSignal<Vec<VfsRow>>, path: Signal<String>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 50usize);
     let sort = use_signal::<SortState>(|| ("name".to_string(), true));
 
-    let list_clone = list.clone();
     let filtered = use_memo(move || {
+        // Read `list` reactively so the table refreshes when the parent re-fetches.
+        let list = list.read();
         let q = search.read().to_lowercase();
         let mut items: Vec<VfsRow> = if q.is_empty() {
-            list_clone.clone()
+            list.clone()
         } else {
-            list_clone
-                .iter()
+            list.iter()
                 .filter(|e| e.matches_search(&q))
                 .cloned()
                 .collect()
@@ -339,7 +341,7 @@ fn VfsTable(list: Vec<VfsRow>, path: Signal<String>) -> Element {
         items
     });
 
-    let total = list.len();
+    let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
     let shown = filtered_count.min(limit_val);

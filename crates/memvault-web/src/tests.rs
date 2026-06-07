@@ -68,7 +68,7 @@ fn test_jwt() -> String {
     let (_admin, node, agent) = test_keys();
     let agent_att = memvault_auth::sign_agent_attestation(
         &node,
-        memvault_core::AgentId("test-agent".to_string()),
+        memvault_core::AgentName("test-agent".to_string()),
         agent.verifying_key().to_bytes(),
         AgentRole::AgentHost,
         u64::MAX,
@@ -76,7 +76,7 @@ fn test_jwt() -> String {
     .unwrap();
     let _ = agent_att; // attestation now lives only in the sigchain; the
     // JWT carries just the agent_id label in `iss`.
-    memvault_auth::jwt::issue(&agent, "test-agent", "read write admin", 3600).unwrap()
+    memvault_auth::jwt::issue(&agent, "read write admin", 3600).unwrap()
 }
 
 /// Mock client that returns canned responses.
@@ -124,7 +124,9 @@ impl MemvaultClient for MockClient {
         if let Some(doc) = guard.as_ref() {
             Ok(vec![memvault_api::DocSummary {
                 id: doc.id.clone(),
-                cid: doc.id.0.to_vec(),
+                // DocSummary.cid is a real CID on the wire (cid_str encoding),
+                // so the mock must emit valid CID bytes, not raw id bytes.
+                cid: memvault_core::cid_from_bytes(&doc.id.0).to_bytes(),
                 title: doc
                     .frontmatter
                     .get("title")
@@ -190,7 +192,7 @@ impl MemvaultClient for MockClient {
         Ok(Some(b"{}".to_vec()))
     }
 
-    async fn add_entity(
+    async fn add_entity_internal(
         &self,
         _entity: Entity,
         _vis: Visibility,
@@ -317,13 +319,14 @@ impl MemvaultClient for MockClient {
     async fn get_tags(&self, _node_id: &str) -> memvault_api::Result<Vec<(String, String)>> {
         Ok(vec![])
     }
-    async fn retract_node(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> {
+    async fn retract_node_internal(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> {
         Ok(())
     }
     async fn list_all(
         &self,
         _view: Option<&str>,
         _limit: usize,
+        _bucket: Option<&memvault_core::BucketId>,
     ) -> memvault_api::Result<Vec<(String, String, String, Vec<(String, String)>)>> {
         Ok(vec![])
     }
@@ -390,7 +393,10 @@ impl MemvaultClient for MockClient {
     ) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
     }
-    async fn bucket_list(&self) -> memvault_api::Result<Vec<memvault_api::types::BucketInfo>> {
+    async fn bucket_list_filtered(
+        &self,
+        _include_merged: bool,
+    ) -> memvault_api::Result<Vec<memvault_api::types::BucketInfo>> {
         Ok(vec![])
     }
     async fn bucket_get(
@@ -403,6 +409,39 @@ impl MemvaultClient for MockClient {
         &self,
         _id: &memvault_core::BucketId,
         _name: &str,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_merge(
+        &self,
+        _sources: &[memvault_core::BucketId],
+        _canonical: &memvault_core::BucketId,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_unmerge(
+        &self,
+        _source: &memvault_core::BucketId,
+        _canonical: &memvault_core::BucketId,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn bucket_merges(
+        &self,
+    ) -> memvault_api::Result<Vec<(memvault_core::BucketId, memvault_core::BucketId)>> {
+        Ok(Vec::new())
+    }
+    async fn skill_rename(
+        &self,
+        _id: &memvault_core::EntityId,
+        _new_name: &str,
+    ) -> memvault_api::Result<()> {
+        Ok(())
+    }
+    async fn agent_rename(
+        &self,
+        _agent_pubkey: &[u8; 32],
+        _new_label: &str,
     ) -> memvault_api::Result<()> {
         Ok(())
     }
@@ -456,16 +495,28 @@ impl MemvaultClient for MockClient {
 
     async fn ensure_agent_bucket(
         &self,
-        _agent_id: &str,
-    ) -> memvault_api::Result<memvault_core::BucketId> {
-        Ok(memvault_core::BucketId([0u8; 32]))
-    }
-    async fn ensure_agent_bucket_for_pubkey(
-        &self,
         _agent_pubkey: &[u8],
         _name_hint: &str,
     ) -> memvault_api::Result<memvault_core::BucketId> {
         Ok(memvault_core::BucketId([0u8; 32]))
+    }
+
+    async fn bucket_grant(
+        &self,
+        _bucket_id: &memvault_core::BucketId,
+        _audience: memvault_auth::GrantAudience,
+        _actions: Vec<memvault_auth::Action>,
+        _ttl_secs: u64,
+    ) -> memvault_api::Result<Vec<u8>> {
+        Ok(vec![0u8; 32])
+    }
+
+    async fn revoke_grant(
+        &self,
+        _grant_cid: &[u8],
+        _reason: &str,
+    ) -> memvault_api::Result<Vec<u8>> {
+        Ok(vec![0u8; 32])
     }
 }
 
@@ -476,7 +527,7 @@ fn test_agent_attestation() -> memvault_auth::AgentAttestation {
     let (_admin, node, agent) = test_keys();
     memvault_auth::sign_agent_attestation(
         &node,
-        memvault_core::AgentId("test-agent".to_string()),
+        memvault_core::AgentName("test-agent".to_string()),
         agent.verifying_key().to_bytes(),
         AgentRole::AgentHost,
         u64::MAX,
@@ -521,6 +572,13 @@ fn ensure_test_env() {
 }
 
 fn test_app_state(client: Arc<dyn MemvaultClient>) -> Arc<AppState> {
+    test_app_state_with(client, Vec::new())
+}
+
+fn test_app_state_with(
+    client: Arc<dyn MemvaultClient>,
+    allowed_origins: Vec<String>,
+) -> Arc<AppState> {
     ensure_test_env();
     Arc::new(AppState {
         client,
@@ -531,6 +589,7 @@ fn test_app_state(client: Arc<dyn MemvaultClient>) -> Arc<AppState> {
         revoked_nodes: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
         agent_attestation_lookup: Some(test_agent_lookup()),
+        allowed_origins,
     })
 }
 
@@ -625,6 +684,117 @@ async fn test_create_and_list_docs() {
     let docs: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
     assert_eq!(docs.len(), 1);
 }
+
+#[tokio::test]
+async fn test_skill_publish_and_list_routes() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+
+    // Publish a skill: the route is wired, authorized, and returns an
+    // "entity:<hex>" id (the publish path threads through the client).
+    let create_body = serde_json::json!({
+        "name": "Code Review",
+        "description": "Review a diff",
+        "instruction_body": "# Code Review\nRun the linter.",
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/skills")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        v["id"].as_str().unwrap().starts_with("entity:"),
+        "publish returns an entity id, got {:?}",
+        v["id"]
+    );
+
+    // List skills: route exists and is authorized (200 with a JSON array).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/skills")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let _skills: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+    // Unauthorized access is rejected.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/skills")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_reserved_kind_rejected_on_generic_entity_create() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+
+    // Managed kinds can't be created through the generic /entities API — it
+    // routes through the validated client add_entity (skills/VFS have their
+    // own endpoints).
+    for kind in ["skill", "vfs:dir"] {
+        let body = serde_json::json!({ "kind": kind });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/entities")
+                    .header("authorization", format!("Bearer {}", test_jwt()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "kind {kind:?} must be rejected by the generic entity API"
+        );
+    }
+
+    // An ordinary kind still creates fine.
+    let body = serde_json::json!({ "kind": "person" });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/entities")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
 
 #[tokio::test]
 async fn test_get_doc() {
@@ -730,4 +900,158 @@ async fn test_download_attachment() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"file-content-here");
+}
+
+// ── Session cookie + CSRF guard ─────────────────────────────────────────
+//
+// Browser-style auth: the web UI hits the API with the `memvault_session`
+// cookie instead of `Authorization: Bearer …`, and state-changing requests
+// must carry a matching `Origin` header so cross-origin pages can't ride the
+// cookie. Bearer-only clients (memctl, curl) keep working because they don't
+// set Origin or the cookie.
+
+#[tokio::test]
+async fn test_session_cookie_authorizes_reads() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_session_cookie_with_matching_origin_authorizes_writes() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "via cookie", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("host", "memvault.local:8401")
+                .header("origin", "http://memvault.local:8401")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_csrf_blocks_cross_origin_cookie_write() {
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "csrf attempt", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("host", "memvault.local:8401")
+                .header("origin", "https://evil.example.com")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_csrf_blocks_cookie_write_without_origin() {
+    // No Origin header AND a session cookie present → CSRF-shaped; reject.
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "no-origin", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_bearer_writes_without_origin_still_pass() {
+    // memctl / curl callers: no cookie, no Origin — must keep working.
+    let state = test_app_state(Arc::new(MockClient::new()));
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "from cli", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_allowed_origins_list_admits_proxy_host() {
+    // Reverse-proxy case: the browser sees the proxy URL as the Origin
+    // but `Host` (as seen by the daemon) is `127.0.0.1:8401`. Same-origin
+    // would refuse; the explicit allow-list admits it.
+    let state = test_app_state_with(
+        Arc::new(MockClient::new()),
+        vec!["https://memvault.example.com".into()],
+    );
+    let app = build_router(state);
+    let body = serde_json::json!({ "body": "via proxy", "tags": [] });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/docs")
+                .header(
+                    "cookie",
+                    format!("{}={}", crate::api::auth::SESSION_COOKIE, test_jwt()),
+                )
+                .header("host", "127.0.0.1:8401")
+                .header("origin", "https://memvault.example.com")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
 }

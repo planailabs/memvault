@@ -6,9 +6,14 @@ use memvault_core::{BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, Visib
 use serde::{Deserialize, Serialize};
 
 /// Summary of a document for list operations.
+///
+/// Wire shape per `standards/`: `id` is an opaque doc id → hex; `cid` is the
+/// document's content address → canonical CID string (not hex).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocSummary {
+    #[serde(with = "crate::wire::hex_id")]
     pub id: DocId,
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
     pub title: Option<String>,
     pub tags: Vec<(String, String)>,
@@ -83,9 +88,69 @@ impl TraversalHit {
     }
 }
 
+/// Spec for publishing a new skill — the manifest props plus an optional inline
+/// instruction body (when set, a Document is created and linked as the skill's
+/// primary instruction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSpec {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub instruction_body: Option<String>,
+}
+
+/// Summary of a skill for list/discovery — the manifest props only, no
+/// resource traversal (cheap; `DetailLevel::Summary`-equivalent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInfo {
+    #[serde(with = "crate::wire::hex_id")]
+    pub id: EntityId,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub retracted: bool,
+}
+
+/// One component node of a skill, paired with the edge that links it. `node` is
+/// a `"type:hex"` tag label (parse via [`NodeRef::from_tag_label`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillResource {
+    #[serde(with = "crate::wire::hex_id")]
+    pub edge_id: EdgeId,
+    pub node: String,
+    pub relation: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub executable: bool,
+    #[serde(default)]
+    pub order: Option<i64>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// A fully-assembled skill: the manifest plus its linked components, grouped by
+/// relation. This is what `skill_get` returns and what the bundle hydrator
+/// walks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillBundle {
+    pub info: SkillInfo,
+    pub instructions: Vec<SkillResource>,
+    pub resources: Vec<SkillResource>,
+    pub requires: Vec<SkillResource>,
+}
+
 /// Status of an issued token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenStatus {
+    /// Token envelope CID (canonical CID string on the wire).
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
     pub label: Option<String>,
     pub role: TokenRole,
@@ -103,6 +168,7 @@ pub struct TokenStatus {
 /// Information about a key rotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RotationInfo {
+    #[serde(with = "crate::wire::hex_bytes")]
     pub rotation_id: Vec<u8>,
     pub kind: String,
     pub valid_from_ns: u64,
@@ -135,21 +201,27 @@ pub struct WriteOptions {
 }
 
 /// Information about a bucket.
+///
+/// Wire shape per `standards/`: IDs are hex strings (the byte-newtype `serde`
+/// is reserved for dag-cbor blocks), so the ID fields carry `crate::wire`
+/// hex helpers and the type is transmitted as-is — no hand-built JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketInfo {
+    #[serde(with = "crate::wire::hex_id")]
     pub id: BucketId,
     pub name: String,
     pub description: Option<String>,
-    pub owner_agent: Option<memvault_core::AgentId>,
+    pub owner_agent: Option<memvault_core::AgentName>,
     /// Owner agent's ed25519 pubkey, when recorded at creation. Used by
     /// ACL to resolve owner / attesting-node grant authority.
-    #[serde(default)]
+    #[serde(default, with = "crate::wire::hex_array32_opt")]
     pub owner_agent_pubkey: Option<[u8; 32]>,
     /// Owning node's ed25519 pubkey for node-owned buckets (e.g. the
     /// per-node legacy bucket).
-    #[serde(default)]
+    #[serde(default, with = "crate::wire::hex_array32_opt")]
     pub owner_node_pubkey: Option<[u8; 32]>,
     /// Which cluster this bucket is bound to (None if unbound/standalone).
+    #[serde(default, with = "crate::wire::hex_id_opt")]
     pub cluster_id: Option<ClusterId>,
     /// Whether this bucket is attached to the cluster (private_to_peer is None).
     pub is_attached: bool,
@@ -161,12 +233,23 @@ pub struct BucketInfo {
     /// The role this bucket plays (standard, legacy, agent).
     #[serde(default)]
     pub role: memvault_doc::BucketRole,
+    /// When this bucket has been merged into another, the canonical bucket
+    /// it resolves to. `None` for a normal (canonical or unmerged) bucket.
+    /// Merged sources are hidden from default bucket listings (treated like
+    /// retracted) — surfaced only via an explicit include flag or to
+    /// Auditor/Admin roles.
+    #[serde(default, with = "crate::wire::hex_id_opt")]
+    pub merged_into: Option<BucketId>,
 }
 
 /// Node status information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
+    // peer_id is a libp2p multihash → base58btc canonical string; cluster_id is
+    // an opaque id → hex.
+    #[serde(with = "crate::wire::b58_bytes")]
     pub peer_id: Vec<u8>,
+    #[serde(with = "crate::wire::hex_bytes")]
     pub cluster_id: Vec<u8>,
     pub block_count: u64,
     pub doc_count: u64,
@@ -177,13 +260,17 @@ pub struct NodeStatus {
 /// Summary of a capability grant visible to a caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrantInfo {
-    /// Hex-encoded grant envelope CID.
+    /// Grant envelope CID (canonical CID string on the wire).
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
     /// Bucket the grant is scoped to (the one the caller asked about).
+    #[serde(with = "crate::wire::hex_id")]
     pub bucket_id: BucketId,
     /// Issuer peer of the grant.
+    #[serde(with = "crate::wire::peer_b58")]
     pub issuer: memvault_core::PeerId,
     /// Issuing cluster.
+    #[serde(with = "crate::wire::hex_id")]
     pub issuing_cluster: ClusterId,
     /// Who the grant is addressed to.
     pub audience: memvault_auth::GrantAudience,
@@ -196,12 +283,18 @@ pub struct GrantInfo {
 /// Summary of a cross-cluster share proposal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareProposalInfo {
-    /// Hex-encoded proposal envelope CID.
+    /// Proposal envelope CID (canonical CID string on the wire).
+    #[serde(with = "crate::wire::cid_str")]
     pub cid: Vec<u8>,
+    #[serde(with = "crate::wire::hex_array16")]
     pub proposal_id: [u8; 16],
+    #[serde(with = "crate::wire::hex_id")]
     pub from_cluster: ClusterId,
+    #[serde(with = "crate::wire::hex_id")]
     pub from_bucket: BucketId,
+    #[serde(with = "crate::wire::peer_b58")]
     pub from_admin: memvault_core::PeerId,
+    #[serde(with = "crate::wire::hex_id")]
     pub to_cluster: ClusterId,
     pub to_recipient: memvault_auth::ShareRecipient,
     pub proposed_actions: Vec<memvault_auth::Action>,

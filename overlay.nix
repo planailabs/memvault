@@ -16,4 +16,16 @@ in
   inherit dioxus-cli-patched;
 
   memctl = prev.callPackage ./package.nix { inherit gitSha dioxus-cli-patched; };
+
+  # Slim build — skips the dx fullstack/WASM client pipeline. Same Rust
+  # source, dramatically faster to build; used by integration tests and
+  # by anyone running memctl headless.
+  memctl-slim = prev.callPackage ./package.nix {
+    inherit gitSha dioxus-cli-patched;
+    slim = true;
+  };
+
+  # MCP server: standalone Rust binary that fronts a memvault cluster
+  # over the Model Context Protocol (stdio).
+  memvault-mcp = prev.callPackage ./nix/memvault-mcp.nix { };
 }

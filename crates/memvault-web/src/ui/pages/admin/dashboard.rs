@@ -5,6 +5,7 @@ use dioxus_i18n::t;
 use plan_ai_design::{Card, PageHeader, Pill, PillVariant, SectionHeading, StatBlock, Td, TdMuted};
 use serde::{Deserialize, Serialize};
 
+use crate::ui::app::Route;
 use crate::ui::components::cid_display::CidDisplay;
 use crate::ui::topbar::use_topbar;
 
@@ -101,8 +102,8 @@ fn AdminView(status: NodeStatusData, tokens: Vec<TokenRow>) -> Element {
 
             // Quick links
             div { class: "flex flex-wrap gap-2",
-                a { href: "/admin/tokens", class: "btn btn-secondary", "Tokens" }
-                a { href: "/admin/trust", class: "btn btn-secondary", "Trust tree" }
+                Link { to: Route::TokenManagement {}, class: "btn btn-secondary", "Tokens" }
+                Link { to: Route::TrustTreePage {}, class: "btn btn-secondary", "Trust tree" }
             }
 
             // Stats
@@ -121,11 +122,11 @@ fn AdminView(status: NodeStatusData, tokens: Vec<TokenRow>) -> Element {
                         tbody { class: "tbody",
                             tr {
                                 td { class: "td font-medium text-sm", {t!("admin-peer-id")} }
-                                td { class: "td", CidDisplay { cid: status.peer_id.clone(), len: Some(16) } }
+                                td { class: "td", span { class: "font-mono text-xs break-all", "{status.peer_id}" } }
                             }
                             tr {
                                 td { class: "td font-medium text-sm", {t!("admin-cluster-id")} }
-                                td { class: "td", CidDisplay { cid: status.cluster_id.clone(), len: Some(16) } }
+                                td { class: "td", span { class: "font-mono text-xs break-all", "{status.cluster_id}" } }
                             }
                         }
                     }

@@ -21,10 +21,13 @@ pub mod otel;
 pub mod quotas;
 pub mod rotation;
 pub mod rpc;
+pub mod skill_hydrate;
+pub mod skills;
 pub mod subscription;
 pub mod tokens;
 pub mod types;
 pub mod vfs;
+pub mod wire;
 
 pub use client::MemvaultClient;
 /// The query-scope triplet types live in `memvault-core` (so `memvault-query`
@@ -39,7 +42,8 @@ pub use local::LocalClient;
 pub use subscription::{EventBus, MemvaultEvent};
 pub use types::{
     DocSummary, GrantInfo, NodeDetail, NodeStatus, NodeSummary, RotationInfo, ScopeCount,
-    ShareProposalInfo, TokenStatus, TraversalHit, View,
+    ShareProposalInfo, SkillBundle, SkillInfo, SkillResource, SkillSpec, TokenStatus, TraversalHit,
+    View,
 };
 
 /// Shared CLI arguments for connecting to a memvault instance.
@@ -112,6 +116,20 @@ impl ClientArgs {
             let client = HttpApiClient::new(&self.url, Some(std::sync::Arc::new(identity)))?;
             Ok(Box::new(client))
         }
+    }
+
+    /// Load the configured agent identity's public key without connecting.
+    /// `None` in local (`--db`) mode or when no identity is present. Callers
+    /// (e.g. the MCP server) use it to resolve the agent's bucket by pubkey
+    /// now that an agent's identity *is* its ed25519 key.
+    pub fn load_agent_pubkey(&self) -> Option<[u8; 32]> {
+        if self.db.is_some() {
+            return None;
+        }
+        let identity_dir = self.identity_dir.clone().unwrap_or_else(default_identity_dir);
+        crate::agent_identity::AgentIdentity::load(&identity_dir)
+            .ok()
+            .map(|id| id.verifying_key.to_bytes())
     }
 }
 

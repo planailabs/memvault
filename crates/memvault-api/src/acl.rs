@@ -40,6 +40,13 @@ pub fn check_bucket_access(
         .try_into()
         .map_err(|_| ApiError::Forbidden("caller pubkey must be 32 bytes".into()))?;
 
+    // Normalize a merged (source) bucket to its canonical target, so a
+    // grant or owner-bypass on the canonical authorizes access to any
+    // source's content with zero grant migration (§6). A bucket with no
+    // merge resolves to itself.
+    let canonical = BucketId(client.canonical_of(&bucket_id.0));
+    let bucket_id = &canonical;
+
     let attestation = crate::sigchain::find_agent_attestation(client, &pubkey_arr)?
         .ok_or_else(|| {
             ApiError::Forbidden(format!(
@@ -47,6 +54,21 @@ pub fn check_bucket_access(
                 hex::encode(pubkey_arr)
             ))
         })?;
+
+    // The attestation must be anchored to a trusted node. An orphaned
+    // attestation — signed by an ephemeral node that was never attested
+    // into the cluster (e.g. a throwaway instance that gossiped its `_ui`
+    // Admin agent in) — must confer no access, not even role=Admin. The
+    // attestation's own signature verifying is necessary but NOT
+    // sufficient; the *attesting node* must itself be trusted (self or
+    // admin-attested).
+    if !client.is_attesting_node_trusted(&attestation.node_pubkey) {
+        return Err(ApiError::Forbidden(format!(
+            "agent {} attested by an untrusted node {} (orphaned attestation)",
+            hex::encode(pubkey_arr),
+            hex::encode(attestation.node_pubkey)
+        )));
+    }
 
     // API admin is ACL-exempt: an `AgentRole::Admin` agent bypasses
     // bucket/grant checks entirely.
@@ -58,7 +80,18 @@ pub fn check_bucket_access(
     // the owner/attesting-node grant authorities below.
     let (owner_agent_pubkey, owner_node_pubkey) = match client.bucket_info_sync(bucket_id) {
         Ok(Some(bucket)) => {
-            if bucket.owner_agent.as_ref() == Some(&attestation.agent_id) {
+            // Owner-bypass: prefer the owner's *pubkey* (collision-free across
+            // nodes). Only fall back to the `agent_id` string for legacy
+            // buckets that predate `owner_agent_pubkey`, where the pubkey was
+            // never recorded — otherwise a different node's same-named agent
+            // would wrongly inherit ownership.
+            let owner_by_pubkey = bucket
+                .owner_agent_pubkey
+                .map(|pk| pk.as_slice() == agent_pubkey)
+                .unwrap_or(false);
+            let owner_by_label = bucket.owner_agent_pubkey.is_none()
+                && bucket.owner_agent.as_ref() == Some(&attestation.agent_id);
+            if owner_by_pubkey || owner_by_label {
                 return Ok(());
             }
             (bucket.owner_agent_pubkey, bucket.owner_node_pubkey)
@@ -112,7 +145,14 @@ pub fn check_bucket_access(
         }
         let matches = match &grant.audience {
             GrantAudience::Peer(p) => p.0.as_slice() == agent_pubkey,
-            GrantAudience::Agent(id) => id == &attestation.agent_id,
+            // Canonical pubkey-addressed grant: match the caller's verified
+            // ed25519 key directly (collision-free across nodes).
+            GrantAudience::AgentKey(pk) => pk.as_slice() == agent_pubkey,
+            // Legacy string-addressed grant: no longer honored. Ambiguous
+            // across nodes; the v12 blockstore migration drops these, and new
+            // grants must use `AgentKey`. The variant remains only so the
+            // migration can still decode and discard pre-migration grants.
+            GrantAudience::Agent(_) => false,
             GrantAudience::Role(r) => *r == attestation.role,
             GrantAudience::Cluster(c) => {
                 // Allow when the bucket is bound to the same cluster the

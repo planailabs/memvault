@@ -30,6 +30,11 @@ struct BucketData {
     classification: String,
     created_ns: u64,
     envelope_count: u64,
+    /// When this bucket is a merged source, the canonical it resolves to.
+    merged_into_hex: String,
+    /// Whether that canonical has a local decl. False = dangling (sync pending
+    /// or a merge into a bad/never-created id).
+    merged_into_exists: bool,
 }
 
 #[server]
@@ -45,6 +50,19 @@ async fn get_bucket(id: String) -> Result<Option<BucketData>, ServerFnError> {
         .bucket_get(&bucket_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // If this is a merged source, does its canonical have a local decl? A
+    // missing one is "dangling" (sync pending, or a bad merge target).
+    let mut merged_into_exists = true;
+    if let Some(b) = &info {
+        if let Some(canonical) = &b.merged_into {
+            merged_into_exists = client
+                .bucket_get(canonical)
+                .await
+                .map_err(|e| ServerFnError::new(e.to_string()))?
+                .is_some();
+        }
+    }
 
     Ok(info.map(|b| {
         let status = if b.name.contains("[ARCHIVED]") {
@@ -72,8 +90,60 @@ async fn get_bucket(id: String) -> Result<Option<BucketData>, ServerFnError> {
             classification: format!("{:?}", b.default_classification),
             created_ns: b.created_ns,
             envelope_count: b.envelope_count,
+            merged_into_hex: b.merged_into.map(|c| hex::encode(c.0)).unwrap_or_default(),
+            merged_into_exists,
         }
     }))
+}
+
+#[server]
+async fn list_bucket_merge_sources(id: String) -> Result<Vec<String>, ServerFnError> {
+    let bucket_bytes = hex::decode(&id).map_err(|e| ServerFnError::new(format!("bad hex: {e}")))?;
+    let bucket_arr: [u8; 32] = bucket_bytes
+        .try_into()
+        .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
+    let local = crate::ui::state::local_client()?;
+    Ok(local
+        .bucket_merge_members(&bucket_arr)
+        .into_iter()
+        .map(hex::encode)
+        .collect())
+}
+
+#[server]
+async fn merge_source_into(canonical: String, source: String) -> Result<(), ServerFnError> {
+    let parse = |s: &str| -> Result<memvault_core::BucketId, ServerFnError> {
+        let arr: [u8; 32] = hex::decode(s.trim())
+            .map_err(|e| ServerFnError::new(format!("bad hex: {e}")))?
+            .try_into()
+            .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
+        Ok(memvault_core::BucketId(arr))
+    };
+    let canonical_id = parse(&canonical)?;
+    let source_id = parse(&source)?;
+    let client = crate::ui::state::client()?;
+    client
+        .bucket_merge(&[source_id], &canonical_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+#[server]
+async fn unmerge_source(canonical: String, source: String) -> Result<(), ServerFnError> {
+    let parse = |s: &str| -> Result<memvault_core::BucketId, ServerFnError> {
+        let arr: [u8; 32] = hex::decode(s.trim())
+            .map_err(|e| ServerFnError::new(format!("bad hex: {e}")))?
+            .try_into()
+            .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
+        Ok(memvault_core::BucketId(arr))
+    };
+    let canonical_id = parse(&canonical)?;
+    let source_id = parse(&source)?;
+    let client = crate::ui::state::client()?;
+    client
+        .bucket_unmerge(&source_id, &canonical_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
 #[server]
@@ -144,6 +214,9 @@ async fn list_grants(id: String) -> Result<Vec<GrantRow>, ServerFnError> {
                     format!("peer:{}", &hex::encode(&p.0)[..8])
                 }
                 memvault_auth::GrantAudience::Agent(a) => format!("agent:{}", a.0),
+                memvault_auth::GrantAudience::AgentKey(pk) => {
+                    format!("agentkey:{}", &hex::encode(pk)[..8])
+                }
                 memvault_auth::GrantAudience::Role(r) => format!("role:{r:?}"),
             };
             let actions: Vec<String> = g.actions.iter().map(|a| format!("{a:?}")).collect();
@@ -199,8 +272,13 @@ async fn create_grant(
             };
             memvault_auth::GrantAudience::Role(role)
         }
-        "agent" => {
-            memvault_auth::GrantAudience::Agent(memvault_core::AgentId(audience_value))
+        "agent_key" => {
+            let bytes = hex::decode(audience_value.trim())
+                .map_err(|_| ServerFnError::new("agent public key must be hex".to_string()))?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| ServerFnError::new("agent public key must be 32 bytes".to_string()))?;
+            memvault_auth::GrantAudience::AgentKey(arr)
         }
         _ => return Err(ServerFnError::new(format!("unsupported audience type: {audience_type}"))),
     };
@@ -233,7 +311,7 @@ async fn create_grant(
 pub fn BucketDetail(id: String) -> Element {
     use_topbar("Bucket Detail");
     let fetch_id = id.clone();
-    let bucket = use_server_future(move || {
+    let mut bucket = use_server_future(move || {
         let id = fetch_id.clone();
         async move { get_bucket(id).await }
     })?;
@@ -298,6 +376,45 @@ pub fn BucketDetail(id: String) -> Element {
                     if !data.description.is_empty() {
                         p { class: "text-sm text-fg-muted mt-2", "{data.description}" }
                     }
+                    if !data.merged_into_hex.is_empty() {
+                        div { class: "mt-2 flex items-center gap-2 text-sm",
+                            Pill { variant: PillVariant::Warn, "merged" }
+                            span { class: "text-fg-muted", "This bucket is merged into " }
+                            span { class: "font-mono text-xs", "{data.merged_into_hex}" }
+                            if !data.merged_into_exists {
+                                Pill { variant: PillVariant::Bad, "dangling" }
+                                span { class: "text-fg-muted text-xs",
+                                    "(canonical not found locally — sync may be pending)"
+                                }
+                            }
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                onclick: {
+                                    let source = id.clone();
+                                    let canonical = data.merged_into_hex.clone();
+                                    move |_| {
+                                        let source = source.clone();
+                                        let canonical = canonical.clone();
+                                        spawn(async move {
+                                            if unmerge_source(canonical, source).await.is_ok() {
+                                                bucket.restart();
+                                            }
+                                        });
+                                    }
+                                },
+                                "Unmerge"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Rename card (archived buckets refuse new writes)
+            if data.status != "archived" {
+                BucketRename {
+                    bucket_id: id.clone(),
+                    current_name: data.name.clone(),
+                    on_renamed: move |_| bucket.restart(),
                 }
             }
 
@@ -342,6 +459,142 @@ pub fn BucketDetail(id: String) -> Element {
 
             // Access Control (Grants) card
             BucketAcls { bucket_id: id.clone() }
+
+            // Bucket merges card (sources folded into this canonical)
+            BucketMerges { bucket_id: id.clone() }
+        }
+    }
+}
+
+#[component]
+fn BucketRename(bucket_id: String, current_name: String, on_renamed: EventHandler<()>) -> Element {
+    let mut name = use_signal(|| current_name.clone());
+    let mut err = use_signal(|| Option::<String>::None);
+
+    rsx! {
+        Card {
+            div { class: "p-5 space-y-3",
+                SectionHeading { "Rename" }
+                div { class: "flex items-end gap-2",
+                    div { class: "flex-1",
+                        label { class: "text-xs text-fg-muted", "Bucket Name" }
+                        input {
+                            class: "input input-sm w-full mt-1",
+                            r#type: "text",
+                            value: "{name}",
+                            oninput: move |e| name.set(e.value()),
+                        }
+                    }
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        onclick: {
+                            let bid = bucket_id.clone();
+                            move |_| {
+                                let bid = bid.clone();
+                                let new_name = name.read().trim().to_string();
+                                if new_name.is_empty() {
+                                    return;
+                                }
+                                spawn(async move {
+                                    match rename_bucket(bid, new_name).await {
+                                        Ok(()) => {
+                                            err.set(None);
+                                            on_renamed.call(());
+                                        }
+                                        Err(e) => err.set(Some(e.to_string())),
+                                    }
+                                });
+                            }
+                        },
+                        "Save"
+                    }
+                }
+                if let Some(e) = err.read().as_ref() {
+                    p { class: "text-sm text-danger", "{e}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn BucketMerges(bucket_id: String) -> Element {
+    let fetch_id = bucket_id.clone();
+    let mut sources = use_server_future(move || {
+        let id = fetch_id.clone();
+        async move { list_bucket_merge_sources(id).await }
+    })?;
+
+    let mut source_input = use_signal(String::new);
+
+    let rows = match &*sources.read() {
+        Some(Ok(s)) => s.clone(),
+        _ => Vec::new(),
+    };
+
+    rsx! {
+        Card {
+            div { class: "p-5 space-y-3",
+                SectionHeading { "Merged Sources" }
+                p { class: "text-sm text-fg-muted",
+                    "Source buckets folded into this one. Their contents surface here; nothing is moved or re-signed."
+                }
+                if rows.is_empty() {
+                    p { class: "text-sm text-fg-muted", "No merged sources." }
+                } else {
+                    div { class: "space-y-1",
+                        for src in rows.iter().cloned() {
+                            div { class: "flex items-center justify-between gap-2 text-sm",
+                                span { class: "font-mono text-xs", "{src}" }
+                                Button {
+                                    variant: ButtonVariant::Danger,
+                                    onclick: {
+                                        let canonical = bucket_id.clone();
+                                        let src = src.clone();
+                                        move |_| {
+                                            let canonical = canonical.clone();
+                                            let src = src.clone();
+                                            spawn(async move {
+                                                let _ = unmerge_source(canonical, src).await;
+                                                sources.restart();
+                                            });
+                                        }
+                                    },
+                                    "Unmerge"
+                                }
+                            }
+                        }
+                    }
+                }
+                div { class: "flex items-center gap-2 pt-2",
+                    input {
+                        class: "flex-1 rounded border border-border bg-bg px-2 py-1 text-sm font-mono",
+                        placeholder: "source bucket id (hex)",
+                        value: "{source_input}",
+                        oninput: move |e| source_input.set(e.value()),
+                    }
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        onclick: {
+                            let canonical = bucket_id.clone();
+                            move |_| {
+                                let canonical = canonical.clone();
+                                let src = source_input.read().clone();
+                                if src.trim().is_empty() {
+                                    return;
+                                }
+                                spawn(async move {
+                                    if merge_source_into(canonical, src).await.is_ok() {
+                                        source_input.set(String::new());
+                                        sources.restart();
+                                    }
+                                });
+                            }
+                        },
+                        "Merge In"
+                    }
+                }
+            }
         }
     }
 }
@@ -384,7 +637,7 @@ fn BucketAcls(bucket_id: String) -> Element {
                                     value: "{audience_type}",
                                     onchange: move |e| audience_type.set(e.value()),
                                     option { value: "role", "Role" }
-                                    option { value: "agent", "Agent" }
+                                    option { value: "agent_key", "Agent (public key)" }
                                 }
                             }
                             div {
@@ -401,8 +654,8 @@ fn BucketAcls(bucket_id: String) -> Element {
                                     }
                                 } else {
                                     input {
-                                        class: "w-full rounded border border-border bg-bg px-2 py-1 text-sm",
-                                        placeholder: "agent-id",
+                                        class: "w-full rounded border border-border bg-bg px-2 py-1 text-sm font-mono",
+                                        placeholder: "agent public key (hex)",
                                         value: "{audience_value}",
                                         oninput: move |e| audience_value.set(e.value()),
                                     }

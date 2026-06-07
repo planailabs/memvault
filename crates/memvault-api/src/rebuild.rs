@@ -38,18 +38,32 @@ pub fn deterministic_legacy_id(client: &LocalClient) -> BucketId {
     BucketId(id)
 }
 
-/// Deterministic agent-bucket ID — a stable function of
-/// `(cluster_id, agent_pubkey)` so every node in the cluster lands on
-/// the same bucket without consulting any list, and so collisions
-/// across reused names are impossible. The agent's pubkey is the
-/// uniqueness anchor; the `AgentId` string label can be reused or
-/// re-claimed and is therefore unsafe as a primary key.
+/// Deterministic agent-bucket ID — a stable function of the agent
+/// **pubkey alone**. The pubkey *is* the agent identity, so the bucket id
+/// is stable for the life of that identity across genesis, standalone→
+/// cluster join, and re-genesis / cluster_id rotation. (Previously the
+/// `cluster_id` was mixed in, so the same agent mapped to a *different*
+/// bucket whenever the cluster_id changed, orphaning prior data; the
+/// bucket-merge auto-alias pass folds those legacy ids into this one.)
 ///
-/// Pre-genesis (zero `cluster_id`) the seed degrades to "pubkey
-/// alone" — still idempotent on this node, and `rebuild` rebinds the
-/// resulting bucket at first post-genesis rebuild the same way
-/// `deterministic_legacy_id` does for unbucketed-adoption.
-pub fn deterministic_agent_bucket_id(cluster_id: &[u8], agent_pubkey: &[u8]) -> BucketId {
+/// The `AgentName` string label can be reused or re-claimed and is
+/// therefore unsafe as a primary key — only the pubkey is.
+pub fn deterministic_agent_bucket_id(agent_pubkey: &[u8]) -> BucketId {
+    let mut payload: Vec<u8> = Vec::with_capacity(agent_pubkey.len() + 16);
+    payload.extend_from_slice(b"::agent::");
+    payload.extend_from_slice(agent_pubkey);
+    let cid = memvault_core::cid_from_bytes(&payload);
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&cid.to_bytes()[..32]);
+    BucketId(id)
+}
+
+/// The **legacy** agent-bucket ID: a function of `(cluster_id,
+/// agent_pubkey)`. Retained only to recompute the bucket ids an agent's
+/// data was historically stored under, so the auto-alias migration can
+/// map them onto the stable [`deterministic_agent_bucket_id`]. Never used
+/// for new writes.
+pub fn legacy_agent_bucket_id(cluster_id: &[u8], agent_pubkey: &[u8]) -> BucketId {
     let mut payload: Vec<u8> = Vec::with_capacity(cluster_id.len() + agent_pubkey.len() + 16);
     payload.extend_from_slice(cluster_id);
     payload.extend_from_slice(b"::agent::");
@@ -76,6 +90,8 @@ pub struct RebuildReport {
     pub docs_indexed: usize,
     pub entities_indexed: usize,
     pub attachments_indexed: usize,
+    pub bucket_merges_reindexed: usize,
+    pub retractions_backfilled: usize,
 }
 
 /// Perform a full deterministic rebuild of all derived state from BLOCKS.
@@ -254,6 +270,17 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     store
         .clear_secondary_indexes()
         .map_err(|e| ApiError::Other(format!("clear indexes: {e}")))?;
+    // The per-scope member-sets (SCOPE_MEMBERS/SCOPE_REGISTRY) are derived
+    // indexes too. A rebuild that re-derives BY_BUCKET/BY_TAG but leaves a
+    // previously-registered bucket partition in place would keep its stale
+    // membership: `ensure_bucket_partition` skips any already-registered
+    // scope, so a node adopted into a bucket during this rebuild (e.g. a
+    // legacy unbucketed entity) would be found by the authoritative scan
+    // yet missing from the member-set. Discard them so they rebuild lazily
+    // with correct membership on next access.
+    store
+        .scope_clear_all()
+        .map_err(|e| ApiError::Other(format!("clear scope member-sets: {e}")))?;
 
     let blocks = store
         .iter_blocks()
@@ -317,6 +344,24 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     let (orphans, dupes) = repair_vfs_sync(store, client)?;
     report.vfs_orphans_linked = orphans;
     report.vfs_dupes_removed = dupes;
+
+    // ── Phase 4b: Re-tag untagged bucket-merge records (v14) ───────────
+    // Bare BucketMergeRecord blocks that synced in before the sync classifier
+    // knew about them never got their `bucket_merge` lookup tag; the generic
+    // reindex can't recover it from the struct body. Re-apply it so the alias
+    // overlay sees them.
+    match client.reindex_bucket_merges() {
+        Ok(n) => report.bucket_merges_reindexed = n,
+        Err(e) => tracing::warn!("bucket-merge reindex during rebuild failed: {e}"),
+    }
+
+    // ── Phase 4c: Backfill syncable retraction blocks (v15) ────────────
+    // Local-only RETRACTED entries (e.g. unmerges) never propagated; publish a
+    // signed retraction block per entry so peers converge.
+    match client.backfill_retraction_blocks() {
+        Ok(n) => report.retractions_backfilled = n,
+        Err(e) => tracing::warn!("retraction backfill during rebuild failed: {e}"),
+    }
 
     // ── Phase 5: Rebuild text index (sync) ─────────────────────────────
 
@@ -393,8 +438,10 @@ fn repair_vfs_sync(
     let vfs_dir_kind = crate::vfs::VFS_DIR_KIND;
     let vfs_child_rel = crate::vfs::VFS_CHILD_REL;
 
-    // 1. Collect all VFS dir entities with names.
-    let labels = store.query_unique_labels("entity", 50_000)
+    // 1. Collect all VFS dir entities with names. Exhaustive (see standards:
+    //    exhaustive-lookups) — a cap would silently drop dirs and corrupt the
+    //    rebuilt VFS tree.
+    let labels = store.query_unique_labels("entity", usize::MAX)
         .map_err(|e| ApiError::Other(format!("query entities: {e}")))?;
     let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
 
@@ -591,6 +638,19 @@ enum Verdict {
 }
 
 fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
+    // v12 migration: drop legacy `GrantAudience::Agent(string)` bucket grants.
+    // Their string audience is ambiguous across nodes (two nodes' same-named
+    // agents both match), so they're poisoned. New grants use `AgentKey(pubkey)`,
+    // which survive. A non-grant block won't deserialize as `Grant` (required
+    // fields), so this can't false-positive. Revocation isn't an option here —
+    // it needs an admin/owner key that may be absent; dropping in the rebuild
+    // needs no authority.
+    if let Ok(grant) = serde_ipld_dagcbor::from_slice::<memvault_auth::Grant>(data) {
+        if matches!(grant.audience, memvault_auth::GrantAudience::Agent(_)) {
+            return Verdict::Drop;
+        }
+    }
+
     // Try to deserialize as structured data.
     let val = match memvault_store::deserialize_block(data) {
         Some(v) => v,
@@ -721,4 +781,52 @@ fn resign_legacy_envelope(
     .ok()?;
 
     serde_ipld_dagcbor::to_vec(&envelope).ok()
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn grant_with(audience: memvault_auth::GrantAudience) -> Vec<u8> {
+        let grant = memvault_auth::Grant {
+            issuer: memvault_core::PeerId(vec![1, 2, 3]),
+            issuing_cluster: memvault_core::ClusterId([7u8; 32]),
+            admin_pubkey: [9u8; 32],
+            audience,
+            scopes: vec![],
+            actions: vec![memvault_auth::Action::Read],
+            not_before_ns: 0,
+            not_after_ns: u64::MAX,
+            parent: None,
+            nonce: [0u8; 16],
+            bucket_scopes: vec![],
+            signature: [0u8; 64],
+        };
+        serde_ipld_dagcbor::to_vec(&grant).unwrap()
+    }
+
+    #[test]
+    fn drops_agent_string_grant() {
+        let bytes = grant_with(memvault_auth::GrantAudience::Agent(memvault_core::AgentName(
+            "alice".into(),
+        )));
+        let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+        assert!(matches!(classify_block(&cid, &bytes), Verdict::Drop));
+    }
+
+    #[test]
+    fn keeps_pubkey_and_role_grants() {
+        for audience in [
+            memvault_auth::GrantAudience::AgentKey([5u8; 32]),
+            memvault_auth::GrantAudience::Peer(memvault_core::PeerId(vec![4u8; 32])),
+            memvault_auth::GrantAudience::Role(memvault_auth::AgentRole::AgentHost),
+        ] {
+            let bytes = grant_with(audience);
+            let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+            assert!(
+                matches!(classify_block(&cid, &bytes), Verdict::Keep),
+                "non-Agent(string) grants must survive the v12 rebuild"
+            );
+        }
+    }
 }

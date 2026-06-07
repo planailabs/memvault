@@ -49,6 +49,13 @@ pub enum Command {
 /// Run the memvault MCP server with the given CLI arguments — or, if a
 /// subcommand was provided, dispatch to that instead.
 pub async fn run(cli: Cli) -> Result<()> {
+    // Install the rustls ring crypto provider once for the process
+    // before any reqwest::Client is constructed. The workspace pins
+    // reqwest with the `rustls-no-provider` feature so the picker is
+    // per-binary — without this, HTTPS calls (e.g. `mcp enroll
+    // --server https://…`) panic on the first request.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if let Some(command) = cli.command {
         return match command {
             Command::Enroll(args) => enroll::run(args).await,
@@ -56,20 +63,27 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
     let client: Arc<dyn memvault_api::MemvaultClient> = Arc::from(cli.client.connect().await?);
 
-    // Resolve the agent bucket once at startup so subsequent writes can default to it.
-    let agent_bucket = if let Some(agent_id) = cli.agent_id.as_deref() {
-        match client.ensure_agent_bucket(agent_id).await {
+    // Resolve the agent bucket once at startup so subsequent writes can default
+    // to it. An agent's identity IS its ed25519 key, so resolve from the
+    // connected identity's pubkey; over HTTP the server re-derives it from the
+    // verified JWT, so a client can only ever resolve its own bucket. `--agent-id`
+    // (if given) is just a display label on the bucket.
+    let agent_bucket = if let Some(pk) = cli.client.load_agent_pubkey() {
+        let hint = cli
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| format!("agent-{}", hex::encode(&pk[..4])));
+        match client.ensure_agent_bucket(&pk, &hint).await {
             Ok(bid) => {
                 tracing::info!(
-                    agent_id,
+                    pubkey = %hex::encode(pk),
                     bucket = %hex::encode(bid.0),
-                    "resolved agent bucket"
+                    "resolved agent bucket from identity pubkey"
                 );
                 Some(bid)
             }
             Err(e) => {
                 tracing::warn!(
-                    agent_id,
                     "failed to resolve agent bucket: {e} — writes without an explicit bucket will fail"
                 );
                 None

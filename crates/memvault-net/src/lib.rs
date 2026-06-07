@@ -17,7 +17,7 @@ pub mod standalone;
 pub mod visibility;
 
 pub use auth_proto::{AUTH_PROTOCOL, AuthCodec, AuthRequest, AuthResponse};
-pub use behaviour::MemvaultBehaviour;
+pub use behaviour::{MemvaultBehaviour, MemvaultBehaviourEvent};
 pub use block_proto::{
     BLOCK_PROTOCOL, BlockAccessToken, BlockCodec, BlockEntry, BlockRequest, BlockResponse,
     RangeFingerprint,

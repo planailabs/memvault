@@ -119,6 +119,9 @@ async fn put_sync_search_retract() {
         vec![1u8; 32],
         vec![0u8; 32],
     );
+    // node2 retracts below, and retract emits a signed retraction block —
+    // LocalClient refuses writes without a node signing key. Seed one.
+    client2.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]));
     let client3 = LocalClient::new(
         Arc::clone(&store3),
         Arc::new(RwLock::new(QuotaManager::new(Default::default()))),

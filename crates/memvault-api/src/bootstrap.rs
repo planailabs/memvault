@@ -258,6 +258,16 @@ pub struct HostServices {
 /// so a write-then-exit process is durable without a flusher.
 pub fn start_host_services(client: &Arc<LocalClient>) -> Result<HostServices> {
     let trust = bootstrap_cluster_trust(client)?;
+    // Trust is now settled from the local sigchain. Sweep out orphaned agent
+    // attestations — ones signed by a node that was never attested into the
+    // cluster (e.g. an ephemeral instance that gossiped its `_ui` Admin agent
+    // in). They're inert (ACL/JWT both reject untrusted attesting nodes), so
+    // this only clears cruft; a legit not-yet-synced agent self-heals via RBSR.
+    match client.prune_orphaned_agent_attestations() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(pruned = n, "swept orphaned agent attestations at startup"),
+        Err(e) => tracing::warn!("orphan-attestation sweep failed: {e}"),
+    }
     let sigchain_watcher = sigchain::spawn_sigchain_watcher(
         Arc::clone(client),
         trust.admin_pubkey,

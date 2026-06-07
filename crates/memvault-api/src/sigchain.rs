@@ -31,6 +31,14 @@ const LABEL_NODE_REV: &str = "node_rev";
 const LABEL_ADMIN_ADMISSION: &str = "admin_admission";
 const LABEL_ADMIN_RETIREMENT: &str = "admin_retirement";
 const LABEL_GRANT_REVOCATION: &str = "grant_revocation";
+/// Label for a bucket-merge alias record (`BucketMergeRecord`). Tagged
+/// `("sigchain", "bucket_merge")` so synced records invalidate the alias
+/// cache here and surface in the audit log (§8.1).
+const LABEL_BUCKET_MERGE: &str = "bucket_merge";
+/// Label for a syncable retraction record (soft-delete of a block, e.g. an
+/// unmerge retracting a `BucketMergeRecord`). Tagged `("sigchain","retraction")`
+/// so it's applied to the `RETRACTED` table on every node that ingests it.
+const LABEL_RETRACTION: &str = "retraction";
 /// Label for the "token redeemed" audit record (`TokenConsumption`).
 pub const LABEL_TOKEN_REDEEM: &str = "token_redeem";
 
@@ -467,6 +475,28 @@ pub fn verify_envelope_authorship(
     verify_signed_envelope(&signed, trusted_attestations, trusted_node_pubkeys)
 }
 
+/// Authenticity check for a retraction block: the envelope must be a
+/// `Signed<T>` carrying a non-empty node signature that verifies against its
+/// declared author. Trust/authority of the signer is deferred (re-checked
+/// elsewhere) — this only rejects unsigned or tampered retractions.
+fn retraction_signature_ok(bytes: &[u8]) -> bool {
+    let Ok(signed) =
+        serde_ipld_dagcbor::from_slice::<memvault_core::Signed<serde_json::Value>>(bytes)
+    else {
+        return false;
+    };
+    if signed.signature.is_empty() {
+        return false;
+    }
+    let Ok(author): std::result::Result<[u8; 32], _> = signed.author.0.as_slice().try_into() else {
+        return false;
+    };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&author) else {
+        return false;
+    };
+    signed.verify(&vk).is_ok()
+}
+
 /// Verify a Signed<T> envelope's node signature plus its optional agent
 /// co-signature. Returns the most specific applicable status.
 fn verify_signed_envelope(
@@ -752,6 +782,10 @@ fn apply_sigchain_block(
             // effects (e.g. an attestation referencing a node that was just
             // added) and is bounded by the AgentAttestation block count.
             refresh_trusted_agents(client, state);
+            // A newly-known agent pubkey may have legacy (cluster-scoped)
+            // buckets to auto-alias onto its stable f(pubkey) id. Invalidate
+            // the alias cache so the next resolution recomputes those edges.
+            client.bump_alias_generation();
         }
         LABEL_NODE_REV => {
             let Ok(rev) = serde_ipld_dagcbor::from_slice::<NodeRevocation>(&bytes) else {
@@ -780,6 +814,53 @@ fn apply_sigchain_block(
             // check reads that index directly (uncached), so the revoked
             // grant stops conferring access on the next check.
             let _ = apply_grant_revocation(client, &bytes);
+        }
+        LABEL_BUCKET_MERGE => {
+            // A bucket-merge alias record landed (local or synced). Bump the
+            // alias generation so the next resolution rebuilds the alias maps
+            // from the bucket_merge side blocks and the union takes effect.
+            // No reindex: source blocks keep their original bucket_id and
+            // were already indexed; only the alias + scope member-sets change.
+            client.bump_alias_generation();
+        }
+        LABEL_RETRACTION => {
+            // A retraction block (local or synced). Apply it to the RETRACTED
+            // table so `is_retracted()` reflects it on every node, and bump the
+            // alias cache (a retracted bucket_merge == an unmerge that must take
+            // effect cluster-wide).
+            //
+            // SECURITY: authenticity gate. The retraction envelope must carry a
+            // valid node signature, or a peer could hide arbitrary blocks by
+            // injecting forged/unsigned retractions. Authority (signer is the
+            // target's author or an admin) is deferred — same model as merges /
+            // node attestations, which accept an authentic block and re-check
+            // authority later.
+            if !retraction_signature_ok(&bytes) {
+                tracing::warn!("sigchain watcher: rejecting retraction with missing/invalid signature");
+                return;
+            }
+            // Membership/authority: drop a retraction signed by a revoked or
+            // untrusted agent, or with a bad agent co-signature. A validly
+            // node-signed retraction whose signer isn't yet in the trust set is
+            // deferred-accepted (sync ordering) — same model as attestations.
+            // (Finer per-target authority — only the target's author or an admin
+            // may retract — would need the retraction to assert an explicit
+            // authority signature, since the envelope sig is the node/agent key,
+            // not the target's authoring authority. Tracked as a refinement.)
+            if matches!(
+                client.verify_envelope_authorship(cid),
+                Ok(AuthorshipStatus::AgentNotTrusted { .. } | AuthorshipStatus::BadSignature)
+            ) {
+                tracing::warn!("sigchain watcher: rejecting retraction from revoked/untrusted agent");
+                return;
+            }
+            if let Some(view) = memvault_store::EnvelopeView::parse(&bytes) {
+                if let Some(target) = view.get_as::<Vec<u8>>("target_cid") {
+                    let tombstone = memvault_core::cid_from_bytes(&target).to_bytes();
+                    let _ = client.store().record_retraction(&target, &tombstone);
+                    client.bump_alias_generation();
+                }
+            }
         }
         LABEL_ADMIN_ADMISSION | LABEL_ADMIN_RETIREMENT => {
             // Admin-key set changed. SECURITY: never apply incrementally
@@ -841,6 +922,61 @@ pub fn find_agent_attestation(
         });
     }
     Ok(best)
+}
+
+/// Resolve an agent's current display label (set via `agent_rename` /
+/// `Op::AgentRename`), or `None` if it was never relabeled.
+///
+/// Display-only: the label never participates in access control. Authority:
+/// a relabel is honoured only when its envelope is node-signed by the agent's
+/// *attesting node* (the host that minted its `AgentAttestation`) — so a
+/// forged or foreign-signed relabel block synced from a peer is ignored.
+/// When several authorized relabels exist, the latest by `wall_ns` wins.
+pub fn agent_label(client: &LocalClient, agent_pubkey: &[u8; 32]) -> Result<Option<String>> {
+    // The only signer allowed to relabel this agent is the node that attested
+    // it. If that's ambiguous/absent, no relabel is trusted.
+    let Some(authority) = sole_attesting_node(client, agent_pubkey)? else {
+        return Ok(None);
+    };
+    let Ok(authority_key) = ed25519_dalek::VerifyingKey::from_bytes(&authority) else {
+        return Ok(None);
+    };
+
+    let cids = client
+        .store()
+        .query_by_tag("agent", &hex::encode(agent_pubkey), 0, usize::MAX)
+        .map_err(|e| ApiError::Other(format!("query agent labels: {e}")))?;
+
+    let mut best: Option<(u64, String)> = None;
+    for cid in cids {
+        let Ok(Some(bytes)) = client.store().get_block(&cid) else {
+            continue;
+        };
+        let Ok(signed) =
+            serde_ipld_dagcbor::from_slice::<memvault_core::Signed<serde_json::Value>>(&bytes)
+        else {
+            continue;
+        };
+        let rename = match signed.payload.get("AgentRename") {
+            Some(r) => r,
+            None => continue,
+        };
+        // The relabel must be node-signed by the agent's attesting node. We
+        // verify the signature directly against that node's key rather than
+        // trusting the envelope's `author` field — a forged or foreign-signed
+        // block won't verify and is dropped.
+        if signed.verify(&authority_key).is_err() {
+            continue;
+        }
+        let wall_ns = rename.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(label) = rename.get("new_label").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if best.as_ref().map(|(w, _)| wall_ns >= *w).unwrap_or(true) {
+            best = Some((wall_ns, label.to_string()));
+        }
+    }
+    Ok(best.map(|(_, l)| l))
 }
 
 /// Lower = less privileged ("more restrictive"). Used to pick the

@@ -6,6 +6,7 @@ use dioxus_i18n::t;
 use super::cmd_k::{CommandPalette, PaletteOpen};
 use super::events::use_event_bus_provider;
 use super::navbar::Sidebar;
+use super::session::use_session_provider;
 use super::topbar::{
     ActiveBucket, ActiveBucketSignal, ActiveView, ActiveViewSignal, ShowRetracted,
     ShowRetractedSignal, Topbar, TopbarMeta,
@@ -22,13 +23,25 @@ pub fn Layout() -> Element {
         Signal::new(super::filters::FilterEpoch::default())
     });
     let _event_bus = use_event_bus_provider();
+    let _session = use_session_provider();
 
     rsx! {
         CommandPalette {}
         div { class: "flex h-screen bg-bg text-fg",
             Sidebar {}
             div { class: "flex-1 flex flex-col min-w-0",
-                Topbar {}
+                // Topbar has its own boundary: toggling a filter (e.g. Retracted)
+                // restarts its bucket/view fetches, and without this the suspense
+                // would bubble past the page boundary and blank the whole layout.
+                // While re-fetching it shows a fixed-height placeholder bar.
+                SuspenseBoundary {
+                    fallback: |_| rsx! {
+                        header { class: "topbar",
+                            div { class: "flex items-center gap-3 px-5 py-3 h-[49px]" }
+                        }
+                    },
+                    Topbar {}
+                }
                 main { class: "flex-1 overflow-y-auto p-5",
                     SuspenseBoundary {
                         fallback: |_| rsx! {

@@ -20,9 +20,11 @@ pub struct EdgeId(pub [u8; 32]);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BucketId(pub [u8; 32]);
 
-/// Agent identifier (human-readable string).
+/// An agent's human-readable name (a display label). The agent's *identity*
+/// is its ed25519 public key, not this string. Serializes transparently as the
+/// inner string, so on the wire it is unchanged from the former `AgentName`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId(pub String);
+pub struct AgentName(pub String);
 
 /// Peer identity — raw bytes to avoid libp2p dependency in core.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -34,6 +36,17 @@ impl ClusterId {
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
         Self(buf)
     }
+}
+
+/// Base58btc-encode bytes — the canonical string form for peer ids and other
+/// multihash-shaped values (matches the `PeerId`/`ClusterId` `Display` impls).
+pub fn b58_encode(bytes: &[u8]) -> String {
+    bs58::encode(bytes).into_string()
+}
+
+/// Decode a base58btc string back to bytes.
+pub fn b58_decode(s: &str) -> Result<Vec<u8>, bs58::decode::Error> {
+    bs58::decode(s).into_vec()
 }
 
 /// Parse a hex string (with an optional `prefix:` like `doc:` or `entity:`)

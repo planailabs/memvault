@@ -31,8 +31,15 @@ fn main() {
                     // key and install it on the LocalClient. The daemon main
                     // path does this with the libp2p host key; here we use a
                     // file-backed key under `<data_dir>/identity/node.key`.
+                    //
+                    // Installing the key also runs the deferred blockstore
+                    // rebuild: `LocalClient::open` no longer rebuilds on
+                    // construction because the rebuild needs this key to
+                    // re-sign migrated legacy envelopes.
                     match memvault_api::node_key::load_or_generate(&data_dir) {
-                        Ok(k) => local_client.set_node_signing_key(k),
+                        Ok(k) => {
+                            local_client.install_node_key_and_rebuild(Some(k));
+                        }
                         Err(e) => {
                             eprintln!("memvault: API routes NOT mounted (node key: {e})");
                             return Ok(router);
@@ -56,6 +63,17 @@ fn main() {
                         return Ok(router);
                     }
 
+                    let allowed_origins: Vec<String> =
+                        std::env::var("MEMVAULT_ALLOWED_ORIGINS")
+                            .ok()
+                            .map(|v| {
+                                v.split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
                     let app_state = Arc::new(memvault_web::AppState {
                         client,
                         event_bus: Arc::new(memvault_api::EventBus::new(64)),
@@ -65,6 +83,7 @@ fn main() {
                         revoked_nodes: Arc::clone(&trust.trust_state.revoked_nodes),
                         metrics: Arc::new(memvault_api::metrics::Metrics::new()),
                         agent_attestation_lookup: None,
+                        allowed_origins,
                     });
                     router = axum::Router::new()
                         .nest("/api/v1", memvault_web::api::routes(app_state))

@@ -13,6 +13,7 @@ pub mod graph;
 pub mod links;
 pub mod ops;
 pub mod search;
+pub mod skills;
 pub mod vfs;
 pub mod views;
 
@@ -20,7 +21,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{delete, get, post};
+use axum::middleware::from_fn_with_state;
+use axum::routing::{delete, get, patch, post};
 
 use crate::AppState;
 
@@ -29,6 +31,7 @@ use crate::AppState;
 /// All node IDs use "type:hex" format: entity:<hex>, doc:<hex>, file:<hex>.
 /// Legacy /docs and /entities endpoints accept both raw hex and type:hex.
 pub fn routes(state: Arc<AppState>) -> Router {
+    let origin_layer = from_fn_with_state(Arc::clone(&state), auth::origin_guard);
     Router::new()
         // ── Nodes (unified) ────────────────────────────────────────
         // The primary API for all node types. Uses type:hex IDs everywhere.
@@ -70,7 +73,21 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route("/docs/{id}/history", get(docs::doc_history))
         // ── Entities (type-specific, accepts raw hex or entity:hex)
-        .route("/entities", post(graph::create_entity))
+        .route("/entities", post(graph::create_entity).get(graph::list_entities))
+        .route("/traverse", get(graph::traverse))
+        // ── Skills (first-class entity aggregates) ─────────────────
+        .route("/skills", get(skills::list_skills).post(skills::publish_skill))
+        .route(
+            "/skills/{id}",
+            get(skills::get_skill)
+                .patch(skills::rename_skill)
+                .delete(skills::delete_skill),
+        )
+        .route("/skills/{id}/resources", post(skills::link_resource))
+        .route(
+            "/skills/{id}/resources/{edge_id}",
+            delete(skills::unlink_resource),
+        )
         .route(
             "/entities/{id}",
             get(graph::get_entity).delete(graph::delete_entity),
@@ -79,6 +96,12 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/files", post(files::upload_file))
         .route("/files/{cid}", get(files::download_file))
         .route("/files/{cid}/manifest", get(files::file_manifest))
+        .route(
+            "/files/{cid}/pin",
+            post(files::pin_file).delete(files::unpin_file),
+        )
+        .route("/files/{cid}/extracted-text", get(files::extracted_text))
+        .route("/pins", get(files::list_pinned))
         // Backward compat: keep old /attachments routes working
         .route("/attachments", post(files::upload_file))
         .route("/attachments/{cid}", get(files::download_file))
@@ -89,6 +112,8 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/vfs/mkdir", post(vfs::vfs_mkdir))
         .route("/vfs/link", post(vfs::vfs_link))
         .route("/vfs/mv", post(vfs::vfs_mv))
+        .route("/vfs/tree", get(vfs::vfs_tree))
+        .route("/vfs/find", get(vfs::vfs_find))
         // ── File upload body limit (2GB) ───────────────────────────
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
         // ─��� Admin ───────────��──────────────────────────────────────
@@ -113,11 +138,22 @@ pub fn routes(state: Arc<AppState>) -> Router {
         // Register static `/buckets/agent` before the `{id}` route so it
         // is not captured as `id = "agent"`.
         .route("/buckets/agent", post(buckets::ensure_agent_bucket))
+        // Static merge routes before `{id}` so they aren't captured as ids.
+        .route("/buckets/merge", post(buckets::merge_buckets))
+        .route("/buckets/unmerge", post(buckets::unmerge_buckets))
+        .route("/buckets/merges", get(buckets::list_merges))
         .route(
             "/buckets/{id}",
             get(buckets::get_bucket).patch(buckets::rename_bucket),
         )
-        .route("/buckets/{id}/grants", post(buckets::submit_grant))
+        .route(
+            "/buckets/{id}/grants",
+            get(buckets::list_grants).post(buckets::submit_grant),
+        )
+        // Set an agent's display label (the agent itself or an Admin).
+        .route("/agents/{pubkey}", patch(agents::rename_agent))
+        .route("/buckets/{id}/issue-grant", post(buckets::issue_grant))
+        .route("/grants/{cid}/revoke", post(buckets::revoke_grant))
         .route("/buckets/{id}/attach", post(buckets::attach_bucket))
         .route("/buckets/{id}/archive", post(buckets::archive_bucket))
         // ── Auth (session token for web UI) ───────────────────────
@@ -129,5 +165,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/events", get(events::events_stream))
         .route("/metrics", get(ops::metrics))
         .route("/health", get(ops::health))
+        // CSRF defence: cookie-bearing cross-origin POSTs/PUTs/DELETEs are
+        // refused. Bearer-token clients (memctl, curl scripts) keep working
+        // because they don't set Origin and don't carry a session cookie.
+        .layer(origin_layer)
         .with_state(state)
 }

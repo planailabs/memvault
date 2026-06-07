@@ -26,7 +26,24 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
     bucket_id: &BucketId,
 ) -> Result<EntityId> {
     let bucket_hex = hex::encode(bucket_id.0);
-    let entities = client.list_entities(500, Some(bucket_id)).await?;
+
+    // Fast path: the VFS root derived index (O(1)). Verify the cached id still
+    // points at a real vfs:dir; if so we're done. A stale/empty entry falls
+    // through to the reconciliation scan below, which repopulates it.
+    if let Some(cached) = client.vfs_root_cached(bucket_id).await? {
+        if let Ok(Some(e)) = client.get_entity(&cached).await {
+            if e.kind == VFS_DIR_KIND {
+                return Ok(cached);
+            }
+        }
+    }
+
+    // Reconciliation scan (source of truth, derived from the blockstore). Runs
+    // only on a cache miss/repair. UNCAPPED: there is exactly one VFS root per
+    // bucket and it must be found deterministically — a fixed cap could drop it
+    // and mint a duplicate root. See standards: exhaustive-lookups +
+    // derived-indexes.
+    let entities = client.list_entities(usize::MAX, Some(bucket_id)).await?;
     let mut candidates: Vec<[u8; 32]> = Vec::new();
 
     for e in &entities {
@@ -43,8 +60,11 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
     }
 
     if !candidates.is_empty() {
+        // Deterministic pick (reconciles "root exists multiple times") + cache.
         candidates.sort();
-        return Ok(EntityId(candidates[0]));
+        let root = EntityId(candidates[0]);
+        let _ = client.vfs_root_cache_put(bucket_id, &root).await;
+        return Ok(root);
     }
 
     // Create root for this bucket.
@@ -57,7 +77,7 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
         edges_out: vec![],
     };
     let id = client
-        .add_entity(entity, Visibility::Internal, Some(bucket_id))
+        .add_entity_internal(entity, Visibility::Internal, Some(bucket_id))
         .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     client
@@ -66,6 +86,7 @@ pub async fn ensure_root<C: MemvaultClient + ?Sized>(
             vec![("vfs".into(), "root".into()), ("bucket".into(), bucket_hex)],
         )
         .await?;
+    let _ = client.vfs_root_cache_put(bucket_id, &id).await;
     Ok(id)
 }
 
@@ -159,7 +180,7 @@ pub async fn create_dir<C: MemvaultClient + ?Sized>(
         edges_out: vec![],
     };
     client
-        .add_entity(entity, Visibility::Internal, Some(bucket_id))
+        .add_entity_internal(entity, Visibility::Internal, Some(bucket_id))
         .await
 }
 
@@ -286,7 +307,7 @@ pub async fn resolve_node_type<C: MemvaultClient + ?Sized>(
 // ── Higher-level helpers (used by MCP, web UI, CLI) ───────────────────
 
 /// A single entry produced by [`ls`].
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VfsEntry {
     pub name: String,
     pub node_id: String,

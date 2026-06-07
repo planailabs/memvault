@@ -1,5 +1,5 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use memvault_core::{AgentId, ClusterId};
+use memvault_core::{AgentName, ClusterId};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -66,7 +66,7 @@ impl AdminKeyRotation {
 /// Records an agent key rotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentKeyRotation {
-    pub agent_id: AgentId,
+    pub agent_id: AgentName,
     pub cluster_id: ClusterId,
     pub old_key: [u8; 32],
     pub new_key: [u8; 32],
@@ -81,7 +81,7 @@ pub struct AgentKeyRotation {
 
 #[derive(Serialize)]
 struct AgentRotationSigningPayload<'a> {
-    agent_id: &'a AgentId,
+    agent_id: &'a AgentName,
     cluster_id: &'a ClusterId,
     old_key: &'a [u8; 32],
     new_key: &'a [u8; 32],

@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::classification::Classification;
-use crate::ids::{AgentId, BucketId, ClusterId, PeerId};
+use crate::ids::{AgentName, BucketId, ClusterId, PeerId};
 use crate::visibility::Visibility;
 
 /// The role a bucket plays within the system.
@@ -44,7 +44,7 @@ pub struct BucketDecl {
     pub name: String,
     pub description: Option<String>,
     /// If Some, this bucket was created by a specific agent. If None, cluster-owned.
-    pub owner_agent: Option<AgentId>,
+    pub owner_agent: Option<AgentName>,
     /// The owner agent's ed25519 pubkey, when known at creation. Lets ACL
     /// enforcement resolve owner/attesting-node grant authority without an
     /// agent_id→pubkey scan. `None` for cluster-owned or node-owned buckets.
