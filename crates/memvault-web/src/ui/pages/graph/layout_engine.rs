@@ -42,7 +42,8 @@ pub struct ForceParams {
     pub link_distance: f64,
     /// Pull toward (0, 0). Scales with alpha.
     pub center_strength: f64,
-    /// Coulomb-style many-body repulsion. Negative = repulsive.
+    /// Coulomb-style many-body repulsion. Positive = repulsive (a node is
+    /// pushed away from every other node; see `tick`'s repulsion loop).
     pub repulsion_strength: f64,
 }
 
@@ -52,7 +53,7 @@ impl Default for ForceParams {
             link_strength: 0.08,
             link_distance: 200.0,
             center_strength: 0.01,
-            repulsion_strength: -2000.0,
+            repulsion_strength: 2000.0,
         }
     }
 }

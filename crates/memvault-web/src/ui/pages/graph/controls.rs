@@ -19,7 +19,7 @@ pub struct GraphSettings {
     pub link_thickness: f64,
     // Forces
     pub center_strength: f64,
-    pub repulsion: f64, // positive magnitude; negated for the engine
+    pub repulsion: f64, // positive magnitude; engine uses positive = repulsive
     pub link_strength: f64,
     pub link_distance: f64,
 }
@@ -58,7 +58,7 @@ impl GraphSettings {
             link_strength: self.link_strength,
             link_distance: self.link_distance,
             center_strength: self.center_strength,
-            repulsion_strength: -self.repulsion,
+            repulsion_strength: self.repulsion,
         }
     }
 }
@@ -215,10 +215,12 @@ mod tests {
     }
 
     #[test]
-    fn to_force_params_negates_repulsion() {
+    fn to_force_params_maps_repulsion() {
         let s = GraphSettings::default();
         let p = s.to_force_params();
-        assert_eq!(p.repulsion_strength, -2000.0);
+        // Positive repulsion_strength repels (see ForceSimulation::tick); the
+        // UI magnitude maps straight through, no negation.
+        assert_eq!(p.repulsion_strength, 2000.0);
         assert_eq!(p.link_distance, 200.0);
         assert_eq!(p.link_strength, 0.08);
         assert_eq!(p.center_strength, 0.01);
