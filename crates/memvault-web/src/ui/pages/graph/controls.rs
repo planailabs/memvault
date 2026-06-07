@@ -90,6 +90,104 @@ pub fn save_settings(s: &GraphSettings) {
     }
 }
 
+/// One labeled range row: caption, slider, live value.
+#[component]
+fn Slider(
+    label: String,
+    min: f64,
+    max: f64,
+    step: f64,
+    value: f64,
+    fmt: String,
+    on_input: EventHandler<f64>,
+) -> Element {
+    rsx! {
+        div { class: "space-y-0.5",
+            div { class: "flex items-center justify-between text-xs",
+                span { class: "text-fg-muted", "{label}" }
+                span { class: "font-mono text-fg-faint", "{fmt}" }
+            }
+            input {
+                r#type: "range",
+                min: "{min}", max: "{max}", step: "{step}",
+                value: "{value}",
+                class: "w-full",
+                oninput: move |e: Event<FormData>| {
+                    if let Ok(v) = e.value().parse::<f64>() {
+                        on_input.call(v);
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// Floating, grouped settings panel (Display + Forces). Toggled by the
+/// gear button in the toolbar. Mirrors Obsidian's graph controls.
+#[component]
+pub fn SettingsPanel(settings: Signal<GraphSettings>) -> Element {
+    let s = *settings.read();
+    rsx! {
+        Card { class: "absolute top-2 right-2 z-10 w-64 p-3 space-y-3 shadow-lg max-h-[90%] overflow-y-auto",
+            // ── Display ──────────────────────────────────────────────
+            div { class: "kicker", {t!("graph-group-display")} }
+            label { class: "flex items-center justify-between text-xs",
+                span { {t!("graph-display-arrows")} }
+                input {
+                    r#type: "checkbox",
+                    checked: s.show_arrows,
+                    onchange: move |e: Event<FormData>| {
+                        let v = e.checked();
+                        settings.write().show_arrows = v;
+                    },
+                }
+            }
+            Slider {
+                label: t!("graph-display-fade"), min: 0.0, max: 1.0, step: 0.02,
+                value: s.label_fade, fmt: format!("{:.2}", s.label_fade),
+                on_input: move |v| { { let mut w = settings.write(); w.label_fade = v; w.clamp(); } },
+            }
+            Slider {
+                label: t!("graph-display-node-size"), min: 0.25, max: 3.0, step: 0.05,
+                value: s.node_scale, fmt: format!("{:.2}×", s.node_scale),
+                on_input: move |v| { { let mut w = settings.write(); w.node_scale = v; w.clamp(); } },
+            }
+            Slider {
+                label: t!("graph-display-link-thickness"), min: 0.25, max: 4.0, step: 0.05,
+                value: s.link_thickness, fmt: format!("{:.2}×", s.link_thickness),
+                on_input: move |v| { { let mut w = settings.write(); w.link_thickness = v; w.clamp(); } },
+            }
+            // ── Forces ───────────────────────────────────────────────
+            div { class: "kicker pt-1 border-t border-line", {t!("graph-group-forces")} }
+            Slider {
+                label: t!("graph-force-center"), min: 0.0, max: 0.08, step: 0.001,
+                value: s.center_strength, fmt: format!("{:.3}", s.center_strength),
+                on_input: move |v| { { let mut w = settings.write(); w.center_strength = v; w.clamp(); } },
+            }
+            Slider {
+                label: t!("graph-force-repel"), min: 200.0, max: 6000.0, step: 50.0,
+                value: s.repulsion, fmt: format!("{:.0}", s.repulsion),
+                on_input: move |v| { { let mut w = settings.write(); w.repulsion = v; w.clamp(); } },
+            }
+            Slider {
+                label: t!("graph-force-link"), min: 0.0, max: 0.4, step: 0.005,
+                value: s.link_strength, fmt: format!("{:.3}", s.link_strength),
+                on_input: move |v| { { let mut w = settings.write(); w.link_strength = v; w.clamp(); } },
+            }
+            Slider {
+                label: t!("graph-force-distance"), min: 30.0, max: 400.0, step: 5.0,
+                value: s.link_distance, fmt: format!("{:.0}", s.link_distance),
+                on_input: move |v| { { let mut w = settings.write(); w.link_distance = v; w.clamp(); } },
+            }
+            button {
+                class: "btn btn-xs btn-ghost w-full",
+                onclick: move |_| settings.set(GraphSettings::default()),
+                {t!("graph-forces-reset")}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

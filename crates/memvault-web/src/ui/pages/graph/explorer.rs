@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::canvas::display_label;
-use super::layout_engine::{ForceParams, ForceSimulation, GraphEdge, GraphNode};
+use super::controls::{load_settings, save_settings, GraphSettings, SettingsPanel};
+use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
 use crate::ui::app::Route;
 use crate::ui::components::cid_display::CidDisplay;
 use crate::ui::topbar::use_topbar;
@@ -669,15 +670,31 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut kind_filter = use_signal(|| None::<String>);
     let mut focus_node = use_signal(|| None::<String>);
     let mut detail = use_signal(|| None::<NodeDetail>);
-    let mut force_params = use_signal(ForceParams::default);
-    let mut forces_open = use_signal(|| false);
+    let mut settings = use_signal(GraphSettings::default);
+    let mut settings_open = use_signal(|| false);
+
+    let mut settings_loaded = use_signal(|| false);
+    // Load persisted settings once on mount (client-side only).
+    use_effect(move || {
+        settings.set(load_settings());
+        settings_loaded.set(true);
+    });
+    // Persist settings whenever they change (client-side only). Skips until the
+    // initial load has completed so it never clobbers stored settings with defaults.
+    use_effect(move || {
+        let s = *settings.read();
+        if !*settings_loaded.peek() {
+            return;
+        }
+        save_settings(&s);
+    });
 
     // Push force-param changes into the simulation and reheat so the
     // canvas relaxes into the new layout instead of jumping. Gated on
     // `sim_ran` so the very first run (which already does its own warmup
     // below) doesn't double up.
     use_effect(move || {
-        let p = *force_params.read();
+        let p = settings.read().to_force_params();
         if !*sim_ran.peek() {
             return;
         }
@@ -945,12 +962,12 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                     button {
                         class: "btn btn-xs btn-secondary ml-auto",
                         onclick: move |_| {
-                            let now_open = !*forces_open.peek();
-                            forces_open.set(now_open);
+                            let open = !*settings_open.peek();
+                            settings_open.set(open);
                         },
-                        {t!("graph-forces")}
+                        {t!("graph-settings")}
                         span { class: "ml-1 font-mono text-fg-faint",
-                            if forces_open() { "▾" } else { "▸" }
+                            if settings_open() { "▾" } else { "▸" }
                         }
                     }
                     button {
@@ -966,81 +983,6 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                             class: "btn btn-xs btn-secondary",
                             onclick: move |_| focus_node.set(None),
                             {t!("graph-show-all")}
-                        }
-                    }
-                }
-
-                // Collapsible force-tuning bar. Sliders map 1:1 onto the
-                // three forces the engine exposes; `Reset` snaps every
-                // value back to `ForceParams::default()`.
-                if forces_open() {
-                    {
-                        let p = *force_params.read();
-                        // The repulsion knob is shown as a positive
-                        // "strength" so dragging right always *increases*
-                        // the force. The stored value stays negative.
-                        let repel = -p.repulsion_strength;
-                        rsx! {
-                            Card { class: "px-3 py-2",
-                                div { class: "flex items-center gap-4 flex-wrap text-xs",
-                                    div { class: "flex items-center gap-2",
-                                        span { class: "kicker", {t!("graph-force-link")} }
-                                        input {
-                                            r#type: "range",
-                                            min: "0", max: "0.4", step: "0.005",
-                                            value: "{p.link_strength}",
-                                            class: "w-32",
-                                            oninput: move |e: Event<FormData>| {
-                                                if let Ok(v) = e.value().parse::<f64>() {
-                                                    force_params.write().link_strength = v;
-                                                }
-                                            },
-                                        }
-                                        span { class: "font-mono text-fg-faint w-12 text-right",
-                                            "{p.link_strength:.3}"
-                                        }
-                                    }
-                                    div { class: "flex items-center gap-2",
-                                        span { class: "kicker", {t!("graph-force-center")} }
-                                        input {
-                                            r#type: "range",
-                                            min: "0", max: "0.08", step: "0.001",
-                                            value: "{p.center_strength}",
-                                            class: "w-32",
-                                            oninput: move |e: Event<FormData>| {
-                                                if let Ok(v) = e.value().parse::<f64>() {
-                                                    force_params.write().center_strength = v;
-                                                }
-                                            },
-                                        }
-                                        span { class: "font-mono text-fg-faint w-12 text-right",
-                                            "{p.center_strength:.3}"
-                                        }
-                                    }
-                                    div { class: "flex items-center gap-2",
-                                        span { class: "kicker", {t!("graph-force-repel")} }
-                                        input {
-                                            r#type: "range",
-                                            min: "200", max: "6000", step: "50",
-                                            value: "{repel}",
-                                            class: "w-32",
-                                            oninput: move |e: Event<FormData>| {
-                                                if let Ok(v) = e.value().parse::<f64>() {
-                                                    force_params.write().repulsion_strength = -v;
-                                                }
-                                            },
-                                        }
-                                        span { class: "font-mono text-fg-faint w-14 text-right",
-                                            "{repel:.0}"
-                                        }
-                                    }
-                                    button {
-                                        class: "btn btn-xs btn-ghost ml-auto",
-                                        onclick: move |_| force_params.set(ForceParams::default()),
-                                        {t!("graph-forces-reset")}
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -1124,7 +1066,10 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                     }
 
                     // ── Main canvas ─────────────────────────────────
-                    Card { class: "flex-1",
+                    Card { class: "flex-1 relative",
+                        if settings_open() {
+                            SettingsPanel { settings }
+                        }
                         // Legend strip — kicker + a dot per kind currently
                         // present in the graph. Mirrors the filter row but
                         // anchors the palette as a visual key over the canvas.
