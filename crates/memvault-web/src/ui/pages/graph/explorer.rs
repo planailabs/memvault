@@ -6,7 +6,7 @@ use plan_ai_design::{Card, Dot, PageHeader, Pill, PillVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::canvas::display_label;
+use super::canvas::{display_label, should_show_label};
 use super::controls::{load_settings, save_settings, GraphSettings, SettingsPanel};
 use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
 use crate::ui::app::Route;
@@ -933,6 +933,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     };
 
     let is_focus_active = focus_node.read().is_some();
+    let cfg = *settings.read();
 
     rsx! {
         div { class: "space-y-4",
@@ -1151,7 +1152,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         else { "entity" };
                                     let dk = display_kind_for(nt, &node.kind);
                                     let halo = kind_halo_color(dk);
-                                    let r = node.radius + 14.0;
+                                    let r = node.radius * cfg.node_scale + 14.0;
                                     rsx! {
                                         circle {
                                             cx: "{node.x}", cy: "{node.y}", r: "{r}",
@@ -1169,7 +1170,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                             for node in nodes.iter() {
                                 if selected.read().as_ref() == Some(&node.id) {
                                     {
-                                        let r = node.radius + 28.0;
+                                        let r = node.radius * cfg.node_scale + 28.0;
                                         rsx! {
                                             circle {
                                                 cx: "{node.x}", cy: "{node.y}", r: "{r}",
@@ -1193,7 +1194,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     let dx = tn.x - sn.x;
                                     let dy = tn.y - sn.y;
                                     let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-                                    let shorten = tn.radius + 4.0;
+                                    let shorten = tn.radius * cfg.node_scale + 4.0;
                                     let end_x = tn.x - dx / dist * shorten;
                                     let end_y = tn.y - dy / dist * shorten;
                                     let mid_x = (sn.x + tn.x) / 2.0;
@@ -1203,8 +1204,15 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     });
                                     let stroke = if is_active { "rgb(var(--c-brand))" } else { "rgb(var(--c-line-soft))" };
                                     let stroke_opacity = if is_active { "0.85" } else { "0.55" };
-                                    let thickness = if is_active { 1.5 } else { 1.0 + (edge.weight as f64 - 1.0).max(0.0) * 0.5 };
-                                    let marker = if is_active { "url(#arrowhead-active)" } else { "url(#arrowhead)" };
+                                    let thickness = (if is_active { 1.5 } else { 1.0 + (edge.weight as f64 - 1.0).max(0.0) * 0.5 })
+                                        * cfg.link_thickness;
+                                    let marker = if !cfg.show_arrows {
+                                        "none".to_string()
+                                    } else if is_active {
+                                        "url(#arrowhead-active)".to_string()
+                                    } else {
+                                        "url(#arrowhead)".to_string()
+                                    };
                                     let chip_w = (edge.relation.len() as f64) * 6.2 + 10.0;
                                     rsx! {
                                         line {
@@ -1255,6 +1263,17 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     let stroke_width = if is_selected { 2.5 } else { 1.5 };
                                     let id = node.id.clone();
                                     let expand_id = node.id.clone();
+                                    let r = node.radius * cfg.node_scale;
+                                    let forced = is_selected;
+                                    let label_text = {
+                                        let max = 32usize;
+                                        if node.label.chars().count() > max {
+                                            let head: String = node.label.chars().take(max).collect();
+                                            format!("{head}…")
+                                        } else {
+                                            node.label.clone()
+                                        }
+                                    };
                                     rsx! {
                                         g {
                                             style: "cursor: pointer",
@@ -1307,10 +1326,10 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                             match nt {
                                                 "doc" => rsx! {
                                                     rect {
-                                                        x: "{node.x - node.radius}",
-                                                        y: "{node.y - node.radius * 0.7}",
-                                                        width: "{node.radius * 2.0}",
-                                                        height: "{node.radius * 1.4}",
+                                                        x: "{node.x - r}",
+                                                        y: "{node.y - r * 0.7}",
+                                                        width: "{r * 2.0}",
+                                                        height: "{r * 1.4}",
                                                         rx: "4", ry: "4",
                                                         fill: "{fill}",
                                                         stroke: "{stroke_color}",
@@ -1318,7 +1337,6 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                     }
                                                 },
                                                 "file" | "attachment" => {
-                                                    let r = node.radius;
                                                     let pts = format!(
                                                         "{},{} {},{} {},{} {},{}",
                                                         node.x, node.y - r,
@@ -1337,7 +1355,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 },
                                                 _ => rsx! {
                                                     circle {
-                                                        cx: "{node.x}", cy: "{node.y}", r: "{node.radius}",
+                                                        cx: "{node.x}", cy: "{node.y}", r: "{r}",
                                                         fill: "{fill}",
                                                         stroke: "{stroke_color}",
                                                         stroke_width: "{stroke_width}",
@@ -1345,16 +1363,18 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 },
                                             }
 
-                                            text {
-                                                x: "{node.x}",
-                                                y: "{node.y + node.radius + 18.0}",
-                                                text_anchor: "middle",
-                                                font_family: "var(--font-sans)",
-                                                font_size: "13.5",
-                                                font_weight: if is_selected { "600" } else { "500" },
-                                                fill: if is_selected { "rgb(var(--c-brand))" } else { "rgb(var(--c-fg-strong))" },
-                                                pointer_events: "none",
-                                                "{node.label}"
+                                            if should_show_label(vp.zoom, r, cfg.label_fade, forced) {
+                                                text {
+                                                    x: "{node.x}",
+                                                    y: "{node.y + r + 18.0}",
+                                                    text_anchor: "middle",
+                                                    font_family: "var(--font-sans)",
+                                                    font_size: "13.5",
+                                                    font_weight: if is_selected { "600" } else { "500" },
+                                                    fill: if is_selected { "rgb(var(--c-brand))" } else { "rgb(var(--c-fg-strong))" },
+                                                    pointer_events: "none",
+                                                    "{label_text}"
+                                                }
                                             }
                                         }
                                     }
