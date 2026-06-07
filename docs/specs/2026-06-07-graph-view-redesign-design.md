@@ -56,8 +56,8 @@ job:
 | `explorer.rs` | Page shell, server data loading, top-level state/signals, event wiring. |
 | `controls.rs` *(new)* | `GraphSettings` param struct, the settings panel UI, localStorage load/save. |
 | `canvas.rs` *(new)* | All SVG drawing — nodes, edges, labels, hover-focus. Consumes a single `GraphParams` input. **The renderer seam.** |
-| `detail.rs` *(existing)* | Node-detail panel overhaul. |
-| `layout_engine.rs` *(existing)* | Force simulation; gains a `link_distance` parameter. |
+| `panel.rs` *(new)* | The graph's inline node-detail panel, extracted from `explorer.rs` and overhauled. (The standalone entity page `detail.rs` is unrelated and untouched.) |
+| `layout_engine.rs` *(existing)* | Force simulation. `link_distance` already present in the working tree; gains a unit test. |
 
 The seam: `canvas.rs` exposes one component that takes the node/edge slices plus a
 `GraphParams` value (display settings + current zoom + hover/selection state) and emits
@@ -155,7 +155,7 @@ applied consistently so no long hash reaches the canvas, sidebar, or edge rows.
 
 The fallback formatting is a pure function, unit-tested.
 
-## Feature: Detail panel readability (`detail.rs`)
+## Feature: Detail panel readability (`panel.rs`)
 
 - **Header** — node name wraps (no truncation) instead of clipping at the panel edge.
 - **Properties** — each value clamps to ~2 lines (CSS line-clamp) with the full text in a
@@ -200,7 +200,7 @@ The fallback formatting is a pure function, unit-tested.
 - `crates/memvault-web/src/ui/pages/graph/explorer.rs` — slim down to shell + state.
 - `crates/memvault-web/src/ui/pages/graph/controls.rs` — **new**.
 - `crates/memvault-web/src/ui/pages/graph/canvas.rs` — **new**.
-- `crates/memvault-web/src/ui/pages/graph/detail.rs` — panel overhaul.
-- `crates/memvault-web/src/ui/pages/graph/layout_engine.rs` — `link_distance`.
+- `crates/memvault-web/src/ui/pages/graph/panel.rs` — **new** (inline detail panel, extracted + overhauled).
+- `crates/memvault-web/src/ui/pages/graph/layout_engine.rs` — `link_distance` unit test.
 - `crates/memvault-web/src/ui/pages/graph/mod.rs` — module wiring.
 - `crates/memvault-web/src/ui/en-US.ftl`, `de-DE.ftl` — new control labels.
