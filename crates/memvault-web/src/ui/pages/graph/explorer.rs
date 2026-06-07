@@ -1437,7 +1437,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                             "{d.edges.len()} edges"
                                         }
                                     }
-                                    h3 { class: "h-card font-semibold", "{d.label}" }
+                                    h3 { class: "h-card font-semibold break-words leading-snug", "{d.label}" }
                                     CidDisplay { cid: d.id.clone() }
 
                                     // Focus button
@@ -1455,9 +1455,18 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                         div { class: "pt-3 border-t border-line",
                                             div { class: "kicker mb-2", {t!("graph-section-properties")} }
                                             for (key, val) in &d.props {
-                                                div { class: "flex justify-between text-sm py-0.5",
-                                                    span { class: "text-fg-muted truncate mr-2", "{key}" }
-                                                    span { class: "font-mono text-fg-strong truncate text-right", "{val}" }
+                                                {
+                                                    let full = val.as_str().map(String::from).unwrap_or_else(|| val.to_string());
+                                                    rsx! {
+                                                        div { class: "py-1",
+                                                            div { class: "text-xs text-fg-muted", "{key}" }
+                                                            div {
+                                                                class: "font-mono text-sm text-fg-strong break-words whitespace-pre-wrap max-h-24 overflow-y-auto",
+                                                                title: "{full}",
+                                                                "{full}"
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
