@@ -672,6 +672,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut detail = use_signal(|| None::<NodeDetail>);
     let mut settings = use_signal(GraphSettings::default);
     let mut settings_open = use_signal(|| false);
+    let mut hovered = use_signal(|| None::<usize>);
 
     let mut settings_loaded = use_signal(|| false);
     // Load persisted settings once on mount (client-side only).
@@ -935,6 +936,21 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let is_focus_active = focus_node.read().is_some();
     let cfg = *settings.read();
 
+    let hover_idx = *hovered.read();
+    let highlight: Option<std::collections::HashSet<usize>> = hover_idx.map(|h| {
+        let mut set = std::collections::HashSet::new();
+        set.insert(h);
+        for e in &edges {
+            if e.source == h {
+                set.insert(e.target);
+            }
+            if e.target == h {
+                set.insert(e.source);
+            }
+        }
+        set
+    });
+
     rsx! {
         div { class: "space-y-4",
             PageHeader { {t!("graph-title")} }
@@ -1145,7 +1161,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                             // opacity. Together they read as a quiet
                             // constellation; the selection halo (next
                             // block) lifts the active node out.
-                            for node in nodes.iter() {
+                            for (idx, node) in nodes.iter().enumerate() {
                                 {
                                     let nt = if node.id.starts_with("doc:") { "doc" }
                                         else if node.id.starts_with("file:") || node.id.starts_with("attachment:") { "file" }
@@ -1153,11 +1169,12 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     let dk = display_kind_for(nt, &node.kind);
                                     let halo = kind_halo_color(dk);
                                     let r = node.radius * cfg.node_scale + 14.0;
+                                    let halo_opacity = if highlight.as_ref().map_or(false, |h| !h.contains(&idx)) { 0.02 } else { 0.10 };
                                     rsx! {
                                         circle {
                                             cx: "{node.x}", cy: "{node.y}", r: "{r}",
                                             fill: "{halo}",
-                                            opacity: "0.10",
+                                            opacity: "{halo_opacity}",
                                             pointer_events: "none",
                                         }
                                     }
@@ -1202,8 +1219,18 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     let is_active = selected.read().as_ref().map_or(false, |sid| {
                                         &nodes[edge.source].id == sid || &nodes[edge.target].id == sid
                                     });
+                                    let edge_dimmed = highlight
+                                        .as_ref()
+                                        .map_or(false, |h| !(h.contains(&edge.source) && h.contains(&edge.target)));
                                     let stroke = if is_active { "rgb(var(--c-brand))" } else { "rgb(var(--c-line-soft))" };
-                                    let stroke_opacity = if is_active { "0.85" } else { "0.55" };
+                                    let stroke_opacity: &str = if edge_dimmed {
+                                        "0.06"
+                                    } else if is_active {
+                                        "0.85"
+                                    } else {
+                                        "0.55"
+                                    };
+                                    let chip_opacity: &str = if edge_dimmed { "0.06" } else { "1.0" };
                                     let thickness = (if is_active { 1.5 } else { 1.0 + (edge.weight as f64 - 1.0).max(0.0) * 0.5 })
                                         * cfg.link_thickness;
                                     let marker = if !cfg.show_arrows {
@@ -1232,6 +1259,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                             fill: "rgb(var(--c-surface))",
                                             stroke: "rgb(var(--c-line))",
                                             stroke_width: "0.5",
+                                            opacity: "{chip_opacity}",
                                             pointer_events: "none",
                                         }
                                         text {
@@ -1240,6 +1268,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                             font_family: "var(--font-mono)",
                                             font_size: "11",
                                             fill: "rgb(var(--c-fg-muted))",
+                                            opacity: "{chip_opacity}",
                                             pointer_events: "none",
                                             "{edge.relation}"
                                         }
@@ -1260,11 +1289,13 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     let dk = display_kind_for(nt, &node.kind);
                                     let (fill, stroke_color) = kind_svg_palette(dk);
                                     let is_selected = selected.read().as_ref() == Some(&node.id);
+                                    let dimmed = !is_selected && highlight.as_ref().map_or(false, |h| !h.contains(&idx));
+                                    let node_opacity = if dimmed { 0.15 } else { 1.0 };
                                     let stroke_width = if is_selected { 2.5 } else { 1.5 };
                                     let id = node.id.clone();
                                     let expand_id = node.id.clone();
                                     let r = node.radius * cfg.node_scale;
-                                    let forced = is_selected;
+                                    let forced = is_selected || highlight.as_ref().map_or(false, |h| h.contains(&idx));
                                     let label_text = {
                                         let max = 32usize;
                                         if node.label.chars().count() > max {
@@ -1277,6 +1308,7 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                     rsx! {
                                         g {
                                             style: "cursor: pointer",
+                                            opacity: "{node_opacity}",
                                             onclick: {
                                                 let click_id = id.clone();
                                                 move |_| {
@@ -1295,6 +1327,8 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                                                 let coords = e.client_coordinates();
                                                 pan_start.set((coords.x, coords.y));
                                             },
+                                            onmouseenter: move |_| hovered.set(Some(idx)),
+                                            onmouseleave: move |_| hovered.set(None),
                                             ondoubleclick: {
                                                 let eid = expand_id.clone();
                                                 move |_| {
