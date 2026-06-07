@@ -511,30 +511,48 @@ pub(crate) fn kind_variant(display_kind: &str) -> PillVariant {
     PALETTE_CYCLE[(h as usize) % PALETTE_CYCLE.len()]
 }
 
-/// SVG `(fill, stroke)` pair for a display-kind, sourced entirely from
-/// the design-token palette.
-pub(crate) fn kind_svg_palette(display_kind: &str) -> (&'static str, &'static str) {
-    match kind_variant(display_kind) {
-        PillVariant::Info => ("rgb(var(--c-info-soft))", "rgb(var(--c-info))"),
-        PillVariant::Accent => ("rgb(var(--c-brand-soft))", "rgb(var(--c-brand))"),
-        PillVariant::Ok => ("rgb(var(--c-success-soft))", "rgb(var(--c-success))"),
-        PillVariant::Warn => ("rgb(var(--c-warn-soft))", "rgb(var(--c-warn-strong))"),
-        PillVariant::Bad => ("rgb(var(--c-danger-soft))", "rgb(var(--c-danger))"),
-        PillVariant::Muted => ("rgb(var(--c-surface-2))", "rgb(var(--c-fg-faint))"),
+/// Deterministic per-kind color: hashes the kind string to a stable hue, so
+/// kinds outside the six semantic variants each get their own color (mkg's
+/// colorful graph palette) rather than collapsing onto a shared variant.
+fn hash_color(s: &str) -> String {
+    let mut h: u32 = 0;
+    for b in s.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    let hue = h % 360;
+    format!("hsl({hue}, 55%, 55%)")
+}
+
+/// SVG `(fill, stroke)` pair for a display-kind. The six semantic kinds reuse
+/// the design-token status palette; every other kind gets a deterministic
+/// hashed hue so dense graphs stay colorful and kinds are distinguishable.
+pub(crate) fn kind_svg_palette(display_kind: &str) -> (String, String) {
+    match kind_variant_opt(display_kind) {
+        Some(PillVariant::Info) => ("rgb(var(--c-info-soft))".into(), "rgb(var(--c-info))".into()),
+        Some(PillVariant::Accent) => ("rgb(var(--c-brand-soft))".into(), "rgb(var(--c-brand))".into()),
+        Some(PillVariant::Ok) => ("rgb(var(--c-success-soft))".into(), "rgb(var(--c-success))".into()),
+        Some(PillVariant::Warn) => ("rgb(var(--c-warn-soft))".into(), "rgb(var(--c-warn-strong))".into()),
+        Some(PillVariant::Bad) => ("rgb(var(--c-danger-soft))".into(), "rgb(var(--c-danger))".into()),
+        Some(PillVariant::Muted) => ("rgb(var(--c-surface-2))".into(), "rgb(var(--c-fg-faint))".into()),
+        None => {
+            let c = hash_color(display_kind);
+            (c.clone(), c)
+        }
     }
 }
 
 /// Full-saturation halo color for a display-kind. Opacity is applied at
 /// the use site so the same color drives both the field halo (low α) and
 /// the brand "selected" emphasis (higher α via the brand variant).
-pub(crate) fn kind_halo_color(display_kind: &str) -> &'static str {
-    match kind_variant(display_kind) {
-        PillVariant::Info => "rgb(var(--c-info))",
-        PillVariant::Accent => "rgb(var(--c-brand))",
-        PillVariant::Ok => "rgb(var(--c-success))",
-        PillVariant::Warn => "rgb(var(--c-warn))",
-        PillVariant::Bad => "rgb(var(--c-danger))",
-        PillVariant::Muted => "rgb(var(--c-fg-faint))",
+pub(crate) fn kind_halo_color(display_kind: &str) -> String {
+    match kind_variant_opt(display_kind) {
+        Some(PillVariant::Info) => "rgb(var(--c-info))".into(),
+        Some(PillVariant::Accent) => "rgb(var(--c-brand))".into(),
+        Some(PillVariant::Ok) => "rgb(var(--c-success))".into(),
+        Some(PillVariant::Warn) => "rgb(var(--c-warn))".into(),
+        Some(PillVariant::Bad) => "rgb(var(--c-danger))".into(),
+        Some(PillVariant::Muted) => "rgb(var(--c-fg-faint))".into(),
+        None => hash_color(display_kind),
     }
 }
 
