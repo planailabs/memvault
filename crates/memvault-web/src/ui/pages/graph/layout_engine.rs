@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// A node in the force graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
     pub kind: String,
@@ -23,7 +23,7 @@ pub struct GraphNode {
 }
 
 /// An edge between two nodes (by index into the nodes vec).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphEdge {
     pub source: usize,
     pub target: usize,
