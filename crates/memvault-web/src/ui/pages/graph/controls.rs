@@ -1,0 +1,136 @@
+//! Graph display/force settings: the `GraphSettings` param struct, its
+//! localStorage persistence, and the floating settings panel UI.
+
+use dioxus::prelude::*;
+use dioxus_i18n::t;
+use plan_ai_design::Card;
+use serde::{Deserialize, Serialize};
+
+use super::layout_engine::ForceParams;
+
+pub const SETTINGS_KEY: &str = "memvault.graph.settings";
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GraphSettings {
+    // Display
+    pub show_arrows: bool,
+    pub label_fade: f64,
+    pub node_scale: f64,
+    pub link_thickness: f64,
+    // Forces
+    pub center_strength: f64,
+    pub repulsion: f64, // positive magnitude; negated for the engine
+    pub link_strength: f64,
+    pub link_distance: f64,
+}
+
+impl Default for GraphSettings {
+    fn default() -> Self {
+        Self {
+            show_arrows: true,
+            label_fade: 0.5,
+            node_scale: 1.0,
+            link_thickness: 1.0,
+            center_strength: 0.01,
+            repulsion: 2000.0,
+            link_strength: 0.08,
+            link_distance: 200.0,
+        }
+    }
+}
+
+impl GraphSettings {
+    /// Clamp every field into its valid slider range (defends against
+    /// corrupt/old localStorage payloads).
+    pub fn clamp(&mut self) {
+        self.label_fade = self.label_fade.clamp(0.0, 1.0);
+        self.node_scale = self.node_scale.clamp(0.25, 3.0);
+        self.link_thickness = self.link_thickness.clamp(0.25, 4.0);
+        self.center_strength = self.center_strength.clamp(0.0, 0.08);
+        self.repulsion = self.repulsion.clamp(200.0, 6000.0);
+        self.link_strength = self.link_strength.clamp(0.0, 0.4);
+        self.link_distance = self.link_distance.clamp(30.0, 400.0);
+    }
+
+    /// Project the force fields onto the engine's `ForceParams`.
+    pub fn to_force_params(&self) -> ForceParams {
+        ForceParams {
+            link_strength: self.link_strength,
+            link_distance: self.link_distance,
+            center_strength: self.center_strength,
+            repulsion_strength: -self.repulsion,
+        }
+    }
+}
+
+/// Load settings from localStorage, clamped. Returns defaults when absent,
+/// unparseable, or outside a browser (SSR/host).
+pub fn load_settings() -> GraphSettings {
+    if let Some(win) = web_sys::window() {
+        if let Ok(Some(store)) = win.local_storage() {
+            if let Ok(Some(raw)) = store.get_item(SETTINGS_KEY) {
+                if let Ok(mut parsed) = serde_json::from_str::<GraphSettings>(&raw) {
+                    parsed.clamp();
+                    return parsed;
+                }
+            }
+        }
+    }
+    GraphSettings::default()
+}
+
+/// Persist settings to localStorage. No-op outside a browser.
+pub fn save_settings(s: &GraphSettings) {
+    if let Some(win) = web_sys::window() {
+        if let Ok(Some(store)) = win.local_storage() {
+            if let Ok(raw) = serde_json::to_string(s) {
+                let _ = store.set_item(SETTINGS_KEY, &raw);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_bounds_all_fields() {
+        let mut s = GraphSettings {
+            show_arrows: true,
+            label_fade: 5.0,
+            node_scale: 0.0,
+            link_thickness: 99.0,
+            center_strength: 1.0,
+            repulsion: 10.0,
+            link_strength: -1.0,
+            link_distance: 9000.0,
+        };
+        s.clamp();
+        assert_eq!(s.label_fade, 1.0);
+        assert_eq!(s.node_scale, 0.25);
+        assert_eq!(s.link_thickness, 4.0);
+        assert_eq!(s.center_strength, 0.08);
+        assert_eq!(s.repulsion, 200.0);
+        assert_eq!(s.link_strength, 0.0);
+        assert_eq!(s.link_distance, 400.0);
+    }
+
+    #[test]
+    fn to_force_params_negates_repulsion() {
+        let s = GraphSettings::default();
+        let p = s.to_force_params();
+        assert_eq!(p.repulsion_strength, -2000.0);
+        assert_eq!(p.link_distance, 200.0);
+        assert_eq!(p.link_strength, 0.08);
+        assert_eq!(p.center_strength, 0.01);
+    }
+
+    #[test]
+    fn serde_roundtrips() {
+        let s = GraphSettings::default();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: GraphSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+}
