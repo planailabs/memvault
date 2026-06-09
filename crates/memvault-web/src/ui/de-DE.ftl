@@ -92,6 +92,19 @@ graph-view-document = Dokument anzeigen
 graph-view-file = Datei anzeigen
 graph-filter-nodes = Knoten filtern...
 graph-edges-count = { $count } Kanten
+graph-forces = Kräfte
+graph-force-link = Verbindung
+graph-force-center = Zentrum
+graph-force-repel = Abstoßung
+graph-forces-reset = Zurücksetzen
+graph-settings = Einstellungen
+graph-group-display = Anzeige
+graph-group-forces = Kräfte
+graph-display-arrows = Pfeile
+graph-display-fade = Textausblendung
+graph-display-node-size = Knotengröße
+graph-display-link-thickness = Verbindungsstärke
+graph-force-distance = Verbindungsabstand
 
 ## ── Entitäts-Details ────────────────────────────────────────────
 

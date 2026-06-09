@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// A node in the force graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
     pub kind: String,
@@ -23,12 +23,39 @@ pub struct GraphNode {
 }
 
 /// An edge between two nodes (by index into the nodes vec).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphEdge {
     pub source: usize,
     pub target: usize,
     pub relation: String,
     pub weight: f32,
+}
+
+/// User-adjustable forces. Sane defaults match the values the simulation
+/// shipped with before the controls existed; the explorer surfaces these
+/// as sliders so the layout can be tuned without recompiling.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ForceParams {
+    /// Spring constant for edge "links" (higher = tighter).
+    pub link_strength: f64,
+    /// Rest length of a link spring in world units.
+    pub link_distance: f64,
+    /// Pull toward (0, 0). Scales with alpha.
+    pub center_strength: f64,
+    /// Coulomb-style many-body repulsion. Positive = repulsive (a node is
+    /// pushed away from every other node; see `tick`'s repulsion loop).
+    pub repulsion_strength: f64,
+}
+
+impl Default for ForceParams {
+    fn default() -> Self {
+        Self {
+            link_strength: 0.08,
+            link_distance: 200.0,
+            center_strength: 0.01,
+            repulsion_strength: 2000.0,
+        }
+    }
 }
 
 /// Force simulation state.
@@ -39,6 +66,7 @@ pub struct ForceSimulation {
     pub alpha_decay: f64,
     pub alpha_min: f64,
     pub velocity_decay: f64,
+    pub params: ForceParams,
 }
 
 impl ForceSimulation {
@@ -50,6 +78,7 @@ impl ForceSimulation {
             alpha_decay: 0.02,
             alpha_min: 0.001,
             velocity_decay: 0.4,
+            params: ForceParams::default(),
         }
     }
 
@@ -130,7 +159,7 @@ impl ForceSimulation {
 
         // ── Many-body repulsion (Coulomb-like, N^2) ───────────────────
         // Constant structural force that keeps nodes apart.
-        let repulsion_strength = -2000.0;
+        let repulsion_strength = self.params.repulsion_strength;
         let min_dist_sq = 900.0; // 30px minimum distance
         for i in 0..n {
             for j in (i + 1)..n {
@@ -172,8 +201,8 @@ impl ForceSimulation {
 
         // ── Link spring force ─────────────────────────────────────────
         // Pulls connected nodes toward link_distance apart.
-        let link_distance = 200.0;
-        let link_strength = 0.08;
+        let link_distance = self.params.link_distance;
+        let link_strength = self.params.link_strength;
         for edge in &self.edges {
             let dx = self.nodes[edge.target].x - self.nodes[edge.source].x;
             let dy = self.nodes[edge.target].y - self.nodes[edge.source].y;
@@ -189,7 +218,7 @@ impl ForceSimulation {
         }
 
         // ── Centering force ───────────────────────────────────────────
-        let center_strength = 0.01 * self.alpha;
+        let center_strength = self.params.center_strength * self.alpha;
         for node in &mut self.nodes {
             node.vx -= node.x * center_strength;
             node.vy -= node.y * center_strength;
@@ -236,5 +265,38 @@ impl ForceSimulation {
 
         // Decay alpha.
         self.alpha += (self.alpha_min - self.alpha) * self.alpha_decay;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Settle a 2-node, 1-edge graph at the given link rest length and
+    /// return the final inter-node distance.
+    fn settle_distance(link_distance: f64) -> f64 {
+        let mut s = ForceSimulation::new();
+        let a = s.add_node("a".into(), "k".into(), "A".into());
+        let b = s.add_node("b".into(), "k".into(), "B".into());
+        s.add_edge(a, b, "rel".into(), 1.0);
+        s.params.link_distance = link_distance;
+        s.alpha = 1.0;
+        // Runs until alpha decays below alpha_min (tick early-returns after).
+        for _ in 0..3000 {
+            s.tick();
+        }
+        let dx = s.nodes[a].x - s.nodes[b].x;
+        let dy = s.nodes[a].y - s.nodes[b].y;
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    #[test]
+    fn link_distance_controls_separation() {
+        let short = settle_distance(80.0);
+        let long = settle_distance(320.0);
+        assert!(
+            long > short,
+            "longer link_distance should separate nodes more: long={long} short={short}"
+        );
     }
 }

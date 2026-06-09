@@ -6,52 +6,67 @@ use plan_ai_design::{Card, Dot, PageHeader, Pill, PillVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::canvas::GraphCanvas;
+// `display_label` is only referenced from the `#[server]` fns below, whose
+// bodies are compiled out on the wasm/client target — gate the import so the
+// client build stays warning-free.
+#[cfg(feature = "server")]
+use super::canvas::display_label;
+use super::controls::{load_settings, save_settings, GraphSettings, SettingsPanel};
 use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
-use crate::ui::app::Route;
-use crate::ui::components::cid_display::CidDisplay;
+use super::panel::DetailPanel;
 use crate::ui::topbar::use_topbar;
 
 // ── Data types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct NodeSummary {
+pub(crate) struct NodeSummary {
     /// Unique ID in tag_label format: "entity:<hex>", "doc:<hex>", "file:<hex>"
-    id: String,
+    pub(crate) id: String,
     /// "entity", "doc", "file"
-    node_type: String,
+    pub(crate) node_type: String,
     /// Entity kind (e.g. "person") or "document"/"file" for docs/files
-    kind: String,
-    label: String,
-    edges: Vec<EdgeSummary>,
-    props: BTreeMap<String, serde_json::Value>,
+    pub(crate) kind: String,
+    pub(crate) label: String,
+    pub(crate) edges: Vec<EdgeSummary>,
+    pub(crate) props: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct EdgeSummary {
-    edge_id: String,
-    relation: String,
-    target_id: String,
-    weight: f32,
+pub(crate) struct EdgeSummary {
+    pub(crate) edge_id: String,
+    pub(crate) relation: String,
+    pub(crate) target_id: String,
+    pub(crate) weight: f32,
 }
 
 /// Lazy-loaded detail for the sidebar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct NodeDetail {
-    id: String,
-    node_type: String,
-    kind: String,
-    label: String,
-    props: BTreeMap<String, serde_json::Value>,
-    edges: Vec<EdgeDetail>,
+pub(crate) struct NodeDetail {
+    pub(crate) id: String,
+    pub(crate) node_type: String,
+    pub(crate) kind: String,
+    pub(crate) label: String,
+    pub(crate) props: BTreeMap<String, serde_json::Value>,
+    pub(crate) edges: Vec<EdgeDetail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct EdgeDetail {
-    edge_id: String,
-    relation: String,
-    direction: String,
-    other_node: String,
-    other_label: Option<String>,
+pub(crate) struct EdgeDetail {
+    pub(crate) edge_id: String,
+    pub(crate) relation: String,
+    pub(crate) direction: String,
+    /// Tag-label of the other end (`entity:<hex>`, `doc:<hex>`, `file:<hex>`).
+    pub(crate) other_node: String,
+    /// Human-readable name of the other end. Resolved server-side so the
+    /// sidebar can show "Atlas" instead of "entity:4aa14e2…".
+    pub(crate) other_label: String,
+    /// Kind of the other end ("person", "library", "document", …). Used
+    /// to pick a palette variant for the dot/pill in the row.
+    pub(crate) other_kind: String,
+    /// Node type discriminator ("entity" / "doc" / "file"), used so the
+    /// hover popover can route to the right detail page.
+    pub(crate) other_node_type: String,
 }
 
 // ── Server functions ───────────────────────────────────────────────────
@@ -140,14 +155,13 @@ async fn list_graph_nodes(
         .into_iter()
         .filter(|entity| !memvault_core::is_reserved_entity_kind(&entity.kind))
         .map(|entity| {
-            let label = entity
-                .props
-                .get("name")
-                .or_else(|| entity.props.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(&entity.kind)
-                .to_string();
             let id = format!("entity:{}", hex::encode(entity.id.0));
+            let label = display_label(
+                entity.props.get("name").and_then(|v| v.as_str()),
+                entity.props.get("title").and_then(|v| v.as_str()),
+                &entity.kind,
+                &id,
+            );
             NodeSummary {
                 id,
                 node_type: "entity".to_string(),
@@ -252,7 +266,7 @@ async fn list_graph_nodes(
 }
 
 #[server]
-async fn get_node_detail(
+pub(crate) async fn get_node_detail(
     node_id: String,
     show_retracted: bool,
 ) -> Result<NodeDetail, ServerFnError> {
@@ -294,21 +308,65 @@ async fn get_node_detail(
         }
     };
 
-    // Get edges
+    // Get edges, resolving each "other end" so the sidebar can render
+    // a human label + kind dot instead of a raw `entity:<hex>` string.
     let mut edges = Vec::new();
     if let Ok(edge_list) = client.edges_of(&node_ref).await {
         for (source, edge) in edge_list {
-            let (direction, other_node) = if source == node_ref {
-                ("outgoing".to_string(), edge.target.tag_label())
+            let (direction, other_ref) = if source == node_ref {
+                ("outgoing".to_string(), edge.target.clone())
             } else {
-                ("incoming".to_string(), source.tag_label())
+                ("incoming".to_string(), source.clone())
+            };
+            let other_node = other_ref.tag_label();
+            let scope =
+                memvault_core::QueryScope::all().with_include_retracted(show_retracted);
+            let (other_node_type, other_kind, other_label) = match &other_ref {
+                memvault_core::NodeRef::Entity(eid) => {
+                    if let Ok(Some(e)) = client.get_entity_scoped(eid, &scope).await {
+                        let label = display_label(
+                            e.props.get("name").and_then(|v| v.as_str()),
+                            e.props.get("title").and_then(|v| v.as_str()),
+                            &e.kind,
+                            &other_node,
+                        );
+                        ("entity".to_string(), e.kind.clone(), label)
+                    } else {
+                        // Couldn't fetch the target — still avoid a raw hash.
+                        let label = display_label(None, None, "entity", &other_node);
+                        ("entity".to_string(), "entity".to_string(), label)
+                    }
+                }
+                memvault_core::NodeRef::Doc(did) => {
+                    let title = client
+                        .get_doc_scoped(did, &scope)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|d| d.frontmatter.get("title").and_then(|v| v.as_str()).map(String::from));
+                    let label = display_label(title.as_deref(), None, "document", &other_node);
+                    ("doc".to_string(), "document".to_string(), label)
+                }
+                memvault_core::NodeRef::Attachment(cid) => {
+                    let name = client
+                        .get_file_manifest(cid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .and_then(|v| v.get("filename").and_then(|f| f.as_str()).map(String::from));
+                    let label = display_label(name.as_deref(), None, "file", &other_node);
+                    ("file".to_string(), "file".to_string(), label)
+                }
             };
             edges.push(EdgeDetail {
                 edge_id: hex::encode(edge.id.0),
                 relation: edge.relation,
                 direction,
                 other_node,
-                other_label: None,
+                other_label,
+                other_kind,
+                other_node_type,
             });
         }
     }
@@ -330,7 +388,7 @@ async fn get_node_detail(
 }
 
 #[server]
-async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<NodeSummary>, ServerFnError> {
+pub(crate) async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let node_ref = memvault_core::NodeRef::from_tag_label(&id)
         .ok_or_else(|| ServerFnError::new("Invalid node ID"))?;
@@ -395,14 +453,16 @@ async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<NodeSummary
 
 // ── Kind palette ──────────────────────────────────────────────────────
 //
-// Known kinds map to a `PillVariant` and reuse the same status palette
-// the rest of the app uses. Kinds outside that set fall back to a
-// deterministic hashed hue, so unrecognized node types still get a
-// distinct, stable color instead of all collapsing onto the muted swatch.
+// Every kind resolves to one of the six `PillVariant` slots in the
+// planai-design palette so the graph reads as part of the rest of the
+// app. Common kinds get hand-picked variants below; unknown kinds fall
+// through to a deterministic hash → variant cycle (same kind always
+// renders the same color, but two unfamiliar kinds may collide on the
+// same variant — that's the cost of staying inside a 6-color system).
 
 /// Display kind for a node: the entity kind for entities, the node_type
 /// ("doc"/"file") otherwise.
-fn display_kind_for<'a>(node_type: &'a str, kind: &'a str) -> &'a str {
+pub(crate) fn display_kind_for<'a>(node_type: &'a str, kind: &'a str) -> &'a str {
     if node_type == "entity" {
         kind
     } else {
@@ -410,29 +470,50 @@ fn display_kind_for<'a>(node_type: &'a str, kind: &'a str) -> &'a str {
     }
 }
 
-/// `PillVariant` for a display-kind that has a dedicated mapping, or
-/// `None` for kinds outside the known set (which fall back to a hashed
-/// hue in the SVG palette).
+/// All six palette slots in a fixed order — used as the target set when
+/// hashing unknown kinds. Keep `Muted` last so first-time hash collisions
+/// land on the more vivid slots first.
+const PALETTE_CYCLE: [PillVariant; 6] = [
+    PillVariant::Info,
+    PillVariant::Accent,
+    PillVariant::Ok,
+    PillVariant::Warn,
+    PillVariant::Bad,
+    PillVariant::Muted,
+];
+
+/// Hand-picked `PillVariant` for a display-kind. `None` means the kind
+/// falls through to the hash-cycle.
 fn kind_variant_opt(display_kind: &str) -> Option<PillVariant> {
     Some(match display_kind {
-        "person" => PillVariant::Info,
-        "project" => PillVariant::Accent,
-        "concept" => PillVariant::Ok,
-        "doc" | "document" => PillVariant::Warn,
-        "file" | "attachment" => PillVariant::Muted,
+        // Entities — the most common kinds we see in real graphs.
+        "person" | "team" => PillVariant::Info,
+        "project" | "server" => PillVariant::Accent,
+        "concept" | "library" => PillVariant::Ok,
+        "doc" | "document" | "tool" => PillVariant::Warn,
+        "database" => PillVariant::Bad,
+        "file" | "attachment" | "standard" | "topic" => PillVariant::Muted,
         _ => return None,
     })
 }
 
-/// `PillVariant` for a display-kind; unknown kinds fall back to `Muted`
-/// for `Pill`/`Dot` components, which can only render a fixed variant.
-fn kind_variant(display_kind: &str) -> PillVariant {
-    kind_variant_opt(display_kind).unwrap_or(PillVariant::Muted)
+/// `PillVariant` for a display-kind. Falls back to a deterministic
+/// hash → palette-cycle mapping so unfamiliar kinds still pick up a
+/// stable, on-brand color.
+pub(crate) fn kind_variant(display_kind: &str) -> PillVariant {
+    if let Some(v) = kind_variant_opt(display_kind) {
+        return v;
+    }
+    let mut h: u32 = 0;
+    for b in display_kind.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    PALETTE_CYCLE[(h as usize) % PALETTE_CYCLE.len()]
 }
 
-/// Deterministic HSL color from a string hash. Picks a hue on the color
-/// wheel, keeps saturation/lightness in a pleasant range. Used for kinds
-/// outside the known palette so they still get a distinct, stable hue.
+/// Deterministic per-kind color: hashes the kind string to a stable hue, so
+/// kinds outside the six semantic variants each get their own color (mkg's
+/// colorful graph palette) rather than collapsing onto a shared variant.
 fn hash_color(s: &str) -> String {
     let mut h: u32 = 0;
     for b in s.bytes() {
@@ -442,9 +523,10 @@ fn hash_color(s: &str) -> String {
     format!("hsl({hue}, 55%, 55%)")
 }
 
-/// SVG `(fill, stroke)` pair for a display-kind. Known kinds reuse the
-/// status palette; unknown kinds get a deterministic hashed hue.
-fn kind_svg_palette(display_kind: &str) -> (String, String) {
+/// SVG `(fill, stroke)` pair for a display-kind. The six semantic kinds reuse
+/// the design-token status palette; every other kind gets a deterministic
+/// hashed hue so dense graphs stay colorful and kinds are distinguishable.
+pub(crate) fn kind_svg_palette(display_kind: &str) -> (String, String) {
     match kind_variant_opt(display_kind) {
         Some(PillVariant::Info) => ("rgb(var(--c-info-soft))".into(), "rgb(var(--c-info))".into()),
         Some(PillVariant::Accent) => ("rgb(var(--c-brand-soft))".into(), "rgb(var(--c-brand))".into()),
@@ -461,9 +543,8 @@ fn kind_svg_palette(display_kind: &str) -> (String, String) {
 
 /// Full-saturation halo color for a display-kind. Opacity is applied at
 /// the use site so the same color drives both the field halo (low α) and
-/// the brand "selected" emphasis (higher α via the brand variant). Unknown
-/// kinds use their hashed hue.
-fn kind_halo_color(display_kind: &str) -> String {
+/// the brand "selected" emphasis (higher α via the brand variant).
+pub(crate) fn kind_halo_color(display_kind: &str) -> String {
     match kind_variant_opt(display_kind) {
         Some(PillVariant::Info) => "rgb(var(--c-info))".into(),
         Some(PillVariant::Accent) => "rgb(var(--c-brand))".into(),
@@ -477,11 +558,11 @@ fn kind_halo_color(display_kind: &str) -> String {
 
 // ── Viewport state ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy)]
-struct Viewport {
-    offset_x: f64,
-    offset_y: f64,
-    zoom: f64,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Viewport {
+    pub(crate) offset_x: f64,
+    pub(crate) offset_y: f64,
+    pub(crate) zoom: f64,
 }
 
 impl Default for Viewport {
@@ -603,14 +684,56 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
     let mut selected = use_signal(|| None::<String>);
     let mut viewport = use_signal(Viewport::default);
     let mut sim_ran = use_signal(|| false);
-    let mut dragging_node = use_signal(|| None::<usize>);
-    let mut did_drag = use_signal(|| false);
-    let mut panning = use_signal(|| false);
-    let mut pan_start = use_signal(|| (0.0f64, 0.0f64));
+    let dragging_node = use_signal(|| None::<usize>);
+    let did_drag = use_signal(|| false);
+    let panning = use_signal(|| false);
+    let pan_start = use_signal(|| (0.0f64, 0.0f64));
     let mut sidebar_search = use_signal(String::new);
     let mut kind_filter = use_signal(|| None::<String>);
     let mut focus_node = use_signal(|| None::<String>);
     let mut detail = use_signal(|| None::<NodeDetail>);
+    let mut settings = use_signal(GraphSettings::default);
+    let mut settings_open = use_signal(|| false);
+    let hovered = use_signal(|| None::<usize>);
+
+    let mut settings_loaded = use_signal(|| false);
+    // Load persisted settings once on mount (client-side only).
+    use_effect(move || {
+        settings.set(load_settings());
+        settings_loaded.set(true);
+    });
+    // Persist settings whenever they change (client-side only). Skips until the
+    // initial load has completed so it never clobbers stored settings with defaults.
+    use_effect(move || {
+        let s = *settings.read();
+        if !*settings_loaded.peek() {
+            return;
+        }
+        save_settings(&s);
+    });
+
+    // Push force-param changes into the simulation and reheat so the
+    // canvas relaxes into the new layout instead of jumping. Gated on
+    // `sim_ran` so the very first run (which already does its own warmup
+    // below) doesn't double up.
+    use_effect(move || {
+        let p = settings.read().to_force_params();
+        if !*sim_ran.peek() {
+            return;
+        }
+        let mut s = sim.write();
+        if s.params == p {
+            return;
+        }
+        s.params = p;
+        s.reheat();
+        for _ in 0..120 {
+            if s.is_settled() {
+                break;
+            }
+            s.tick();
+        }
+    });
 
     // Run simulation client-side only (use_effect doesn't fire during SSR).
     use_effect(move || {
@@ -751,88 +874,8 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
         base_half * 2.0,
     );
 
-    // ── Event handlers ─────────────────────────────────────────────
-
-    let on_wheel = move |e: Event<WheelData>| {
-        let delta = e.delta().strip_units().y;
-        let mut vp = viewport.write();
-        let factor = if delta > 0.0 { 0.9 } else { 1.1 };
-        vp.zoom = (vp.zoom * factor).clamp(0.1, 10.0);
-    };
-
-    let on_svg_mousedown = move |e: Event<MouseData>| {
-        panning.set(true);
-        let coords = e.client_coordinates();
-        pan_start.set((coords.x, coords.y));
-    };
-
-    let on_svg_mousemove = {
-        move |e: Event<MouseData>| {
-            let coords = e.client_coordinates();
-
-            // Node dragging takes priority.
-            if let Some(idx) = *dragging_node.read() {
-                let ps = *pan_start.read();
-                let screen_dx = coords.x - ps.0;
-                let screen_dy = coords.y - ps.1;
-                // Only start moving the node after a small threshold to
-                // distinguish clicks from drags.
-                if screen_dx.abs() > 3.0 || screen_dy.abs() > 3.0 || *did_drag.read() {
-                    did_drag.set(true);
-                    let mut s = sim.write();
-                    let vp = *viewport.read();
-                    let scale = (base_half * 2.0) / 800.0;
-                    if let Some(node) = s.nodes.get_mut(idx) {
-                        let dx = screen_dx * scale / vp.zoom;
-                        let dy = screen_dy * scale / vp.zoom;
-                        node.fx = Some(node.x + dx);
-                        node.fy = Some(node.y + dy);
-                        node.x = node.fx.unwrap();
-                        node.y = node.fy.unwrap();
-                    }
-                    pan_start.set((coords.x, coords.y));
-                }
-                return;
-            }
-
-            // Panning.
-            if *panning.read() {
-                let ps = *pan_start.read();
-                let vp_val = *viewport.read();
-                let scale = (base_half * 2.0) / 800.0;
-                let dx = (coords.x - ps.0) * scale / vp_val.zoom;
-                let dy = (coords.y - ps.1) * scale / vp_val.zoom;
-                viewport.write().offset_x -= dx;
-                viewport.write().offset_y -= dy;
-                pan_start.set((coords.x, coords.y));
-            }
-        }
-    };
-
-    let on_svg_mouseup = move |_: Event<MouseData>| {
-        if let Some(idx) = *dragging_node.read() {
-            // Only reheat the simulation if the mouse actually moved (real drag).
-            if *did_drag.read() {
-                let mut s = sim.write();
-                if let Some(node) = s.nodes.get_mut(idx) {
-                    node.fx = None;
-                    node.fy = None;
-                }
-                s.reheat();
-                for _ in 0..100 {
-                    if s.is_settled() {
-                        break;
-                    }
-                    s.tick();
-                }
-            }
-        }
-        dragging_node.set(None);
-        did_drag.set(false);
-        panning.set(false);
-    };
-
     let is_focus_active = focus_node.read().is_some();
+    let cfg = *settings.read();
 
     rsx! {
         div { class: "space-y-4",
@@ -861,6 +904,17 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                     span { class: "font-mono text-sm font-semibold text-fg", "{vp.zoom:.1}×" }
                     button {
                         class: "btn btn-xs btn-secondary ml-auto",
+                        onclick: move |_| {
+                            let open = !*settings_open.peek();
+                            settings_open.set(open);
+                        },
+                        {t!("graph-settings")}
+                        span { class: "ml-1 font-mono text-fg-faint",
+                            if settings_open() { "▾" } else { "▸" }
+                        }
+                    }
+                    button {
+                        class: "btn btn-xs btn-secondary",
                         onclick: move |_| {
                             let s = sim.read();
                             viewport.set(Viewport::fit_to_nodes(&s.nodes));
@@ -955,7 +1009,10 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                     }
 
                     // ── Main canvas ─────────────────────────────────
-                    Card { class: "flex-1",
+                    Card { class: "flex-1 relative",
+                        if settings_open() {
+                            SettingsPanel { settings }
+                        }
                         // Legend strip — kicker + a dot per kind currently
                         // present in the graph. Mirrors the filter row but
                         // anchors the palette as a visual key over the canvas.
@@ -979,391 +1036,25 @@ fn GraphView(initial_nodes: Vec<NodeSummary>) -> Element {
                             span { class: "ml-auto font-mono text-fg-faint", {t!("graph-hint")} }
                         }
 
-                        svg {
-                            class: "w-full select-none",
-                            style: "min-height: 560px; cursor: grab",
-                            view_box: "{vb}",
-                            onwheel: on_wheel,
-                            onmousedown: on_svg_mousedown,
-                            onmousemove: on_svg_mousemove,
-                            onmouseup: on_svg_mouseup,
-                            onmouseleave: move |_| {
-                                dragging_node.set(None);
-                                panning.set(false);
-                            },
-
-                            // Arrow markers — neutral (`arrowhead`) for the
-                            // resting field, brand (`arrowhead-active`) for
-                            // edges incident to the current selection.
-                            defs {
-                                marker {
-                                    id: "arrowhead",
-                                    marker_width: "10",
-                                    marker_height: "7",
-                                    ref_x: "10",
-                                    ref_y: "3.5",
-                                    orient: "auto",
-                                    marker_units: "strokeWidth",
-                                    path {
-                                        d: "M0,0 L10,3.5 L0,7",
-                                        fill: "rgb(var(--c-line-soft))",
-                                        opacity: "0.7",
-                                    }
-                                }
-                                marker {
-                                    id: "arrowhead-active",
-                                    marker_width: "10",
-                                    marker_height: "7",
-                                    ref_x: "10",
-                                    ref_y: "3.5",
-                                    orient: "auto",
-                                    marker_units: "strokeWidth",
-                                    path {
-                                        d: "M0,0 L10,3.5 L0,7",
-                                        fill: "rgb(var(--c-brand))",
-                                    }
-                                }
-                            }
-
-                            // ── Kind halos (drawn first, behind edges) ──
-                            // Every node gets a kind-tinted halo at 10%
-                            // opacity. Together they read as a quiet
-                            // constellation; the selection halo (next
-                            // block) lifts the active node out.
-                            for node in nodes.iter() {
-                                {
-                                    let nt = if node.id.starts_with("doc:") { "doc" }
-                                        else if node.id.starts_with("file:") || node.id.starts_with("attachment:") { "file" }
-                                        else { "entity" };
-                                    let dk = display_kind_for(nt, &node.kind);
-                                    let halo = kind_halo_color(dk);
-                                    let r = node.radius + 14.0;
-                                    rsx! {
-                                        circle {
-                                            cx: "{node.x}", cy: "{node.y}", r: "{r}",
-                                            fill: "{halo}",
-                                            opacity: "0.10",
-                                            pointer_events: "none",
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Selected halo — brighter brand glow, sits
-                            // over the kind halos so the active node
-                            // visibly emanates.
-                            for node in nodes.iter() {
-                                if selected.read().as_ref() == Some(&node.id) {
-                                    {
-                                        let r = node.radius + 28.0;
-                                        rsx! {
-                                            circle {
-                                                cx: "{node.x}", cy: "{node.y}", r: "{r}",
-                                                fill: "rgb(var(--c-brand))",
-                                                opacity: "0.18",
-                                                pointer_events: "none",
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Edges — incident-to-selection edges render in
-                            // brand, all others in the soft hairline line
-                            // color. Labels sit on a small surface chip so
-                            // they read against busy node fields.
-                            for edge in &edges {
-                                {
-                                    let sn = &nodes[edge.source];
-                                    let tn = &nodes[edge.target];
-                                    let dx = tn.x - sn.x;
-                                    let dy = tn.y - sn.y;
-                                    let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-                                    let shorten = tn.radius + 4.0;
-                                    let end_x = tn.x - dx / dist * shorten;
-                                    let end_y = tn.y - dy / dist * shorten;
-                                    let mid_x = (sn.x + tn.x) / 2.0;
-                                    let mid_y = (sn.y + tn.y) / 2.0;
-                                    let is_active = selected.read().as_ref().map_or(false, |sid| {
-                                        &nodes[edge.source].id == sid || &nodes[edge.target].id == sid
-                                    });
-                                    let stroke = if is_active { "rgb(var(--c-brand))" } else { "rgb(var(--c-line-soft))" };
-                                    let stroke_opacity = if is_active { "0.85" } else { "0.55" };
-                                    let thickness = if is_active { 1.5 } else { 1.0 + (edge.weight as f64 - 1.0).max(0.0) * 0.5 };
-                                    let marker = if is_active { "url(#arrowhead-active)" } else { "url(#arrowhead)" };
-                                    let chip_w = (edge.relation.len() as f64) * 6.2 + 10.0;
-                                    rsx! {
-                                        line {
-                                            x1: "{sn.x}", y1: "{sn.y}",
-                                            x2: "{end_x}", y2: "{end_y}",
-                                            stroke: "{stroke}",
-                                            stroke_width: "{thickness}",
-                                            stroke_opacity: "{stroke_opacity}",
-                                            marker_end: "{marker}",
-                                        }
-                                        rect {
-                                            x: "{mid_x - chip_w / 2.0}",
-                                            y: "{mid_y - 8.0}",
-                                            width: "{chip_w}",
-                                            height: "14",
-                                            rx: "3", ry: "3",
-                                            fill: "rgb(var(--c-surface))",
-                                            stroke: "rgb(var(--c-line))",
-                                            stroke_width: "0.5",
-                                            pointer_events: "none",
-                                        }
-                                        text {
-                                            x: "{mid_x}", y: "{mid_y + 2.5}",
-                                            text_anchor: "middle",
-                                            font_family: "var(--font-mono)",
-                                            font_size: "11",
-                                            fill: "rgb(var(--c-fg-muted))",
-                                            pointer_events: "none",
-                                            "{edge.relation}"
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Nodes — circle for entity, rounded rect for
-                            // doc, diamond for file. Fill/stroke come from
-                            // the kind palette; selection gets a slightly
-                            // heavier stroke (no opacity dip — translucent
-                            // node fills muddy the canvas in dark mode).
-                            for (idx, node) in nodes.iter().enumerate() {
-                                {
-                                    let nt = if node.id.starts_with("doc:") { "doc" }
-                                        else if node.id.starts_with("file:") || node.id.starts_with("attachment:") { "file" }
-                                        else { "entity" };
-                                    let dk = display_kind_for(nt, &node.kind);
-                                    let (fill, stroke_color) = kind_svg_palette(dk);
-                                    let is_selected = selected.read().as_ref() == Some(&node.id);
-                                    let stroke_width = if is_selected { 2.5 } else { 1.5 };
-                                    let id = node.id.clone();
-                                    let expand_id = node.id.clone();
-                                    rsx! {
-                                        g {
-                                            style: "cursor: pointer",
-                                            onclick: {
-                                                let click_id = id.clone();
-                                                move |_| {
-                                                    selected.set(Some(click_id.clone()));
-                                                    let nid = click_id.clone();
-                                                    spawn(async move {
-                                                        if let Ok(d) = get_node_detail(nid, show_retracted().0).await {
-                                                            detail.set(Some(d));
-                                                        }
-                                                    });
-                                                }
-                                            },
-                                            onmousedown: move |e: Event<MouseData>| {
-                                                e.stop_propagation();
-                                                dragging_node.set(Some(idx));
-                                                let coords = e.client_coordinates();
-                                                pan_start.set((coords.x, coords.y));
-                                            },
-                                            ondoubleclick: {
-                                                let eid = expand_id.clone();
-                                                move |_| {
-                                                    let eid = eid.clone();
-                                                    spawn(async move {
-                                                        if let Ok(neighbors) = expand_node(eid, show_retracted().0).await {
-                                                            let mut s = sim.write();
-                                                            for neighbor in &neighbors {
-                                                                s.add_node(neighbor.id.clone(), neighbor.kind.clone(), neighbor.label.clone());
-                                                            }
-                                                            for neighbor in &neighbors {
-                                                                let src = s.nodes.iter().position(|n| n.id == neighbor.id).unwrap_or(0);
-                                                                for edge in &neighbor.edges {
-                                                                    if let Some(tgt) = s.nodes.iter().position(|n| n.id == edge.target_id) {
-                                                                        s.add_edge(src, tgt, edge.relation.clone(), edge.weight);
-                                                                    }
-                                                                }
-                                                            }
-                                                            s.reheat();
-                                                            for _ in 0..200 {
-                                                                if s.is_settled() { break; }
-                                                                s.tick();
-                                                            }
-                                                        }
-                                                    });
-                                                }
-                                            },
-
-                                            match nt {
-                                                "doc" => rsx! {
-                                                    rect {
-                                                        x: "{node.x - node.radius}",
-                                                        y: "{node.y - node.radius * 0.7}",
-                                                        width: "{node.radius * 2.0}",
-                                                        height: "{node.radius * 1.4}",
-                                                        rx: "4", ry: "4",
-                                                        fill: "{fill}",
-                                                        stroke: "{stroke_color}",
-                                                        stroke_width: "{stroke_width}",
-                                                    }
-                                                },
-                                                "file" | "attachment" => {
-                                                    let r = node.radius;
-                                                    let pts = format!(
-                                                        "{},{} {},{} {},{} {},{}",
-                                                        node.x, node.y - r,
-                                                        node.x + r, node.y,
-                                                        node.x, node.y + r,
-                                                        node.x - r, node.y,
-                                                    );
-                                                    rsx! {
-                                                        polygon {
-                                                            points: "{pts}",
-                                                            fill: "{fill}",
-                                                            stroke: "{stroke_color}",
-                                                            stroke_width: "{stroke_width}",
-                                                        }
-                                                    }
-                                                },
-                                                _ => rsx! {
-                                                    circle {
-                                                        cx: "{node.x}", cy: "{node.y}", r: "{node.radius}",
-                                                        fill: "{fill}",
-                                                        stroke: "{stroke_color}",
-                                                        stroke_width: "{stroke_width}",
-                                                    }
-                                                },
-                                            }
-
-                                            text {
-                                                x: "{node.x}",
-                                                y: "{node.y + node.radius + 18.0}",
-                                                text_anchor: "middle",
-                                                font_family: "var(--font-sans)",
-                                                font_size: "13.5",
-                                                font_weight: if is_selected { "600" } else { "500" },
-                                                fill: if is_selected { "rgb(var(--c-brand))" } else { "rgb(var(--c-fg-strong))" },
-                                                pointer_events: "none",
-                                                "{node.label}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        GraphCanvas {
+                            nodes: nodes.clone(),
+                            edges: edges.clone(),
+                            settings: cfg,
+                            view_box: vb.clone(),
+                            selected,
+                            hovered,
+                            dragging_node,
+                            detail,
+                            sim,
+                            viewport,
+                            panning,
+                            pan_start,
+                            did_drag,
                         }
                     }
 
                     // ── Right detail panel ──────────────────────────
-                    if let Some(d) = &*detail.read() {
-                        {
-                            let display_kind = display_kind_for(&d.node_type, &d.kind).to_string();
-                            let variant = kind_variant(&display_kind);
-                            let incoming: Vec<&EdgeDetail> = d.edges.iter().filter(|e| e.direction == "incoming").collect();
-                            let outgoing: Vec<&EdgeDetail> = d.edges.iter().filter(|e| e.direction == "outgoing").collect();
-                            rsx! {
-                        div { class: "w-72 shrink-0 space-y-3",
-                            Card {
-                                div { class: "p-4 space-y-3",
-                                    div { class: "flex items-center gap-2",
-                                        Pill { variant,
-                                            Dot { variant }
-                                            "{display_kind}"
-                                        }
-                                        Pill { variant: PillVariant::Muted, mono: true,
-                                            "{d.edges.len()} edges"
-                                        }
-                                    }
-                                    h3 { class: "h-card font-semibold", "{d.label}" }
-                                    CidDisplay { cid: d.id.clone() }
-
-                                    // Focus button
-                                    button {
-                                        class: "btn btn-xs btn-secondary w-full",
-                                        onclick: {
-                                            let fid = d.id.clone();
-                                            move |_| focus_node.set(Some(fid.clone()))
-                                        },
-                                        {t!("graph-focus-node")}
-                                    }
-
-                                    // Properties
-                                    if !d.props.is_empty() {
-                                        div { class: "pt-3 border-t border-line",
-                                            div { class: "kicker mb-2", {t!("graph-section-properties")} }
-                                            for (key, val) in &d.props {
-                                                div { class: "flex justify-between text-sm py-0.5",
-                                                    span { class: "text-fg-muted truncate mr-2", "{key}" }
-                                                    span { class: "font-mono text-fg-strong truncate text-right", "{val}" }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Incoming edges
-                                    if !incoming.is_empty() {
-                                        div { class: "pt-3 border-t border-line",
-                                            div { class: "kicker mb-2",
-                                                {t!("graph-section-incoming", count: incoming.len())}
-                                            }
-                                            for edge in &incoming {
-                                                div { class: "flex items-center justify-between gap-2 py-1",
-                                                    span { class: "font-mono text-xs text-fg-muted bg-surface-2 px-1.5 py-0.5 rounded border border-line",
-                                                        "{edge.relation}"
-                                                    }
-                                                    span { class: "text-xs text-fg truncate text-right",
-                                                        "{edge.other_node}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Outgoing edges
-                                    if !outgoing.is_empty() {
-                                        div { class: "pt-3 border-t border-line",
-                                            div { class: "kicker mb-2",
-                                                {t!("graph-section-outgoing", count: outgoing.len())}
-                                            }
-                                            for edge in &outgoing {
-                                                div { class: "flex items-center justify-between gap-2 py-1",
-                                                    span { class: "font-mono text-xs text-fg-muted bg-surface-2 px-1.5 py-0.5 rounded border border-line",
-                                                        "{edge.relation}"
-                                                    }
-                                                    span { class: "text-xs text-fg truncate text-right",
-                                                        "{edge.other_node}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Navigation link
-                                    if d.node_type == "entity" {
-                                        if let Some(hex_id) = d.id.strip_prefix("entity:") {
-                                            Link { to: Route::EntityDetail { id: hex_id.to_string() },
-                                                class: "btn btn-sm btn-secondary w-full mt-2",
-                                                {t!("graph-view-details")}
-                                            }
-                                        }
-                                    }
-                                    if d.node_type == "doc" {
-                                        if let Some(hex_id) = d.id.strip_prefix("doc:") {
-                                            Link { to: Route::NoteDetail { id: hex_id.to_string() },
-                                                class: "btn btn-sm btn-secondary w-full mt-2",
-                                                {t!("graph-view-document")}
-                                            }
-                                        }
-                                    }
-                                    if d.node_type == "file" || d.node_type == "attachment" {
-                                        if let Some(hex_cid) = d.id.strip_prefix("file:").or_else(|| d.id.strip_prefix("attachment:")) {
-                                            Link { to: Route::FileDetail { cid: hex_cid.to_string() },
-                                                class: "btn btn-sm btn-secondary w-full mt-2",
-                                                {t!("graph-view-file")}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                            }
-                        }
-                    }
+                    DetailPanel { detail, selected, focus_node }
                 }
             }
         }

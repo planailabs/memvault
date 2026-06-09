@@ -92,6 +92,19 @@ graph-view-document = View Document
 graph-view-file = View File
 graph-filter-nodes = Filter nodes...
 graph-edges-count = { $count } edges
+graph-forces = Forces
+graph-force-link = Link
+graph-force-center = Center
+graph-force-repel = Repel
+graph-forces-reset = Reset
+graph-settings = Settings
+graph-group-display = Display
+graph-group-forces = Forces
+graph-display-arrows = Arrows
+graph-display-fade = Text fade
+graph-display-node-size = Node size
+graph-display-link-thickness = Link thickness
+graph-force-distance = Link distance
 
 ## ── Entity Detail ───────────────────────────────────────────────
 
