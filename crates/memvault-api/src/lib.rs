@@ -20,6 +20,9 @@ pub mod sigchain;
 pub mod otel;
 pub mod quotas;
 pub mod rotation;
+// JSON-RPC over a Unix domain socket — Unix-only transport. (Windows would use
+// a named pipe; no consumer needs it in the cross-compiled daemon build.)
+#[cfg(unix)]
 pub mod rpc;
 pub mod skill_hydrate;
 pub mod skills;
