@@ -192,6 +192,82 @@ impl MemvaultClient for MockClient {
         Ok(Some(b"{}".to_vec()))
     }
 
+    async fn read_extraction(
+        &self,
+        _manifest_cid: &[u8],
+    ) -> memvault_api::Result<memvault_api::types::ExtractionInfo> {
+        Ok(memvault_api::types::ExtractionInfo {
+            status: memvault_api::types::MediaJobStatus::Done,
+            text: Some("transcribed words".into()),
+            segments: Some(vec![memvault_api::types::TranscriptSegmentInfo {
+                start_ms: 0,
+                end_ms: 1500,
+                text: "transcribed words".into(),
+            }]),
+            error: None,
+            extractor: Some("memvault-test@0.0.0".into()),
+        })
+    }
+
+    async fn read_page_render(
+        &self,
+        _manifest_cid: &[u8],
+    ) -> memvault_api::Result<memvault_api::types::PageRenderInfo> {
+        Ok(memvault_api::types::PageRenderInfo {
+            status: memvault_api::types::MediaJobStatus::Done,
+            page_count: 2,
+            pages: vec![
+                memvault_api::types::PageDims {
+                    page_no: 1,
+                    width: 816,
+                    height: 1056,
+                },
+                memvault_api::types::PageDims {
+                    page_no: 2,
+                    width: 816,
+                    height: 1056,
+                },
+            ],
+            error: None,
+        })
+    }
+
+    async fn read_page_image(
+        &self,
+        _manifest_cid: &[u8],
+        page_no: u32,
+    ) -> memvault_api::Result<Option<(Vec<u8>, String)>> {
+        // Page 1 is rendered; everything else is not yet available.
+        if page_no == 1 {
+            Ok(Some((b"png-bytes-here".to_vec(), "image/png".to_string())))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn read_page_text_layer(
+        &self,
+        _manifest_cid: &[u8],
+        page_no: u32,
+    ) -> memvault_api::Result<Option<memvault_api::types::PageTextLayer>> {
+        if page_no == 1 {
+            Ok(Some(memvault_api::types::PageTextLayer {
+                page_no: 1,
+                width: 816,
+                height: 1056,
+                words: vec![memvault_api::types::PageWord {
+                    text: "hello".into(),
+                    x: 10.0,
+                    y: 20.0,
+                    w: 50.0,
+                    h: 12.0,
+                }],
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn add_entity_internal(
         &self,
         _entity: Entity,
@@ -900,6 +976,210 @@ async fn test_download_attachment() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"file-content-here");
+}
+
+// ── Media extraction endpoints ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_media_extraction_status_mapping() {
+    let app = make_app();
+    let cid_hex = hex::encode([0xABu8; 32]);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/extraction"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // MediaJobStatus serializes snake_case.
+    assert_eq!(v["status"], "done");
+    assert_eq!(v["text"], "transcribed words");
+    assert_eq!(v["segments"][0]["start_ms"], 0);
+    assert_eq!(v["segments"][0]["end_ms"], 1500);
+    assert_eq!(v["extractor"], "memvault-test@0.0.0");
+}
+
+#[tokio::test]
+async fn test_media_page_render_manifest() {
+    let app = make_app();
+    let cid_hex = hex::encode([0xABu8; 32]);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/pages"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["status"], "done");
+    assert_eq!(v["page_count"], 2);
+    assert_eq!(v["pages"][0]["page_no"], 1);
+    assert_eq!(v["pages"][0]["width"], 816);
+    assert_eq!(v["pages"][1]["height"], 1056);
+}
+
+#[tokio::test]
+async fn test_media_page_image_etag_and_304() {
+    let app = make_app();
+    let cid_hex = hex::encode([0xABu8; 32]);
+    let expected_etag = format!("\"{cid_hex}-p1\"");
+
+    // First fetch: 200 with image bytes, mime, ETag, immutable caching.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/pages/1/image"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/png");
+    assert_eq!(resp.headers()["etag"], expected_etag.as_str());
+    assert_eq!(
+        resp.headers()["cache-control"],
+        "private, max-age=31536000, immutable"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"png-bytes-here");
+
+    // Conditional revalidation: matching If-None-Match → 304, empty body.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/pages/1/image"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("if-none-match", expected_etag.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty());
+
+    // Non-matching If-None-Match still serves the bytes.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/pages/1/image"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .header("if-none-match", "\"something-else\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_media_page_image_404_when_unrendered() {
+    let app = make_app();
+    let cid_hex = hex::encode([0xABu8; 32]);
+    // MockClient only has page 1; page 2 is not yet rendered.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/pages/2/image"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_media_page_text_layer() {
+    let app = make_app();
+    let cid_hex = hex::encode([0xABu8; 32]);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/pages/1/text-layer"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["page_no"], 1);
+    assert_eq!(v["words"][0]["text"], "hello");
+    assert_eq!(v["words"][0]["x"], 10.0);
+
+    // Missing text layer → 404.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/files/{cid_hex}/pages/2/text-layer"))
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_media_endpoints_unauthorized_without_token() {
+    let app = make_app();
+    let cid_hex = hex::encode([0xABu8; 32]);
+    for path in [
+        format!("/api/v1/files/{cid_hex}/extraction"),
+        format!("/api/v1/files/{cid_hex}/pages"),
+        format!("/api/v1/files/{cid_hex}/pages/1/image"),
+        format!("/api/v1/files/{cid_hex}/pages/1/text-layer"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected 401 for {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_media_invalid_cid_rejected() {
+    let app = make_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/files/not-a-cid/extraction")
+                .header("authorization", format!("Bearer {}", test_jwt()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 // ── Session cookie + CSRF guard ─────────────────────────────────────────

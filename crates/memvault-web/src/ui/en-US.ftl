@@ -145,6 +145,23 @@ file-meta-replication = Replication
 file-meta-uploaded-by = Uploaded by
 file-section-links = Links ({ $count })
 file-section-text = Extracted Text
+file-section-transcript = Transcript
+file-extraction-pending = Processing…
+file-extraction-failed = Extraction failed
+file-extraction-unavailable = Extraction unavailable
+file-view-pages = View pages ({ $count })
+
+## ── Page Viewer ─────────────────────────────────────────────────
+
+pages-title = Pages
+pages-back = Back to file
+pages-pending = Rendering pages…
+pages-failed = Page rendering failed: { $error }
+pages-zoom-in = Zoom in
+pages-zoom-out = Zoom out
+pages-zoom-fit = Fit width
+pages-zoom-reset = Reset zoom
+pages-page-of = Page { $page } of { $count }
 
 ## ── VFS ─────────────────────────────────────────────────────────
 

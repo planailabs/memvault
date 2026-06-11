@@ -11,6 +11,7 @@ pub mod events;
 pub mod files;
 pub mod graph;
 pub mod links;
+pub mod media;
 pub mod ops;
 pub mod search;
 pub mod skills;
@@ -101,6 +102,14 @@ pub fn routes(state: Arc<AppState>) -> Router {
             post(files::pin_file).delete(files::unpin_file),
         )
         .route("/files/{cid}/extracted-text", get(files::extracted_text))
+        // ── Media extraction (text / OCR / transcript / page renders) ──
+        .route("/files/{cid}/extraction", get(media::extraction))
+        .route("/files/{cid}/pages", get(media::page_render))
+        .route("/files/{cid}/pages/{page_no}/image", get(media::page_image))
+        .route(
+            "/files/{cid}/pages/{page_no}/text-layer",
+            get(media::page_text_layer),
+        )
         .route("/pins", get(files::list_pinned))
         // Backward compat: keep old /attachments routes working
         .route("/attachments", post(files::upload_file))

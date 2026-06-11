@@ -13,6 +13,7 @@ use super::pages::buckets::detail::BucketDetail;
 use super::pages::buckets::list::BucketList;
 use super::pages::files::detail::FileDetail;
 use super::pages::files::explorer::FileExplorer;
+use super::pages::files::pages::FilePages;
 use super::pages::graph::detail::EntityDetail;
 use super::pages::graph::explorer::GraphExplorer;
 use super::pages::graph::history::EntityHistory;
@@ -46,6 +47,10 @@ pub enum Route {
     EntityHistory { id: String },
     #[route("/files")]
     FileExplorer {},
+    // Must come before the catch-all-ish `/files/:cid` so "pages" isn't
+    // captured as a CID.
+    #[route("/files/:cid/pages")]
+    FilePages { cid: String },
     #[route("/files/:cid")]
     FileDetail { cid: String },
     #[route("/vfs")]

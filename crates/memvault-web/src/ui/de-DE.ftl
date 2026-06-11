@@ -145,6 +145,23 @@ file-meta-replication = Replikation
 file-meta-uploaded-by = Hochgeladen von
 file-section-links = Verknüpfungen ({ $count })
 file-section-text = Extrahierter Text
+file-section-transcript = Transkript
+file-extraction-pending = Wird verarbeitet…
+file-extraction-failed = Extraktion fehlgeschlagen
+file-extraction-unavailable = Extraktion nicht verfügbar
+file-view-pages = Seiten ansehen ({ $count })
+
+## ── Seitenansicht ───────────────────────────────────────────────
+
+pages-title = Seiten
+pages-back = Zurück zur Datei
+pages-pending = Seiten werden gerendert…
+pages-failed = Seiten-Rendering fehlgeschlagen: { $error }
+pages-zoom-in = Vergrößern
+pages-zoom-out = Verkleinern
+pages-zoom-fit = An Breite anpassen
+pages-zoom-reset = Zoom zurücksetzen
+pages-page-of = Seite { $page } von { $count }
 
 ## ── VFS ─────────────────────────────────────────────────────────
 

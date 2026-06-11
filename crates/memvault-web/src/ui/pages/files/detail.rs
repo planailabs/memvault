@@ -5,6 +5,7 @@ use dioxus_i18n::t;
 use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant, SectionHeading};
 use serde::{Deserialize, Serialize};
 
+use crate::ui::app::Route;
 use crate::ui::components::cid_display::CidDisplay;
 use crate::ui::topbar::use_topbar;
 
@@ -56,6 +57,96 @@ impl FileData {
     fn is_text(&self) -> bool {
         self.mime_type.starts_with("text/") || self.mime_type == "application/json"
     }
+
+    fn is_audio(&self) -> bool {
+        self.mime_type.starts_with("audio/")
+    }
+}
+
+// ── Media extraction view models ────────────────────────────────────────
+//
+// Local DTOs mirroring `memvault_api::types::{ExtractionInfo,
+// PageRenderInfo}` — the memvault-api types don't compile to wasm, so
+// pages keep their own serde structs (same pattern as `FileData`).
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TranscriptSegmentView {
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ExtractionView {
+    /// Wire status string: pending | done | failed | unavailable | unsupported.
+    status: String,
+    text: Option<String>,
+    segments: Option<Vec<TranscriptSegmentView>>,
+    error: Option<String>,
+    extractor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PageRenderSummary {
+    status: String,
+    page_count: u32,
+    error: Option<String>,
+}
+
+/// `MediaJobStatus` → its wire string ("pending", "done", …) via the serde
+/// snake_case rename, so the UI's string matching can't drift from the enum.
+#[cfg(feature = "server")]
+fn media_status_str(status: memvault_api::types::MediaJobStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "unavailable".into())
+}
+
+/// Format a millisecond offset as `mm:ss` for transcript timestamps.
+fn fmt_mmss(ms: u64) -> String {
+    let s = ms / 1000;
+    format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+#[server]
+async fn get_extraction(cid: String) -> Result<ExtractionView, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let cid_bytes = hex::decode(&cid).map_err(|_| ServerFnError::new("Invalid CID hex"))?;
+    let info = client
+        .read_extraction(&cid_bytes)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(ExtractionView {
+        status: media_status_str(info.status),
+        text: info.text,
+        segments: info.segments.map(|segs| {
+            segs.into_iter()
+                .map(|s| TranscriptSegmentView {
+                    start_ms: s.start_ms,
+                    end_ms: s.end_ms,
+                    text: s.text,
+                })
+                .collect()
+        }),
+        error: info.error,
+        extractor: info.extractor,
+    })
+}
+
+#[server]
+async fn get_page_render_summary(cid: String) -> Result<PageRenderSummary, ServerFnError> {
+    let client = crate::ui::state::client()?;
+    let cid_bytes = hex::decode(&cid).map_err(|_| ServerFnError::new("Invalid CID hex"))?;
+    let info = client
+        .read_page_render(&cid_bytes)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(PageRenderSummary {
+        status: media_status_str(info.status),
+        page_count: info.page_count,
+        error: info.error,
+    })
 }
 
 #[server]
@@ -185,13 +276,85 @@ pub fn FileDetail(cid: String) -> Element {
 fn FileView(data: FileData) -> Element {
     let download_url = format!("/api/v1/files/{}", data.cid);
 
+    // ── Media extraction state ──────────────────────────────────────
+    // Reading the state lazily *triggers* background extraction, so we
+    // poll every 2s until it reaches a terminal status. Dioxus cancels
+    // the spawned task when the component unmounts (navigation).
+    let mut extraction = use_signal(|| None::<ExtractionView>);
+    let mut page_summary = use_signal(|| None::<PageRenderSummary>);
+
+    let extraction_cid = data.cid.clone();
+    use_effect(move || {
+        let cid = extraction_cid.clone();
+        spawn(async move {
+            loop {
+                match get_extraction(cid.clone()).await {
+                    Ok(view) => {
+                        let pending = view.status == "pending";
+                        extraction.set(Some(view));
+                        if !pending {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+                super::media_poll_delay().await;
+            }
+        });
+    });
+
+    let pages_cid = data.cid.clone();
+    use_effect(move || {
+        let cid = pages_cid.clone();
+        spawn(async move {
+            loop {
+                match get_page_render_summary(cid.clone()).await {
+                    Ok(view) => {
+                        let pending = view.status == "pending";
+                        page_summary.set(Some(view));
+                        if !pending {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+                super::media_poll_delay().await;
+            }
+        });
+    });
+
+    let ext = extraction.read().clone();
+    let pages = page_summary.read().clone();
+    // Audio when the manifest says so, or when a transcript with timed
+    // segments showed up (covers containers with loose mime types).
+    let is_audio = data.is_audio() || ext.as_ref().is_some_and(|e| e.segments.is_some());
+    // Prefer freshly polled text; fall back to the SSR-time value.
+    let extracted_text = ext
+        .as_ref()
+        .and_then(|e| e.text.clone())
+        .or_else(|| data.extracted_text.clone());
+    let segments = ext.as_ref().and_then(|e| e.segments.clone()).unwrap_or_default();
+    let page_count = pages.as_ref().map(|p| p.page_count).unwrap_or(0);
+    let show_pages_link = pages
+        .as_ref()
+        .is_some_and(|p| p.status == "done" || (p.status == "pending" && p.page_count > 0));
+
     rsx! {
         div { class: "space-y-4",
             // Header
             div { class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3",
                 PageHeader { class: "mb-0", "{data.filename}" }
-                a { href: "{download_url}", class: "btn btn-md btn-primary", download: "{data.filename}",
-                    {t!("file-download")}
+                div { class: "flex items-center gap-2",
+                    if show_pages_link {
+                        Link {
+                            to: Route::FilePages { cid: data.cid.clone() },
+                            class: "btn btn-md btn-secondary",
+                            {t!("file-view-pages", count: page_count)}
+                        }
+                    }
+                    a { href: "{download_url}", class: "btn btn-md btn-primary", download: "{data.filename}",
+                        {t!("file-download")}
+                    }
                 }
             }
 
@@ -297,21 +460,115 @@ fn FileView(data: FileData) -> Element {
                 }
             }
 
-            // Extracted text is plain text (no HTML), so render it directly in
-            // a <pre>. Dioxus escapes text node children, so there's no
-            // injection risk and no need for an isolating sandbox iframe.
-            if let Some(text) = &data.extracted_text {
+            // Extracted text / transcript. Plain text (no HTML) rendered via
+            // text nodes — Dioxus escapes them, so there's no injection risk
+            // and no need for an isolating sandbox iframe.
+            if is_audio {
                 Card {
                     div { class: "p-5",
-                        SectionHeading { {t!("file-section-text")} }
-                        pre {
-                            class: "mt-2 max-h-[400px] overflow-y-auto whitespace-pre-wrap break-words text-[0.8125rem] text-fg-muted m-0",
-                            "{text}"
+                        div { class: "flex flex-wrap items-center gap-2",
+                            SectionHeading { {t!("file-section-transcript")} }
+                            ExtractionStatusPill { extraction: ext.clone() }
+                        }
+                        audio {
+                            controls: true,
+                            id: "mv-audio",
+                            src: "{download_url}",
+                            class: "w-full mt-3",
+                        }
+                        if !segments.is_empty() {
+                            div { class: "mt-3 max-h-[400px] overflow-y-auto divide-y divide-line",
+                                for seg in segments {
+                                    {
+                                        let start_ms = seg.start_ms;
+                                        let stamp = fmt_mmss(start_ms);
+                                        rsx! {
+                                            div { class: "flex items-start gap-3 py-1.5",
+                                                button {
+                                                    class: "font-mono text-xs text-brand hover:underline shrink-0 mt-0.5 cursor-pointer",
+                                                    onclick: move |_| {
+                                                        document::eval(&format!(
+                                                            "document.getElementById('mv-audio').currentTime = {};",
+                                                            start_ms as f64 / 1000.0
+                                                        ));
+                                                    },
+                                                    "[{stamp}]"
+                                                }
+                                                span { class: "text-sm text-fg-muted", "{seg.text}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let Some(text) = &extracted_text {
+                            pre {
+                                class: "mt-2 max-h-[400px] overflow-y-auto whitespace-pre-wrap break-words text-[0.8125rem] text-fg-muted m-0",
+                                "{text}"
+                            }
+                        }
+                    }
+                }
+            } else if extracted_text.is_some() || ext.is_some() {
+                Card {
+                    div { class: "p-5",
+                        div { class: "flex flex-wrap items-center gap-2",
+                            SectionHeading { {t!("file-section-text")} }
+                            ExtractionStatusPill { extraction: ext.clone() }
+                        }
+                        if let Some(text) = &extracted_text {
+                            pre {
+                                class: "mt-2 max-h-[400px] overflow-y-auto whitespace-pre-wrap break-words text-[0.8125rem] text-fg-muted m-0",
+                                "{text}"
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/// Job-status pill rendered next to the extracted-text / transcript
+/// heading. `done` renders nothing — the text itself is the signal.
+#[component]
+fn ExtractionStatusPill(extraction: Option<ExtractionView>) -> Element {
+    let Some(ext) = extraction else {
+        return rsx! {};
+    };
+    match ext.status.as_str() {
+        "pending" => rsx! {
+            Pill { variant: PillVariant::Info,
+                svg {
+                    class: "animate-spin h-3 w-3 mr-1 inline",
+                    fill: "none",
+                    view_box: "0 0 24 24",
+                    circle {
+                        class: "opacity-25",
+                        cx: "12", cy: "12", r: "10",
+                        stroke: "currentColor", stroke_width: "4",
+                    }
+                    path {
+                        class: "opacity-75",
+                        fill: "currentColor",
+                        d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z",
+                    }
+                }
+                {t!("file-extraction-pending")}
+            }
+        },
+        "failed" => rsx! {
+            Pill { variant: PillVariant::Bad, {t!("file-extraction-failed")} }
+            if let Some(err) = &ext.error {
+                span { class: "text-xs text-fg-muted", "{err}" }
+            }
+        },
+        "unavailable" | "unsupported" => rsx! {
+            Pill { variant: PillVariant::Warn, {t!("file-extraction-unavailable")} }
+            if let Some(err) = &ext.error {
+                span { class: "text-xs text-fg-muted", "{err}" }
+            }
+        },
+        _ => rsx! {},
     }
 }
 
