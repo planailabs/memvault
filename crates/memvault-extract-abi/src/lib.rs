@@ -29,6 +29,14 @@ pub struct ExtractionHints {
     /// Timeout in milliseconds (advisory — host enforces via fuel)
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Guest-visible model file/dir paths keyed by role (e.g.
+    /// "whisper" → "/models/whisper-small"). Paths are inside the
+    /// sandbox namespace mapped by the host via allowed_paths.
+    #[serde(default)]
+    pub model_paths: std::collections::BTreeMap<String, String>,
+    /// Preferred language (BCP-47 or "auto") for transcription/OCR.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 // ─── Output ────────────────────────────────────────────────────────────────────
@@ -59,6 +67,21 @@ pub struct ExtractedText {
     /// index into `text`.
     #[serde(default)]
     pub links: Vec<ExtractedLink>,
+    /// Timed segments for transcription extractors. Empty for plain text
+    /// extraction. `byte_span` indexes into `text`.
+    #[serde(default)]
+    pub segments: Vec<TranscriptSegment>,
+}
+
+/// A timed transcript segment produced by audio transcription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    /// Segment start in milliseconds from the beginning of the audio.
+    pub start_ms: u64,
+    /// Segment end in milliseconds.
+    pub end_ms: u64,
+    /// Byte range of this segment's text within `ExtractedText::text`.
+    pub byte_span: (u32, u32),
 }
 
 // ─── Plugin capabilities ───────────────────────────────────────────────────────
@@ -84,6 +107,34 @@ pub struct ExtractorCapability {
     /// Built-ins default to 0. Custom plugins use higher values to override.
     #[serde(default)]
     pub priority: i32,
+    /// Which operation this capability serves. Plugins predating ops
+    /// decode as `Extract`.
+    #[serde(default)]
+    pub op: PluginOp,
+}
+
+impl ExtractorCapability {
+    /// Capability serving the `extract` export.
+    pub fn extract(match_rule: MatchRule, priority: i32) -> Self {
+        Self { match_rule, priority, op: PluginOp::Extract }
+    }
+
+    /// Capability serving the `render_pages` export.
+    pub fn render(match_rule: MatchRule, priority: i32) -> Self {
+        Self { match_rule, priority, op: PluginOp::RenderPages }
+    }
+}
+
+/// Operation a plugin capability serves. The same MIME can be claimed by
+/// different plugins for different ops (e.g. fast text extraction vs page
+/// rendering for `application/pdf`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PluginOp {
+    /// Text extraction via the `extract` export.
+    #[default]
+    Extract,
+    /// Page rendering via the `render_pages` export.
+    RenderPages,
 }
 
 /// How a capability matches incoming files.
@@ -93,6 +144,160 @@ pub enum MatchRule {
     Mime(String),
     /// Match by file extension without dot (e.g. "docx")
     Extension(String),
+    /// Match by MIME prefix (e.g. "audio/")
+    MimePrefix(String),
+}
+
+// ─── Page rendering (render_pages export) ──────────────────────────────────────
+
+/// Header portion of the binary render input envelope (CBOR-encoded).
+/// Same wire layout as extraction: `[4 bytes LE header_len][header CBOR][raw content]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderInput {
+    /// MIME type of the content (e.g. "application/pdf")
+    pub mime: String,
+    /// File extension without dot, for extension-based dispatch
+    #[serde(default)]
+    pub extension: Option<String>,
+    /// Rendering parameters
+    pub params: RenderParams,
+}
+
+/// Parameters controlling page rasterization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderParams {
+    /// Raster resolution in dots per inch (PDF user space is 72/inch).
+    pub dpi: u32,
+    /// First page to render in this call, 0-based. The host loops over
+    /// batches to bound guest memory.
+    pub page_start: u32,
+    /// Number of pages to render in this call.
+    pub page_count: u32,
+    /// Encoding of the returned page images.
+    pub image_format: RenderImageFormat,
+    /// Downscale so the longest image edge does not exceed this.
+    #[serde(default)]
+    pub max_edge_px: Option<u32>,
+    /// Guest-visible model paths (same semantics as `ExtractionHints::model_paths`).
+    #[serde(default)]
+    pub model_paths: std::collections::BTreeMap<String, String>,
+}
+
+/// Image encoding for rendered pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RenderImageFormat {
+    #[default]
+    Png,
+    Webp,
+}
+
+impl RenderImageFormat {
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Webp => "image/webp",
+        }
+    }
+}
+
+/// Response from a `render_pages` call (CBOR-encoded).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RenderResponse {
+    Ok(RenderedPages),
+    Err { code: String, message: String },
+}
+
+/// A batch of rendered pages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderedPages {
+    /// Renderer identifier (e.g. "memvault-pdfrender")
+    pub renderer: String,
+    /// Renderer version
+    pub renderer_version: String,
+    /// Total page count of the document (not just this batch).
+    pub total_pages: u32,
+    /// Rendered pages for the requested batch window.
+    pub pages: Vec<RenderedPage>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// One rendered page with its text layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderedPage {
+    /// 1-based page number.
+    pub page_no: u32,
+    pub width_px: u32,
+    pub height_px: u32,
+    /// Encoded image bytes (format per `RenderParams::image_format`).
+    pub image: Vec<u8>,
+    /// Text layer word boxes in image pixel coordinates.
+    pub words: Vec<WordBox>,
+    /// Where the text layer came from.
+    pub text_source: TextSource,
+}
+
+/// Origin of a page's text layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextSource {
+    /// Embedded text extracted from the document.
+    Embedded,
+    /// Recognized via OCR.
+    Ocr,
+    /// No text available for this page.
+    #[default]
+    None,
+}
+
+/// A positioned word in image pixel coordinates (origin top-left).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WordBox {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Encode a render request into the binary envelope format:
+/// `[4 bytes LE header_len][header CBOR][raw content]`
+pub fn encode_render_envelope(input: &RenderInput, content: &[u8]) -> Vec<u8> {
+    let mut header_cbor = Vec::new();
+    ciborium::into_writer(input, &mut header_cbor).expect("CBOR serialization cannot fail");
+
+    let header_len = header_cbor.len() as u32;
+    let mut envelope = Vec::with_capacity(4 + header_cbor.len() + content.len());
+    envelope.extend_from_slice(&header_len.to_le_bytes());
+    envelope.extend_from_slice(&header_cbor);
+    envelope.extend_from_slice(content);
+    envelope
+}
+
+/// Decode a binary render envelope into the header and raw content slice.
+pub fn decode_render_envelope(data: &[u8]) -> Result<(RenderInput, &[u8]), EnvelopeError> {
+    if data.len() < 4 {
+        return Err(EnvelopeError::TooShort);
+    }
+    let header_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let header_end = 4 + header_len;
+    if data.len() < header_end {
+        return Err(EnvelopeError::TooShort);
+    }
+    let header: RenderInput =
+        ciborium::from_reader(&data[4..header_end]).map_err(EnvelopeError::Cbor)?;
+    Ok((header, &data[header_end..]))
+}
+
+/// Encode a render response to CBOR bytes.
+pub fn encode_render_response(response: &RenderResponse) -> Vec<u8> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(response, &mut buf).expect("CBOR serialization cannot fail");
+    buf
+}
+
+/// Decode a render response from CBOR bytes.
+pub fn decode_render_response(data: &[u8]) -> Result<RenderResponse, EnvelopeError> {
+    ciborium::from_reader(data).map_err(EnvelopeError::Cbor)
 }
 
 // ─── Binary envelope encoding ──────────────────────────────────────────────────
@@ -181,7 +386,7 @@ mod tests {
             extension: Some("html".to_string()),
             hints: ExtractionHints {
                 max_text_bytes: Some(1024),
-                timeout_ms: None,
+                ..Default::default()
             },
         };
         let content = b"<html><body>Hello</body></html>";
@@ -204,6 +409,7 @@ mod tests {
             page_breaks: vec![5],
             warnings: vec![],
             links: vec![],
+            segments: vec![],
         });
 
         let encoded = encode_response(&response);
@@ -224,14 +430,8 @@ mod tests {
             id: "builtin".to_string(),
             version: "0.1.0".to_string(),
             capabilities: vec![
-                ExtractorCapability {
-                    match_rule: MatchRule::Mime("text/html".to_string()),
-                    priority: 0,
-                },
-                ExtractorCapability {
-                    match_rule: MatchRule::Extension("htm".to_string()),
-                    priority: 5,
-                },
+                ExtractorCapability::extract(MatchRule::Mime("text/html".to_string()), 0),
+                ExtractorCapability::extract(MatchRule::Extension("htm".to_string()), 5),
             ],
         };
 
@@ -240,6 +440,99 @@ mod tests {
 
         assert_eq!(decoded.capabilities.len(), 2);
         assert_eq!(decoded.capabilities[1].priority, 5);
+    }
+
+    #[test]
+    fn render_envelope_roundtrip() {
+        let input = RenderInput {
+            mime: "application/pdf".to_string(),
+            extension: Some("pdf".to_string()),
+            params: RenderParams {
+                dpi: 144,
+                page_start: 8,
+                page_count: 8,
+                image_format: RenderImageFormat::Png,
+                max_edge_px: Some(4096),
+                model_paths: Default::default(),
+            },
+        };
+        let content = b"%PDF-1.7 fake";
+
+        let envelope = encode_render_envelope(&input, content);
+        let (decoded, decoded_content) = decode_render_envelope(&envelope).unwrap();
+
+        assert_eq!(decoded.mime, "application/pdf");
+        assert_eq!(decoded.params.dpi, 144);
+        assert_eq!(decoded.params.page_start, 8);
+        assert_eq!(decoded.params.image_format, RenderImageFormat::Png);
+        assert_eq!(decoded_content, content);
+    }
+
+    #[test]
+    fn render_response_roundtrip() {
+        let response = RenderResponse::Ok(RenderedPages {
+            renderer: "memvault-pdfrender".to_string(),
+            renderer_version: "0.1.0".to_string(),
+            total_pages: 12,
+            pages: vec![RenderedPage {
+                page_no: 9,
+                width_px: 1224,
+                height_px: 1584,
+                image: vec![0x89, b'P', b'N', b'G'],
+                words: vec![WordBox { text: "Invoice".into(), x: 72.0, y: 54.1, w: 88.2, h: 14.0 }],
+                text_source: TextSource::Embedded,
+            }],
+            warnings: vec![],
+        });
+
+        let encoded = encode_render_response(&response);
+        match decode_render_response(&encoded).unwrap() {
+            RenderResponse::Ok(p) => {
+                assert_eq!(p.total_pages, 12);
+                assert_eq!(p.pages[0].words[0].text, "Invoice");
+                assert_eq!(p.pages[0].text_source, TextSource::Embedded);
+            }
+            _ => panic!("expected Ok"),
+        }
+    }
+
+    #[test]
+    fn capability_op_defaults_to_extract() {
+        // A capability serialized by an old plugin (no `op` field) must
+        // decode as Extract.
+        let minimal = ciborium::Value::Map(vec![(
+            ciborium::Value::Text("match_rule".to_string()),
+            ciborium::Value::Map(vec![(
+                ciborium::Value::Text("Mime".to_string()),
+                ciborium::Value::Text("text/html".to_string()),
+            )]),
+        )]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&minimal, &mut buf).unwrap();
+
+        let decoded: ExtractorCapability = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(decoded.op, PluginOp::Extract);
+        assert_eq!(decoded.priority, 0);
+    }
+
+    #[test]
+    fn extracted_text_without_segments_decodes() {
+        // Old extractors omit `segments`.
+        let response = ExtractionResponse::Ok(ExtractedText {
+            extractor: "x".into(),
+            extractor_version: "1".into(),
+            text: "hi".into(),
+            page_breaks: vec![],
+            warnings: vec![],
+            links: vec![],
+            segments: vec![],
+        });
+        let encoded = encode_response(&response);
+        let decoded = decode_response(&encoded).unwrap();
+        match decoded {
+            ExtractionResponse::Ok(t) => assert!(t.segments.is_empty()),
+            _ => panic!("expected Ok"),
+        }
     }
 
     #[test]

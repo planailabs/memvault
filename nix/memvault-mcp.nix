@@ -9,11 +9,12 @@
 }:
 
 let
-  # memvault-extract's build.rs nests a `cargo build --target
-  # wasm32-unknown-unknown` for the extract-guest crate. nixpkgs' default
-  # rustc has no wasm std, so override via rust-overlay.
+  # memvault-extract's build.rs nests `cargo build --target
+  # wasm32-unknown-unknown` (text guest) and `--target wasm32-wasip1`
+  # (media guests) invocations. nixpkgs' default rustc has no wasm std,
+  # so override via rust-overlay.
   toolchainWasm = rust-bin.stable.latest.default.override {
-    targets = [ "wasm32-unknown-unknown" ];
+    targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
   };
   rp = makeRustPlatform {
     cargo = toolchainWasm;

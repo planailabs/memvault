@@ -1,0 +1,15 @@
+[package]
+name = "memvault-extract-guest-text"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+memvault-extract-abi = { path = "../memvault-extract-abi" }
+extism-pdk = "1"
+pulldown-cmark = "0.12"
+scraper = "0.22"
+docx-rs = "0.4"
+lopdf = "0.34"

@@ -1,7 +1,6 @@
 {
   lib,
   stdenv,
-  rustPlatform,
   rust-bin,
   makeRustPlatform,
   pkg-config,
@@ -24,18 +23,20 @@
 }:
 
 let
-  # The slim build wants a rustc + cargo that know about wasm32 because
-  # memvault-extract/build.rs nests a wasm32 cargo invocation for the
-  # extract-guest crate. The full dx build already brings this via
-  # dioxus-cli, so we only override the rustPlatform on the slim path.
+  # Both build flavors want a rustc + cargo that know about the wasm32
+  # targets because memvault-extract/build.rs nests wasm32 cargo
+  # invocations for the guest crates: wasm32-unknown-unknown (text guest)
+  # and wasm32-wasip1 (media guests). nixpkgs' rustc ships
+  # wasm32-unknown-unknown std but not wasip1, so override the toolchain
+  # via rust-overlay on both paths.
   toolchainWasm = rust-bin.stable.latest.default.override {
-    targets = [ "wasm32-unknown-unknown" ];
+    targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
   };
-  slimRustPlatform = makeRustPlatform {
+  wasmRustPlatform = makeRustPlatform {
     cargo = toolchainWasm;
     rustc = toolchainWasm;
   };
-  rp = if slim then slimRustPlatform else rustPlatform;
+  rp = wasmRustPlatform;
 in
 
 rp.buildRustPackage ({

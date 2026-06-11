@@ -4,23 +4,58 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+/// One guest WASM module to build and embed.
+struct GuestSpec {
+    /// Crate directory name under `<workspace>/crates/`.
+    crate_dir: &'static str,
+    /// Rust target triple. The text guest needs no WASI; media guests use
+    /// wasip1 for file access (models), clocks, and randomness.
+    target: &'static str,
+    /// Env var consumed by `include_bytes!(env!(...))` in src/lib.rs.
+    env_var: &'static str,
+    /// Additional override env var honored for backwards compatibility.
+    legacy_override: Option<&'static str>,
+    /// Cargo feature (upper-snake, as in `CARGO_FEATURE_*`) gating this
+    /// guest. None = always built.
+    feature: Option<&'static str>,
+}
+
+const GUESTS: &[GuestSpec] = &[
+    GuestSpec {
+        crate_dir: "memvault-extract-guest-text",
+        target: "wasm32-unknown-unknown",
+        env_var: "MEMVAULT_EXTRACT_GUEST_TEXT_WASM",
+        legacy_override: Some("MEMVAULT_EXTRACT_GUEST_WASM"),
+        feature: None,
+    },
+    GuestSpec {
+        crate_dir: "memvault-extract-guest-pdfrender",
+        target: "wasm32-wasip1",
+        env_var: "MEMVAULT_EXTRACT_GUEST_PDFRENDER_WASM",
+        legacy_override: None,
+        feature: Some("MEDIA_PLUGINS"),
+    },
+    GuestSpec {
+        crate_dir: "memvault-extract-guest-ocr",
+        target: "wasm32-wasip1",
+        env_var: "MEMVAULT_EXTRACT_GUEST_OCR_WASM",
+        legacy_override: None,
+        feature: Some("MEDIA_PLUGINS"),
+    },
+    GuestSpec {
+        crate_dir: "memvault-extract-guest-audio",
+        target: "wasm32-wasip1",
+        env_var: "MEMVAULT_EXTRACT_GUEST_AUDIO_WASM",
+        legacy_override: None,
+        feature: Some("MEDIA_PLUGINS"),
+    },
+];
+
 fn main() {
-    println!("cargo:rerun-if-env-changed=MEMVAULT_EXTRACT_GUEST_WASM");
-
-    if let Some(path) = env::var_os("MEMVAULT_EXTRACT_GUEST_WASM") {
-        let path = PathBuf::from(path);
-        assert_wasm_exists(&path);
-        println!(
-            "cargo:rustc-env=MEMVAULT_EXTRACT_GUEST_WASM={}",
-            path.display()
-        );
-        return;
-    }
-
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    // Sibling crates (memvault-extract-guest, memvault-extract-abi) live
-    // next to this crate at `<workspace>/crates/<name>`. That holds in
-    // both layouts memvault ships in:
+    // Sibling crates (the guest crates, memvault-extract-abi) live next to
+    // this crate at `<workspace>/crates/<name>`. That holds in both layouts
+    // memvault ships in:
     //   - standalone memvault repo: `<workspace>/crates/memvault-extract`
     //   - mac-mgmt monorepo:        `<workspace>/memvault/crates/memvault-extract`
     // Use the parent of the manifest dir (`crates/`) as the anchor and
@@ -32,55 +67,90 @@ fn main() {
         .expect("memvault-extract should live under <workspace>/crates")
         .to_path_buf();
     let workspace_root = find_workspace_root(&crates_dir);
-    let guest_manifest = crates_dir.join("memvault-extract-guest/Cargo.toml");
-    let guest_lock = crates_dir.join("memvault-extract-guest/Cargo.lock");
-    let guest_src = crates_dir.join("memvault-extract-guest/src");
+
+    for guest in GUESTS {
+        build_guest(guest, &crates_dir, &workspace_root);
+    }
+}
+
+fn build_guest(guest: &GuestSpec, crates_dir: &Path, workspace_root: &Path) {
+    if let Some(feature) = guest.feature {
+        if env::var_os(format!("CARGO_FEATURE_{feature}")).is_none() {
+            return;
+        }
+    }
+
+    // Env override: use a prebuilt guest artifact instead of a nested build.
+    println!("cargo:rerun-if-env-changed={}", guest.env_var);
+    let mut overrides = vec![guest.env_var];
+    if let Some(legacy) = guest.legacy_override {
+        println!("cargo:rerun-if-env-changed={legacy}");
+        overrides.push(legacy);
+    }
+    for var in overrides {
+        if let Some(path) = env::var_os(var) {
+            let path = PathBuf::from(path);
+            assert_wasm_exists(guest, &path);
+            println!("cargo:rustc-env={}={}", guest.env_var, path.display());
+            return;
+        }
+    }
+
+    let guest_dir = crates_dir.join(guest.crate_dir);
+    let guest_manifest = guest_dir.join("Cargo.toml");
+    let guest_src = guest_dir.join("src");
     let abi_src = crates_dir.join("memvault-extract-abi/src");
-    let inputs = [&guest_manifest, &guest_lock, &guest_src, &abi_src];
-    for input in inputs {
+    let mut inputs = vec![guest_manifest.clone(), guest_src, abi_src];
+    let guest_lock = guest_dir.join("Cargo.lock");
+    if guest_lock.exists() {
+        inputs.push(guest_lock);
+    }
+    for input in &inputs {
         emit_rerun_if_changed(input);
     }
 
     // Build the guest WASM in its OWN target directory under
-    // `<workspace>/target/extract-guest/`, NOT the workspace-root
-    // `target/`. Using the same target dir as the outer build deadlocks
-    // when this build.rs runs while that outer build is still holding
-    // its `target/` lock — the nested `cargo build` blocks on the same
-    // lock forever (observed in NixOS sandbox builds; see the sync
-    // NixOS test). A dedicated sub-target sidesteps the race.
-    //
-    // The Procfile previously sliced per-node target dirs for the same
-    // reason; this is the same fix applied to the build-script-spawned
-    // wasm compile.
-    let target_dir = workspace_root.join("target").join("extract-guest");
-    let wasm_path = target_dir.join("wasm32-unknown-unknown/release/memvault_extract_guest.wasm");
+    // `<workspace>/target/<crate_dir>/`, NOT the workspace-root `target/`.
+    // Using the same target dir as the outer build deadlocks when this
+    // build.rs runs while that outer build is still holding its `target/`
+    // lock — the nested `cargo build` blocks on the same lock forever
+    // (observed in NixOS sandbox builds; see the sync NixOS test). A
+    // dedicated sub-target per guest sidesteps the race (and per-guest
+    // dirs avoid lock contention between the nested builds themselves).
+    let target_dir = workspace_root.join("target").join(guest.crate_dir);
+    let artifact = format!("{}.wasm", guest.crate_dir.replace('-', "_"));
+    let wasm_path = target_dir
+        .join(guest.target)
+        .join("release")
+        .join(artifact);
 
-    if should_rebuild_wasm(&wasm_path, &inputs) {
+    let input_refs: Vec<&PathBuf> = inputs.iter().collect();
+    if should_rebuild_wasm(&wasm_path, &input_refs) {
         let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = Command::new(cargo)
             .arg("build")
             .arg("--manifest-path")
             .arg(&guest_manifest)
             .arg("--target")
-            .arg("wasm32-unknown-unknown")
+            .arg(guest.target)
             .arg("--release")
             .env("CARGO_TARGET_DIR", &target_dir)
             .status()
-            .expect("failed to spawn cargo to build memvault-extract-guest WASM");
+            .unwrap_or_else(|e| {
+                panic!("failed to spawn cargo to build {} WASM: {e}", guest.crate_dir)
+            });
 
         if !status.success() {
             panic!(
-                "failed to build memvault-extract-guest WASM at {} (status: {status})",
+                "failed to build {} WASM at {} (status: {status})",
+                guest.crate_dir,
                 wasm_path.display()
             );
         }
     }
 
-    assert_wasm_exists(&wasm_path);
-    println!(
-        "cargo:rustc-env=MEMVAULT_EXTRACT_GUEST_WASM={}",
-        wasm_path.display()
-    );
+    assert_wasm_exists(guest, &wasm_path);
+    println!("cargo:rustc-env={}={}", guest.env_var, wasm_path.display());
 }
 
 /// Walk upward from `start` until we find a Cargo.toml containing
@@ -103,11 +173,15 @@ fn find_workspace_root(start: &Path) -> PathBuf {
     }
 }
 
-fn assert_wasm_exists(path: &Path) {
+fn assert_wasm_exists(guest: &GuestSpec, path: &Path) {
     if !path.exists() {
         panic!(
-            "memvault-extract guest WASM not found at {}; set MEMVAULT_EXTRACT_GUEST_WASM or build memvault-extract-guest for wasm32-unknown-unknown",
-            path.display()
+            "{} guest WASM not found at {}; set {} or build {} for {}",
+            guest.crate_dir,
+            path.display(),
+            guest.env_var,
+            guest.crate_dir,
+            guest.target
         );
     }
 }

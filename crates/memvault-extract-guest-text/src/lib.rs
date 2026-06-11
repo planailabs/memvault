@@ -18,85 +18,31 @@ pub fn capabilities(_input: Vec<u8>) -> FnResult<Vec<u8>> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         capabilities: vec![
             // Plain text
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("text/plain".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("text/csv".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("application/json".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("txt".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("csv".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("json".to_string()),
-                priority: 0,
-            },
+            ExtractorCapability::extract(MatchRule::Mime("text/plain".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Mime("text/csv".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Mime("application/json".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("txt".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("csv".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("json".to_string()), 0),
             // Markdown
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("text/markdown".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("text/x-markdown".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("md".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("markdown".to_string()),
-                priority: 0,
-            },
+            ExtractorCapability::extract(MatchRule::Mime("text/markdown".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Mime("text/x-markdown".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("md".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("markdown".to_string()), 0),
             // HTML
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("text/html".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("application/xhtml+xml".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("html".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("htm".to_string()),
-                priority: 0,
-            },
+            ExtractorCapability::extract(MatchRule::Mime("text/html".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Mime("application/xhtml+xml".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("html".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("htm".to_string()), 0),
             // PDF
-            ExtractorCapability {
-                match_rule: MatchRule::Mime("application/pdf".to_string()),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("pdf".to_string()),
-                priority: 0,
-            },
+            ExtractorCapability::extract(MatchRule::Mime("application/pdf".to_string()), 0),
+            ExtractorCapability::extract(MatchRule::Extension("pdf".to_string()), 0),
             // DOCX
-            ExtractorCapability {
-                match_rule: MatchRule::Mime(
+            ExtractorCapability::extract(MatchRule::Mime(
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         .to_string(),
-                ),
-                priority: 0,
-            },
-            ExtractorCapability {
-                match_rule: MatchRule::Extension("docx".to_string()),
-                priority: 0,
-            },
+                ), 0),
+            ExtractorCapability::extract(MatchRule::Extension("docx".to_string()), 0),
         ],
     };
     Ok(memvault_extract_abi::encode_capabilities(&caps))

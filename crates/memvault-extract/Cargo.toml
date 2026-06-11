@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[features]
+default = ["media-plugins"]
+# Embed the media guest plugins (pdf page render, OCR, audio transcription).
+# Disable for faster dev builds of crates that only need text extraction.
+media-plugins = []
+
 [dependencies]
 memvault-extract-abi = { path = "../memvault-extract-abi" }
 extism = "1"

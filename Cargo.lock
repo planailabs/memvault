@@ -5322,7 +5322,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "memvault-extract-guest"
+name = "memvault-extract-guest-audio"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "memvault-extract-abi",
+]
+
+[[package]]
+name = "memvault-extract-guest-ocr"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "memvault-extract-abi",
+]
+
+[[package]]
+name = "memvault-extract-guest-pdfrender"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+ "memvault-extract-abi",
+]
+
+[[package]]
+name = "memvault-extract-guest-text"
 version = "0.1.0"
 dependencies = [
  "docx-rs",

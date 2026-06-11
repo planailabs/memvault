@@ -5,14 +5,27 @@ pub mod wasm_host;
 pub use error::ExtractError;
 pub use memvault_extract_abi::{
     ExtractedText, ExtractionHints, ExtractionResponse, ExtractorCapability, MatchRule,
-    PluginCapabilities,
+    PluginCapabilities, PluginOp, RenderImageFormat, RenderInput, RenderParams, RenderResponse,
+    RenderedPage, RenderedPages, TextSource, TranscriptSegment, WordBox,
 };
-pub use registry::ExtractionRegistry;
-pub use wasm_host::{ResourceLimits, WasmExtractor};
+pub use registry::{ExtractionRegistry, MediaPlugins};
+pub use wasm_host::{PluginOptions, ResourceLimits, WasmExtractor};
 
-/// Embedded built-in extractor WASM module.
-/// Built from memvault-extract-guest targeting wasm32-unknown-unknown.
-const BUILTIN_WASM: &[u8] = include_bytes!(env!("MEMVAULT_EXTRACT_GUEST_WASM"));
+/// Embedded built-in text extractor WASM module.
+/// Built from memvault-extract-guest-text targeting wasm32-unknown-unknown.
+const BUILTIN_TEXT_WASM: &[u8] = include_bytes!(env!("MEMVAULT_EXTRACT_GUEST_TEXT_WASM"));
+
+/// Embedded PDF page-render WASM module (hayro + pdfplumber, wasm32-wasip1).
+#[cfg(feature = "media-plugins")]
+const BUILTIN_PDFRENDER_WASM: &[u8] = include_bytes!(env!("MEMVAULT_EXTRACT_GUEST_PDFRENDER_WASM"));
+
+/// Embedded OCR WASM module (ocrs/rten, wasm32-wasip1).
+#[cfg(feature = "media-plugins")]
+const BUILTIN_OCR_WASM: &[u8] = include_bytes!(env!("MEMVAULT_EXTRACT_GUEST_OCR_WASM"));
+
+/// Embedded audio transcription WASM module (symphonia + candle whisper, wasm32-wasip1).
+#[cfg(feature = "media-plugins")]
+const BUILTIN_AUDIO_WASM: &[u8] = include_bytes!(env!("MEMVAULT_EXTRACT_GUEST_AUDIO_WASM"));
 
 #[cfg(test)]
 mod tests {
@@ -122,6 +135,45 @@ mod tests {
         };
         let result = reg.extract(input.as_bytes(), "text/plain", &hints).unwrap();
         assert_eq!(result.text.len(), 100);
+    }
+
+    #[cfg(feature = "media-plugins")]
+    #[test]
+    fn media_registry_op_dispatch() {
+        let set = MediaPlugins {
+            pdfrender: Some(PluginOptions::default()),
+            ocr: Some(PluginOptions::default()),
+            audio: Some(PluginOptions::default()),
+        };
+        let reg = ExtractionRegistry::with_media_plugins(&set);
+
+        // RenderPages routes to pdfrender for PDFs and ocr for images.
+        assert!(reg.can_render("application/pdf"));
+        assert!(reg.can_render("image/png"));
+        assert!(!reg.can_render("text/plain"));
+
+        // Extract routes to ocr for images and audio via MimePrefix.
+        assert!(reg.can_extract("image/png"));
+        assert!(reg.can_extract("audio/mpeg"));
+        assert!(reg.can_extract("audio/x-flac"));
+
+        // The text registry serves Extract only — no render capability.
+        let text_reg = ExtractionRegistry::with_defaults();
+        assert!(!text_reg.can_render("application/pdf"));
+        // And the media registry must not shadow text extraction for PDFs.
+        assert!(!reg.can_extract("application/pdf"));
+
+        // Stub guests route correctly and report unimplemented.
+        let params = RenderParams {
+            dpi: 144,
+            page_start: 0,
+            page_count: 1,
+            image_format: RenderImageFormat::Png,
+            max_edge_px: None,
+            model_paths: Default::default(),
+        };
+        let err = reg.render_pages(b"%PDF", "application/pdf", &params).unwrap_err();
+        assert!(matches!(err, ExtractError::ExtractionFailed(m) if m.contains("not yet implemented")));
     }
 
     #[test]
