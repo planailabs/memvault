@@ -6,6 +6,8 @@ pub mod bootstrap;
 pub mod client;
 pub mod docs;
 pub mod error;
+pub mod extraction;
+pub mod extraction_config;
 pub mod files;
 pub mod health;
 #[cfg(feature = "http-client")]
@@ -15,6 +17,7 @@ pub mod link_reconcile;
 pub mod local;
 pub mod metrics;
 pub mod node_key;
+pub mod office_convert;
 pub mod rebuild;
 pub mod sigchain;
 pub mod otel;

@@ -380,6 +380,85 @@ impl MemvaultClient for HttpApiClient {
         Ok(resp["text"].as_str().map(|s| s.to_string()))
     }
 
+    async fn read_extraction(&self, manifest_cid: &[u8]) -> Result<crate::types::ExtractionInfo> {
+        self.client
+            .get(self.url(&format!("/files/{}/extraction", cid_path(manifest_cid))))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)
+    }
+
+    async fn read_page_render(&self, manifest_cid: &[u8]) -> Result<crate::types::PageRenderInfo> {
+        self.client
+            .get(self.url(&format!("/files/{}/pages", cid_path(manifest_cid))))
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)
+    }
+
+    async fn read_page_image(
+        &self,
+        manifest_cid: &[u8],
+        page_no: u32,
+    ) -> Result<Option<(Vec<u8>, String)>> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/files/{}/pages/{page_no}/image",
+                cid_path(manifest_cid)
+            )))
+            .send()
+            .await
+            .map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let resp = resp.error_for_status().map_err(map_reqwest)?;
+        let mime = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/png")
+            .to_string();
+        let bytes = resp.bytes().await.map_err(map_reqwest)?;
+        Ok(Some((bytes.to_vec(), mime)))
+    }
+
+    async fn read_page_text_layer(
+        &self,
+        manifest_cid: &[u8],
+        page_no: u32,
+    ) -> Result<Option<crate::types::PageTextLayer>> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/files/{}/pages/{page_no}/text-layer",
+                cid_path(manifest_cid)
+            )))
+            .send()
+            .await
+            .map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        resp.error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map(Some)
+            .map_err(map_reqwest)
+    }
+
     async fn pin_file(&self, manifest_cid: &[u8]) -> Result<()> {
         self.client
             .post(self.url(&format!("/files/{}/pin", cid_path(manifest_cid))))

@@ -279,15 +279,24 @@ fn parse_cached_links(val: Option<&serde_json::Value>) -> Vec<memvault_extract_a
 
 fn safe_extract_text(data: &[u8], mime_type: &str) -> ExtractionResult {
     let registry = memvault_extract::ExtractionRegistry::with_defaults();
+    safe_extract_text_with(&registry, data, mime_type)
+}
+
+/// Run text extraction against a caller-provided registry (the pipeline's
+/// long-lived one, or a fresh fallback) with panic isolation. The plugin
+/// mutex recovers from poisoning inside `WasmExtractor`, so a panicked
+/// call doesn't wedge a shared registry.
+fn safe_extract_text_with(
+    registry: &memvault_extract::ExtractionRegistry,
+    data: &[u8],
+    mime_type: &str,
+) -> ExtractionResult {
     if !registry.can_extract(mime_type) {
         return ExtractionResult::Unsupported;
     }
-    let data = data.to_vec();
-    let mime = mime_type.to_string();
-    match std::panic::catch_unwind(move || {
-        let registry = memvault_extract::ExtractionRegistry::with_defaults();
-        registry.extract(&data, &mime, &memvault_extract::ExtractionHints::default())
-    }) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.extract(data, mime_type, &memvault_extract::ExtractionHints::default())
+    })) {
         Ok(Ok(extracted)) => ExtractionResult::Ok {
             text: extracted.text,
             links: extracted.links,
@@ -301,6 +310,14 @@ fn safe_extract_text(data: &[u8], mime_type: &str) -> ExtractionResult {
             ExtractionResult::Failed("extractor panicked".to_string())
         }
     }
+}
+
+/// Find the entry for a 1-based page number in a page_render annotation.
+fn find_page(data: &serde_json::Value, page_no: u32) -> Option<&serde_json::Value> {
+    data.get("pages")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("page_no").and_then(|v| v.as_u64()) == Some(page_no as u64))
 }
 
 fn op_edge_target_label(op: &Op) -> Option<String> {
@@ -425,6 +442,12 @@ pub struct LocalClient {
     /// Optional agent identity for agent-scoped operations. Write-once
     /// via `OnceLock` so it can be installed through a shared `Arc`.
     agent_identity: std::sync::OnceLock<crate::agent_identity::AgentIdentity>,
+    /// Unified extraction pipeline (text + transcription + OCR + page
+    /// render). Write-once via `OnceLock`, installed through the shared
+    /// `Arc` by `install_extraction_pipeline`; absent on clients that
+    /// never install it (CLI one-shots), which degrade to inline-only
+    /// text extraction.
+    extraction: std::sync::OnceLock<std::sync::Arc<crate::extraction::ExtractionPipeline>>,
     /// Cached attestation CID for the bound agent. Populated by
     /// `enroll_local_agent` after publishing the attestation, so
     /// `signer_for_writes` can embed an inline attribution pointer
@@ -573,6 +596,7 @@ impl LocalClient {
             trust_state: std::sync::OnceLock::new(),
             pinned_admin_genesis: std::sync::OnceLock::new(),
             agent_identity: std::sync::OnceLock::new(),
+            extraction: std::sync::OnceLock::new(),
             agent_attestation_cid_cache: std::sync::OnceLock::new(),
             keystore,
             keystore_watch: std::sync::OnceLock::new(),
@@ -2666,8 +2690,14 @@ impl LocalClient {
             _ => {}
         }
 
-        // Extract fresh.
-        let result = safe_extract_text(source.data(), mime_type);
+        // Extract fresh — through the pipeline's long-lived registry when
+        // installed (skips per-call plugin instantiation), else a fresh one.
+        let result = match self.extraction.get() {
+            Some(pipeline) => {
+                safe_extract_text_with(pipeline.text_registry(), source.data(), mime_type)
+            }
+            None => safe_extract_text(source.data(), mime_type),
+        };
 
         // Cache the result.
         match &result {
@@ -2969,6 +2999,293 @@ impl LocalClient {
             }
         }
         None
+    }
+
+    // ─── Extraction pipeline storage primitives ───────────────────────────
+    //
+    // Orchestration lives in `crate::extraction`; these are the
+    // store/sign/index primitives it needs (private fields keep them here).
+
+    /// Install the unified extraction pipeline. Idempotent; first call wins.
+    pub fn install_extraction_pipeline(
+        self: &std::sync::Arc<Self>,
+        config: crate::extraction_config::ExtractionConfig,
+    ) {
+        let pipeline = std::sync::Arc::new(crate::extraction::ExtractionPipeline::new(
+            config,
+            std::sync::Arc::downgrade(self),
+        ));
+        let _ = self.extraction.set(pipeline);
+    }
+
+    /// Newest annotation `data` object of `ann_type` targeting this file.
+    /// "Newest" by the annotation's own timestamp field (extraction and
+    /// page_render annotations carry one each).
+    pub(crate) fn load_file_annotation(
+        &self,
+        manifest_cid: &[u8],
+        ann_type: &str,
+    ) -> Option<serde_json::Value> {
+        let target = format!("file:{}", hex::encode(manifest_cid));
+        let ann_cids = self.store.query_by_tag("_ann", &target, 0, 50).ok()?;
+        let mut newest: Option<(u64, serde_json::Value)> = None;
+        for cid in &ann_cids {
+            let Ok(Some(block_data)) = self.store.get_block(cid) else {
+                continue;
+            };
+            let Some(view) = memvault_store::EnvelopeView::parse(&block_data) else {
+                continue;
+            };
+            if view.field("type").and_then(|v| v.as_str()) != Some(ann_type) {
+                continue;
+            }
+            let Some(data) = view.field("data").cloned() else {
+                continue;
+            };
+            let ts = data
+                .get("rendered_at_ns")
+                .or_else(|| data.get("extracted_at_ns"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if newest.as_ref().is_none_or(|(best, _)| ts >= *best) {
+                newest = Some((ts, data));
+            }
+        }
+        newest.map(|(_, data)| data)
+    }
+
+    /// Whether any cached extraction (success or failure) exists.
+    pub(crate) fn has_extraction_annotation(&self, manifest_cid: &[u8]) -> bool {
+        self.load_cached_extraction(manifest_cid).is_some()
+    }
+
+    pub(crate) fn load_page_render_annotation(
+        &self,
+        manifest_cid: &[u8],
+    ) -> Option<serde_json::Value> {
+        self.load_file_annotation(manifest_cid, crate::extraction::PAGE_RENDER_ANNOTATION)
+    }
+
+    /// Store raw bytes as a chunked content DAG; returns the root CID.
+    pub(crate) fn store_blob(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+        let (root, blocks) = memvault_attach::chunk_file(bytes)?;
+        for (cid, data) in &blocks {
+            self.store.put_block(cid, data)?;
+        }
+        Ok(root)
+    }
+
+    /// Read a chunked content DAG back; `None` when blocks are missing
+    /// locally (still syncing from a peer).
+    pub(crate) fn read_blob(&self, root: &[u8]) -> Option<Vec<u8>> {
+        memvault_attach::read_range::read_full(&self.store, root).ok()
+    }
+
+    /// The manifest's MIME type (used by lazy read triggers).
+    pub(crate) fn manifest_mime(&self, manifest_cid: &[u8]) -> Option<String> {
+        let data = self.store.get_block(manifest_cid).ok()??;
+        let manifest: AttachmentManifest = memvault_store::deserialize_block_as(&data)?;
+        Some(manifest.mime_type)
+    }
+
+    /// Store one rendered page: image blob (+ overflow words blob), and
+    /// return the page entry for the page_render annotation. CID fields
+    /// are byte arrays — the same encoding as `content_root` — so the
+    /// swarm's dependent-CID chasing can replicate the blocks.
+    pub(crate) fn store_rendered_page(
+        &self,
+        page: &memvault_extract::RenderedPage,
+        dpi: u32,
+        format: memvault_extract::RenderImageFormat,
+    ) -> Result<serde_json::Value> {
+        let image_root = self.store_blob(&page.image)?;
+        let (words_inline, words_blob) = crate::extraction::words_to_json(&page.words);
+        let words_root = match words_blob {
+            Some(blob) => Some(self.store_blob(&blob)?),
+            None => None,
+        };
+        Ok(serde_json::json!({
+            "page_no": page.page_no,
+            "width_px": page.width_px,
+            "height_px": page.height_px,
+            "dpi": dpi,
+            "image_mime": format.mime(),
+            "image_root": image_root,
+            "text_source": crate::extraction::text_source_str(page.text_source),
+            "words_inline": words_inline,
+            "words_root": words_root,
+        }))
+    }
+
+    /// Persist the page_render annotation (status "ok" or "failed").
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn store_page_render_annotation_record(
+        &self,
+        manifest_cid: &[u8],
+        config: &crate::extraction_config::ExtractionConfig,
+        status: &str,
+        error: Option<&str>,
+        total_pages: u32,
+        source_pdf_root: Option<&[u8]>,
+        pages: Vec<serde_json::Value>,
+    ) {
+        let target = format!("file:{}", hex::encode(manifest_cid));
+        let truncated = total_pages > config.render.max_pages;
+        let _ = self.store_annotation(
+            &target,
+            crate::extraction::PAGE_RENDER_ANNOTATION,
+            serde_json::json!({
+                "renderer": "memvault-extract",
+                "renderer_version": env!("CARGO_PKG_VERSION"),
+                "params": {
+                    "dpi": config.render.dpi,
+                    "max_pages": config.render.max_pages,
+                    "image_format": config.render.image_format,
+                },
+                "params_hash": config.render_params_hash(),
+                "status": status,
+                "error": error,
+                "rendered_at_ns": memvault_core::wall_ns(),
+                "source_pdf_root": source_pdf_root,
+                "total_pages": total_pages,
+                "truncated": truncated,
+                "pages": pages,
+            }),
+        );
+    }
+
+    pub(crate) fn store_page_render_failure(
+        &self,
+        manifest_cid: &[u8],
+        config: &crate::extraction_config::ExtractionConfig,
+        error: &str,
+    ) {
+        self.store_page_render_annotation_record(
+            manifest_cid,
+            config,
+            "failed",
+            Some(error),
+            0,
+            None,
+            Vec::new(),
+        );
+    }
+
+    /// Persist a media extraction success (transcript or OCR text) as a
+    /// standard `"extraction"` annotation — search indexing and
+    /// `read_extracted_text` consume it unchanged — plus a `media` extra
+    /// carrying timed segments, then refresh the search index.
+    pub(crate) async fn store_media_extraction_success(
+        &self,
+        manifest_cid: &[u8],
+        mime: &str,
+        extracted: &memvault_extract::ExtractedText,
+    ) {
+        let segments: Vec<serde_json::Value> = extracted
+            .segments
+            .iter()
+            .map(|s| {
+                let text = extracted
+                    .text
+                    .get(s.byte_span.0 as usize..s.byte_span.1 as usize)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                serde_json::json!({ "start_ms": s.start_ms, "end_ms": s.end_ms, "text": text })
+            })
+            .collect();
+        let kind = if mime.starts_with("audio/") { "transcript" } else { "ocr" };
+        let extractor = format!("{}@{}", extracted.extractor, extracted.extractor_version);
+
+        let target = format!("file:{}", hex::encode(manifest_cid));
+        let _ = self.store_annotation(
+            &target,
+            "extraction",
+            serde_json::json!({
+                "extracted_text_inline": extracted.text,
+                "extraction_error": serde_json::Value::Null,
+                "links": serde_json::Value::Null,
+                "extractor": extractor,
+                "extracted_at_ns": memvault_core::wall_ns(),
+                "media": { "kind": kind, "segments": segments },
+            }),
+        );
+
+        self.reindex_attachment_text(manifest_cid, &extracted.text).await;
+    }
+
+    /// Persist a media extraction failure so the cluster converges on the
+    /// same state instead of every node retrying forever.
+    pub(crate) fn store_media_extraction_failure(&self, manifest_cid: &[u8], error: &str) {
+        let target = format!("file:{}", hex::encode(manifest_cid));
+        let _ = self.store_annotation(
+            &target,
+            "extraction",
+            serde_json::json!({
+                "extracted_text_inline": serde_json::Value::Null,
+                "extraction_error": error,
+                "links": serde_json::Value::Null,
+                "extractor": "memvault-extract",
+                "extracted_at_ns": memvault_core::wall_ns(),
+            }),
+        );
+    }
+
+    /// Re-index an attachment with newly available extracted text
+    /// (transcript/OCR arriving after the upload-time indexing pass).
+    /// `index_attachment` replaces by node id, so this is idempotent.
+    pub(crate) async fn reindex_attachment_text(&self, manifest_cid: &[u8], text: &str) {
+        let (filename, mime_type, tags, bucket_hex) = {
+            let mcid_hex = hex::encode(manifest_cid);
+            let env_cids = self
+                .store
+                .query_by_tag("_manifest", &mcid_hex, 0, 1)
+                .unwrap_or_default();
+            let mut filename = None;
+            let mut mime_type = String::new();
+            let mut tags: Vec<(String, String)> = Vec::new();
+            for env_cid in &env_cids {
+                let Ok(Some(env_data)) = self.store.get_block(env_cid) else {
+                    continue;
+                };
+                let Some(view) = memvault_store::EnvelopeView::parse(&env_data) else {
+                    continue;
+                };
+                filename = view
+                    .field("filename")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                mime_type = view
+                    .field("mime_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(arr) = view.field("tags").and_then(|v| v.as_array()) {
+                    tags = arr
+                        .iter()
+                        .filter_map(|t| {
+                            let pair = t.as_array()?;
+                            Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()))
+                        })
+                        .collect();
+                }
+                break;
+            }
+            let bucket_hex = self.inferred_attachment_bucket(manifest_cid).map(hex::encode);
+            (filename, mime_type, tags, bucket_hex)
+        };
+
+        let mut idx = self.index.write().await;
+        let _ = idx.index_attachment(
+            manifest_cid,
+            filename.as_deref(),
+            &mime_type,
+            Some(text),
+            &tags,
+            bucket_hex.as_deref(),
+            memvault_core::wall_ns(),
+        );
+        self.commit_or_defer(&mut idx);
     }
 
     /// Public read accessor — returns the cached extracted links for a
@@ -5960,6 +6277,12 @@ impl MemvaultClient for LocalClient {
         let file_node_id = format!("file:{}", hex::encode(&manifest_cid_bytes));
         self.sync_node_created(&file_node_id, &tags).await;
 
+        // Queue background extraction ops (transcription / OCR / page
+        // render) for media types. No-op without an installed pipeline.
+        if let Some(pipeline) = self.extraction.get() {
+            pipeline.on_ingest(&manifest_cid_bytes, mime_type);
+        }
+
         self.event_bus.publish(MemvaultEvent::FileAttached {
             doc_id: DocId([0; 32]), // No doc association in new system
             name: filename.unwrap_or("unnamed").to_string(),
@@ -6021,6 +6344,157 @@ impl MemvaultClient for LocalClient {
 
         let content = memvault_attach::read_range::read_full(&self.store, &manifest.content_root)?;
         Ok(self.extract_and_cache(manifest_cid, &content, &manifest.mime_type))
+    }
+
+    async fn read_extraction(&self, manifest_cid: &[u8]) -> Result<crate::types::ExtractionInfo> {
+        use crate::extraction::{classify_mime, ExtractOp, MediaClass};
+        use crate::types::{ExtractionInfo, MediaJobStatus};
+
+        // The durable record wins — locally produced or synced from a peer.
+        if let Some(data) = self.load_file_annotation(manifest_cid, "extraction") {
+            return Ok(crate::extraction::project_extraction(&data));
+        }
+
+        let mime = self
+            .manifest_mime(manifest_cid)
+            .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
+        let class = classify_mime(&mime);
+
+        let media_op = match class {
+            MediaClass::Audio => Some(ExtractOp::Transcribe),
+            MediaClass::Image => Some(ExtractOp::Ocr),
+            _ => None,
+        };
+
+        if let Some(op) = media_op {
+            let unavailable = |reason: String| ExtractionInfo {
+                status: MediaJobStatus::Unavailable,
+                text: None,
+                segments: None,
+                error: Some(reason),
+                extractor: None,
+            };
+            return Ok(match self.extraction.get() {
+                Some(pipeline) => match pipeline.unavailable_reason(op, class) {
+                    Some(reason) => unavailable(reason),
+                    None => {
+                        pipeline.ensure_job(op, manifest_cid, &mime);
+                        ExtractionInfo {
+                            status: MediaJobStatus::Pending,
+                            text: None,
+                            segments: None,
+                            error: None,
+                            extractor: None,
+                        }
+                    }
+                },
+                None => unavailable("extraction pipeline not running".into()),
+            });
+        }
+
+        // Inline text path (also caches failures); then re-read the cache
+        // to distinguish failure from unsupported.
+        let text = self.read_extracted_text(manifest_cid).await?;
+        if let Some(text) = text {
+            return Ok(ExtractionInfo {
+                status: MediaJobStatus::Done,
+                text: Some(text),
+                segments: None,
+                error: None,
+                extractor: None,
+            });
+        }
+        if let Some(data) = self.load_file_annotation(manifest_cid, "extraction") {
+            return Ok(crate::extraction::project_extraction(&data));
+        }
+        Ok(ExtractionInfo {
+            status: MediaJobStatus::Unsupported,
+            text: None,
+            segments: None,
+            error: None,
+            extractor: None,
+        })
+    }
+
+    async fn read_page_render(&self, manifest_cid: &[u8]) -> Result<crate::types::PageRenderInfo> {
+        use crate::extraction::{classify_mime, ExtractOp, MediaClass};
+        use crate::types::{MediaJobStatus, PageRenderInfo};
+
+        if let Some(data) = self.load_page_render_annotation(manifest_cid) {
+            return Ok(crate::extraction::project_page_render(&data));
+        }
+
+        let mime = self
+            .manifest_mime(manifest_cid)
+            .ok_or_else(|| ApiError::NotFound("file manifest not found".into()))?;
+        let class = classify_mime(&mime);
+
+        let empty = |status: MediaJobStatus, error: Option<String>| PageRenderInfo {
+            status,
+            page_count: 0,
+            pages: vec![],
+            error,
+        };
+
+        if !matches!(class, MediaClass::Pdf | MediaClass::Image | MediaClass::Office) {
+            return Ok(empty(MediaJobStatus::Unsupported, None));
+        }
+
+        Ok(match self.extraction.get() {
+            Some(pipeline) => match pipeline.unavailable_reason(ExtractOp::RenderPages, class) {
+                Some(reason) => empty(MediaJobStatus::Unavailable, Some(reason)),
+                None => {
+                    pipeline.ensure_job(ExtractOp::RenderPages, manifest_cid, &mime);
+                    empty(MediaJobStatus::Pending, None)
+                }
+            },
+            None => empty(
+                MediaJobStatus::Unavailable,
+                Some("extraction pipeline not running".into()),
+            ),
+        })
+    }
+
+    async fn read_page_image(
+        &self,
+        manifest_cid: &[u8],
+        page_no: u32,
+    ) -> Result<Option<(Vec<u8>, String)>> {
+        let Some(data) = self.load_page_render_annotation(manifest_cid) else {
+            return Ok(None);
+        };
+        let Some(page) = find_page(&data, page_no) else {
+            return Ok(None);
+        };
+        let Some(image_root) = page
+            .get("image_root")
+            .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
+        else {
+            return Ok(None);
+        };
+        let mime = page
+            .get("image_mime")
+            .and_then(|v| v.as_str())
+            .unwrap_or("image/png")
+            .to_string();
+        // None when blocks haven't synced from the rendering peer yet.
+        Ok(self.read_blob(&image_root).map(|bytes| (bytes, mime)))
+    }
+
+    async fn read_page_text_layer(
+        &self,
+        manifest_cid: &[u8],
+        page_no: u32,
+    ) -> Result<Option<crate::types::PageTextLayer>> {
+        let Some(data) = self.load_page_render_annotation(manifest_cid) else {
+            return Ok(None);
+        };
+        let Some(page) = find_page(&data, page_no) else {
+            return Ok(None);
+        };
+        Ok(crate::extraction::page_text_layer(page, |root| {
+            self.read_blob(root)
+        }))
     }
 
     async fn pin_file(&self, manifest_cid: &[u8]) -> Result<()> {

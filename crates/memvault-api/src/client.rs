@@ -11,8 +11,9 @@ use memvault_query::{AuditQuery, AuditRecord, SearchHit, UnifiedHit};
 
 use crate::error::Result;
 use crate::types::{
-    BucketInfo, DocSummary, GrantInfo, NodeStatus, NodeSummary, RotationInfo, ScopeCount,
-    ShareProposalInfo, SkillBundle, SkillInfo, SkillSpec, TokenStatus, TraversalHit,
+    BucketInfo, DocSummary, ExtractionInfo, GrantInfo, MediaJobStatus, NodeStatus, NodeSummary,
+    PageRenderInfo, PageTextLayer, RotationInfo, ScopeCount, ShareProposalInfo, SkillBundle,
+    SkillInfo, SkillSpec, TokenStatus, TraversalHit,
 };
 
 /// The complete memvault API surface.
@@ -52,6 +53,49 @@ pub trait MemvaultClient: Send + Sync {
     async fn read_file(&self, manifest_cid: &[u8]) -> Result<Vec<u8>>;
     async fn read_file_range(&self, manifest_cid: &[u8], start: u64, end: u64) -> Result<Vec<u8>>;
     async fn read_extracted_text(&self, manifest_cid: &[u8]) -> Result<Option<String>>;
+    /// Unified extraction state (plain text / OCR text / audio transcript)
+    /// with job status. Lazily triggers background extraction for media
+    /// types when no cached result exists. Default: pipeline not available.
+    async fn read_extraction(&self, manifest_cid: &[u8]) -> Result<ExtractionInfo> {
+        let _ = manifest_cid;
+        Ok(ExtractionInfo {
+            status: MediaJobStatus::Unavailable,
+            text: None,
+            segments: None,
+            error: Some("extraction pipeline not available on this client".into()),
+            extractor: None,
+        })
+    }
+    /// Page-render manifest (dims only — images and text layers are
+    /// fetched per page). Lazily triggers rendering when absent.
+    async fn read_page_render(&self, manifest_cid: &[u8]) -> Result<PageRenderInfo> {
+        let _ = manifest_cid;
+        Ok(PageRenderInfo {
+            status: MediaJobStatus::Unavailable,
+            page_count: 0,
+            pages: vec![],
+            error: Some("extraction pipeline not available on this client".into()),
+        })
+    }
+    /// (image bytes, mime) for one rendered page (1-based page number).
+    /// `None` while not rendered or blocks not yet synced.
+    async fn read_page_image(
+        &self,
+        manifest_cid: &[u8],
+        page_no: u32,
+    ) -> Result<Option<(Vec<u8>, String)>> {
+        let _ = (manifest_cid, page_no);
+        Ok(None)
+    }
+    /// Word boxes for one rendered page. `None` when not available.
+    async fn read_page_text_layer(
+        &self,
+        manifest_cid: &[u8],
+        page_no: u32,
+    ) -> Result<Option<PageTextLayer>> {
+        let _ = (manifest_cid, page_no);
+        Ok(None)
+    }
     async fn pin_file(&self, manifest_cid: &[u8]) -> Result<()>;
     async fn unpin_file(&self, manifest_cid: &[u8]) -> Result<()>;
     async fn list_pinned(&self) -> Result<Vec<(Vec<u8>, String)>>; // (cid, reason)

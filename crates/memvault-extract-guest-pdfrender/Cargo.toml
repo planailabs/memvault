@@ -9,3 +9,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 memvault-extract-abi = { path = "../memvault-extract-abi" }
 extism-pdk = "1"
+hayro = "0.7"
+pdfplumber = { version = "0.2", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }

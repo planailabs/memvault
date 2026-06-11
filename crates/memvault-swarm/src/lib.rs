@@ -1605,9 +1605,11 @@ fn handle_block_response(
 
 /// Extract CIDs referenced by a block so the sync loop can chase them.
 ///
-/// Handles three cases:
+/// Handles four cases:
 /// - **Attachment envelope** (kind: "attachment"): has `manifest_cid`
 /// - **AttachmentManifest**: has `content_root` (the UnixFS DAG root)
+/// - **page_render annotation**: per-page `image_root`/`words_root` blob
+///   roots plus the optional `source_pdf_root` (office→PDF derivative)
 /// - **DAG-PB node** (protobuf): has `links[].hash` pointing to child blocks
 ///
 /// Without this, file data chunks (stored via `put_block`, no BY_TIME
@@ -1626,6 +1628,31 @@ fn extract_dependent_cids(block_data: &[u8]) -> Vec<Vec<u8>> {
         // AttachmentManifest → content_root (UnixFS DAG root CID).
         if let Some(root) = view.get_as::<Vec<u8>>("content_root") {
             deps.push(root);
+        }
+
+        // page_render annotation → page image / text-layer blob roots and
+        // the converted-PDF root. These reference raw chunk DAGs (same as
+        // content_root); without chasing them a peer would sync the
+        // annotation but 404 on every page image, permanently.
+        if view.field("type").and_then(|v| v.as_str()) == Some("page_render") {
+            if let Some(data) = view.field("data") {
+                let push_cid = |deps: &mut Vec<Vec<u8>>, v: Option<&serde_json::Value>| {
+                    if let Some(v) = v {
+                        if let Ok(cid) = serde_json::from_value::<Vec<u8>>(v.clone()) {
+                            if !cid.is_empty() {
+                                deps.push(cid);
+                            }
+                        }
+                    }
+                };
+                push_cid(&mut deps, data.get("source_pdf_root"));
+                if let Some(pages) = data.get("pages").and_then(|v| v.as_array()) {
+                    for page in pages {
+                        push_cid(&mut deps, page.get("image_root"));
+                        push_cid(&mut deps, page.get("words_root"));
+                    }
+                }
+            }
         }
 
         // Causal links — always at the envelope level, not nested.
@@ -2254,5 +2281,45 @@ mod sync_classify_tests {
             }
             _ => panic!("synced BucketMergeRecord was not classified as a sigchain ingest"),
         }
+    }
+
+    /// A page_render annotation's blob roots (page images, overflow text
+    /// layers, converted PDF) must be chased as dependents — otherwise a
+    /// peer syncs the annotation but can never serve the page images.
+    #[test]
+    fn page_render_annotation_blob_roots_are_dependents() {
+        let image_root: Vec<u8> = vec![1, 18, 32, 7, 7, 7];
+        let words_root: Vec<u8> = vec![1, 18, 32, 8, 8, 8];
+        let source_pdf_root: Vec<u8> = vec![1, 18, 32, 9, 9, 9];
+        let envelope = serde_json::json!({
+            "kind": "annotation",
+            "target": "file:abcd",
+            "type": "page_render",
+            "data": {
+                "status": "ok",
+                "source_pdf_root": source_pdf_root,
+                "pages": [
+                    { "page_no": 1, "image_root": image_root, "words_root": null },
+                    { "page_no": 2, "image_root": [2, 2, 2], "words_root": words_root },
+                ],
+            },
+        });
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+
+        let deps = extract_dependent_cids(&bytes);
+        assert!(deps.contains(&image_root), "missing page 1 image root: {deps:?}");
+        assert!(deps.contains(&vec![2, 2, 2]), "missing page 2 image root");
+        assert!(deps.contains(&words_root), "missing words overflow root");
+        assert!(deps.contains(&source_pdf_root), "missing converted pdf root");
+
+        // Non-page_render annotations contribute no blob deps.
+        let other = serde_json::json!({
+            "kind": "annotation",
+            "target": "file:abcd",
+            "type": "extraction",
+            "data": { "pages": [ { "image_root": [3, 3, 3] } ] },
+        });
+        let deps = extract_dependent_cids(&serde_json::to_vec(&other).unwrap());
+        assert!(!deps.contains(&vec![3, 3, 3]));
     }
 }

@@ -2642,6 +2642,17 @@ mod native {
                     client.set_node_signing_key(node_sk);
                     let local_client = std::sync::Arc::new(client);
 
+                    // Unified extraction pipeline (text + transcription +
+                    // OCR + page render). A malformed extraction.toml
+                    // disables background media extraction but never the
+                    // daemon itself.
+                    match memvault_api::extraction_config::ExtractionConfig::load(&data_dir) {
+                        Ok(cfg) => local_client.install_extraction_pipeline(cfg),
+                        Err(e) => tracing::warn!(
+                            "extraction config invalid — media extraction disabled: {e}"
+                        ),
+                    }
+
                     // Inside `pub async fn run` driven by the caller's tokio
                     // runtime — start the shared host services (trust
                     // bootstrap, sigchain watcher, batched index commits +

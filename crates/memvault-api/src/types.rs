@@ -301,3 +301,89 @@ pub struct ShareProposalInfo {
     pub purpose: String,
     pub not_after_ns: u64,
 }
+
+// ─── Extraction / media pipeline ──────────────────────────────────────────────
+
+/// Status of a background extraction op for a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaJobStatus {
+    /// Work is queued or running (locally or expected from a peer).
+    Pending,
+    /// A cached result annotation exists.
+    Done,
+    /// A cached failure annotation exists.
+    Failed,
+    /// The capability is disabled/unconfigured on this node.
+    Unavailable,
+    /// No extractor claims this MIME type for the op.
+    Unsupported,
+}
+
+/// A timed transcript segment (wire form — carries its text, unlike the
+/// ABI form which spans into the full transcript).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptSegmentInfo {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// Unified extraction state for a file: plain text, OCR text, or audio
+/// transcript, plus job status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtractionInfo {
+    pub status: MediaJobStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Timed segments, present for audio transcripts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<TranscriptSegmentInfo>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Extractor identifier (e.g. "memvault-whisper@0.1.0").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor: Option<String>,
+}
+
+/// Pixel dimensions of one pre-rendered page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageDims {
+    /// 1-based page number.
+    pub page_no: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Page-render manifest for a file: dims only, no image bytes or text
+/// layers (those are fetched per page).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageRenderInfo {
+    pub status: MediaJobStatus,
+    pub page_count: u32,
+    #[serde(default)]
+    pub pages: Vec<PageDims>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A positioned word in image pixel coordinates (origin top-left).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageWord {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Selectable text layer for one rendered page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageTextLayer {
+    /// 1-based page number.
+    pub page_no: u32,
+    /// Image pixel dims the word coords are relative to.
+    pub width: u32,
+    pub height: u32,
+    pub words: Vec<PageWord>,
+}

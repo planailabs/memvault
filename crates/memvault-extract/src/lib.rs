@@ -163,7 +163,7 @@ mod tests {
         // And the media registry must not shadow text extraction for PDFs.
         assert!(!reg.can_extract("application/pdf"));
 
-        // Stub guests route correctly and report unimplemented.
+        // Render routes to the pdfrender guest, which rejects truncated PDFs.
         let params = RenderParams {
             dpi: 144,
             page_start: 0,
@@ -173,7 +173,7 @@ mod tests {
             model_paths: Default::default(),
         };
         let err = reg.render_pages(b"%PDF", "application/pdf", &params).unwrap_err();
-        assert!(matches!(err, ExtractError::ExtractionFailed(m) if m.contains("not yet implemented")));
+        assert!(matches!(err, ExtractError::ExtractionFailed(m) if m.contains("failed to parse pdf")));
     }
 
     #[test]

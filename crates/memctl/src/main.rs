@@ -70,6 +70,12 @@ fn main() {
                         )
                         .expect("create_client_with_bus failed"),
                     );
+                    match memvault_api::extraction_config::ExtractionConfig::load(&data_dir) {
+                        Ok(cfg) => local_client.install_extraction_pipeline(cfg),
+                        Err(e) => tracing::warn!(
+                            "extraction config invalid — media extraction disabled: {e}"
+                        ),
+                    }
                     memvault_web::ui::state::set_client(Arc::clone(&local_client));
                     Some((store, local_client))
                 }

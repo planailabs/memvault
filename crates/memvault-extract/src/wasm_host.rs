@@ -192,7 +192,10 @@ impl WasmExtractor {
 
         let envelope = memvault_extract_abi::encode_envelope(&input, content);
 
-        let mut plugin = self.plugin.lock().unwrap();
+        let mut plugin = self
+            .plugin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let output = plugin
             .call::<&[u8], Vec<u8>>("extract", &envelope)
@@ -228,7 +231,10 @@ impl WasmExtractor {
     ) -> Result<RenderedPages, ExtractError> {
         let envelope = memvault_extract_abi::encode_render_envelope(input, content);
 
-        let mut plugin = self.plugin.lock().unwrap();
+        let mut plugin = self
+            .plugin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let output = plugin
             .call::<&[u8], Vec<u8>>("render_pages", &envelope)
