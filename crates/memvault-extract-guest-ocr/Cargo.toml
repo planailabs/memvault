@@ -9,3 +9,19 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 memvault-extract-abi = { path = "../memvault-extract-abi" }
 extism-pdk = "1"
+# Dependencies of the vendored ocrs engine (src/ocrs/, see its mod.rs for
+# provenance and why it is vendored rather than pulled from crates.io).
+# `rten_format` is all we need for .rten model loading. ocrs pulls rayon
+# unconditionally; on wasm32-wasip1 (no threads) rayon-core falls back to
+# single-threaded execution, so this is safe in the sandbox.
+anyhow = "1"
+rayon = "1"
+rten = { version = "0.24", default-features = false, features = ["rten_format"] }
+rten-imageproc = "0.24"
+rten-tensor = "0.24"
+thiserror = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff"] }
+
+[dev-dependencies]
+# Used by the vendored ocrs test suite.
+fastrand = "2"
