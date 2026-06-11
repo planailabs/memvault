@@ -233,7 +233,69 @@ These work everywhere: MCP tools (`memvault_link`, `memvault_edges`), the REST A
   api.token             # Bearer token for HTTP API auth
   identity/             # Node identity keys
   trust/                # Trust anchors
+  extraction.toml       # Optional media extraction config (see below)
 ```
+
+## Media extraction
+
+Beyond plain text extraction (always on), the daemon can transcribe audio
+(Whisper via candle), OCR images (ocrs), and pre-render document pages with
+a selectable text layer (hayro + pdfplumber) — all as sandboxed WASM
+plugins running in background jobs after upload. Results are cached as
+annotation blocks and sync across the cluster like any other block; a node
+without a capability still serves results produced by peers.
+
+Everything is configured in `<data_dir>/extraction.toml` (path overridable
+via `MEMVAULT_EXTRACTION_CONFIG`). **Every option is optional** — with no
+file at all, PDF/image page rendering works out of the box and
+transcription/OCR report `unavailable` until models are provisioned:
+
+```toml
+# Directory mapped read-only into plugin sandboxes as /models.
+models_dir = "/var/lib/memvault/models"
+# Office→PDF conversion (docx/odt/pptx/…): autodetects `soffice` on PATH.
+#libreoffice_path = "/usr/bin/soffice"
+
+[render]                  # PDF/image page pre-rendering
+#enabled = false
+dpi = 144                 # raster resolution
+max_pages = 200           # hard cap per document
+page_batch = 8            # pages per sandbox call (bounds guest memory)
+
+[whisper]                 # audio transcription
+model_dir = "whisper-small"   # relative to models_dir; unset = disabled
+language = "auto"
+max_duration_secs = 7200
+
+[ocr]                     # image OCR + scanned-PDF text layers
+#enabled = false
+detection_model = "ocrs/text-detection.rten"
+recognition_model = "ocrs/text-recognition.rten"
+
+[limits]                  # per-plugin sandbox bounds (wall-clock, no fuel)
+audio_timeout_ms = 900000
+ocr_timeout_ms = 120000
+pdfrender_timeout_ms = 300000
+memory_max_pages = 40960  # 64 KiB wasm pages (2.5 GiB)
+```
+
+Model provisioning (no auto-download — models are explicit):
+
+```
+<models_dir>/
+  whisper-small/          # any candle-compatible Whisper model dir
+    config.json
+    tokenizer.json
+    model.safetensors
+  ocrs/
+    text-detection.rten   # from the ocrs project's released models
+    text-recognition.rten
+```
+
+Disabling a capability (unset prerequisites or `enabled = false`) means:
+uploads don't queue the op, reads report `unavailable` with a reason, and
+nothing is cached as a failure — enabling it later takes effect on the
+next read with no cleanup.
 
 ## Index rebuild
 
