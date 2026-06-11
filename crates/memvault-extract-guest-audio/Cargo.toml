@@ -9,3 +9,23 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 memvault-extract-abi = { path = "../memvault-extract-abi" }
 extism-pdk = "1"
+# Audio decoding (pure Rust, wasm32-wasip1 compatible).
+symphonia = { version = "0.5", default-features = false, features = [
+    "mp3",
+    "aac",
+    "isomp4",
+    "wav",
+    "flac",
+    "ogg",
+    "vorbis",
+    "pcm",
+] }
+# Resampling to whisper's 16 kHz.
+rubato = "0.16"
+# Whisper inference, CPU only — no cuda/mkl/accelerate features.
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+# unstable_wasm swaps onig (C) for fancy-regex, as in candle's wasm whisper example.
+tokenizers = { version = "0.21", default-features = false, features = ["unstable_wasm"] }
+serde_json = "1"
