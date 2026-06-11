@@ -140,6 +140,7 @@
         packages = {
           default = memctl;
           memctl = memctl;
+          memctl-slim = pkgs.memctl-slim;
           memvault-mcp = memvault-mcp;
           dioxus-cli-patched = dioxus-cli-patched;
           macosx-sdk = macosx-sdk;
