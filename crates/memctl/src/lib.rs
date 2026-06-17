@@ -314,6 +314,12 @@ mod native {
             /// once at startup.
             #[arg(long, default_value = "0")]
             kad_bootstrap_interval_secs: u64,
+            /// Seconds between bootstrap re-dial rounds. Re-dials configured
+            /// bootstrap peers we've lost so a node behind a one-shot dial (esp.
+            /// a `/p2p`-less addr, never registered in Kademlia) doesn't island
+            /// after a failed initial dial or a dropped link. 0 disables.
+            #[arg(long, default_value = "60")]
+            bootstrap_redial_interval_secs: u64,
         },
         /// Print the libp2p peer id (e.g. to build a `/p2p/<id>` bootstrap addr)
         ///
@@ -2566,6 +2572,7 @@ mod native {
                 api_port,
                 kad_server,
                 kad_bootstrap_interval_secs,
+                bootstrap_redial_interval_secs,
             } => {
                 // Open the store and reconcile PeerId
                 let store = make_store()?;
@@ -2734,7 +2741,7 @@ mod native {
                     let mut swarm = memvault_net::standalone_swarm(
                         keypair,
                         listen_addr,
-                        bootstrap_addrs,
+                        bootstrap_addrs.clone(),
                         cluster_id_bytes.to_vec(),
                     )
                     .await
@@ -2748,6 +2755,8 @@ mod native {
                         cluster_id: cluster_id_bytes.clone(),
                         kad_server,
                         kad_bootstrap_interval_secs,
+                        bootstrap_peers: bootstrap_addrs,
+                        bootstrap_redial_interval_secs,
                         ..Default::default()
                     };
 
@@ -2770,7 +2779,7 @@ mod native {
                     let mut swarm = memvault_net::standalone_swarm(
                         keypair,
                         listen_addr,
-                        bootstrap_addrs,
+                        bootstrap_addrs.clone(),
                         cluster_id_bytes.to_vec(),
                     )
                     .await
@@ -2783,6 +2792,8 @@ mod native {
                         cluster_id: cluster_id_bytes.clone(),
                         kad_server,
                         kad_bootstrap_interval_secs,
+                        bootstrap_peers: bootstrap_addrs,
+                        bootstrap_redial_interval_secs,
                         ..Default::default()
                     };
 

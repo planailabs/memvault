@@ -120,6 +120,12 @@ pub struct SyncConfig {
     /// Seconds between Kademlia bootstrap rounds. 0 disables periodic bootstrap;
     /// when > 0 an initial bootstrap also runs at startup.
     pub kad_bootstrap_interval_secs: u64,
+    /// Configured bootstrap peer multiaddrs. The initial dial happens at swarm
+    /// construction; the sync loop keeps this list to re-dial peers we've lost
+    /// (see [`MemvaultDriver::tick_redial_bootstrap`]).
+    pub bootstrap_peers: Vec<Multiaddr>,
+    /// Seconds between bootstrap re-dial rounds. 0 disables periodic re-dial.
+    pub bootstrap_redial_interval_secs: u64,
 }
 
 impl Default for SyncConfig {
@@ -130,6 +136,8 @@ impl Default for SyncConfig {
             initial_sync_max_heads: 500,
             kad_server: false,
             kad_bootstrap_interval_secs: 0,
+            bootstrap_peers: Vec::new(),
+            bootstrap_redial_interval_secs: 60,
         }
     }
 }
@@ -393,6 +401,57 @@ impl MemvaultDriver {
     /// Run one periodic Kademlia bootstrap round.
     pub fn tick_kad_bootstrap(&self, host: &mut impl MemvaultHost) {
         host.kad_bootstrap();
+    }
+
+    /// The configured bootstrap re-dial interval, or `None` when disabled
+    /// (`bootstrap_redial_interval_secs == 0`) or no bootstrap peers are
+    /// configured. Loops use this to arm a timer that fires
+    /// [`Self::tick_redial_bootstrap`].
+    pub fn bootstrap_redial_interval(&self) -> Option<Duration> {
+        if self.config.bootstrap_peers.is_empty() {
+            return None;
+        }
+        match self.config.bootstrap_redial_interval_secs {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        }
+    }
+
+    /// Re-dial configured bootstrap peers to recover lost connectivity.
+    ///
+    /// Bootstrap addrs are only dialed once, at swarm construction. A bare
+    /// (`/p2p`-less) bootstrap addr is never registered in Kademlia — its peer
+    /// id is unknown until Identify completes — so if the initial dial fails or
+    /// the link later drops, nothing re-dials it and the node islands until
+    /// restart. This heals that.
+    ///
+    /// Per addr:
+    /// - carries `/p2p/<peer>` already connected → skip (libp2p would dedup the
+    ///   dial anyway);
+    /// - carries `/p2p/<peer>` not connected → dial;
+    /// - bare addr → dial only when we have no live peers at all, so a healthy
+    ///   node doesn't accrue redundant connections to an addr libp2p can't
+    ///   dedup (no peer id to dedup on).
+    pub fn tick_redial_bootstrap(&self, host: &mut impl MemvaultHost) {
+        let islanded = self.synced_peers.is_empty();
+        for addr in &self.config.bootstrap_peers {
+            let peer = addr.iter().find_map(|p| match p {
+                libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+                _ => None,
+            });
+            match peer {
+                Some(p) if self.synced_peers.contains(&p) => continue,
+                Some(_) => {
+                    tracing::debug!(%addr, "re-dialing bootstrap peer");
+                    host.dial(addr.clone());
+                }
+                None if islanded => {
+                    tracing::debug!(%addr, "re-dialing bare bootstrap peer (islanded)");
+                    host.dial(addr.clone());
+                }
+                None => {}
+            }
+        }
     }
 
     /// A peer connected: request their heads, and redeem a pending token.
@@ -741,6 +800,18 @@ pub async fn run_sync_loop(
         None => None,
     };
 
+    // Optional periodic bootstrap re-dial (None when disabled or no bootstrap
+    // peers). The initial dial already happened in `standalone_swarm`, so
+    // consume the immediate tick.
+    let mut bootstrap_redial_timer = match driver.bootstrap_redial_interval() {
+        Some(d) => {
+            let mut t = tokio::time::interval(d);
+            t.tick().await;
+            Some(t)
+        }
+        None => None,
+    };
+
     loop {
         tokio::select! {
             event = swarm.next() => {
@@ -779,6 +850,13 @@ pub async fn run_sync_loop(
                     None => std::future::pending::<()>().await,
                 }
             } => driver.tick_kad_bootstrap(&mut StandaloneHost(swarm)),
+
+            _ = async {
+                match bootstrap_redial_timer.as_mut() {
+                    Some(t) => { t.tick().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => driver.tick_redial_bootstrap(&mut StandaloneHost(swarm)),
 
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutting down...");

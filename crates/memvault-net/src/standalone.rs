@@ -67,7 +67,15 @@ pub async fn standalone_swarm(
                     .with_request_timeout(std::time::Duration::from_secs(120)),
             );
 
-            let gossipsub_config = gossipsub::Config::default();
+            // Enable gossipsub Peer eXchange: on PRUNE a node hands the pruned
+            // peer a set of alternative mesh members, so peers discover more of
+            // the cluster through the gossip mesh itself (not just mDNS/Kademlia).
+            // `prune_peers > 0` is what actually turns PX on for outgoing prunes.
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .do_px()
+                .prune_peers(16)
+                .build()
+                .map_err(|e| NetError::Gossipsub(e.to_string()))?;
             let mut gs = gossipsub::Behaviour::new(
                 MessageAuthenticity::Signed(key.clone()),
                 gossipsub_config,
