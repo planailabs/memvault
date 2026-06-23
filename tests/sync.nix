@@ -92,10 +92,17 @@ pkgs.testers.nixosTest {
     node_b.succeed(f"memctl cluster-join '{node_token}'")
 
     node_b.log("Enrolling reader agent on node_b")
-    node_b.succeed(
+    reader_enroll_out = node_b.succeed(
         f"memctl agent enroll --token '{reader_token}' --agent-id reader"
     )
     node_b.succeed("test -f /var/lib/memvault/agents/reader/private_key.pem")
+    reader_key_match = re.search(r"Public key:\s*([0-9a-f]{64})", reader_enroll_out)
+    assert reader_key_match, (
+        "could not parse reader public key from enroll output:\n"
+        + reader_enroll_out
+    )
+    reader_pubkey = reader_key_match.group(1)
+    node_b.log(f"Reader public key = {reader_pubkey}")
 
     # ── 3. Start daemons on both nodes ──────────────────────────────
     # `--url http://localhost:8401` (distinct from the literal default
@@ -136,13 +143,13 @@ pkgs.testers.nixosTest {
     # point of the test.
     node_a.log(
         f"Issuing read grant on writer's bucket {writer_bucket} for "
-        f"audience=reader"
+        f"reader agent key {reader_pubkey}"
     )
     grant_cid = node_a.succeed(
         "memctl --url http://localhost:8401 "
         "--identity-dir /var/lib/memvault/agents/writer "
         f"grant create {writer_bucket} "
-        "--agent reader --actions read --ttl 86400"
+        f"--agent-key {reader_pubkey} --actions read --ttl 86400"
     ).strip().splitlines()[-1].strip()
     assert re.fullmatch(r"[0-9a-f]+", grant_cid), \
         f"unexpected grant create output: {grant_cid!r}"
