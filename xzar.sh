@@ -43,10 +43,50 @@ mkdir -p "$ARTIFACT_DIR"
 # ── Linux (musl) ────────────────────────────────────────────────────────
 # libloading (via dioxus→subsecond) emits #[link(name = "dl")] on Linux,
 # but musl libc has dlopen/dlsym built-in — no separate libdl exists.
-# Provide an empty stub archive so the linker resolves -ldl.
+# Provide an empty stub archive so the linker resolves -ldl. The same temporary
+# directory also carries tiny fortify compatibility objects for bundled C code
+# that was compiled with glibc-style fortify references while targeting static
+# musl (notably zstd-sys on CI).
 DL_STUB="$(mktemp -d)"
-ar rcs "$DL_STUB/libdl.a"
+cat > "$DL_STUB/fortify-compat.c" <<'FORTIFY_COMPAT'
+typedef __SIZE_TYPE__ size_t;
+void *__memcpy_chk(void *dest, const void *src, size_t len, size_t destlen) {
+  (void)destlen;
+  unsigned char *d = (unsigned char *)dest;
+  const unsigned char *s = (const unsigned char *)src;
+  for (size_t i = 0; i < len; i++) d[i] = s[i];
+  return dest;
+}
+void *__memmove_chk(void *dest, const void *src, size_t len, size_t destlen) {
+  (void)destlen;
+  unsigned char *d = (unsigned char *)dest;
+  const unsigned char *s = (const unsigned char *)src;
+  if (d < s) {
+    for (size_t i = 0; i < len; i++) d[i] = s[i];
+  } else {
+    for (size_t i = len; i > 0; i--) d[i - 1] = s[i - 1];
+  }
+  return dest;
+}
+void *__memset_chk(void *dest, int c, size_t len, size_t destlen) {
+  (void)destlen;
+  unsigned char *d = (unsigned char *)dest;
+  for (size_t i = 0; i < len; i++) d[i] = (unsigned char)c;
+  return dest;
+}
+FORTIFY_COMPAT
+cc -c "$DL_STUB/fortify-compat.c" -o "$DL_STUB/fortify-compat.o"
+ar rcs "$DL_STUB/libdl.a" "$DL_STUB/fortify-compat.o"
 export RUSTFLAGS="${RUSTFLAGS:-} -L $DL_STUB"
+
+# zstd-sys compiles bundled C code during the server build. On the Nix CI
+# shell's musl cross toolchain, fortify can leave references such as
+# `__memcpy_chk` that are not provided by the static musl link. Disable fortify
+# only for this musl artifact build; the native CI build/test path remains
+# covered by the default Nix hardening flags.
+OLD_HARDENING_DISABLE="${hardeningDisable-}"
+export hardeningDisable="${hardeningDisable:-} fortify"
+export CFLAGS_x86_64_unknown_linux_musl="${CFLAGS_x86_64_unknown_linux_musl:-} -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
 
 dx build --package memctl --release --embed \
   @client --platform web --no-default-features --features web \
@@ -54,6 +94,13 @@ dx build --package memctl --release --embed \
 
 rm -rf "$DL_STUB"
 unset RUSTFLAGS
+unset CFLAGS_x86_64_unknown_linux_musl
+if [ -n "$OLD_HARDENING_DISABLE" ]; then
+  export hardeningDisable="$OLD_HARDENING_DISABLE"
+else
+  unset hardeningDisable
+fi
+unset OLD_HARDENING_DISABLE
 
 stage_memctl_binary x86_64-unknown-linux-musl
 

@@ -55,7 +55,14 @@
           modules = [
             self.nixosModules.default
             ({ ... }: {
-              nixpkgs.overlays = [ self.overlays.default ];
+              # The memvault overlay's package.nix uses rust-overlay's
+              # `rust-bin` toolchain for wasm32-wasip1 support. Apply the
+              # overlay here too; this NixOS configuration is outside the
+              # per-system package scope where rust-overlay is already added.
+              nixpkgs.overlays = [
+                (import rust-overlay)
+                self.overlays.default
+              ];
               networking.hostName = "memvault";
 
               services.memvault = {
