@@ -56,7 +56,20 @@ echo "▸ Building Tailwind CSS…"
 # (avoiding native deps like tokio/mio) while the server gets all features
 # for a fully functional daemon binary.
 echo "▸ Building Dioxus fullstack (client + server)…"
-DX_LOG="${TMPDIR:-/tmp}/dx-build-memctl.$$.log"
+# `nix develop` may set TMPDIR to an executor-owned /tmp/nix-shell.* directory.
+# dx and tee both create temporary files during bundling, and failures there used
+# to surface as opaque rustc/dx errors plus "tee: ... Operation not permitted".
+# Force a repository-local writable temp/log directory before invoking dx.
+BUILD_TMPDIR="${MEMVAULT_BUILD_TMPDIR:-$SCRIPT_DIR/target/build-memvault-tmp}"
+mkdir -p "$BUILD_TMPDIR"
+if ! tmp_probe="$(mktemp "$BUILD_TMPDIR/write-test.XXXXXX")"; then
+  echo "✗ Cannot create temporary files in $BUILD_TMPDIR" >&2
+  ls -ld "$BUILD_TMPDIR" >&2 || true
+  exit 1
+fi
+rm -f "$tmp_probe"
+export TMPDIR="$BUILD_TMPDIR"
+DX_LOG="$BUILD_TMPDIR/dx-build-memctl.$$.log"
 DX_CMD=(dx build --package memctl)
 if [ -n "$DX_PROFILE" ]; then
   DX_CMD+=("$DX_PROFILE")
@@ -74,11 +87,21 @@ set +e
 status=${PIPESTATUS[0]}
 set -e
 if [ "$status" -ne 0 ]; then
-  if grep -q "cargo metadata took too long" "$DX_LOG"; then
-    echo "✗ dx timed out waiting for cargo metadata even after preflight." >&2
-    echo "Active cargo/rustc processes:" >&2
-    ps -ef | grep -E '[c]argo|[r]ustc|[r]ustdoc' >&2 || true
+  echo "✗ dx build failed (exit ${status})" >&2
+  if [ -f "$DX_LOG" ]; then
+    echo "Last 120 lines from $DX_LOG:" >&2
+    tail -n 120 "$DX_LOG" >&2 || true
+  else
+    echo "No dx log was written at $DX_LOG" >&2
   fi
+  if grep -q "cargo metadata took too long" "$DX_LOG" 2>/dev/null; then
+    echo "✗ dx timed out waiting for cargo metadata even after preflight." >&2
+  fi
+  echo "Active cargo/rustc/dx processes:" >&2
+  ps -ef | grep -E '[c]argo|[r]ustc|[r]ustdoc|[d]x' >&2 || true
+  echo "Temporary directory state:" >&2
+  ls -ld "$TMPDIR" "$BUILD_TMPDIR" >&2 || true
+  df -h "$BUILD_TMPDIR" >&2 || true
   exit "$status"
 fi
 rm -f "$DX_LOG"
