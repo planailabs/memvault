@@ -508,7 +508,9 @@ fn FileView(data: FileData) -> Element {
                         }
                     }
                 }
-            } else if extracted_text.is_some() || ext.is_some() {
+            } else if extracted_text.is_some()
+                || ext.as_ref().is_some_and(|e| matches!(e.status.as_str(), "pending" | "failed"))
+            {
                 Card {
                     div { class: "p-5",
                         div { class: "flex flex-wrap items-center gap-2",
@@ -562,12 +564,9 @@ fn ExtractionStatusPill(extraction: Option<ExtractionView>) -> Element {
                 span { class: "text-xs text-fg-muted", "{err}" }
             }
         },
-        "unavailable" | "unsupported" => rsx! {
-            Pill { variant: PillVariant::Warn, {t!("file-extraction-unavailable")} }
-            if let Some(err) = &ext.error {
-                span { class: "text-xs text-fg-muted", "{err}" }
-            }
-        },
+        // "unavailable" (extractor not configured on this node) and
+        // "unsupported" (file type has no extractable text) are not
+        // actionable for the viewer — render nothing rather than a warning.
         _ => rsx! {},
     }
 }

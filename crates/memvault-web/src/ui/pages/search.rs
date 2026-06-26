@@ -10,7 +10,11 @@ use crate::ui::topbar::use_topbar;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct SearchHit {
-    doc_id: String,
+    /// "doc" | "entity" | "file" — drives the result link target and badge.
+    node_type: String,
+    /// Hex id without the node-type prefix: DocId, EntityId, or file CID.
+    id: String,
+    /// Display title (doc frontmatter title / entity name / filename).
     title: Option<String>,
     score: f32,
     snippet: String,
@@ -38,35 +42,52 @@ async fn search_docs(
 
     let mut results = Vec::new();
     for h in hits {
-        if h.node_type != "doc" {
-            continue;
-        }
-        let hex_str = h.node_id.strip_prefix("doc:").unwrap_or(&h.node_id);
-        let doc_id = hex_str.to_string();
-        let doc_id_typed = match hex::decode(hex_str) {
-            Ok(bytes) if bytes.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                memvault_core::DocId(arr)
-            }
+        // Strip the node-type prefix to the bare hex id (DocId / EntityId /
+        // file CID). Unknown node types are skipped.
+        let (node_type, id) = match h.node_type.as_str() {
+            "doc" => ("doc", h.node_id.strip_prefix("doc:").unwrap_or(&h.node_id)),
+            "entity" => ("entity", h.node_id.strip_prefix("entity:").unwrap_or(&h.node_id)),
+            "file" => ("file", h.node_id.strip_prefix("file:").unwrap_or(&h.node_id)),
             _ => continue,
         };
+        let id = id.to_string();
 
-        // Fetch title from the document.
-        let title = if let Ok(Some(doc)) = client.get_doc_scoped(&doc_id_typed, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
-            doc.frontmatter
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(String::from)
+        // Title: docs carry it in frontmatter; entities and files surface the
+        // index label (entity name / filename). Fall back to the label, then
+        // to nothing (the snippet still shows).
+        let label = (!h.label.is_empty()).then(|| h.label.clone());
+        let title = if node_type == "doc" {
+            match hex::decode(&id) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    let scope = memvault_core::QueryScope::all()
+                        .with_include_retracted(show_retracted);
+                    client
+                        .get_doc_scoped(&memvault_core::DocId(arr), &scope)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|doc| {
+                            doc.frontmatter
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .or(label)
+                }
+                _ => label,
+            }
         } else {
-            None
+            label
         };
 
         // Highlight matching terms in snippet.
         let snippet_html = highlight_snippet(&h.snippet, &q_lower);
 
         results.push(SearchHit {
-            doc_id,
+            node_type: node_type.to_string(),
+            id,
             title,
             score: h.score,
             snippet: h.snippet,
@@ -171,7 +192,7 @@ pub fn SearchPage() -> Element {
                 input {
                     class: "input flex-1 text-lg",
                     r#type: "search",
-                    placeholder: "Search notes...",
+                    placeholder: "Search notes, graph, files...",
                     value: "{query}",
                     oninput: move |e: Event<FormData>| query.set(e.value()),
                     autofocus: true,
@@ -189,10 +210,16 @@ pub fn SearchPage() -> Element {
                 Some(Ok(hits)) => rsx! {
                     p { class: "text-sm text-fg-muted mb-2", "{hits.len()} results" }
                     for hit in hits {
-                        Link { to: Route::NoteDetail { id: hit.doc_id.clone() },
+                        Link {
+                            to: match hit.node_type.as_str() {
+                                "entity" => Route::EntityDetail { id: hit.id.clone() },
+                                "file" => Route::FileDetail { cid: hit.id.clone() },
+                                _ => Route::NoteDetail { id: hit.id.clone() },
+                            },
                             Card { class: "hover:border-brand transition-colors",
                                 div { class: "p-4",
                                     div { class: "flex items-center gap-2 mb-1",
+                                        Pill { variant: PillVariant::Info, "{hit.node_type}" }
                                         if let Some(title) = &hit.title {
                                             span { class: "font-medium", "{title}" }
                                         }

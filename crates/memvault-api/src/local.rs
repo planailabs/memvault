@@ -6935,23 +6935,13 @@ impl MemvaultClient for LocalClient {
         let hits = idx.search_unified_mode(query, None, mode, limit * 2);
         drop(idx);
 
-        let buckets = self.store.list_buckets().unwrap_or_default();
-        if buckets.is_empty() {
-            return Ok(hits.into_iter().take(limit).collect());
-        }
-        // Filter to nodes in any accessible bucket.
-        let bucket_ids: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
-        Ok(hits
-            .into_iter()
-            .filter(|h| {
-                if let Some(node_bucket) = self.inferred_bucket_for_node_id(&h.node_id) {
-                    bucket_ids.iter().any(|b| *b == node_bucket)
-                } else {
-                    false
-                }
-            })
-            .take(limit)
-            .collect())
+        // The index only holds this node's own bucketed content (populate keys
+        // on BY_BUCKET), so every hit is already in an accessible bucket; ACL is
+        // enforced separately at the handler layer. The old envelope-parse bucket
+        // inference dropped any node it couldn't resolve a bucket for (`else
+        // false`), which silently hid most docs/entities/files — the same bug
+        // `node_passes_bucket` fixes for scoped search. Don't re-derive here.
+        Ok(hits.into_iter().take(limit).collect())
     }
 
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {
