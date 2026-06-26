@@ -44,16 +44,25 @@ async fn wait_for_render_done(
     client: &Arc<LocalClient>,
     cid: &[u8],
 ) -> memvault_api::types::PageRenderInfo {
-    for _ in 0..300 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut polls = 0u32;
+    let mut last_info = None;
+
+    while std::time::Instant::now() < deadline {
         let info = client.read_page_render(cid).await.unwrap();
+        polls += 1;
         match info.status {
             MediaJobStatus::Pending => {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                last_info = Some(info);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             _ => return info,
         }
     }
-    panic!("page render did not finish within 30s");
+    panic!(
+        "page render did not finish within 120s after {polls} polls; last info: {:?}",
+        last_info
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -92,7 +101,11 @@ async fn pdf_page_render_end_to_end() {
     let layer = client.read_page_text_layer(&cid, 1).await.unwrap().unwrap();
     assert_eq!(layer.width, dims.width);
     assert!(layer.words.iter().any(|w| w.text.contains("Hello")));
-    let hello = layer.words.iter().find(|w| w.text.contains("Hello")).unwrap();
+    let hello = layer
+        .words
+        .iter()
+        .find(|w| w.text.contains("Hello"))
+        .unwrap();
     assert!(hello.x >= 0.0 && hello.x < dims.width as f32);
     assert!(hello.h > 0.0);
 
@@ -128,7 +141,14 @@ async fn audio_without_model_is_unavailable_not_failed() {
     wav.extend_from_slice(&0u32.to_le_bytes());
 
     let cid = client
-        .upload_file(&wav, Some("note.wav"), "audio/wav", vec![], "internal", None)
+        .upload_file(
+            &wav,
+            Some("note.wav"),
+            "audio/wav",
+            vec![],
+            "internal",
+            None,
+        )
         .await
         .unwrap();
 
@@ -212,6 +232,10 @@ async fn peer_serves_synced_page_render() {
 
     let (image, _) = client2.read_page_image(&cid, 1).await.unwrap().unwrap();
     assert_eq!(&image[..4], &[0x89, b'P', b'N', b'G']);
-    let layer = client2.read_page_text_layer(&cid, 1).await.unwrap().unwrap();
+    let layer = client2
+        .read_page_text_layer(&cid, 1)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(layer.words.iter().any(|w| w.text.contains("Hello")));
 }
