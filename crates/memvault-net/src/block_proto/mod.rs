@@ -14,6 +14,18 @@ use serde::{Deserialize, Serialize};
 /// Protocol identifier for block exchange.
 pub const BLOCK_PROTOCOL: &str = "/ai-memvault/block/1.0";
 
+/// Hard per-connection ceiling on concurrent block-exchange substreams
+/// (inbound + outbound combined), enforced by libp2p request-response.
+///
+/// The sync driver already caps our *outbound* requests at one in-flight per
+/// peer ([`memvault_swarm::MemvaultDriver`]'s outbound gate), so this is the
+/// transport-level backstop that also bounds *inbound* streams a peer can open
+/// against us. Without a cap, libp2p's default is 100, which let a buggy or
+/// busy peer pin a problematic number of open block streams per connection.
+/// Small headroom over one keeps a stray inbound request from starving our
+/// one outbound slot.
+pub const MAX_CONCURRENT_BLOCK_STREAMS: usize = 4;
+
 // ── Range-based set reconciliation (RBSR) ──────────────────────────
 
 /// A fingerprint over a time-range window, used for RBSR.

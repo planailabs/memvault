@@ -11,7 +11,7 @@
 //!
 //! Used by `memctl daemon` and potentially the mac-mgmt daemon.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -297,6 +297,72 @@ impl JoinConfig {
     }
 }
 
+/// Caps outbound block-exchange requests to **one in-flight per peer**,
+/// queueing the rest. Without this, a single RBSR round against a large diff
+/// fans out hundreds of concurrent fetch substreams to one peer — each held
+/// open for the 120 s request timeout — and reactive RBSR re-triggers the whole
+/// fan-out on every gossip message and inbound request, exhausting the
+/// connection's stream budget (the "problematic number of open block exchange
+/// connections"). With the gate, work drains one request at a time as each
+/// response/failure lands, so the open-substream count per peer stays at one.
+#[derive(Default)]
+struct OutboundGate {
+    /// Peers with a block request currently on the wire (awaiting response or
+    /// terminal failure).
+    inflight: HashSet<PeerId>,
+    /// Per-peer backlog of requests waiting for the in-flight one to finish.
+    queue: HashMap<PeerId, VecDeque<BlockRequest>>,
+}
+
+impl OutboundGate {
+    /// Returns true if `req` is a redundant RBSR (range-fingerprint) probe:
+    /// identical store state yields identical fingerprints, so queueing more
+    /// than one per peer is pure waste — the next resync re-issues anyway.
+    fn is_rbsr(req: &BlockRequest) -> bool {
+        req.cids.is_empty() && !req.range_fingerprints.is_empty()
+    }
+
+    /// Send `req` now if the peer has nothing in flight, else enqueue it.
+    fn send(&mut self, host: &mut impl MemvaultHost, peer: PeerId, req: BlockRequest) {
+        if self.inflight.insert(peer) {
+            host.send_block_request(&peer, req);
+            return;
+        }
+        let q = self.queue.entry(peer).or_default();
+        // Collapse duplicate RBSR probes so a busy peer's backlog can't fill
+        // with redundant full-store reconciliations.
+        if Self::is_rbsr(&req) && q.iter().any(Self::is_rbsr) {
+            return;
+        }
+        q.push_back(req);
+        tracing::debug!(%peer, depth = q.len(), "block request queued (peer busy)");
+    }
+
+    /// The in-flight request for `peer` finished: send the next queued request,
+    /// or clear the in-flight marker when the backlog is empty.
+    fn complete(&mut self, host: &mut impl MemvaultHost, peer: PeerId) {
+        if let Some(q) = self.queue.get_mut(&peer) {
+            if let Some(next) = q.pop_front() {
+                host.send_block_request(&peer, next); // stays in flight
+                return;
+            }
+            self.queue.remove(&peer);
+        }
+        self.inflight.remove(&peer);
+    }
+
+    /// Drop all state for a disconnected peer.
+    fn forget(&mut self, peer: &PeerId) {
+        self.inflight.remove(peer);
+        self.queue.remove(peer);
+    }
+
+    /// Total requests waiting across all peers (for the resync gauge).
+    fn queued_total(&self) -> usize {
+        self.queue.values().map(VecDeque::len).sum()
+    }
+}
+
 /// Drives memvault block sync over a host swarm via [`MemvaultHost`].
 ///
 /// Owns the store, sync config, join config, and the per-peer sync state that
@@ -317,6 +383,9 @@ pub struct MemvaultDriver {
     failed_sync_peers: HashSet<PeerId>,
     /// peer → cluster_id, learned from identify, for visibility enforcement.
     peer_clusters: HashMap<PeerId, Vec<u8>>,
+    /// Caps outbound block requests to one in-flight per peer (see
+    /// [`OutboundGate`]).
+    outbound: OutboundGate,
 }
 
 impl MemvaultDriver {
@@ -330,6 +399,7 @@ impl MemvaultDriver {
             initial_sync_complete: HashSet::new(),
             failed_sync_peers: HashSet::new(),
             peer_clusters: HashMap::new(),
+            outbound: OutboundGate::default(),
         }
     }
 
@@ -458,7 +528,7 @@ impl MemvaultDriver {
     pub fn on_connection_established(&mut self, peer: PeerId, host: &mut impl MemvaultHost) {
         tracing::info!(%peer, "peer connected");
         if self.synced_peers.insert(peer) {
-            request_remote_heads(host, &self.store, &self.config, peer);
+            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, peer);
         }
         if let Some(token) = self.join_config.pending_token.clone() {
             // Redeem only with the token's issuer (the admin that can mint our
@@ -479,6 +549,7 @@ impl MemvaultDriver {
         self.synced_peers.remove(&peer);
         self.initial_sync_complete.remove(&peer);
         self.failed_sync_peers.remove(&peer);
+        self.outbound.forget(&peer);
     }
 
     /// mDNS discovered peers: register in Kademlia and dial.
@@ -521,12 +592,12 @@ impl MemvaultDriver {
         message: &libp2p::gossipsub::Message,
         host: &mut impl MemvaultHost,
     ) {
-        handle_gossip_message(host, &self.store, source, message);
+        handle_gossip_message(host, &mut self.outbound, &self.store, source, message);
         // Reactive RBSR: gossip from a connected-but-unsynced peer means the
         // first RBSR raced a concurrent mint or never ran. Re-issue now.
         if self.synced_peers.contains(&source) && !self.initial_sync_complete.contains(&source) {
             tracing::debug!(peer = %source, "gossip from unsynced peer — re-RBSRing");
-            request_remote_heads(host, &self.store, &self.config, source);
+            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, source);
         }
     }
 
@@ -550,7 +621,7 @@ impl MemvaultDriver {
         );
         if self.synced_peers.contains(&peer) && !self.initial_sync_complete.contains(&peer) {
             tracing::debug!(%peer, "block request from unsynced peer — re-RBSRing");
-            request_remote_heads(host, &self.store, &self.config, peer);
+            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, peer);
         }
     }
 
@@ -561,15 +632,33 @@ impl MemvaultDriver {
         response: BlockResponse,
         host: &mut impl MemvaultHost,
     ) {
-        handle_block_response(host, &self.store, peer, response, &self.join_config);
+        // `handle_block_response` queues any follow-up fetches behind the
+        // still-in-flight marker; `complete` then launches exactly one of them
+        // (or clears the marker if there's nothing left), keeping the on-the-wire
+        // count for this peer at one.
+        handle_block_response(host, &mut self.outbound, &self.store, peer, response, &self.join_config);
+        self.outbound.complete(host, peer);
         if self.synced_peers.contains(&peer) {
             self.initial_sync_complete.insert(peer);
             self.failed_sync_peers.remove(&peer);
         }
     }
 
-    /// A block-exchange inbound/outbound failure with a peer.
-    pub fn on_block_failure(&mut self, peer: PeerId) {
+    /// An outbound block request to `peer` failed (timeout, reset, dial error).
+    /// Releases the peer's in-flight slot so the next queued request can go out,
+    /// otherwise a single dropped request would wedge the peer's queue forever.
+    pub fn on_block_outbound_failure(&mut self, peer: PeerId, host: &mut impl MemvaultHost) {
+        self.outbound.complete(host, peer);
+        self.mark_sync_failed(peer);
+    }
+
+    /// We failed to serve an inbound block request from `peer`. Does not touch
+    /// the outbound gate (that tracks our own requests, not theirs).
+    pub fn on_block_inbound_failure(&mut self, peer: PeerId) {
+        self.mark_sync_failed(peer);
+    }
+
+    fn mark_sync_failed(&mut self, peer: PeerId) {
         if self.synced_peers.contains(&peer) {
             self.failed_sync_peers.insert(peer);
             self.initial_sync_complete.remove(&peer);
@@ -602,7 +691,7 @@ impl MemvaultDriver {
             if let Some(cb) = self.join_config.on_join_success.take() {
                 cb();
             }
-            request_remote_heads(host, &self.store, &self.config, peer);
+            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, peer);
         }
     }
 
@@ -620,7 +709,7 @@ impl MemvaultDriver {
             .collect();
         for peer in needs_resync {
             tracing::debug!(%peer, "post-mint resync of failed/incomplete peer");
-            request_remote_heads(host, &self.store, &self.config, peer);
+            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, peer);
         }
     }
 
@@ -630,9 +719,13 @@ impl MemvaultDriver {
         if peers.is_empty() {
             return;
         }
-        tracing::info!(peers = peers.len(), "periodic RBSR resync");
+        tracing::info!(
+            peers = peers.len(),
+            outbound_queued = self.outbound.queued_total(),
+            "periodic RBSR resync"
+        );
         for peer_id in &peers {
-            request_remote_heads(host, &self.store, &self.config, *peer_id);
+            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, *peer_id);
         }
         // Verify completeness: walk all stored blocks, find missing
         // dependencies (manifest → DAG chunks), and re-request them.
@@ -641,8 +734,9 @@ impl MemvaultDriver {
             let target = peers[0];
             tracing::info!(missing = missing.len(), %target, "requesting incomplete file chunks");
             for chunk in missing.chunks(FETCH_CHUNK_SIZE) {
-                host.send_block_request(
-                    &target,
+                self.outbound.send(
+                    host,
+                    target,
                     BlockRequest {
                         cids: chunk.to_vec(),
                         since_ns: None,
@@ -738,7 +832,7 @@ fn dispatch_standalone_event(
             ..
         }) => {
             tracing::warn!(%peer, %error, "block exchange outbound failure");
-            driver.on_block_failure(peer);
+            driver.on_block_outbound_failure(peer, &mut host);
         }
         StandaloneMemvaultBehaviourEvent::BlockExchange(RrEvent::InboundFailure {
             peer,
@@ -746,7 +840,7 @@ fn dispatch_standalone_event(
             ..
         }) => {
             tracing::warn!(%peer, %error, "block exchange inbound failure");
-            driver.on_block_failure(peer);
+            driver.on_block_inbound_failure(peer);
         }
         StandaloneMemvaultBehaviourEvent::Join(RrEvent::Message {
             peer,
@@ -940,6 +1034,7 @@ const RESYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// are skipped, so bandwidth is proportional to the diff.
 fn request_remote_heads(
     host: &mut impl MemvaultHost,
+    gate: &mut OutboundGate,
     store: &MemvaultStore,
     _config: &SyncConfig,
     peer_id: libp2p::PeerId,
@@ -980,8 +1075,8 @@ fn request_remote_heads(
         token: None,
         store_version: memvault_core::BLOCKSTORE_VERSION,
     };
-    host.send_block_request(&peer_id, request);
-    tracing::info!(%peer_id, windows = RBSR_WINDOWS, total_blocks = total, "sent RBSR full sync request");
+    gate.send(host, peer_id, request);
+    tracing::info!(%peer_id, windows = RBSR_WINDOWS, total_blocks = total, "queued RBSR full sync request");
 }
 
 fn publish_head(host: &mut impl MemvaultHost, cluster_id: &[u8], outbound: OutboundHead) {
@@ -1000,6 +1095,7 @@ fn publish_head(host: &mut impl MemvaultHost, cluster_id: &[u8], outbound: Outbo
 
 fn handle_gossip_message(
     host: &mut impl MemvaultHost,
+    gate: &mut OutboundGate,
     store: &MemvaultStore,
     source: libp2p::PeerId,
     message: &libp2p::gossipsub::Message,
@@ -1009,8 +1105,9 @@ fn handle_gossip_message(
         if let Ok(ann) = serde_ipld_dagcbor::from_slice::<HeadAnnouncement>(&message.data) {
             if store.get_block(&ann.cid).ok().flatten().is_none() {
                 tracing::debug!(cid = %hex::encode(&ann.cid), %source, "missing block from gossip");
-                host.send_block_request(
-                    &source,
+                gate.send(
+                    host,
+                    source,
                     BlockRequest {
                         cids: vec![ann.cid],
                         since_ns: None,
@@ -1584,6 +1681,7 @@ fn ingest_is_sigchain(meta: &memvault_store::IngestMeta) -> bool {
 
 fn handle_block_response(
     host: &mut impl MemvaultHost,
+    gate: &mut OutboundGate,
     store: &MemvaultStore,
     peer: libp2p::PeerId,
     response: BlockResponse,
@@ -1666,8 +1764,9 @@ fn handle_block_response(
     if !missing_cids.is_empty() {
         tracing::info!(%peer, missing = missing_cids.len(), "requesting missing blocks from peer");
         for chunk in missing_cids.chunks(FETCH_CHUNK_SIZE) {
-            host.send_block_request(
-                &peer,
+            gate.send(
+                host,
+                peer,
                 BlockRequest {
                     cids: chunk.to_vec(),
                     since_ns: None,
@@ -2399,5 +2498,122 @@ mod sync_classify_tests {
         });
         let deps = extract_dependent_cids(&serde_json::to_vec(&other).unwrap());
         assert!(!deps.contains(&vec![3, 3, 3]));
+    }
+}
+
+#[cfg(test)]
+mod outbound_gate_tests {
+    use super::*;
+
+    /// Records every `send_block_request`; all other host ops are no-ops.
+    #[derive(Default)]
+    struct RecordingHost {
+        sent: Vec<(PeerId, BlockRequest)>,
+    }
+    impl MemvaultHost for RecordingHost {
+        fn dial(&mut self, _addr: Multiaddr) {}
+        fn kad_add_address(&mut self, _peer: &PeerId, _addr: Multiaddr) {}
+        fn kad_set_server_mode(&mut self) {}
+        fn kad_bootstrap(&mut self) {}
+        fn send_block_request(&mut self, peer: &PeerId, req: BlockRequest) {
+            self.sent.push((*peer, req));
+        }
+        fn send_block_response(&mut self, _c: ResponseChannel<BlockResponse>, _r: BlockResponse) {}
+        fn send_join_request(&mut self, _peer: &PeerId, _req: JoinRequest) {}
+        fn send_join_response(&mut self, _c: ResponseChannel<JoinResponse>, _r: JoinResponse) {}
+        fn gossip_publish(&mut self, _t: libp2p::gossipsub::IdentTopic, _d: Vec<u8>) {}
+    }
+
+    fn fetch(cid: u8) -> BlockRequest {
+        BlockRequest {
+            cids: vec![vec![cid]],
+            since_ns: None,
+            limit: None,
+            range_fingerprints: vec![],
+            token: None,
+            store_version: 0,
+        }
+    }
+
+    fn rbsr() -> BlockRequest {
+        BlockRequest {
+            cids: vec![],
+            since_ns: None,
+            limit: None,
+            range_fingerprints: vec![RangeFingerprint {
+                start_ns: 0,
+                end_ns: 1,
+                count: 0,
+                xor: [0u8; 32],
+            }],
+            token: None,
+            store_version: 0,
+        }
+    }
+
+    #[test]
+    fn caps_at_one_inflight_and_drains_in_order() {
+        let mut host = RecordingHost::default();
+        let mut gate = OutboundGate::default();
+        let peer = PeerId::random();
+
+        // Three fetches: only the first goes on the wire, the rest queue.
+        gate.send(&mut host, peer, fetch(1));
+        gate.send(&mut host, peer, fetch(2));
+        gate.send(&mut host, peer, fetch(3));
+        assert_eq!(host.sent.len(), 1);
+        assert_eq!(host.sent[0].1.cids, vec![vec![1]]);
+        assert_eq!(gate.queued_total(), 2);
+
+        // Each completion launches exactly the next one, in FIFO order.
+        gate.complete(&mut host, peer);
+        assert_eq!(host.sent.len(), 2);
+        assert_eq!(host.sent[1].1.cids, vec![vec![2]]);
+        gate.complete(&mut host, peer);
+        assert_eq!(host.sent.len(), 3);
+        assert_eq!(host.sent[2].1.cids, vec![vec![3]]);
+
+        // Backlog drained: completing again clears the in-flight marker, no send.
+        gate.complete(&mut host, peer);
+        assert_eq!(host.sent.len(), 3);
+        assert!(gate.inflight.is_empty());
+    }
+
+    #[test]
+    fn dedups_redundant_rbsr_probes() {
+        let mut host = RecordingHost::default();
+        let mut gate = OutboundGate::default();
+        let peer = PeerId::random();
+
+        gate.send(&mut host, peer, fetch(1)); // in flight
+        gate.send(&mut host, peer, rbsr()); // queued
+        gate.send(&mut host, peer, rbsr()); // collapsed into the queued one
+        gate.send(&mut host, peer, rbsr()); // collapsed
+        assert_eq!(gate.queued_total(), 1, "redundant RBSR probes must collapse");
+    }
+
+    #[test]
+    fn forget_clears_peer_state() {
+        let mut host = RecordingHost::default();
+        let mut gate = OutboundGate::default();
+        let peer = PeerId::random();
+        gate.send(&mut host, peer, fetch(1));
+        gate.send(&mut host, peer, fetch(2));
+        gate.forget(&peer);
+        assert!(gate.inflight.is_empty());
+        assert_eq!(gate.queued_total(), 0);
+    }
+
+    #[test]
+    fn separate_peers_each_get_one_inflight() {
+        let mut host = RecordingHost::default();
+        let mut gate = OutboundGate::default();
+        let a = PeerId::random();
+        let b = PeerId::random();
+        gate.send(&mut host, a, fetch(1));
+        gate.send(&mut host, b, fetch(2));
+        // Both go out immediately — the cap is per-peer, not global.
+        assert_eq!(host.sent.len(), 2);
+        assert_eq!(gate.queued_total(), 0);
     }
 }

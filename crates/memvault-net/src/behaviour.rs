@@ -50,10 +50,13 @@ impl MemvaultBehaviour {
             request_response::Config::default(),
         );
 
-        // Mirror the standalone block-exchange config (120s request timeout).
+        // Mirror the standalone block-exchange config (120s request timeout +
+        // per-connection stream cap).
         let block_exchange = request_response::Behaviour::new(
             [(StreamProtocol::new(BLOCK_PROTOCOL), ProtocolSupport::Full)],
-            request_response::Config::default().with_request_timeout(Duration::from_secs(120)),
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(120))
+                .with_max_concurrent_streams(crate::block_proto::MAX_CONCURRENT_BLOCK_STREAMS),
         );
 
         Self {
