@@ -5,7 +5,7 @@ use dioxus_i18n::t;
 
 use super::cmd_k::{CommandPalette, PaletteOpen};
 use super::events::use_event_bus_provider;
-use super::navbar::Sidebar;
+use super::navbar::{DrawerOpen, MobileDrawer, Sidebar};
 use super::session::use_session_provider;
 use super::topbar::{
     ActiveBucket, ActiveBucketSignal, ActiveView, ActiveViewSignal, ShowRetracted,
@@ -25,10 +25,16 @@ pub fn Layout() -> Element {
     let _event_bus = use_event_bus_provider();
     let _session = use_session_provider();
 
+    // Mobile drawer open/closed — shared between the topbar's hamburger
+    // and the drawer itself.
+    let drawer_open = use_signal(|| false);
+    use_context_provider(|| DrawerOpen(drawer_open));
+
     rsx! {
         CommandPalette {}
         div { class: "flex h-screen bg-bg text-fg",
             Sidebar {}
+            MobileDrawer { is_open: drawer_open }
             div { class: "flex-1 flex flex-col min-w-0",
                 // Topbar has its own boundary: toggling a filter (e.g. Retracted)
                 // restarts its bucket/view fetches, and without this the suspense

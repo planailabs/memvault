@@ -232,6 +232,37 @@ pub fn Topbar() -> Element {
                         {t!("topbar-shortcut")}
                     }
                 }
+
+                MobileMenuButton {}
+            }
+        }
+    }
+}
+
+/// Hamburger for the mobile drawer — visible below `xl` only, where the
+/// desktop sidebar is hidden.
+#[component]
+fn MobileMenuButton() -> Element {
+    let mut drawer = use_context::<super::navbar::DrawerOpen>();
+    let open = *drawer.0.read();
+    rsx! {
+        button {
+            class: "xl:hidden nav-icon-btn",
+            "aria-expanded": "{open}",
+            "aria-controls": "mobile-drawer",
+            "aria-label": t!("nav-open-menu"),
+            onclick: move |_| drawer.0.set(!open),
+            svg {
+                class: "h-5 w-5",
+                fill: "none",
+                stroke: "currentColor",
+                view_box: "0 0 24 24",
+                path {
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                    stroke_width: "2",
+                    d: "M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5",
+                }
             }
         }
     }

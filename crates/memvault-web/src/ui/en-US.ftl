@@ -10,6 +10,8 @@ nav-section-operations = Operations
 nav-audit = Audit
 nav-views = Views
 nav-admin = Admin
+nav-open-menu = Open main menu
+nav-close-menu = Close menu
 
 ## ── Common ──────────────────────────────────────────────────────
 

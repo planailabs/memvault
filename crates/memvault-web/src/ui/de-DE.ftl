@@ -10,6 +10,8 @@ nav-section-operations = Betrieb
 nav-audit = Protokoll
 nav-views = Ansichten
 nav-admin = Admin
+nav-open-menu = Hauptmenü öffnen
+nav-close-menu = Menü schließen
 
 ## ── Allgemein ───────────────────────────────────────────────────
 
