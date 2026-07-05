@@ -84,17 +84,25 @@ memctl status
 
 ## Architecture
 
-memvault stores everything as content-addressed blocks in a single [redb](https://github.com/cberner/redb) database file (`blocks.redb`). Secondary indexes (by tag, author, time, causal links, provenance) are derived from the blocks and can be rebuilt at any time with `memctl repair-index`.
+memvault stores everything as content-addressed blocks in a single [redb](https://github.com/cberner/redb) database file (`blocks.redb`). Secondary indexes (by tag, author, time, bucket, causal links, provenance) are derived from the blocks and can be rebuilt at any time with `memctl repair-index`.
 
 Three types of objects live in the store:
 
 | Type | ID format | Example |
 |------|-----------|---------|
 | **Document** | `doc:<hex>` | Notes, memos, any text with frontmatter |
-| **Entity** | `entity:<hex>` | Knowledge graph nodes (person, project, concept, ...) |
-| **Attachment** | `attachment:<hex>` | Files stored as UnixFS DAGs (IPFS-compatible) |
+| **Entity** | `entity:<hex>` | Knowledge graph nodes (person, project, concept, skill, ...) |
+| **File** | `file:<hex>` | Files stored as UnixFS DAGs (IPFS-compatible) |
 
 Any object can link to any other via typed, weighted edges. An edge from a document to an entity, or from a file to another file, works the same way.
+
+Layered on top of blocks and edges:
+
+- **Buckets** — every write is scoped to a bucket. Agents get their own default bucket; capability grants control who can read or write which bucket, and buckets can be merged into a canonical one (a read/ACL alias overlay — nothing is moved or re-signed).
+- **VFS** — a per-bucket virtual filesystem: directories, paths, and tree views over any node, with a node mountable at multiple paths.
+- **Views** — saved tag filters for scoping queries.
+- **Skills** — graph entities that aggregate instruction docs and resource files by typed edges, hydratable to disk as a `SKILL.md` bundle.
+- **Cross-cluster shares** — federation via share proposals between clusters, approved or rejected through an inbox/outbox flow.
 
 ## MCP server
 
@@ -102,33 +110,50 @@ The MCP server (`plan-ai-memvault`) exposes memvault to LLM agents via the Model
 
 ### Two modes
 
-**HTTP mode** (default) -- talks to a running daemon:
-
-```bash
-plan-ai-memvault --url http://127.0.0.1:8401
-```
-
-**Local mode** -- direct access to a redb file, no daemon needed:
+**Local mode** — direct access to a redb file, no daemon needed (takes priority when `--db` is set):
 
 ```bash
 plan-ai-memvault --db ~/.local/share/memvault/blocks.redb
-plan-ai-memvault --db /path/to/blocks.redb --cluster-id abc123...
+```
+
+**HTTP mode** — talks to a running daemon, authenticated with an enrolled agent identity (every request carries a JWT signed with the agent's ed25519 key):
+
+```bash
+plan-ai-memvault --url http://127.0.0.1:8401 --identity-dir ~/.local/share/memvault/agents/claude
 ```
 
 ### Configuration
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--url` | `MEMVAULT_URL` | `http://127.0.0.1:8401` | Daemon API URL (HTTP mode) |
-| `--token-file` | `MEMVAULT_TOKEN_FILE` | `~/.local/share/memvault/api.token` | Bearer token (HTTP mode) |
 | `--db` | `MEMVAULT_DB` | -- | redb path (local mode, bypasses HTTP) |
-| `--cluster-id` | `MEMVAULT_CLUSTER_ID` | all zeros | Cluster ID hex (local mode) |
+| `--url` | `MEMVAULT_URL` | `http://127.0.0.1:8401` | Daemon API URL (HTTP mode) |
+| `--identity-dir` | `MEMVAULT_IDENTITY_DIR` | `<data-dir>/identity/ui_agent` | Agent identity dir (HTTP mode) |
 | `--default-tags` | `MEMVAULT_DEFAULT_TAGS` | -- | Comma-separated `scope:label` tags |
 | `--default-visibility` | `MEMVAULT_DEFAULT_VISIBILITY` | `internal` | `internal`, `federated`, or `public` |
+| `--agent-id` | `MEMVAULT_AGENT_ID` | derived from pubkey | Display label for the agent's default bucket |
 
-### MCP tools (18)
+### Agent enrollment (HTTP mode)
 
-**Documents:**
+An agent identity is created by redeeming a join token against a running daemon:
+
+```bash
+# On the cluster: issue an agent token
+memctl token issue --agent-role agent-host --label claude
+
+# On the agent host: exchange it for a credential
+plan-ai-memvault enroll --server http://127.0.0.1:8401 --token mvjoin1:... --agent-id claude
+# → credential written to <data-dir>/agents/claude/
+
+# Run the MCP server with that identity
+plan-ai-memvault --url http://127.0.0.1:8401 --identity-dir <data-dir>/agents/claude
+```
+
+Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent makes without an explicit bucket lands in its own agent bucket, derived from its ed25519 pubkey.
+
+### MCP tools (62)
+
+**Documents & tags:**
 
 | Tool | Description |
 |------|-------------|
@@ -136,40 +161,58 @@ plan-ai-memvault --db /path/to/blocks.redb --cluster-id abc123...
 | `memvault_get` | Retrieve a document by hex-encoded doc ID |
 | `memvault_search` | Full-text search across docs, entities, and files |
 | `memvault_list` | List recent documents, optionally filtered by tag |
-| `memvault_retract` | Soft-delete a document (creates a tombstone) |
+| `memvault_list_all` | List all nodes (docs, entities, files), optionally filtered by view |
+| `memvault_doc_history` | Operation history for a document |
+| `memvault_retract` | Soft-delete any node (creates a tombstone) |
+| `memvault_tag` / `memvault_untag` | Add / remove `scope:label` tags on any node |
+| `memvault_get_tags` | Effective tags for a node |
 
 **Files:**
 
 | Tool | Description |
 |------|-------------|
-| `memvault_attach` | Upload a base64-encoded file |
-| `memvault_read_range` | Read a byte range from an attachment |
+| `memvault_upload_file` | Upload a local file by absolute path |
+| `memvault_read_range` | Read a byte range from a file |
 | `memvault_extract_text` | Extract text from PDF, DOCX, HTML, Markdown |
-| `memvault_attachment_info` | Get file metadata (name, MIME type, size) |
-| `memvault_pin` | Pin a file to prevent garbage collection |
-| `memvault_unpin` | Unpin a file |
+| `memvault_file_info` | Manifest metadata (name, MIME type, size) |
+| `memvault_pin` / `memvault_unpin` | Pin / unpin against garbage collection |
 
 **Knowledge graph:**
 
 | Tool | Description |
 |------|-------------|
 | `memvault_graph_add` | Create an entity (person, project, concept, ...) |
+| `memvault_get_entity` / `memvault_list_entities` | Fetch one / list entities |
 | `memvault_graph_link` | Link two entities by hex ID |
 | `memvault_graph_query` | List all edges for an entity |
+| `memvault_traverse` | Walk the graph from any node up to a max depth |
 
 **Cross-type linking:**
 
 | Tool | Description |
 |------|-------------|
-| `memvault_link` | Link any two nodes: `entity:<hex>`, `doc:<hex>`, `attachment:<hex>` |
+| `memvault_link` | Link any two nodes: `entity:<hex>`, `doc:<hex>`, `file:<hex>` |
 | `memvault_edges` | List all edges (in + out) for any node |
 | `memvault_unlink` | Remove an edge by ID |
 
-**Status:**
+**VFS** (`memvault_vfs_*`): `ls`, `tree`, `resolve`, `find`, `mkdir`, `link`, `unlink`, `mv` — organise nodes into a per-bucket directory hierarchy; a node can be mounted at multiple paths, and unlinking never deletes the underlying node.
+
+**Skills** (`memvault_skill_*`): `publish`, `list`, `get`, `rename`, `delete`, `link_resource`, `unlink_resource`, `hydrate` — bundle instruction docs and resources as a skill entity and materialize it to disk as a `SKILL.md` bundle.
+
+**Buckets & agents** (`memvault_bucket_*`, `memvault_agent_rename`): `list`, `create`, `get`, `rename`, `archive`, `merge`, `unmerge`, `merges`, `grants_list` — manage bucket scoping, merge overlays, and capability grants.
+
+**Views** (`memvault_view_*`): `list`, `create`, `update`, `delete` — saved tag filters.
+
+**Cross-cluster shares** (`memvault_share_*`): `inbox`, `outbox`, `decide` — review and approve/reject federation proposals (two-step: preview with `confirm: false`, then commit).
+
+**Export, status & audit:**
 
 | Tool | Description |
 |------|-------------|
+| `memvault_export` | Export a single node to a temp file |
+| `memvault_export_vault` | Export the whole vault (or a filtered subset) to a directory or tar |
 | `memvault_status` | Block count, doc count, peer count, uptime |
+| `memvault_audit` | Query the audit log, optionally by op kind |
 
 ### Adding to Claude Code
 
@@ -189,26 +232,14 @@ plan-ai-memvault --db /path/to/blocks.redb --cluster-id abc123...
 }
 ```
 
-**Option 2: Global** — add to `~/.claude/settings.json` under `mcpServers`:
+**Option 2: Via CLI** — project scope by default, `--scope user` for all projects:
 
-```json
-{
-  "mcpServers": {
-    "memvault": {
-      "command": "plan-ai-memvault",
-      "args": ["--db", "/home/user/.local/share/memvault/blocks.redb"]
-    }
-  }
-}
+```bash
+claude mcp add memvault -- plan-ai-memvault --db /home/user/.local/share/memvault/blocks.redb
+claude mcp add --scope user memvault -- plan-ai-memvault --db /home/user/.local/share/memvault/blocks.redb
 ```
 
-**Option 3: Via CLI** — run inside Claude Code:
-
-```
-/mcp add memvault plan-ai-memvault --args "--db /home/user/.local/share/memvault/blocks.redb"
-```
-
-**HTTP mode** (when a daemon is running):
+**HTTP mode** (when a daemon is running — enroll first, see above):
 
 ```json
 {
@@ -217,14 +248,14 @@ plan-ai-memvault --db /path/to/blocks.redb --cluster-id abc123...
       "command": "plan-ai-memvault",
       "args": ["--url", "http://127.0.0.1:8401"],
       "env": {
-        "MEMVAULT_TOKEN_FILE": "/home/user/.local/share/memvault/api.token"
+        "MEMVAULT_IDENTITY_DIR": "/home/user/.local/share/memvault/agents/claude"
       }
     }
   }
 }
 ```
 
-After adding, restart Claude Code or run `/mcp` to verify the server is connected. You should see 18 tools available under the `memvault_*` prefix.
+After adding, restart Claude Code or run `/mcp` to verify the server is connected. You should see 62 tools available under the `memvault_*` prefix.
 
 **First use** — initialize the database if it doesn't exist yet:
 
@@ -234,45 +265,67 @@ memctl genesis
 
 ## memctl CLI
 
-Management CLI for direct store operations. Supports `--data-dir` (looks for `blocks.redb` inside) or `--db` (path to the redb file directly).
+Management CLI. Targets a local store via `--data-dir` (looks for `blocks.redb` inside) or `--db` (path to the redb file directly), or a running daemon via `--url` with an enrolled identity. `--agent-id` binds writes to an enrolled agent's identity and bucket; `--bucket-id` targets a specific bucket.
 
 ### Commands
 
+Run `memctl <command> --help` for full flags; `memctl` with no arguments runs a full node (web UI + P2P swarm).
+
 ```
+# Documents
 memctl genesis                    Initialize a new cluster
 memctl put <text> [--title T]     Store a document
 memctl get <cid>                  Retrieve a block by CID
 memctl search <query>             Full-text search
 memctl list [--limit N]           List recent documents
-memctl audit [--limit N]          Show audit log
 memctl history <doc-id>           Document operation history
 memctl retract <cid> --reason R   Soft-delete
+memctl doc <links|backlinks|dangling|reindex-links>   Document link tooling
 
+# Knowledge graph & skills
 memctl graph add <kind> --prop k=v    Create entity
 memctl graph link <src> <tgt> <rel>   Link entities
 memctl graph query <from>             Traverse edges
+memctl skill <publish|list|get|...>   Manage skill bundles
 
-memctl daemon [--listen A] [--bootstrap A,..]   Run a node (P2P swarm + HTTP API)
+# Cluster
+memctl daemon [--listen A] [--bootstrap A,..]   Run a node (P2P swarm + web/API server)
 memctl cluster-join <mvjoin1:...>               Join an existing cluster
+memctl token <issue|list|revoke>                Join-token management
+memctl agent <enroll|list|...>                  Agent enrollment management
+memctl peers / peer-id / status                 Node info
+memctl node-attest <pubkey>                     Attest a pre-genesis peer
+memctl uncluster                                Detach this node from its cluster
 
+# Buckets, grants & shares
+memctl bucket <list|create|merge|...>   Bucket management
+memctl grant <...>                      Capability grants
+memctl share <...>                      Cross-cluster share proposals
+
+# Import & export
+memctl export / export-blocks           Export vault contents / raw blocks
+memctl import-files / import-docs       Bulk import
+
+# Maintenance
 memctl repair-index               Rebuild all indexes from blockstore
-memctl fix-cluster-id             Index null-cluster blocks into CLUSTER_ORIGIN
-memctl status                     Node status
-memctl token issue --node-role R  Issue a join token
-memctl token list                 List tokens
-memctl token revoke <cid>         Revoke a token
+memctl audit [--limit N]          Show audit log
+memctl gc                         Garbage-collect unpinned blocks
+memctl sigchain / diff-blocks     Inspect trust chain / compare stores
 ```
 
 ## Web UI
 
-The web UI runs on port 8401 (by default) and provides:
+The web UI is served by the daemon on port 8401 (by default) and provides:
 
 - **Notes** -- create, edit, view with markdown rendering, version history
 - **Graph** -- interactive force-directed knowledge graph with entity/doc/file nodes, focus mode, and drag-to-rearrange
-- **Files** -- upload, preview (images), download, text extraction
-- **Timeline** -- chronological feed of all operations
+- **Files** -- upload, preview, download, text extraction
+- **Skills** -- browse and inspect skill bundles
+- **Buckets** -- bucket status, merges, and capability grants
+- **VFS** -- browse the virtual filesystem hierarchy
+- **Views** -- manage saved tag filters
 - **Audit** -- filterable audit trail with human-readable descriptions
-- **Admin** -- cluster status, token management
+- **Admin** -- cluster status, token and agent management
 
 Global search (`Ctrl+K` or the search button) searches across all node types -- document bodies, entity properties, filenames.
 
@@ -283,20 +336,20 @@ Cross-type linking uses a unified `NodeRef` format:
 ```
 entity:a1b2c3d4e5f6...    # 32-byte hex entity ID
 doc:9f8e7d6c5b4a...       # 32-byte hex document ID
-attachment:4a5b6c7d...    # hex-encoded manifest CID
+file:4a5b6c7d...          # hex-encoded manifest CID
 ```
 
-These work everywhere: MCP tools (`memvault_link`, `memvault_edges`), the REST API (`/api/v1/links`), and the web UI's quick-link forms.
+These work everywhere: MCP tools (`memvault_link`, `memvault_edges`), the REST API (`/api/v1/links`), and the web UI's quick-link forms. The legacy `attachment:` prefix on old edges is still understood on read.
 
 ## Storage layout
 
 ```
 ~/.local/share/memvault/
-  blocks.redb           # Primary block store + all indexes
+  blocks.redb           # Primary block store + all indexes (incl. cluster ID)
   text_index.json       # Full-text search index cache (auto-rebuilt if stale)
-  cluster_id            # Hex-encoded cluster identifier
-  api.token             # Bearer token for HTTP API auth
-  identity/             # Node identity keys
+  identity/             # Node identity: libp2p key + keystore.mvks (admin key, pinned genesis, tokens)
+  identity/ui_agent/    # Local agent credential used by the web UI
+  agents/<agent-id>/    # Enrolled agent credentials (private_key.pem, attestation, agent.json)
   trust/                # Trust anchors
   extraction.toml       # Optional media extraction config (see below)
 ```

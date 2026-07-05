@@ -16,6 +16,13 @@ Rules for any AI agent (Claude Code, Copilot, etc.) working on the memvault crat
   (with `memvault_api::wire` hex helpers / `*Wire` DTOs) and deserialize it with
   `serde`. Do not hand-build `serde_json::json!({…})` on the server or
   field-pick a `serde_json::Value` on the client.
+- **Keep the README current — this is important.** `README.md` documents the
+  user-facing surface: MCP tools (names + count), `memctl` command syntax, CLI
+  flags, auth flows, web UI pages, node-ref formats, and the storage layout.
+  When a change touches any of those, update the README in the *same* change.
+  Verify against the code (clap derives, `#[tool(...)]` attributes), don't
+  guess — stale docs have already bitten us (hyphenated commands, `api.token`,
+  an 18-tool list when the server had 62).
 
 ## CID integrity
 
