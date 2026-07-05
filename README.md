@@ -45,6 +45,9 @@ See [MCP server](#mcp-server) below for HTTP mode, all flags, and manual `.mcp.j
 
 ## Quick start (cluster)
 
+> [!NOTE]
+> Clustering is optional — a single node works fully standalone. Add peers whenever you want replication across machines.
+
 ```bash
 # Node A — create the cluster and start a node
 memctl genesis
