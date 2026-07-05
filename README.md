@@ -28,9 +28,6 @@ memctl graph link <alice-id> <project-id> works_on
 claude mcp add memvault -- plan-ai-memvault --db ~/.local/share/memvault/blocks.redb
 ```
 
-> [!NOTE]
-> No setup needed first — `memctl genesis` can be run at any time, before or after adding the MCP server, to initialize the store as its own cluster.
-
 Run `/mcp` inside Claude Code to verify the connection, then just talk to it:
 
 ```
@@ -46,7 +43,8 @@ See [MCP server](#mcp-server) below for HTTP mode, all flags, and manual `.mcp.j
 ## Quick start (cluster)
 
 > [!NOTE]
-> Clustering is optional — a single node works fully standalone. Add peers whenever you want replication across machines.
+> Clustering is optional — a single node works fully standalone.
+> Run `memctl genesis` to start a cluster; add peers whenever you want replication across machines.
 
 ```bash
 # Node A — create the cluster and start a node
