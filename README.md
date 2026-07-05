@@ -2,12 +2,13 @@
 
 Local-first, peer-to-peer knowledge base with a content-addressed block store, knowledge graph, full-text search, and MCP integration.
 
-## Quick start (standalone)
+## Download binaries
+
+Freshly built by our GitLab CI: [ » Download ](https://git.plan.ai/plan-ai/memvault/-/jobs/artifacts/trunk/browse/artifacts?job=artifact:memctl)
+
+## Quick start (CLI)
 
 ```bash
-# Initialize a cluster
-memctl genesis
-
 # Store a note
 memctl put "Meeting notes from today" --title "Meeting 2026-05-04" --tag "project:acme"
 
@@ -15,9 +16,66 @@ memctl put "Meeting notes from today" --title "Meeting 2026-05-04" --tag "projec
 memctl search "meeting"
 
 # Add entities and link them
-memctl graph-add person --prop name=Alice
-memctl graph-add project --prop name="Project X"
-memctl graph-link <alice-id> <project-id> works_on
+memctl graph add person --prop name=Alice
+memctl graph add project --prop name="Project X"
+memctl graph link <alice-id> <project-id> works_on
+```
+
+## Quick start (MCP)
+
+```bash
+# Add to Claude Code — local mode, talks to the redb file directly
+claude mcp add memvault -- plan-ai-memvault --db ~/.local/share/memvault/blocks.redb
+```
+
+Run `/mcp` inside Claude Code to verify the connection, then just talk to it:
+
+```
+> Store a note in memvault: the staging DB password rotates every 90 days, tag it ops:staging
+> Search memvault for everything we know about the api gateway
+> Add Alice and the payments service to the knowledge graph and link her as maintainer
+> What did I save about the acme project last week?
+> Attach this PDF to memvault and extract its text
+```
+
+See [MCP server](#mcp-server) below for HTTP mode, all flags, and manual `.mcp.json` configuration.
+
+## Quick start (cluster)
+
+```bash
+# Node A — create the cluster and start a node
+memctl genesis
+memctl daemon --listen /ip4/0.0.0.0/tcp/4001
+
+# Node A — issue a single-use join token (keystore-only, works while the daemon runs)
+memctl token issue --node-role node --label node-b
+# → mvjoin1:...
+
+# Node B — join with the token, then start a node pointed at node A
+memctl cluster-join mvjoin1:...
+memctl daemon --bootstrap /ip4/<node-a-ip>/tcp/4001
+# cluster-join stashes the token; the daemon redeems it automatically
+# over /join/1.0 once the nodes connect
+```
+
+Blocks now sync both ways. Try it:
+
+```bash
+# Node B — write a document
+memctl put "Deploy notes for the api gateway" --title "Deploy 2026-07-05" --tag "project:gateway"
+
+# Node A — it syncs over
+memctl search "gateway"
+memctl list --limit 5
+
+# Grow the knowledge graph — entities and edges sync like any other block
+memctl graph add service --prop name=api-gateway
+memctl graph add person --prop name=Alice
+memctl graph link <alice-id> <service-id> maintains
+memctl graph query <alice-id>
+
+# Check cluster health — peer count should show the other node
+memctl status
 ```
 
 ## Architecture
@@ -186,16 +244,19 @@ memctl audit [--limit N]          Show audit log
 memctl history <doc-id>           Document operation history
 memctl retract <cid> --reason R   Soft-delete
 
-memctl graph-add <kind> --prop k=v    Create entity
-memctl graph-link <src> <tgt> <rel>   Link entities
-memctl graph-query <from>             List edges
+memctl graph add <kind> --prop k=v    Create entity
+memctl graph link <src> <tgt> <rel>   Link entities
+memctl graph query <from>             Traverse edges
+
+memctl daemon [--listen A] [--bootstrap A,..]   Run a node (P2P swarm + HTTP API)
+memctl cluster-join <mvjoin1:...>               Join an existing cluster
 
 memctl repair-index               Rebuild all indexes from blockstore
 memctl fix-cluster-id             Index null-cluster blocks into CLUSTER_ORIGIN
 memctl status                     Node status
-memctl token-issue [--role R]     Issue a join token
-memctl token-list                 List tokens
-memctl token-revoke <cid>         Revoke a token
+memctl token issue --node-role R  Issue a join token
+memctl token list                 List tokens
+memctl token revoke <cid>         Revoke a token
 ```
 
 ## Web UI
