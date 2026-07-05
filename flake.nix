@@ -91,6 +91,7 @@
             "aarch64-apple-darwin"
             "x86_64-apple-darwin"
             "x86_64-unknown-linux-musl"
+            "x86_64-pc-windows-gnu"
             "wasm32-unknown-unknown"
             "wasm32-wasip1"
           ];

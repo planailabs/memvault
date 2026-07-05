@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build memctl for every supported target and drop the binaries under
-# ./artifacts/<nix-system>/memctl so CI can collect them as job artifacts.
+# Build memctl and memvault-mcp for every supported target and drop the
+# binaries under ./artifacts/<nix-system>/ so CI can collect them as job
+# artifacts.
 
 set -euo pipefail
 
@@ -16,26 +17,37 @@ nix_system_for() {
   case "$1" in
     x86_64-unknown-linux-musl) echo "x86_64-linux" ;;
     aarch64-apple-darwin)      echo "aarch64-darwin" ;;
+    x86_64-pc-windows-gnu)     echo "x86_64-windows" ;;
     *) echo "unknown rust target: $1" >&2; exit 1 ;;
   esac
 }
 
-stage_memctl_binary() {
-  local rust_target="$1"
+stage_binary() {
+  local rust_target="$1" bin_src="$2" bin_name="$3"
   local nix_system
   nix_system="$(nix_system_for "$rust_target")"
-  local bin_src="$SCRIPT_DIR/target/dx/memctl/release/web/server"
 
   if [ ! -f "$bin_src" ]; then
-    echo "missing memctl binary: $bin_src" >&2
+    echo "missing $bin_name binary: $bin_src" >&2
     exit 1
   fi
 
   local dest="$ARTIFACT_DIR/$nix_system"
   mkdir -p "$dest"
-  cp "$bin_src" "$dest/memctl"
-  chmod +x "$dest/memctl"
-  echo "✓ staged $dest/memctl"
+  cp "$bin_src" "$dest/$bin_name"
+  chmod +x "$dest/$bin_name"
+  echo "✓ staged $dest/$bin_name"
+}
+
+stage_memctl_binary() {
+  local rust_target="$1"
+  local src="$SCRIPT_DIR/target/dx/memctl/release/web/server"
+  local name=memctl
+  if [ "$rust_target" = "x86_64-pc-windows-gnu" ]; then
+    [ -f "$src.exe" ] && src="$src.exe"
+    name=memctl.exe
+  fi
+  stage_binary "$rust_target" "$src" "$name"
 }
 
 mkdir -p "$ARTIFACT_DIR"
@@ -77,7 +89,11 @@ void *__memset_chk(void *dest, int c, size_t len, size_t destlen) {
 FORTIFY_COMPAT
 cc -c "$DL_STUB/fortify-compat.c" -o "$DL_STUB/fortify-compat.o"
 ar rcs "$DL_STUB/libdl.a" "$DL_STUB/fortify-compat.o"
-export RUSTFLAGS="${RUSTFLAGS:-} -L $DL_STUB"
+# Force-link the stub archive (-l static=dl): memctl pulls it in anyway via
+# libloading's -ldl, but memvault-mcp links no libdl — without the explicit
+# flag the fortify shims never make it into its link and zstd's
+# `__memcpy_chk` references dangle.
+export RUSTFLAGS="${RUSTFLAGS:-} -L $DL_STUB -l static=dl"
 
 # zstd-sys compiles bundled C code during the server build. On the Nix CI
 # shell's musl cross toolchain, fortify can leave references such as
@@ -91,6 +107,12 @@ export CFLAGS_x86_64_unknown_linux_musl="${CFLAGS_x86_64_unknown_linux_musl:-} -
 dx build --package memctl --release --embed \
   @client --platform web --no-default-features --features web \
   @server --platform server --features embed --target x86_64-unknown-linux-musl
+
+# memvault-mcp shares the musl fortify/libdl workarounds above, so build it
+# while that environment is still in effect.
+cargo build --release --package memvault-mcp --target x86_64-unknown-linux-musl
+stage_binary x86_64-unknown-linux-musl \
+  "$SCRIPT_DIR/target/x86_64-unknown-linux-musl/release/memvault-mcp" memvault-mcp
 
 rm -rf "$DL_STUB"
 unset RUSTFLAGS
@@ -108,27 +130,27 @@ stage_memctl_binary x86_64-unknown-linux-musl
 SDKROOT="$(nix build --no-link --print-out-paths "$SCRIPT_DIR#macosx-sdk")"
 export SDKROOT
 
-# Shim cargo so dx uses cargo-zigbuild for the macOS cross-compile.
-# zigbuild handles cc-rs, assembly, and linking via zig's built-in
-# cross-compilation — no manual CC/AR wrappers needed.
+# Shim cargo so dx uses cargo-zigbuild for the macOS and Windows
+# cross-compiles. zigbuild handles cc-rs, assembly, and linking via zig's
+# built-in cross-compilation — no manual CC/AR wrappers needed.
 CARGO_SHIM="$(mktemp -d)"
 REAL_CARGO="$(which cargo)"
 ZIGBUILD="$(which cargo-zigbuild)"
 cat > "$CARGO_SHIM/cargo" <<SHIM
 #!/usr/bin/env bash
-# Only use zigbuild for apple/darwin targets; pass through for wasm/native.
-# dx calls "cargo rustc ..." so we invoke cargo-zigbuild directly (it
-# accepts build/rustc/test/run subcommands natively).
+# Only use zigbuild for apple/darwin/windows targets; pass through for
+# wasm/native. dx calls "cargo rustc ..." so we invoke cargo-zigbuild
+# directly (it accepts build/rustc/test/run subcommands natively).
 use_zig=false
 prev=""
 # Strip +toolchain args (e.g. +nightly) — cargo-zigbuild doesn't support them.
 args=()
 for arg in "\$@"; do
   case "\$prev" in
-    --target) [[ "\$arg" == *apple* || "\$arg" == *darwin* ]] && use_zig=true ;;
+    --target) [[ "\$arg" == *apple* || "\$arg" == *darwin* || "\$arg" == *windows* ]] && use_zig=true ;;
   esac
   case "\$arg" in
-    --target=*apple*|--target=*darwin*) use_zig=true ;;
+    --target=*apple*|--target=*darwin*|--target=*windows*) use_zig=true ;;
     +*) prev="\$arg"; continue ;;
   esac
   prev="\$arg"
@@ -147,11 +169,28 @@ dx build --package memctl --release --embed \
   @client --platform web --no-default-features --features web \
   @server --platform server --features embed --target aarch64-apple-darwin
 
+stage_memctl_binary aarch64-apple-darwin
+
+cargo zigbuild --release --package memvault-mcp --target aarch64-apple-darwin
+stage_binary aarch64-apple-darwin \
+  "$SCRIPT_DIR/target/aarch64-apple-darwin/release/memvault-mcp" memvault-mcp
+
+# ── Windows (x86_64) ────────────────────────────────────────────────────
+# Cross-compiled via the same zigbuild shim as macOS; zig provides the
+# mingw CRT, so no separate Windows SDK is needed.
+dx build --package memctl --release --embed \
+  @client --platform web --no-default-features --features web \
+  @server --platform server --features embed --target x86_64-pc-windows-gnu
+
+stage_memctl_binary x86_64-pc-windows-gnu
+
+cargo zigbuild --release --package memvault-mcp --target x86_64-pc-windows-gnu
+stage_binary x86_64-pc-windows-gnu \
+  "$SCRIPT_DIR/target/x86_64-pc-windows-gnu/release/memvault-mcp.exe" memvault-mcp.exe
+
 export PATH="${PATH#"$CARGO_SHIM:"}"
 rm -rf "$CARGO_SHIM"
 
-stage_memctl_binary aarch64-apple-darwin
-
 echo
-echo "✓ memctl artifacts ready under $ARTIFACT_DIR/"
+echo "✓ artifacts ready under $ARTIFACT_DIR/"
 find "$ARTIFACT_DIR" -type f

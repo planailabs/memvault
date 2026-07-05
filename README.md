@@ -25,7 +25,7 @@ memctl graph link <alice-id> <project-id> works_on
 
 ```bash
 # Add to Claude Code — local mode, talks to the redb file directly
-claude mcp add memvault -- plan-ai-memvault --db ~/.local/share/memvault/blocks.redb
+claude mcp add memvault -- memvault-mcp --db ~/.local/share/memvault/blocks.redb
 ```
 
 Run `/mcp` inside Claude Code to verify the connection, then just talk to it:
@@ -106,20 +106,20 @@ Layered on top of blocks and edges:
 
 ## MCP server
 
-The MCP server (`plan-ai-memvault`) exposes memvault to LLM agents via the Model Context Protocol over stdio.
+The MCP server (`memvault-mcp`) exposes memvault to LLM agents via the Model Context Protocol over stdio.
 
 ### Two modes
 
 **Local mode** — direct access to a redb file, no daemon needed (takes priority when `--db` is set):
 
 ```bash
-plan-ai-memvault --db ~/.local/share/memvault/blocks.redb
+memvault-mcp --db ~/.local/share/memvault/blocks.redb
 ```
 
 **HTTP mode** — talks to a running daemon, authenticated with an enrolled agent identity (every request carries a JWT signed with the agent's ed25519 key):
 
 ```bash
-plan-ai-memvault --url http://127.0.0.1:8401 --identity-dir ~/.local/share/memvault/agents/claude
+memvault-mcp --url http://127.0.0.1:8401 --identity-dir ~/.local/share/memvault/agents/claude
 ```
 
 ### Configuration
@@ -142,11 +142,11 @@ An agent identity is created by redeeming a join token against a running daemon:
 memctl token issue --agent-role agent-host --label claude
 
 # On the agent host: exchange it for a credential
-plan-ai-memvault enroll --server http://127.0.0.1:8401 --token mvjoin1:... --agent-id claude
+memvault-mcp enroll --server http://127.0.0.1:8401 --token mvjoin1:... --agent-id claude
 # → credential written to <data-dir>/agents/claude/
 
 # Run the MCP server with that identity
-plan-ai-memvault --url http://127.0.0.1:8401 --identity-dir <data-dir>/agents/claude
+memvault-mcp --url http://127.0.0.1:8401 --identity-dir <data-dir>/agents/claude
 ```
 
 Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent makes without an explicit bucket lands in its own agent bucket, derived from its ed25519 pubkey.
@@ -222,7 +222,7 @@ Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent m
 {
   "mcpServers": {
     "memvault": {
-      "command": "plan-ai-memvault",
+      "command": "memvault-mcp",
       "args": ["--db", "/home/user/.local/share/memvault/blocks.redb"],
       "env": {
         "MEMVAULT_DEFAULT_TAGS": "agent:claude"
@@ -235,8 +235,8 @@ Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent m
 **Option 2: Via CLI** — project scope by default, `--scope user` for all projects:
 
 ```bash
-claude mcp add memvault -- plan-ai-memvault --db /home/user/.local/share/memvault/blocks.redb
-claude mcp add --scope user memvault -- plan-ai-memvault --db /home/user/.local/share/memvault/blocks.redb
+claude mcp add memvault -- memvault-mcp --db /home/user/.local/share/memvault/blocks.redb
+claude mcp add --scope user memvault -- memvault-mcp --db /home/user/.local/share/memvault/blocks.redb
 ```
 
 **HTTP mode** (when a daemon is running — enroll first, see above):
@@ -245,7 +245,7 @@ claude mcp add --scope user memvault -- plan-ai-memvault --db /home/user/.local/
 {
   "mcpServers": {
     "memvault": {
-      "command": "plan-ai-memvault",
+      "command": "memvault-mcp",
       "args": ["--url", "http://127.0.0.1:8401"],
       "env": {
         "MEMVAULT_IDENTITY_DIR": "/home/user/.local/share/memvault/agents/claude"
