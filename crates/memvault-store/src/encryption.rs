@@ -19,12 +19,17 @@ impl BlockEncryption {
         Self { key }
     }
 
-    /// Derive a key from a passphrase using blake3.
-    pub fn from_passphrase(passphrase: &str) -> Self {
-        let hash = blake3::hash(passphrase.as_bytes());
-        Self {
-            key: *hash.as_bytes(),
-        }
+    /// Derive a key from a passphrase using Argon2id (memory-hard, salted).
+    /// A bare hash (blake3/sha2) has no work factor and is brute-forceable
+    /// offline against the ciphertext; the salt must be persisted alongside the
+    /// store and passed back in on open.
+    pub fn from_passphrase(passphrase: &str, salt: &[u8; 16]) -> Self {
+        use argon2::Argon2;
+        let mut key = [0u8; 32];
+        Argon2::default()
+            .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+            .expect("argon2id key derivation");
+        Self { key }
     }
 
     /// Encrypt a block. Returns nonce (12 bytes) + ciphertext.
@@ -77,7 +82,7 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let enc = BlockEncryption::from_passphrase("test-key");
+        let enc = BlockEncryption::from_passphrase("test-key", &[1u8; 16]);
         let plaintext = b"hello, memvault!";
         let encrypted = enc.encrypt(plaintext).unwrap();
         let decrypted = enc.decrypt(&encrypted).unwrap();
@@ -86,8 +91,8 @@ mod tests {
 
     #[test]
     fn wrong_key_fails() {
-        let enc1 = BlockEncryption::from_passphrase("key-one");
-        let enc2 = BlockEncryption::from_passphrase("key-two");
+        let enc1 = BlockEncryption::from_passphrase("key-one", &[1u8; 16]);
+        let enc2 = BlockEncryption::from_passphrase("key-two", &[1u8; 16]);
         let encrypted = enc1.encrypt(b"secret").unwrap();
         let result = enc2.decrypt(&encrypted);
         assert!(result.is_err());
@@ -95,7 +100,7 @@ mod tests {
 
     #[test]
     fn too_short_ciphertext_fails() {
-        let enc = BlockEncryption::from_passphrase("key");
+        let enc = BlockEncryption::from_passphrase("key", &[1u8; 16]);
         let result = enc.decrypt(&[0u8; 5]);
         assert!(matches!(result, Err(EncryptionError::TooShort)));
     }
@@ -110,7 +115,7 @@ mod tests {
 
     #[test]
     fn large_block_roundtrip() {
-        let enc = BlockEncryption::from_passphrase("big-data");
+        let enc = BlockEncryption::from_passphrase("big-data", &[1u8; 16]);
         let plaintext: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
         let encrypted = enc.encrypt(&plaintext).unwrap();
         let decrypted = enc.decrypt(&encrypted).unwrap();

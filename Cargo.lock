@@ -6103,6 +6103,7 @@ name = "memvault-store"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "blake3",
  "hex",
  "memvault-core",
