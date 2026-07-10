@@ -1179,7 +1179,9 @@ fn serve_block_request(
             match store.get_block(cid) {
                 Ok(Some(data)) => {
                     // Visibility enforcement: check bucket access.
-                    if !is_local && !check_block_access(store, cid, &data, &request.token) {
+                    if !is_local
+                        && !check_block_access(store, cid, &data, &request.token, &peer, join_config)
+                    {
                         tracing::debug!(%peer, cid = %hex::encode(cid), "block access denied");
                         BlockEntry { cid: cid.clone(), data: vec![], found: false }
                     } else {
@@ -1254,6 +1256,8 @@ fn check_block_access(
     _cid: &[u8],
     block_data: &[u8],
     token: &Option<memvault_net::BlockAccessToken>,
+    peer: &libp2p::PeerId,
+    join_config: &JoinConfig,
 ) -> bool {
     // Parse the block to check if it has a bucket_id.
     let val: serde_json::Value = match memvault_store::deserialize_block(block_data) {
@@ -1271,16 +1275,15 @@ fn check_block_access(
         None => return true, // No bucket association → public.
     };
 
-    // If a BAT is provided and matches this bucket, allow.
+    // If a BAT is provided, it must cryptographically authorize *this* peer for
+    // *this* bucket. A structurally-present-but-unverified token is worthless:
+    // verify the Ed25519 signature against the cluster admin key, check expiry,
+    // and confirm the token was issued to the requesting peer (non-transferable).
     if let Some(bat) = token {
-        if bat.bucket_id.as_slice() == bucket_id.as_slice() {
-            // BAT signature verification requires the admin key, which
-            // we'd need to look up. For now, check structural validity.
-            // Full verification requires the store to hold the issuer's
-            // public key — look up from BUCKET_TRUST or admin key.
-            if !bat.signature.is_empty() && bat.not_after_ns >= memvault_core::wall_ns() {
-                return true;
-            }
+        if bat.bucket_id.as_slice() == bucket_id.as_slice()
+            && bat_authorizes_peer(bat, peer, join_config.pinned_admin_pubkey)
+        {
+            return true;
         }
     }
 
@@ -1341,6 +1344,39 @@ enum SyncDisposition {
 /// PeerId from the attested ed25519 pubkey, and compares. Returns true
 /// on first match. Cheap when the cluster is small; cache later if it
 /// matters.
+/// Verify a Block Access Token fully authorizes `peer`: signature valid under
+/// the cluster admin key, not expired, and bound to the requesting peer. Any
+/// missing piece → deny (fail closed). Without this a peer could forge a token
+/// with an arbitrary non-empty signature and read a private bucket.
+fn bat_authorizes_peer(
+    bat: &memvault_net::BlockAccessToken,
+    peer: &libp2p::PeerId,
+    pinned_admin_pubkey: Option<[u8; 32]>,
+) -> bool {
+    // Admin key that must have signed the token (the anchor for this cluster).
+    let Some(admin_pk) = pinned_admin_pubkey else {
+        return false;
+    };
+    let Ok(admin_vk) = ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) else {
+        return false;
+    };
+    if !bat.is_valid(&admin_vk, memvault_core::wall_ns()) {
+        return false;
+    }
+    // Grantee binding: the token's grantee pubkey must derive to the peer that
+    // is presenting it, so a token issued to A can't be replayed by B.
+    if bat.grantee_peer.len() != 32 {
+        return false;
+    }
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&bat.grantee_peer);
+    let Ok(ed_pk) = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pk) else {
+        return false;
+    };
+    let grantee: libp2p::PeerId = libp2p::identity::PublicKey::from(ed_pk).to_peer_id();
+    &grantee == peer
+}
+
 fn peer_is_trusted_node(
     store: &MemvaultStore,
     peer: &libp2p::PeerId,
@@ -2615,5 +2651,79 @@ mod outbound_gate_tests {
         // Both go out immediately — the cap is per-peer, not global.
         assert_eq!(host.sent.len(), 2);
         assert_eq!(gate.queued_total(), 0);
+    }
+}
+
+#[cfg(test)]
+mod bat_gate_tests {
+    use super::bat_authorizes_peer;
+    use ed25519_dalek::SigningKey;
+    use memvault_net::BlockAccessToken;
+
+    fn peer_id_from(vk: &ed25519_dalek::VerifyingKey) -> libp2p::PeerId {
+        let ed = libp2p::identity::ed25519::PublicKey::try_from_bytes(vk.as_bytes()).unwrap();
+        libp2p::identity::PublicKey::from(ed).to_peer_id()
+    }
+
+    fn make_bat(
+        admin: &SigningKey,
+        grantee_vk: &ed25519_dalek::VerifyingKey,
+        not_after_ns: u64,
+    ) -> BlockAccessToken {
+        BlockAccessToken {
+            bucket_id: [7u8; 32],
+            grantee_peer: grantee_vk.as_bytes().to_vec(),
+            issuer_cluster: [0u8; 32],
+            not_after_ns,
+            signature: vec![],
+        }
+        .sign(admin)
+    }
+
+    #[test]
+    fn valid_bat_authorizes_bound_peer() {
+        let admin = SigningKey::from_bytes(&[1u8; 32]);
+        let grantee = SigningKey::from_bytes(&[2u8; 32]);
+        let g_vk = grantee.verifying_key();
+        let bat = make_bat(&admin, &g_vk, u64::MAX);
+        let peer = peer_id_from(&g_vk);
+        assert!(bat_authorizes_peer(&bat, &peer, Some(admin.verifying_key().to_bytes())));
+    }
+
+    #[test]
+    fn forged_signature_rejected() {
+        let admin = SigningKey::from_bytes(&[1u8; 32]);
+        let attacker = SigningKey::from_bytes(&[9u8; 32]);
+        let grantee = SigningKey::from_bytes(&[2u8; 32]);
+        let g_vk = grantee.verifying_key();
+        // Signed by the wrong key; also try a junk single-byte signature.
+        let bat = make_bat(&attacker, &g_vk, u64::MAX);
+        let peer = peer_id_from(&g_vk);
+        assert!(!bat_authorizes_peer(&bat, &peer, Some(admin.verifying_key().to_bytes())));
+
+        let mut junk = make_bat(&admin, &g_vk, u64::MAX);
+        junk.signature = vec![0u8];
+        assert!(!bat_authorizes_peer(&junk, &peer, Some(admin.verifying_key().to_bytes())));
+    }
+
+    #[test]
+    fn wrong_peer_and_expired_rejected() {
+        let admin = SigningKey::from_bytes(&[1u8; 32]);
+        let grantee = SigningKey::from_bytes(&[2u8; 32]);
+        let other = SigningKey::from_bytes(&[3u8; 32]);
+        let g_vk = grantee.verifying_key();
+        let admin_pk = Some(admin.verifying_key().to_bytes());
+
+        // Token issued to grantee, presented by a different peer.
+        let bat = make_bat(&admin, &g_vk, u64::MAX);
+        assert!(!bat_authorizes_peer(&bat, &peer_id_from(&other.verifying_key()), admin_pk));
+
+        // Expired token, correct peer.
+        let expired = make_bat(&admin, &g_vk, 0);
+        assert!(!bat_authorizes_peer(&expired, &peer_id_from(&g_vk), admin_pk));
+
+        // No pinned admin key → deny.
+        let valid = make_bat(&admin, &g_vk, u64::MAX);
+        assert!(!bat_authorizes_peer(&valid, &peer_id_from(&g_vk), None));
     }
 }
