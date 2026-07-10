@@ -17,6 +17,35 @@ use crate::types::*;
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+/// Enforce the optional upload allow-list. When `MEMVAULT_UPLOAD_ROOTS` is set
+/// (colon-separated absolute directories), the canonicalized target must live
+/// under one of them; otherwise the upload is refused. Unset → unrestricted
+/// (the historical operator-tool behavior).
+fn upload_path_allowed(path: &std::path::Path) -> Result<(), String> {
+    let Ok(roots) = std::env::var("MEMVAULT_UPLOAD_ROOTS") else {
+        return Ok(());
+    };
+    let roots: Vec<_> = roots.split(':').filter(|s| !s.is_empty()).collect();
+    if roots.is_empty() {
+        return Ok(());
+    }
+    // Canonicalize to resolve symlinks and `..` before the containment check.
+    let canon = path
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?;
+    for root in roots {
+        if let Ok(root_canon) = std::path::Path::new(root).canonicalize() {
+            if canon.starts_with(&root_canon) {
+                return Ok(());
+            }
+        }
+    }
+    Err(format!(
+        "{} is outside the permitted upload roots",
+        path.display()
+    ))
+}
+
 fn ensure_entity_label(id: &str) -> String {
     if let Some(rest) = id.strip_prefix("entity:") {
         format!("entity:{rest}")
@@ -266,6 +295,12 @@ impl MemvaultServer {
             Err(e) => return format!("error: {e}"),
         };
         let path = std::path::Path::new(&params.path);
+        // When MEMVAULT_UPLOAD_ROOTS is set (colon-separated dirs), confine
+        // uploads to those trees so a prompt-injected tool call can't exfiltrate
+        // arbitrary host files (e.g. ~/.ssh/id_ed25519) into the vault.
+        if let Err(e) = upload_path_allowed(path) {
+            return format!("error: {e}");
+        }
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => return format!("error: cannot read {}: {e}", params.path),
