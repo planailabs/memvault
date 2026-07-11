@@ -119,10 +119,7 @@ fn build_guest(guest: &GuestSpec, crates_dir: &Path, workspace_root: &Path) {
     // dirs avoid lock contention between the nested builds themselves).
     let target_dir = workspace_root.join("target").join(guest.crate_dir);
     let artifact = format!("{}.wasm", guest.crate_dir.replace('-', "_"));
-    let wasm_path = target_dir
-        .join(guest.target)
-        .join("release")
-        .join(artifact);
+    let wasm_path = target_dir.join(guest.target).join("release").join(artifact);
 
     let input_refs: Vec<&PathBuf> = inputs.iter().collect();
     if should_rebuild_wasm(&wasm_path, &input_refs) {
@@ -137,7 +134,10 @@ fn build_guest(guest: &GuestSpec, crates_dir: &Path, workspace_root: &Path) {
             .env("CARGO_TARGET_DIR", &target_dir)
             .status()
             .unwrap_or_else(|e| {
-                panic!("failed to spawn cargo to build {} WASM: {e}", guest.crate_dir)
+                panic!(
+                    "failed to spawn cargo to build {} WASM: {e}",
+                    guest.crate_dir
+                )
             });
 
         if !status.success() {

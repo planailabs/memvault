@@ -49,7 +49,10 @@ impl Resampler16k {
                     .map_err(|e| format!("failed to create resampler: {e}"))?,
             )
         };
-        Ok(Self { inner, pending: Vec::new() })
+        Ok(Self {
+            inner,
+            pending: Vec::new(),
+        })
     }
 
     /// Feed mono samples at the source rate; returns whatever 16 kHz output
@@ -67,8 +70,9 @@ impl Resampler16k {
                 break;
             }
             let chunk = &self.pending[consumed..consumed + need];
-            let resampled =
-                rs.process(&[chunk], None).map_err(|e| format!("resampling failed: {e}"))?;
+            let resampled = rs
+                .process(&[chunk], None)
+                .map_err(|e| format!("resampling failed: {e}"))?;
             out.extend_from_slice(&resampled[0]);
             consumed += need;
         }
@@ -128,7 +132,12 @@ impl AudioStream {
             hint.mime_type(mime);
         }
         let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(|e| format!("unrecognized audio format: {e}"))?;
         let format = probed.format;
         let track = format
@@ -189,8 +198,10 @@ impl AudioStream {
                 Some((b, s)) if *s == spec && b.capacity() >= needed
             );
             if !reusable {
-                self.sample_buf =
-                    Some((SampleBuffer::<f32>::new(decoded.capacity() as u64, spec), spec));
+                self.sample_buf = Some((
+                    SampleBuffer::<f32>::new(decoded.capacity() as u64, spec),
+                    spec,
+                ));
             }
             let buf = &mut self.sample_buf.as_mut().expect("just set").0;
             buf.copy_interleaved_ref(decoded);
@@ -216,6 +227,10 @@ impl AudioStream {
             Some(rs) => rs.finish()?,
             None => Vec::new(),
         };
-        if tail.is_empty() { Ok(None) } else { Ok(Some(tail)) }
+        if tail.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(tail))
+        }
     }
 }

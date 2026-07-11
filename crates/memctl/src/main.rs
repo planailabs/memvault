@@ -57,9 +57,7 @@ fn main() {
             // Open store and run rebuild BEFORE starting the swarm.
             // The rebuild rewrites blocks (changing CIDs) and must complete
             // before any peer can request data.
-            let store = match memvault_store::MemvaultStore::open(
-                data_dir.join("blocks.redb"),
-            ) {
+            let store = match memvault_store::MemvaultStore::open(data_dir.join("blocks.redb")) {
                 Ok(s) => {
                     let store = std::sync::Arc::new(s);
                     let local_client = Arc::new(
@@ -115,8 +113,7 @@ fn main() {
             );
             let trust = memvault_api::bootstrap::bootstrap_cluster_trust(&local_client)
                 .expect("cluster trust bootstrap failed");
-            memvault_web::init_ui_agent(&local_client, &data_dir)
-                .expect("init_ui_agent failed");
+            memvault_web::init_ui_agent(&local_client, &data_dir).expect("init_ui_agent failed");
 
             let client_arc =
                 memvault_web::ui::state::client().expect("failed to initialize memvault client");

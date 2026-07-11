@@ -85,9 +85,16 @@ impl MemvaultHost for StandaloneHost<'_> {
         }
     }
     fn send_block_request(&mut self, peer: &PeerId, req: BlockRequest) {
-        self.0.behaviour_mut().block_exchange.send_request(peer, req);
+        self.0
+            .behaviour_mut()
+            .block_exchange
+            .send_request(peer, req);
     }
-    fn send_block_response(&mut self, channel: ResponseChannel<BlockResponse>, resp: BlockResponse) {
+    fn send_block_response(
+        &mut self,
+        channel: ResponseChannel<BlockResponse>,
+        resp: BlockResponse,
+    ) {
         let _ = self
             .0
             .behaviour_mut()
@@ -636,7 +643,14 @@ impl MemvaultDriver {
         // still-in-flight marker; `complete` then launches exactly one of them
         // (or clears the marker if there's nothing left), keeping the on-the-wire
         // count for this peer at one.
-        handle_block_response(host, &mut self.outbound, &self.store, peer, response, &self.join_config);
+        handle_block_response(
+            host,
+            &mut self.outbound,
+            &self.store,
+            peer,
+            response,
+            &self.join_config,
+        );
         self.outbound.complete(host, peer);
         if self.synced_peers.contains(&peer) {
             self.initial_sync_complete.insert(peer);
@@ -725,7 +739,13 @@ impl MemvaultDriver {
             "periodic RBSR resync"
         );
         for peer_id in &peers {
-            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, *peer_id);
+            request_remote_heads(
+                host,
+                &mut self.outbound,
+                &self.store,
+                &self.config,
+                *peer_id,
+            );
         }
         // Verify completeness: walk all stored blocks, find missing
         // dependencies (manifest → DAG chunks), and re-request them.
@@ -814,7 +834,9 @@ fn dispatch_standalone_event(
         }
         StandaloneMemvaultBehaviourEvent::BlockExchange(RrEvent::Message {
             peer,
-            message: RrMessage::Request { channel, request, .. },
+            message: RrMessage::Request {
+                channel, request, ..
+            },
             ..
         }) => {
             driver.on_block_request(peer, channel, request, &mut host);
@@ -844,7 +866,9 @@ fn dispatch_standalone_event(
         }
         StandaloneMemvaultBehaviourEvent::Join(RrEvent::Message {
             peer,
-            message: RrMessage::Request { channel, request, .. },
+            message: RrMessage::Request {
+                channel, request, ..
+            },
             ..
         }) => {
             driver.on_join_request(peer, channel, request, &mut host);
@@ -1144,8 +1168,7 @@ fn serve_block_request(
     // each call — cheap relative to network IO, and avoids holding a
     // shared trust handle in the swarm. Pre-genesis daemons (no pinned
     // admin) skip the check.
-    if join_config.pinned_admin_pubkey.is_some()
-        && !peer_is_trusted_node(store, &peer, join_config)
+    if join_config.pinned_admin_pubkey.is_some() && !peer_is_trusted_node(store, &peer, join_config)
     {
         tracing::warn!(
             %peer,
@@ -1171,77 +1194,99 @@ fn serve_block_request(
     let peer_cluster = peer_clusters.get(&peer);
     let is_local = peer_cluster.map(|c| c == cluster_id).unwrap_or(false);
 
-    let entries =
-        if !request.cids.is_empty() {
-            // Fetch mode: return block data, with visibility check.
-            tracing::debug!(%peer, cids = request.cids.len(), "block fetch request");
-            request.cids.iter().map(|cid| {
-            match store.get_block(cid) {
-                Ok(Some(data)) => {
-                    // Visibility enforcement: check bucket access.
-                    if !is_local
-                        && !check_block_access(store, cid, &data, &request.token, &peer, join_config)
-                    {
-                        tracing::debug!(%peer, cid = %hex::encode(cid), "block access denied");
-                        BlockEntry { cid: cid.clone(), data: vec![], found: false }
-                    } else {
-                        BlockEntry { cid: cid.clone(), data, found: true }
+    let entries = if !request.cids.is_empty() {
+        // Fetch mode: return block data, with visibility check.
+        tracing::debug!(%peer, cids = request.cids.len(), "block fetch request");
+        request
+            .cids
+            .iter()
+            .map(|cid| {
+                match store.get_block(cid) {
+                    Ok(Some(data)) => {
+                        // Visibility enforcement: check bucket access.
+                        if !is_local
+                            && !check_block_access(
+                                store,
+                                cid,
+                                &data,
+                                &request.token,
+                                &peer,
+                                join_config,
+                            )
+                        {
+                            tracing::debug!(%peer, cid = %hex::encode(cid), "block access denied");
+                            BlockEntry {
+                                cid: cid.clone(),
+                                data: vec![],
+                                found: false,
+                            }
+                        } else {
+                            BlockEntry {
+                                cid: cid.clone(),
+                                data,
+                                found: true,
+                            }
+                        }
                     }
+                    _ => BlockEntry {
+                        cid: cid.clone(),
+                        data: vec![],
+                        found: false,
+                    },
                 }
-                _ => BlockEntry { cid: cid.clone(), data: vec![], found: false },
+            })
+            .collect()
+    } else if !request.range_fingerprints.is_empty() {
+        // RBSR mode: compare fingerprints, return CIDs from mismatched windows.
+        let mut diff_cids = Vec::new();
+        let mut matched = 0usize;
+        let mut mismatched = 0usize;
+        for rf in &request.range_fingerprints {
+            let (local_count, local_xor) = store
+                .range_fingerprint(rf.start_ns, rf.end_ns)
+                .unwrap_or((0, [0u8; 32]));
+            if local_count as u32 == rf.count && local_xor == rf.xor {
+                matched += 1;
+                continue; // Same data in this window.
             }
-        }).collect()
-        } else if !request.range_fingerprints.is_empty() {
-            // RBSR mode: compare fingerprints, return CIDs from mismatched windows.
-            let mut diff_cids = Vec::new();
-            let mut matched = 0usize;
-            let mut mismatched = 0usize;
-            for rf in &request.range_fingerprints {
-                let (local_count, local_xor) = store
-                    .range_fingerprint(rf.start_ns, rf.end_ns)
-                    .unwrap_or((0, [0u8; 32]));
-                if local_count as u32 == rf.count && local_xor == rf.xor {
-                    matched += 1;
-                    continue; // Same data in this window.
-                }
-                mismatched += 1;
-                // Return ALL our CIDs from this window so the requester can diff.
-                // No limit — bandwidth is already bounded by the number of
-                // mismatched windows, and truncating here causes silent
-                // data loss when blocks cluster temporally (burst writes).
-                if let Ok(cids) = store.query_by_time(rf.start_ns, rf.end_ns, usize::MAX) {
-                    for cid in cids {
-                        diff_cids.push(BlockEntry {
-                            cid,
-                            data: vec![],
-                            found: true,
-                        });
-                    }
-                }
-            }
-            tracing::debug!(%peer, matched, mismatched, diff = diff_cids.len(), "RBSR response");
-            diff_cids
-        } else if let Some(since_ns) = request.since_ns {
-            // List-heads fallback.
-            let limit = request.limit.unwrap_or(500);
-            tracing::debug!(%peer, since_ns, limit, "list-heads request");
-            match store.query_by_time(since_ns, u64::MAX, limit) {
-                Ok(cids) => cids
-                    .into_iter()
-                    .map(|cid| BlockEntry {
+            mismatched += 1;
+            // Return ALL our CIDs from this window so the requester can diff.
+            // No limit — bandwidth is already bounded by the number of
+            // mismatched windows, and truncating here causes silent
+            // data loss when blocks cluster temporally (burst writes).
+            if let Ok(cids) = store.query_by_time(rf.start_ns, rf.end_ns, usize::MAX) {
+                for cid in cids {
+                    diff_cids.push(BlockEntry {
                         cid,
                         data: vec![],
                         found: true,
-                    })
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!(%peer, %e, "failed to query recent heads");
-                    vec![]
+                    });
                 }
             }
-        } else {
-            vec![]
-        };
+        }
+        tracing::debug!(%peer, matched, mismatched, diff = diff_cids.len(), "RBSR response");
+        diff_cids
+    } else if let Some(since_ns) = request.since_ns {
+        // List-heads fallback.
+        let limit = request.limit.unwrap_or(500);
+        tracing::debug!(%peer, since_ns, limit, "list-heads request");
+        match store.query_by_time(since_ns, u64::MAX, limit) {
+            Ok(cids) => cids
+                .into_iter()
+                .map(|cid| BlockEntry {
+                    cid,
+                    data: vec![],
+                    found: true,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(%peer, %e, "failed to query recent heads");
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
 
     let found = entries.iter().filter(|e| e.found).count();
     tracing::debug!(%peer, found, total = entries.len(), "serving block response");
@@ -1398,8 +1443,7 @@ fn peer_is_trusted_node(
         let Ok(Some(bytes)) = store.get_block(&cid) else {
             continue;
         };
-        let Ok(att) =
-            serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
+        let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
         else {
             continue;
         };
@@ -1419,8 +1463,7 @@ fn peer_is_trusted_node(
         let Ok(ed_pk) = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pkbytes) else {
             continue;
         };
-        let candidate: libp2p::PeerId =
-            libp2p::identity::PublicKey::from(ed_pk).to_peer_id();
+        let candidate: libp2p::PeerId = libp2p::identity::PublicKey::from(ed_pk).to_peer_id();
         if &candidate == peer {
             return true;
         }
@@ -1439,9 +1482,7 @@ enum SyncSigchainVerdict {
     /// Bytes parsed as a known sigchain type but the signature didn't
     /// verify (or admin/cluster mismatch). Reason string is logged at
     /// the call site for debugging.
-    Drop {
-        reason: &'static str,
-    },
+    Drop { reason: &'static str },
     /// Sigchain block validated successfully. Caller wraps `label`
     /// + `signer_pubkey` into the canonical `AsSigchain` meta.
     /// `extra_tags` lets a per-type validator add lookup-side tags the
@@ -1670,12 +1711,10 @@ fn vet_sync_block(
     match validate_sigchain_for_sync(bytes, join_config) {
         // Ordinary content envelope: the bytes carry tags/author/wall_ns;
         // we only stamp the receiving node's cluster.
-        SyncSigchainVerdict::NotSigchain => {
-            SyncDisposition::Ingest(memvault_store::IngestMeta {
-                cluster_id: Some(join_config.cluster_id.to_vec()),
-                ..Default::default()
-            })
-        }
+        SyncSigchainVerdict::NotSigchain => SyncDisposition::Ingest(memvault_store::IngestMeta {
+            cluster_id: Some(join_config.cluster_id.to_vec()),
+            ..Default::default()
+        }),
         SyncSigchainVerdict::Drop { reason } => {
             tracing::warn!(reason, "dropped sync'd sigchain block");
             SyncDisposition::Drop
@@ -1918,7 +1957,6 @@ fn collect_incomplete_cids(store: &MemvaultStore) -> Vec<Vec<u8>> {
     missing
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────
 // /ai-memvault/join/1.0 — node-attestation handshake.
 //
@@ -2115,8 +2153,7 @@ fn build_join_response(
     // the same peer arrived ~20ms apart (libp2p retransmit, double
     // ConnectionEstablished, etc.) — both saw "no attestation yet" if
     // the redb commit hadn't propagated to the read txn in time.
-    let already_minted =
-        matches!(store.get_block(&cid_bytes), Ok(Some(_)));
+    let already_minted = matches!(store.get_block(&cid_bytes), Ok(Some(_)));
 
     if !already_minted {
         // Honour max_uses BEFORE minting so we don't over-issue. Keystore
@@ -2149,7 +2186,10 @@ fn build_join_response(
     // every call. Skip the insert entirely on a hit to keep tag
     // index clean.
     if !already_minted {
-        if store.insert_envelope(&cid_bytes, &att_bytes, &meta).is_err() {
+        if store
+            .insert_envelope(&cid_bytes, &att_bytes, &meta)
+            .is_err()
+        {
             return refuse(JoinRefuseReason::TokenInvalidSignature);
         }
     }
@@ -2301,10 +2341,7 @@ fn mint_join_admission(
 /// wants to cross-check). Size is bounded by cluster size + 1.
 fn gather_bootstrap_blocks(store: &MemvaultStore) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    for (kind, label) in &[
-        ("sigchain", "node_att"),
-        ("sigchain", "admin_genesis"),
-    ] {
+    for (kind, label) in &[("sigchain", "node_att"), ("sigchain", "admin_genesis")] {
         if let Ok(cids) = store.query_by_tag(kind, label, 0, 1024) {
             // Tag entries may repeat the same CID (pre-fix duplicate
             // publishes); dedupe before reading.
@@ -2520,10 +2557,16 @@ mod sync_classify_tests {
         let bytes = serde_json::to_vec(&envelope).unwrap();
 
         let deps = extract_dependent_cids(&bytes);
-        assert!(deps.contains(&image_root), "missing page 1 image root: {deps:?}");
+        assert!(
+            deps.contains(&image_root),
+            "missing page 1 image root: {deps:?}"
+        );
         assert!(deps.contains(&vec![2, 2, 2]), "missing page 2 image root");
         assert!(deps.contains(&words_root), "missing words overflow root");
-        assert!(deps.contains(&source_pdf_root), "missing converted pdf root");
+        assert!(
+            deps.contains(&source_pdf_root),
+            "missing converted pdf root"
+        );
 
         // Non-page_render annotations contribute no blob deps.
         let other = serde_json::json!({
@@ -2625,7 +2668,11 @@ mod outbound_gate_tests {
         gate.send(&mut host, peer, rbsr()); // queued
         gate.send(&mut host, peer, rbsr()); // collapsed into the queued one
         gate.send(&mut host, peer, rbsr()); // collapsed
-        assert_eq!(gate.queued_total(), 1, "redundant RBSR probes must collapse");
+        assert_eq!(
+            gate.queued_total(),
+            1,
+            "redundant RBSR probes must collapse"
+        );
     }
 
     #[test]
@@ -2687,7 +2734,11 @@ mod bat_gate_tests {
         let g_vk = grantee.verifying_key();
         let bat = make_bat(&admin, &g_vk, u64::MAX);
         let peer = peer_id_from(&g_vk);
-        assert!(bat_authorizes_peer(&bat, &peer, Some(admin.verifying_key().to_bytes())));
+        assert!(bat_authorizes_peer(
+            &bat,
+            &peer,
+            Some(admin.verifying_key().to_bytes())
+        ));
     }
 
     #[test]
@@ -2699,11 +2750,19 @@ mod bat_gate_tests {
         // Signed by the wrong key; also try a junk single-byte signature.
         let bat = make_bat(&attacker, &g_vk, u64::MAX);
         let peer = peer_id_from(&g_vk);
-        assert!(!bat_authorizes_peer(&bat, &peer, Some(admin.verifying_key().to_bytes())));
+        assert!(!bat_authorizes_peer(
+            &bat,
+            &peer,
+            Some(admin.verifying_key().to_bytes())
+        ));
 
         let mut junk = make_bat(&admin, &g_vk, u64::MAX);
         junk.signature = vec![0u8];
-        assert!(!bat_authorizes_peer(&junk, &peer, Some(admin.verifying_key().to_bytes())));
+        assert!(!bat_authorizes_peer(
+            &junk,
+            &peer,
+            Some(admin.verifying_key().to_bytes())
+        ));
     }
 
     #[test]
@@ -2716,11 +2775,19 @@ mod bat_gate_tests {
 
         // Token issued to grantee, presented by a different peer.
         let bat = make_bat(&admin, &g_vk, u64::MAX);
-        assert!(!bat_authorizes_peer(&bat, &peer_id_from(&other.verifying_key()), admin_pk));
+        assert!(!bat_authorizes_peer(
+            &bat,
+            &peer_id_from(&other.verifying_key()),
+            admin_pk
+        ));
 
         // Expired token, correct peer.
         let expired = make_bat(&admin, &g_vk, 0);
-        assert!(!bat_authorizes_peer(&expired, &peer_id_from(&g_vk), admin_pk));
+        assert!(!bat_authorizes_peer(
+            &expired,
+            &peer_id_from(&g_vk),
+            admin_pk
+        ));
 
         // No pinned admin key → deny.
         let valid = make_bat(&admin, &g_vk, u64::MAX);

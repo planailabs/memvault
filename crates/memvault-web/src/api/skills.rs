@@ -79,7 +79,10 @@ pub async fn publish_skill(
     if let Some(bid) = &bucket {
         crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
     }
-    let id = state.client.skill_publish(req.spec, vis, bucket.as_ref()).await?;
+    let id = state
+        .client
+        .skill_publish(req.spec, vis, bucket.as_ref())
+        .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     Ok((
         axum::http::StatusCode::CREATED,

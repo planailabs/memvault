@@ -15,15 +15,15 @@ use std::sync::Arc;
 use ed25519_dalek::{Signer, SigningKey};
 use tokio::sync::{OnceCell, RwLock};
 
-use memvault_api::agent_identity::{enroll_local_agent, AgentIdentity};
+use memvault_api::agent_identity::{AgentIdentity, enroll_local_agent};
 use memvault_api::{EventBus, HttpApiClient, LocalClient, MemvaultClient};
 use memvault_auth::node_attestation::{AttestationOrigin, NodeAttestation};
-use memvault_auth::{jwt::NodeTrust, AgentRole};
+use memvault_auth::{AgentRole, jwt::NodeTrust};
 use memvault_core::{AgentName, BucketId, ClusterId, NodeRef, PeerId, Visibility};
 use memvault_doc::Entity;
 use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
-use memvault_web::{build_router, AppState};
+use memvault_web::{AppState, build_router};
 
 const AGENT_ID: &str = "test-agent";
 
@@ -99,7 +99,10 @@ async fn server() -> &'static TestServer {
             };
             node_att.signature = admin.sign(&node_att.signing_bytes().unwrap()).to_bytes();
             let mut trust = HashMap::new();
-            trust.insert(node.verifying_key().to_bytes(), NodeTrust::Attested(node_att));
+            trust.insert(
+                node.verifying_key().to_bytes(),
+                NodeTrust::Attested(node_att),
+            );
 
             let agent_att = memvault_auth::sign_agent_attestation(
                 &node,
@@ -204,10 +207,7 @@ async fn vfs_mkdir_resolve_ls_tree_round_trip() {
     assert!(resolved.is_some(), "freshly created dir must resolve");
 
     // ls / shows reports.
-    let entries = client
-        .vfs_ls(&bucket, "/", false)
-        .await
-        .expect("ls");
+    let entries = client.vfs_ls(&bucket, "/", false).await.expect("ls");
     assert!(
         entries.iter().any(|e| e.name == "reports"),
         "ls / must list the new 'reports' dir, got {:?}",
@@ -215,11 +215,11 @@ async fn vfs_mkdir_resolve_ls_tree_round_trip() {
     );
 
     // tree contains the nested path.
-    let tree = client
-        .vfs_tree(&bucket, "/", 10)
-        .await
-        .expect("tree");
-    assert!(tree.contains("2026"), "tree must include the nested dir: {tree}");
+    let tree = client.vfs_tree(&bucket, "/", 10).await.expect("tree");
+    assert!(
+        tree.contains("2026"),
+        "tree must include the nested dir: {tree}"
+    );
 }
 
 #[tokio::test]
@@ -327,7 +327,11 @@ async fn docs_put_get_and_search() {
     // search used to discard the response; the hit carries the authoritative
     // DocId (distinct from the 36-byte block CID returned by put_doc).
     let hits = client.search("kangaroo", 10).await.expect("search");
-    let doc_id = hits.first().expect("search must find the indexed doc").doc_id.clone();
+    let doc_id = hits
+        .first()
+        .expect("search must find the indexed doc")
+        .doc_id
+        .clone();
 
     let got = client.get_doc(&doc_id).await.expect("get_doc");
     assert_eq!(
@@ -365,7 +369,10 @@ async fn views_crud_round_trip() {
     client.create_view(view.clone()).await.expect("create_view");
 
     let views = client.list_views().await.expect("list_views");
-    assert!(views.iter().any(|v| v.name == "e2e-view"), "view must be listed");
+    assert!(
+        views.iter().any(|v| v.name == "e2e-view"),
+        "view must be listed"
+    );
 
     let got = client.get_view("e2e-view").await.expect("get_view");
     assert!(got.is_some(), "get_view must return the created view");
@@ -460,7 +467,10 @@ async fn status_reports_node() {
     // NodeStatus now decodes peer_id/cluster_id (the old hand-parse dropped
     // them — it returned empty vecs).
     assert!(!status.peer_id.is_empty(), "status must carry peer_id");
-    assert!(!status.cluster_id.is_empty(), "status must carry cluster_id");
+    assert!(
+        !status.cluster_id.is_empty(),
+        "status must carry cluster_id"
+    );
 }
 
 #[tokio::test]
@@ -475,8 +485,14 @@ async fn listing_and_vfs_are_bucket_scoped() {
         frontmatter: Default::default(),
         body: body.to_string(),
     };
-    client.put_doc(mk("alpha doc"), vec![], Visibility::Internal, Some(&a)).await.expect("put a");
-    client.put_doc(mk("beta doc"), vec![], Visibility::Internal, Some(&b)).await.expect("put b");
+    client
+        .put_doc(mk("alpha doc"), vec![], Visibility::Internal, Some(&a))
+        .await
+        .expect("put a");
+    client
+        .put_doc(mk("beta doc"), vec![], Visibility::Internal, Some(&b))
+        .await
+        .expect("put b");
 
     // list_docs must be bucket-scoped: the two buckets return disjoint,
     // non-empty doc sets. (The old HTTP client dropped the bucket param, so
@@ -485,20 +501,36 @@ async fn listing_and_vfs_are_bucket_scoped() {
     let db = client.list_docs(None, 50, Some(&b)).await.expect("list b");
     let aids: std::collections::HashSet<_> = da.iter().map(|d| d.id.clone()).collect();
     let bids: std::collections::HashSet<_> = db.iter().map(|d| d.id.clone()).collect();
-    assert!(!aids.is_empty() && !bids.is_empty(), "each bucket must list its own doc");
-    assert!(aids.is_disjoint(&bids), "list_docs must be bucket-scoped, not global");
+    assert!(
+        !aids.is_empty() && !bids.is_empty(),
+        "each bucket must list its own doc"
+    );
+    assert!(
+        aids.is_disjoint(&bids),
+        "list_docs must be bucket-scoped, not global"
+    );
 
     // VFS in the non-default bucket B: mkdir → resolve → tree (the
     // customer-plan-ai symptom was resolve failing / tree empty here).
     client.vfs_mkdir(&b, "/scoped/dir").await.expect("mkdir b");
     assert!(
-        client.vfs_resolve(&b, "/scoped/dir").await.expect("resolve b").is_some(),
+        client
+            .vfs_resolve(&b, "/scoped/dir")
+            .await
+            .expect("resolve b")
+            .is_some(),
         "VFS path must resolve in a non-default bucket"
     );
     let tree = client.vfs_tree(&b, "/", 10).await.expect("tree b");
-    assert!(tree.contains("scoped"), "tree must show the dir in bucket B: {tree}");
+    assert!(
+        tree.contains("scoped"),
+        "tree must show the dir in bucket B: {tree}"
+    );
     // list_entities is bucket-scoped: B's root entity must be visible.
-    let ents_b = client.list_entities(50, Some(&b)).await.expect("list_entities b");
+    let ents_b = client
+        .list_entities(50, Some(&b))
+        .await
+        .expect("list_entities b");
     assert!(!ents_b.is_empty(), "bucket B must surface its VFS entities");
 }
 
@@ -583,5 +615,8 @@ async fn pin_unpin_and_extracted_text() {
     let _pinned = client.list_pinned().await.expect("list_pinned");
     client.unpin_file(&cid).await.expect("unpin_file");
     // extracted-text may be None for a plain upload; the call must succeed.
-    client.read_extracted_text(&cid).await.expect("read_extracted_text");
+    client
+        .read_extracted_text(&cid)
+        .await
+        .expect("read_extracted_text");
 }

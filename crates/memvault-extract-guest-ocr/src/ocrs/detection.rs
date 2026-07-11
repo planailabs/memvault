@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 use rten::{Dimension, FloatOperators, Operators, RunOptions};
-use rten_imageproc::{find_contours, min_area_rect, simplify_polygon, RetrievalMode, RotatedRect};
+use rten_imageproc::{RetrievalMode, RotatedRect, find_contours, min_area_rect, simplify_polygon};
 use rten_tensor::prelude::*;
 use rten_tensor::{NdTensor, NdTensorView, Tensor};
 
@@ -138,7 +138,12 @@ impl TextDetector {
         // Add batch dim
         let image = image.reshaped([1, img_chans, img_height, img_width]);
 
-        let [_, _, Dimension::Fixed(in_height), Dimension::Fixed(in_width)] = self.input_shape[..]
+        let [
+            _,
+            _,
+            Dimension::Fixed(in_height),
+            Dimension::Fixed(in_width),
+        ] = self.input_shape[..]
         else {
             return Err(anyhow!("failed to get model dims"));
         };
@@ -202,9 +207,9 @@ impl TextDetector {
 
 #[cfg(test)]
 mod tests {
-    use rten_imageproc::{fill_rect, Point};
-    use rten_tensor::prelude::*;
+    use rten_imageproc::{Point, fill_rect};
     use rten_tensor::NdTensor;
+    use rten_tensor::prelude::*;
 
     use super::find_connected_component_rects;
     use crate::ocrs::test_util::gen_rect_grid;

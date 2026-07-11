@@ -243,7 +243,10 @@ fn quota_set_and_check_by_pubkey() {
         },
     );
     manager.record_write(&pk, 40);
-    assert!(manager.check_write(&pk, 20).is_err(), "40+20 > 50 for this pubkey");
+    assert!(
+        manager.check_write(&pk, 20).is_err(),
+        "40+20 > 50 for this pubkey"
+    );
     // A different pubkey falls back to the (large) default quota.
     assert!(manager.check_write(&[8u8; 32], 20).is_ok());
 }
@@ -604,7 +607,7 @@ fn audit_query_by_time_range() {
             provenance: vec![],
             cluster_id: None,
             bucket_id: None,
-                    ..Default::default()
+            ..Default::default()
         };
         store
             .insert_envelope(cid.as_bytes(), &serde_json::to_vec(&data).unwrap(), &meta)

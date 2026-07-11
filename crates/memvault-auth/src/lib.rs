@@ -13,56 +13,58 @@ pub(crate) fn domain_sign<T: serde::Serialize>(
     domain: &[u8],
     payload: &T,
 ) -> error::Result<Vec<u8>> {
-    let body = serde_ipld_dagcbor::to_vec(payload)
-        .map_err(|e| error::AuthError::Codec(e.to_string()))?;
+    let body =
+        serde_ipld_dagcbor::to_vec(payload).map_err(|e| error::AuthError::Codec(e.to_string()))?;
     let mut out = Vec::with_capacity(domain.len() + body.len());
     out.extend_from_slice(domain);
     out.extend_from_slice(&body);
     Ok(out)
 }
 pub mod agent_attestation;
-pub mod bucket_merge;
-pub mod sigchain_shape;
 pub mod agent_revocation;
-pub mod node_attestation;
+pub mod bucket_merge;
 pub mod enrollment;
 pub mod error;
 pub mod grant;
 pub mod grant_revocation;
 pub mod jwt;
 pub mod key_state;
+pub mod node_attestation;
 pub mod revocation;
 pub mod role;
 pub mod rotation;
 pub mod share;
+pub mod sigchain_shape;
 pub mod token;
 pub mod trust;
 pub mod verifier;
 
-pub use admin_genesis::{AdminGenesis, pick_earliest as pick_earliest_admin_genesis, sign_admin_genesis};
+pub use admin_genesis::{
+    AdminGenesis, pick_earliest as pick_earliest_admin_genesis, sign_admin_genesis,
+};
 pub use admin_keys::{
     AdminKeyAdmission, AdminKeyRetirement, admin_pop_signing_bytes, sign_admin_admission,
     sign_admin_pop, sign_admin_retirement, verify_admin_pop,
 };
 pub use agent_attestation::{AgentAttestation, sign_agent_attestation};
-pub use bucket_merge::{BucketMergeRecord, sign_bucket_merge};
 pub use agent_revocation::{
     AgentRevocation, NodeRevocation, sign_agent_revocation, sign_node_revocation,
 };
-pub use sigchain_shape::{SigchainKind, sigchain_label_for, detect_sigchain_shape};
-pub use node_attestation::{AttestationOrigin, NodeAttestation};
+pub use bucket_merge::{BucketMergeRecord, sign_bucket_merge};
 pub use enrollment::AgentEnrollment;
 pub use error::{AuthError, Result};
 pub use grant::{Action, Grant, GrantAudience};
 pub use grant_revocation::{GrantRevocation, sign_grant_revocation};
 pub use jwt::{AgentTokenClaims, issue as issue_agent_token, scope, verify as verify_agent_token};
 pub use key_state::{AdminKeyState, KeyValidity};
+pub use node_attestation::{AttestationOrigin, NodeAttestation};
 pub use revocation::Revocation;
 pub use role::{AgentRole, NodeRole, TokenRole};
 pub use rotation::{AdminKeyRotation, AgentKeyRotation, RotationAborted};
 pub use share::{
     BucketTrust, ShareDecision, ShareProposal, ShareRecipient, ShareReply, ShareStatus,
 };
+pub use sigchain_shape::{SigchainKind, detect_sigchain_shape, sigchain_label_for};
 pub use token::{
     JoinToken, TokenConsumption, decode_token_string, encode_token_string, sign_token_consumption,
 };

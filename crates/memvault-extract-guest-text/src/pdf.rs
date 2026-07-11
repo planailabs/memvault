@@ -1,4 +1,4 @@
-use memvault_extract_abi::{ExtractionHints, ExtractedText};
+use memvault_extract_abi::{ExtractedText, ExtractionHints};
 
 pub fn extract(content: &[u8], hints: &ExtractionHints) -> Result<ExtractedText, String> {
     let doc = lopdf::Document::load_mem(content).map_err(|e| format!("PDF parse failed: {e}"))?;

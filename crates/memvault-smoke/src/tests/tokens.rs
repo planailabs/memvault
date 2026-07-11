@@ -10,7 +10,12 @@ async fn issue_token() {
     let node = TestNode::new();
     let token = node
         .client
-        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, Some("test".into()))
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            3600,
+            1,
+            Some("test".into()),
+        )
         .await
         .unwrap();
     assert!(token.starts_with("mvjoin1:"));
@@ -35,11 +40,21 @@ async fn issue_token_different_roles() {
 async fn list_tokens() {
     let node = TestNode::new();
     node.client
-        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, Some("first".into()))
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            3600,
+            1,
+            Some("first".into()),
+        )
         .await
         .unwrap();
     node.client
-        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 7200, 5, Some("second".into()))
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            7200,
+            5,
+            Some("second".into()),
+        )
         .await
         .unwrap();
     let tokens = node.client.list_tokens().await.unwrap();
@@ -50,7 +65,12 @@ async fn list_tokens() {
 async fn revoke_token() {
     let node = TestNode::new();
     node.client
-        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, Some("revocable".into()))
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            3600,
+            1,
+            Some("revocable".into()),
+        )
         .await
         .unwrap();
     let tokens = node.client.list_tokens().await.unwrap();
@@ -67,7 +87,12 @@ async fn revoke_token() {
 async fn token_with_max_uses() {
     let node = TestNode::new();
     node.client
-        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 10, Some("multi".into()))
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            3600,
+            10,
+            Some("multi".into()),
+        )
         .await
         .unwrap();
     let tokens = node.client.list_tokens().await.unwrap();
@@ -80,7 +105,12 @@ async fn token_decode_roundtrip() {
     let node = TestNode::new();
     let encoded = node
         .client
-        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, Some("roundtrip".into()))
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            3600,
+            1,
+            Some("roundtrip".into()),
+        )
         .await
         .unwrap();
     let decoded = memvault_auth::decode_token_string(&encoded).unwrap();

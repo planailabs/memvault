@@ -254,7 +254,9 @@ pub fn gc_invalidated_tokens(keystore: &KeyStore, now_ns: u64) -> usize {
         let Ok(cid_bytes) = hex::decode(hex_cid) else {
             continue;
         };
-        let Some(cbor) = keystore.get(&k) else { continue };
+        let Some(cbor) = keystore.get(&k) else {
+            continue;
+        };
         let Ok(token) = serde_ipld_dagcbor::from_slice::<JoinToken>(&cbor) else {
             continue;
         };
@@ -292,7 +294,9 @@ pub fn list_tokens(keystore: &KeyStore) -> Result<Vec<TokenStatus>> {
         let Ok(cid_bytes) = hex::decode(hex_cid) else {
             continue;
         };
-        let Some(cbor) = keystore.get(&k) else { continue };
+        let Some(cbor) = keystore.get(&k) else {
+            continue;
+        };
         let token: JoinToken = match serde_ipld_dagcbor::from_slice(&cbor) {
             Ok(t) => t,
             Err(_) => continue,

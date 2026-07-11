@@ -45,7 +45,11 @@ async fn cache_annotation_populated_for_doc_body() {
 async fn wikilink_creates_body_provenance_edge() {
     let node = TestNode::new();
 
-    let target_doc = Document::new(DocId::random(), "I am the target".into(), Default::default());
+    let target_doc = Document::new(
+        DocId::random(),
+        "I am the target".into(),
+        Default::default(),
+    );
     node.client
         .put_doc(target_doc.clone(), vec![], Visibility::Internal, None)
         .await
@@ -129,9 +133,7 @@ async fn dangling_alias_emits_pending_edge() {
     let pending: Vec<_> = edges
         .iter()
         .filter(|(s, _)| *s == NodeRef::Doc(source_doc.id.clone()))
-        .filter(|(_, e)| {
-            e.props.get("pending_alias").and_then(|v| v.as_str()) == Some("Alice")
-        })
+        .filter(|(_, e)| e.props.get("pending_alias").and_then(|v| v.as_str()) == Some("Alice"))
         .collect();
     assert_eq!(pending.len(), 1, "expected a single pending alias edge");
 }
@@ -269,10 +271,7 @@ async fn reindex_idempotent() {
     assert_eq!(before_targets.len(), 1);
 
     // Reindex this doc — should produce no new edges (idempotent).
-    node.client
-        .reindex_doc_links(&source_doc.id)
-        .await
-        .unwrap();
+    node.client.reindex_doc_links(&source_doc.id).await.unwrap();
 
     let after = node
         .client

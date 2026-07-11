@@ -57,8 +57,8 @@ impl AgentRevocation {
     pub fn verify_signature(&self) -> Result<()> {
         let bytes = self.signing_bytes()?;
         let sig = Signature::from_bytes(&self.signature);
-        let pubkey = VerifyingKey::from_bytes(&self.node_pubkey)
-            .map_err(|_| AuthError::SignatureInvalid)?;
+        let pubkey =
+            VerifyingKey::from_bytes(&self.node_pubkey).map_err(|_| AuthError::SignatureInvalid)?;
         pubkey
             .verify(&bytes, &sig)
             .map_err(|_| AuthError::SignatureInvalid)

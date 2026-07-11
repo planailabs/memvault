@@ -72,7 +72,9 @@ pub fn render_pdf_pages(content: &[u8], params: &RenderParams) -> RenderResponse
     };
 
     let start = (params.page_start as usize).min(pages.len());
-    let end = start.saturating_add(params.page_count as usize).min(pages.len());
+    let end = start
+        .saturating_add(params.page_count as usize)
+        .min(pages.len());
 
     let cache = RenderCache::new();
     let interpreter = InterpreterSettings::default();
@@ -111,7 +113,11 @@ pub fn render_pdf_pages(content: &[u8], params: &RenderParams) -> RenderResponse
             Some(p) => extract_words(p, idx, scale, &mut warnings),
             None => Vec::new(),
         };
-        let text_source = if words.is_empty() { TextSource::None } else { TextSource::Embedded };
+        let text_source = if words.is_empty() {
+            TextSource::None
+        } else {
+            TextSource::Embedded
+        };
 
         rendered.push(RenderedPage {
             page_no: (idx + 1) as u32,

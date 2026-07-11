@@ -64,7 +64,10 @@ pub(crate) fn classify_mime(mime: &str) -> MediaClass {
     if mime.starts_with("audio/") {
         return MediaClass::Audio;
     }
-    if matches!(mime, "image/png" | "image/jpeg" | "image/webp" | "image/tiff") {
+    if matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/webp" | "image/tiff"
+    ) {
         return MediaClass::Image;
     }
     if mime == "application/pdf" {
@@ -334,10 +337,16 @@ impl ExtractionPipeline {
         }
         if let Some((det, rec)) = self.config.ocr_model_paths() {
             if let Ok(rel) = det.strip_prefix(models_dir) {
-                map.insert("ocr-detection".to_string(), format!("/models/{}", rel.display()));
+                map.insert(
+                    "ocr-detection".to_string(),
+                    format!("/models/{}", rel.display()),
+                );
             }
             if let Ok(rel) = rec.strip_prefix(models_dir) {
-                map.insert("ocr-recognition".to_string(), format!("/models/{}", rel.display()));
+                map.insert(
+                    "ocr-recognition".to_string(),
+                    format!("/models/{}", rel.display()),
+                );
             }
         }
         Some(map)
@@ -415,8 +424,8 @@ impl ExtractionPipeline {
             let pipeline = Arc::clone(self);
             let batch_data = render_data.clone();
             let batch_mime = render_mime.clone();
-            let ocr_fallback = class != MediaClass::Image
-                && self.config.ocr_unavailable_reason().is_none();
+            let ocr_fallback =
+                class != MediaClass::Image && self.config.ocr_unavailable_reason().is_none();
             let batch = tokio::task::spawn_blocking(move || {
                 let registry = pipeline.media_registry();
                 let mut batch = registry.render_pages(&batch_data, &batch_mime, &params)?;
@@ -446,9 +455,10 @@ impl ExtractionPipeline {
                                 }
                             }
                             Err(e) => {
-                                batch
-                                    .warnings
-                                    .push(format!("page {} ocr fallback failed: {e}", page.page_no));
+                                batch.warnings.push(format!(
+                                    "page {} ocr fallback failed: {e}",
+                                    page.page_no
+                                ));
                             }
                         }
                     }
@@ -607,10 +617,7 @@ pub(crate) fn project_page_render(data: &serde_json::Value) -> PageRenderInfo {
         status,
         page_count: pages.len() as u32,
         pages,
-        error: data
-            .get("error")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        error: data.get("error").and_then(|v| v.as_str()).map(String::from),
     }
 }
 
@@ -658,7 +665,12 @@ pub(crate) fn page_text_layer(
         Vec::new()
     };
 
-    Some(PageTextLayer { page_no, width, height, words })
+    Some(PageTextLayer {
+        page_no,
+        width,
+        height,
+        words,
+    })
 }
 
 /// Project a cached `"extraction"` annotation `data` object into the wire

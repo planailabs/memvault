@@ -3,9 +3,9 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 use rten::ctc::{CtcDecoder, CtcHypothesis};
-use rten::{thread_pool, Dimension, FloatOperators};
+use rten::{Dimension, FloatOperators, thread_pool};
 use rten_imageproc::{
-    bounding_rect, BoundingRect, Line, Point, PointF, Polygon, Rect, RotatedRect,
+    BoundingRect, Line, Point, PointF, Polygon, Rect, RotatedRect, bounding_rect,
 };
 use rten_tensor::prelude::*;
 use rten_tensor::{NdTensor, NdTensorView, NdTensorViewMut, Tensor};

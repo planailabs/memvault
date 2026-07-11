@@ -285,7 +285,6 @@ impl MemvaultStore {
         Ok(())
     }
 
-
     /// Store a bucket declaration CID in the BUCKETS table.
     pub fn put_bucket(&self, bucket_id: &[u8], decl_cid: &[u8]) -> Result<(), StoreError> {
         let txn = self.db.begin_write()?;
@@ -389,11 +388,7 @@ impl MemvaultStore {
     /// A bucket can only be bound to exactly one cluster (its home). Attempting
     /// to bind a bucket that is already bound to a *different* cluster returns
     /// an error. Re-binding to the same cluster is idempotent.
-    pub fn bind_bucket(
-        &self,
-        bucket_id: &[u8],
-        cluster_id: &[u8],
-    ) -> Result<(), StoreError> {
+    pub fn bind_bucket(&self, bucket_id: &[u8], cluster_id: &[u8]) -> Result<(), StoreError> {
         if let Some(existing) = self.get_bucket_cluster(bucket_id)? {
             if existing != cluster_id {
                 return Err(StoreError::Other(format!(

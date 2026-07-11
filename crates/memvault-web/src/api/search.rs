@@ -54,9 +54,8 @@ pub async fn search(
         })
         .collect();
 
-    let filtered = crate::api::auth::filter_readable(&auth.claims, results, |r| {
-        format!("doc:{}", r.doc_id)
-    })?;
+    let filtered =
+        crate::api::auth::filter_readable(&auth.claims, results, |r| format!("doc:{}", r.doc_id))?;
 
     Ok(Json(filtered))
 }

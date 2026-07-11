@@ -172,8 +172,12 @@ mod tests {
             max_edge_px: None,
             model_paths: Default::default(),
         };
-        let err = reg.render_pages(b"%PDF", "application/pdf", &params).unwrap_err();
-        assert!(matches!(err, ExtractError::ExtractionFailed(m) if m.contains("failed to parse pdf")));
+        let err = reg
+            .render_pages(b"%PDF", "application/pdf", &params)
+            .unwrap_err();
+        assert!(
+            matches!(err, ExtractError::ExtractionFailed(m) if m.contains("failed to parse pdf"))
+        );
     }
 
     #[test]

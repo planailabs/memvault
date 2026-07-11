@@ -218,7 +218,12 @@ fn line_iter(s: &str) -> impl Iterator<Item = (&str, usize)> {
     })
 }
 
-fn push_frontmatter_uri(uri: &str, line_start: usize, line_len: usize, out: &mut Vec<ExtractedLink>) {
+fn push_frontmatter_uri(
+    uri: &str,
+    line_start: usize,
+    line_len: usize,
+    out: &mut Vec<ExtractedLink>,
+) {
     if uri.is_empty() {
         return;
     }
@@ -268,7 +273,11 @@ fn parse_shorthand(body: &str, label: &str) -> Option<ParsedUri> {
             ident: ident.to_string(),
             alias: display_alias.or_else(|| {
                 let label = label.trim();
-                if label.is_empty() { None } else { Some(label.to_string()) }
+                if label.is_empty() {
+                    None
+                } else {
+                    Some(label.to_string())
+                }
             }),
             relation: None,
             pinned_at: None,
@@ -334,10 +343,7 @@ fn scan_wikilinks(body: &str, body_offset: usize) -> Vec<ExtractedLink> {
                     out.push(ExtractedLink {
                         uri: render_uri(&parsed),
                         display_text: display,
-                        byte_span: (
-                            (body_offset + start) as u32,
-                            (body_offset + end + 2) as u32,
-                        ),
+                        byte_span: ((body_offset + start) as u32, (body_offset + end + 2) as u32),
                         syntax: LinkSyntax::Wikilink,
                     });
                 }
@@ -466,11 +472,7 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert!(links.iter().any(|l| l.uri == "memvault://doc/abcd"));
         assert!(links.iter().any(|l| l.uri == "memvault://entity/1234"));
-        assert!(
-            links
-                .iter()
-                .all(|l| l.syntax == LinkSyntax::FrontmatterRef)
-        );
+        assert!(links.iter().all(|l| l.syntax == LinkSyntax::FrontmatterRef));
     }
 
     #[test]

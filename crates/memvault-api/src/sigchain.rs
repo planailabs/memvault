@@ -90,8 +90,8 @@ fn write_block_with_extra_tags(
 /// Published once at genesis; sync propagates it to peers so they all
 /// agree on the admin pubkey without having to be told out-of-band.
 pub fn publish_admin_genesis(client: &LocalClient, genesis: &AdminGenesis) -> Result<Vec<u8>> {
-    let bytes = serde_ipld_dagcbor::to_vec(genesis)
-        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    let bytes =
+        serde_ipld_dagcbor::to_vec(genesis).map_err(|e| ApiError::Serialization(e.to_string()))?;
     write_block(client, LABEL_ADMIN_GENESIS, &bytes)
 }
 
@@ -556,9 +556,7 @@ fn verify_signed_envelope(
 /// `AppState` simultaneously — both Arc-clone the same handles.
 #[derive(Clone)]
 pub struct LiveTrustState {
-    pub node_trust: std::sync::Arc<
-        std::sync::RwLock<HashMap<[u8; 32], NodeTrust>>,
-    >,
+    pub node_trust: std::sync::Arc<std::sync::RwLock<HashMap<[u8; 32], NodeTrust>>>,
     pub revoked_agents: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
     pub revoked_nodes: std::sync::Arc<std::sync::RwLock<HashSet<[u8; 32]>>>,
     /// Cached set of agent pubkeys currently trusted (attested by a node in
@@ -836,7 +834,9 @@ fn apply_sigchain_block(
             // node attestations, which accept an authentic block and re-check
             // authority later.
             if !retraction_signature_ok(&bytes) {
-                tracing::warn!("sigchain watcher: rejecting retraction with missing/invalid signature");
+                tracing::warn!(
+                    "sigchain watcher: rejecting retraction with missing/invalid signature"
+                );
                 return;
             }
             // Membership/authority: drop a retraction signed by a revoked or
@@ -851,7 +851,9 @@ fn apply_sigchain_block(
                 client.verify_envelope_authorship(cid),
                 Ok(AuthorshipStatus::AgentNotTrusted { .. } | AuthorshipStatus::BadSignature)
             ) {
-                tracing::warn!("sigchain watcher: rejecting retraction from revoked/untrusted agent");
+                tracing::warn!(
+                    "sigchain watcher: rejecting retraction from revoked/untrusted agent"
+                );
                 return;
             }
             if let Some(view) = memvault_store::EnvelopeView::parse(&bytes) {
@@ -1104,10 +1106,7 @@ pub fn scan_trusted_attestations(
     Ok(out)
 }
 
-fn load_blocks_by_label(
-    client: &LocalClient,
-    label: &str,
-) -> Result<Vec<Vec<u8>>> {
+fn load_blocks_by_label(client: &LocalClient, label: &str) -> Result<Vec<Vec<u8>>> {
     let cids = client
         .store()
         .query_by_tag(KIND, label, 0, usize::MAX)
@@ -1224,8 +1223,7 @@ pub fn scan_revocations(
     }
 
     if !admin_keys.is_empty() {
-        let admin_key_bytes: HashSet<[u8; 32]> =
-            admin_keys.iter().map(|k| k.to_bytes()).collect();
+        let admin_key_bytes: HashSet<[u8; 32]> = admin_keys.iter().map(|k| k.to_bytes()).collect();
         for bytes in load_blocks_by_label(client, LABEL_NODE_REV)? {
             let rev: NodeRevocation = match serde_ipld_dagcbor::from_slice(&bytes) {
                 Ok(r) => r,

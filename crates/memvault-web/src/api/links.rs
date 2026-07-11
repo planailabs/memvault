@@ -71,16 +71,8 @@ pub async fn create_link(
 
     // ACL: writing an edge mutates the source node's bucket, and reads the
     // target — require Write on the source and at least Read on the target.
-    crate::api::auth::enforce_node_action(
-        &auth.claims,
-        &req.source,
-        memvault_auth::Action::Write,
-    )?;
-    crate::api::auth::enforce_node_action(
-        &auth.claims,
-        &req.target,
-        memvault_auth::Action::Read,
-    )?;
+    crate::api::auth::enforce_node_action(&auth.claims, &req.source, memvault_auth::Action::Write)?;
+    crate::api::auth::enforce_node_action(&auth.claims, &req.target, memvault_auth::Action::Read)?;
 
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
 
@@ -159,7 +151,10 @@ pub async fn get_node(
         NodeRef::Entity(eid) => {
             let entity = state
                 .client
-                .get_entity_scoped(&eid, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
+                .get_entity_scoped(
+                    &eid,
+                    &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
+                )
                 .await?
                 .ok_or_else(|| ApiError::not_found("Entity not found"))?;
             Ok(Json(serde_json::json!({
@@ -179,7 +174,10 @@ pub async fn get_node(
         NodeRef::Doc(did) => {
             let doc = state
                 .client
-                .get_doc_scoped(&did, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
+                .get_doc_scoped(
+                    &did,
+                    &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
+                )
                 .await?
                 .ok_or_else(|| ApiError::not_found("Document not found"))?;
             Ok(Json(serde_json::json!({
@@ -276,7 +274,11 @@ pub async fn delete_link(
             "Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
         )
     })?;
-    crate::api::auth::enforce_node_action(&auth.claims, &params.source, memvault_auth::Action::Write)?;
+    crate::api::auth::enforce_node_action(
+        &auth.claims,
+        &params.source,
+        memvault_auth::Action::Write,
+    )?;
 
     state.client.remove_link_from(&source, &edge_id).await?;
 

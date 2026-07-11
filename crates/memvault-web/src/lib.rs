@@ -56,9 +56,7 @@ mod server_router {
         /// can insert new entries when peers announce `NodeAttestation`s
         /// over RBSR sync without restarting the daemon.
         pub node_trust: Arc<
-            std::sync::RwLock<
-                std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>,
-            >,
+            std::sync::RwLock<std::collections::HashMap<[u8; 32], memvault_auth::jwt::NodeTrust>>,
         >,
         /// Revoked agent pubkeys. Populated from
         /// [`memvault_auth::AgentRevocation`] blocks in the sig-chain (phase 5
@@ -84,13 +82,8 @@ mod server_router {
         /// install a stub so they don't need a full `LocalClient` set up.
         /// `None` falls back to the global `LOCAL_CLIENT` lookup.
         #[allow(clippy::type_complexity)]
-        pub agent_attestation_lookup: Option<
-            Arc<
-                dyn Fn(&[u8; 32]) -> Option<memvault_auth::AgentAttestation>
-                    + Send
-                    + Sync,
-            >,
-        >,
+        pub agent_attestation_lookup:
+            Option<Arc<dyn Fn(&[u8; 32]) -> Option<memvault_auth::AgentAttestation> + Send + Sync>>,
     }
 
     /// Load (or generate) the built-in `_ui` agent identity used by the

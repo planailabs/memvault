@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 mod link;
 
-pub use link::{ExtractedLink, LinkSyntax, LinkTargetKind, ParsedUri, UriError, parse_uri, render_uri};
+pub use link::{
+    ExtractedLink, LinkSyntax, LinkTargetKind, ParsedUri, UriError, parse_uri, render_uri,
+};
 
 // ─── Input envelope ────────────────────────────────────────────────────────────
 
@@ -116,12 +118,20 @@ pub struct ExtractorCapability {
 impl ExtractorCapability {
     /// Capability serving the `extract` export.
     pub fn extract(match_rule: MatchRule, priority: i32) -> Self {
-        Self { match_rule, priority, op: PluginOp::Extract }
+        Self {
+            match_rule,
+            priority,
+            op: PluginOp::Extract,
+        }
     }
 
     /// Capability serving the `render_pages` export.
     pub fn render(match_rule: MatchRule, priority: i32) -> Self {
-        Self { match_rule, priority, op: PluginOp::RenderPages }
+        Self {
+            match_rule,
+            priority,
+            op: PluginOp::RenderPages,
+        }
     }
 }
 
@@ -479,7 +489,13 @@ mod tests {
                 width_px: 1224,
                 height_px: 1584,
                 image: vec![0x89, b'P', b'N', b'G'],
-                words: vec![WordBox { text: "Invoice".into(), x: 72.0, y: 54.1, w: 88.2, h: 14.0 }],
+                words: vec![WordBox {
+                    text: "Invoice".into(),
+                    x: 72.0,
+                    y: 54.1,
+                    w: 88.2,
+                    h: 14.0,
+                }],
                 text_source: TextSource::Embedded,
             }],
             warnings: vec![],

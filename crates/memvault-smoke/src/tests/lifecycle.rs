@@ -379,7 +379,11 @@ async fn retraction_workflow() {
 #[tokio::test]
 async fn auditor_bypasses_retraction() {
     let node = TestNode::new();
-    let doc = Document::new(DocId::random(), "secret then retracted".into(), Default::default());
+    let doc = Document::new(
+        DocId::random(),
+        "secret then retracted".into(),
+        Default::default(),
+    );
     let id = doc.id.clone();
     node.client
         .put_doc(doc, vec![], Visibility::Internal, None)
@@ -403,7 +407,10 @@ async fn auditor_bypasses_retraction() {
     // Auditor/admin bypass (include_retracted = true): the doc reappears.
     assert!(
         node.client
-            .get_doc_scoped(&id, &memvault_core::QueryScope::all().with_include_retracted(true))
+            .get_doc_scoped(
+                &id,
+                &memvault_core::QueryScope::all().with_include_retracted(true)
+            )
             .await
             .unwrap()
             .is_some(),

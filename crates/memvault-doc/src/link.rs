@@ -99,10 +99,8 @@ pub fn reconcile(
     provenance: LinkProvenance,
     existing_body_edges: &[Edge],
 ) -> Vec<Op> {
-    let prev_keys: HashSet<(NodeRef, String)> =
-        prev.iter().map(|l| l.dedup_key()).collect();
-    let next_keys: HashSet<(NodeRef, String)> =
-        next.iter().map(|l| l.dedup_key()).collect();
+    let prev_keys: HashSet<(NodeRef, String)> = prev.iter().map(|l| l.dedup_key()).collect();
+    let next_keys: HashSet<(NodeRef, String)> = next.iter().map(|l| l.dedup_key()).collect();
 
     let mut ops = Vec::new();
 

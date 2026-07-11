@@ -53,7 +53,6 @@ impl AuditRow {
     }
 }
 
-
 #[server]
 async fn list_audit(limit: usize) -> Result<Vec<AuditRow>, ServerFnError> {
     use memvault_query::AuditQuery;

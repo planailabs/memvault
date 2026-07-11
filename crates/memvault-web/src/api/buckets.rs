@@ -300,7 +300,8 @@ pub async fn ensure_agent_bucket(
     }
     // Only AgentHost agents (writers) get a data bucket; Auditor / Service /
     // Admin agents don't.
-    if crate::api::auth::caller_role(&state, &auth.claims) != Some(memvault_auth::AgentRole::AgentHost)
+    if crate::api::auth::caller_role(&state, &auth.claims)
+        != Some(memvault_auth::AgentRole::AgentHost)
     {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -378,8 +379,8 @@ pub async fn revoke_grant(
     Path(grant_cid_hex): Path<String>,
     Json(req): Json<RevokeGrantRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let grant_cid = hex::decode(&grant_cid_hex)
-        .map_err(|_| ApiError::bad_request("invalid grant cid hex"))?;
+    let grant_cid =
+        hex::decode(&grant_cid_hex).map_err(|_| ApiError::bad_request("invalid grant cid hex"))?;
     let rev_cid = state
         .client
         .revoke_grant(&grant_cid, &req.reason)
@@ -394,12 +395,22 @@ pub async fn revoke_grant(
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum IssueGrantAudience {
-    Cluster { cluster_id: String },
-    Peer { peer_id: String },
-    Agent { agent_id: String },
+    Cluster {
+        cluster_id: String,
+    },
+    Peer {
+        peer_id: String,
+    },
+    Agent {
+        agent_id: String,
+    },
     /// Canonical pubkey-addressed agent grant (hex ed25519 pubkey).
-    AgentKey { agent_pubkey: String },
-    Role { role: String },
+    AgentKey {
+        agent_pubkey: String,
+    },
+    Role {
+        role: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,16 +441,15 @@ pub async fn issue_grant(
 
     let audience = match req.audience {
         IssueGrantAudience::Cluster { cluster_id } => {
-            let bytes = hex::decode(&cluster_id)
-                .map_err(|_| ApiError::bad_request("cluster_id hex"))?;
+            let bytes =
+                hex::decode(&cluster_id).map_err(|_| ApiError::bad_request("cluster_id hex"))?;
             let arr: [u8; 32] = bytes
                 .try_into()
                 .map_err(|_| ApiError::bad_request("cluster_id must be 32 bytes"))?;
             memvault_auth::GrantAudience::Cluster(memvault_core::ClusterId(arr))
         }
         IssueGrantAudience::Peer { peer_id } => {
-            let bytes = hex::decode(&peer_id)
-                .map_err(|_| ApiError::bad_request("peer_id hex"))?;
+            let bytes = hex::decode(&peer_id).map_err(|_| ApiError::bad_request("peer_id hex"))?;
             memvault_auth::GrantAudience::Peer(memvault_core::PeerId(bytes))
         }
         IssueGrantAudience::Agent { .. } => {
@@ -462,9 +472,7 @@ pub async fn issue_grant(
                 "service" => memvault_auth::AgentRole::Service,
                 "admin" => memvault_auth::AgentRole::Admin,
                 other => {
-                    return Err(ApiError::bad_request(format!(
-                        "unknown role: {other}"
-                    )));
+                    return Err(ApiError::bad_request(format!("unknown role: {other}")));
                 }
             };
             memvault_auth::GrantAudience::Role(parsed)

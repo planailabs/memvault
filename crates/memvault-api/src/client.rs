@@ -368,25 +368,17 @@ pub trait MemvaultClient: Send + Sync {
     /// Fetch a document by id, verifying it satisfies the scope (retraction +
     /// bucket + view). Returns `Ok(None)` if absent or out of scope. Supersedes
     /// the `*_ex` by-id getters. Default impl honours only retraction.
-    async fn get_doc_scoped(
-        &self,
-        id: &DocId,
-        scope: &QueryScope,
-    ) -> Result<Option<Document>> {
-        self.get_doc(id).await.map(|d| {
-            d.filter(|_| scope.retraction.includes_active())
-        })
+    async fn get_doc_scoped(&self, id: &DocId, scope: &QueryScope) -> Result<Option<Document>> {
+        self.get_doc(id)
+            .await
+            .map(|d| d.filter(|_| scope.retraction.includes_active()))
     }
 
     /// Fetch an entity by id, verifying it satisfies the scope.
-    async fn get_entity_scoped(
-        &self,
-        id: &EntityId,
-        scope: &QueryScope,
-    ) -> Result<Option<Entity>> {
-        self.get_entity(id).await.map(|e| {
-            e.filter(|_| scope.retraction.includes_active())
-        })
+    async fn get_entity_scoped(&self, id: &EntityId, scope: &QueryScope) -> Result<Option<Entity>> {
+        self.get_entity(id)
+            .await
+            .map(|e| e.filter(|_| scope.retraction.includes_active()))
     }
 
     /// Resolve a node's label, verifying it satisfies the scope.
@@ -491,11 +483,7 @@ pub trait MemvaultClient: Send + Sync {
     async fn agent_rename(&self, agent_pubkey: &[u8; 32], new_label: &str) -> Result<()>;
 
     /// Bind a bucket to a cluster.
-    async fn bucket_bind(
-        &self,
-        bucket_id: &BucketId,
-        cluster_id: &ClusterId,
-    ) -> Result<()>;
+    async fn bucket_bind(&self, bucket_id: &BucketId, cluster_id: &ClusterId) -> Result<()>;
 
     /// Attach a private bucket to the cluster (flips private_to_peer to None, triggers gossip).
     async fn bucket_attach(&self, id: &BucketId) -> Result<()>;
@@ -514,11 +502,7 @@ pub trait MemvaultClient: Send + Sync {
     /// ever ensure *its own* bucket. `LocalClient` uses the passed pubkey
     /// directly. (The former name-string `ensure_agent_bucket(agent_id)` and
     /// the HTTP-only `ensure_agent_bucket_for_pubkey` are folded into this.)
-    async fn ensure_agent_bucket(
-        &self,
-        agent_pubkey: &[u8],
-        name_hint: &str,
-    ) -> Result<BucketId>;
+    async fn ensure_agent_bucket(&self, agent_pubkey: &[u8], name_hint: &str) -> Result<BucketId>;
 
     /// List capability grants scoped to a bucket.
     async fn bucket_grants_list(&self, bucket_id: &BucketId) -> Result<Vec<GrantInfo>>;
@@ -542,11 +526,7 @@ pub trait MemvaultClient: Send + Sync {
     /// Revoke a previously-issued grant by its CID. Returns the
     /// revocation block CID. Signed with the same authority that signed
     /// the original grant (admin / owner-agent / node).
-    async fn revoke_grant(
-        &self,
-        grant_cid: &[u8],
-        reason: &str,
-    ) -> Result<Vec<u8>>;
+    async fn revoke_grant(&self, grant_cid: &[u8], reason: &str) -> Result<Vec<u8>>;
 
     // -- Sharing --
 

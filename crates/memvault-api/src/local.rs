@@ -8,9 +8,9 @@ use tokio::sync::RwLock;
 
 use memvault_attach::{self, AttachmentManifest};
 use memvault_auth::TokenRole;
+use memvault_core::RetractionMode;
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility, cid_from_bytes};
 use memvault_doc::{Document, Edge, Entity, Op, TextPatch};
-use memvault_core::RetractionMode;
 use memvault_query::{AuditQuery, AuditRecord, QuotaManager, SearchHit, TantivyIndex, query_audit};
 use memvault_store::{EnvelopeMeta, MemvaultStore};
 
@@ -295,7 +295,11 @@ fn safe_extract_text_with(
         return ExtractionResult::Unsupported;
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        registry.extract(data, mime_type, &memvault_extract::ExtractionHints::default())
+        registry.extract(
+            data,
+            mime_type,
+            &memvault_extract::ExtractionHints::default(),
+        )
     })) {
         Ok(Ok(extracted)) => ExtractionResult::Ok {
             text: extracted.text,
@@ -1068,12 +1072,7 @@ impl LocalClient {
     /// self-trust applies — a standalone node still serves its own agents.
     pub fn is_attesting_node_trusted(&self, node_pubkey: &[u8; 32]) -> bool {
         // Self-trust.
-        if self
-            .node_verifying_key()
-            .map(|k| k.to_bytes())
-            .as_ref()
-            == Some(node_pubkey)
-        {
+        if self.node_verifying_key().map(|k| k.to_bytes()).as_ref() == Some(node_pubkey) {
             return true;
         }
         // A revoked node never confers trust.
@@ -1095,8 +1094,7 @@ impl LocalClient {
             let Ok(Some(bytes)) = self.store.get_block(&cid) else {
                 continue;
             };
-            let Ok(att) =
-                serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
+            let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
             else {
                 continue;
             };
@@ -1132,8 +1130,7 @@ impl LocalClient {
             let Ok(Some(bytes)) = self.store.get_block(&cid) else {
                 continue;
             };
-            let Ok(att) =
-                serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&bytes)
+            let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&bytes)
             else {
                 continue;
             };
@@ -1169,9 +1166,7 @@ impl LocalClient {
         }
         let info = self.bucket_info_sync(bucket_id).ok().flatten()?;
         // 2. Held owner-agent identity (this node hosts the owner).
-        if let (Some(owner_pk), Some(id)) =
-            (info.owner_agent_pubkey, self.agent_identity.get())
-        {
+        if let (Some(owner_pk), Some(id)) = (info.owner_agent_pubkey, self.agent_identity.get()) {
             if id.verifying_key.to_bytes() == owner_pk {
                 return Some((id.signing_key.clone(), owner_pk));
             }
@@ -1471,9 +1466,9 @@ impl LocalClient {
     ) -> Result<Vec<u8>> {
         let now_ns = memvault_core::wall_ns();
         let cluster = memvault_core::ClusterId(self.cluster_id_arr()?);
-        let old = self.admin_signing_key_at_ns(now_ns).ok_or_else(|| {
-            ApiError::Other("no valid admin signing key — cannot rotate".into())
-        })?;
+        let old = self
+            .admin_signing_key_at_ns(now_ns)
+            .ok_or_else(|| ApiError::Other("no valid admin signing key — cannot rotate".into()))?;
         let old_pubkey = old.verifying_key().to_bytes();
         let new_pubkey = new_signing_key.verifying_key().to_bytes();
         if new_pubkey == old_pubkey {
@@ -1485,7 +1480,14 @@ impl LocalClient {
         // the same instant — passes the `admitted_at <= pop_not_after` check).
         let pop = memvault_auth::sign_admin_pop(&new_signing_key, &cluster, now_ns);
         let adm = memvault_auth::sign_admin_admission(
-            &old, new_pubkey, cluster.clone(), now_ns, now_ns, now_ns, None, pop,
+            &old,
+            new_pubkey,
+            cluster.clone(),
+            now_ns,
+            now_ns,
+            now_ns,
+            None,
+            pop,
         )
         .map_err(|e| ApiError::Other(format!("sign rotation admission: {e}")))?;
         let cid = crate::sigchain::publish_admin_admission(self, &adm)?;
@@ -1677,11 +1679,7 @@ impl LocalClient {
     /// Revoke a node. Requires the admin signing key. Persists as a sigchain
     /// block; on next scan, downstream verifiers transitively reject every
     /// JWT chained through that node.
-    pub fn revoke_node(
-        &self,
-        node_pubkey: [u8; 32],
-        reason: impl Into<String>,
-    ) -> Result<Vec<u8>> {
+    pub fn revoke_node(&self, node_pubkey: [u8; 32], reason: impl Into<String>) -> Result<Vec<u8>> {
         let admin_sk = self
             .admin_signing_key()
             .ok_or_else(|| ApiError::Other("no admin signing key configured".into()))?;
@@ -1867,13 +1865,7 @@ impl LocalClient {
     ) -> Result<memvault_core::BucketId> {
         let bucket_id = crate::rebuild::deterministic_agent_bucket_id(agent_pubkey);
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
-        if self
-            .store
-            .get_bucket(&bucket_id.0)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        if self.store.get_bucket(&bucket_id.0).ok().flatten().is_some() {
             // Bucket already exists. Make sure it's bound to the current
             // cluster — covers the pre-genesis-then-genesis case where
             // the BucketDecl landed before cluster_id was set, and
@@ -2002,7 +1994,7 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
-                    ..Default::default()
+            ..Default::default()
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -2029,10 +2021,7 @@ impl LocalClient {
     /// A held admin signing secret that is valid *at* `now_ns`, preferring
     /// the anchor key. Used when signing new admin operations so we never
     /// sign with a key that's outside its validity window.
-    pub fn admin_signing_key_at_ns(
-        &self,
-        now_ns: u64,
-    ) -> Option<ed25519_dalek::SigningKey> {
+    pub fn admin_signing_key_at_ns(&self, now_ns: u64) -> Option<ed25519_dalek::SigningKey> {
         let held = self.held_admin_keys.read().ok()?;
         let state = self.admin_key_state.read().ok()?;
         // Prefer the anchor if we hold it and it's valid.
@@ -2086,9 +2075,7 @@ impl LocalClient {
     /// that the JWT verifier already does, so writes still attribute
     /// correctly.
     pub fn agent_attestation_cid(&self) -> Option<&[u8]> {
-        self.agent_attestation_cid_cache
-            .get()
-            .map(|v| v.as_slice())
+        self.agent_attestation_cid_cache.get().map(|v| v.as_slice())
     }
 
     /// Cache the bound agent's attestation CID. Called by
@@ -2212,10 +2199,7 @@ impl LocalClient {
     /// `bucket_get` trait method but avoids the executor — used by
     /// callers that already hold a `LocalClient` reference inside a
     /// sync context (e.g. ACL checks).
-    pub fn bucket_info_sync(
-        &self,
-        id: &BucketId,
-    ) -> Result<Option<crate::types::BucketInfo>> {
+    pub fn bucket_info_sync(&self, id: &BucketId) -> Result<Option<crate::types::BucketInfo>> {
         let decl_cid = match self.store.get_bucket(&id.0)? {
             Some(c) => c,
             None => return Ok(None),
@@ -2649,9 +2633,10 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
-                    ..Default::default()
+            ..Default::default()
         };
-        self.store.insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
+        self.store
+            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
         Ok(())
     }
 
@@ -2671,10 +2656,7 @@ impl LocalClient {
     /// Extract text + links from a source (attachment or document), cache
     /// the result in the blockstore as an `"extraction"` annotation, and
     /// return the extracted text if successful.
-    pub(crate) fn extract_source_and_cache(
-        &self,
-        source: ExtractionSource<'_>,
-    ) -> Option<String> {
+    pub(crate) fn extract_source_and_cache(&self, source: ExtractionSource<'_>) -> Option<String> {
         let mime_type = source.mime();
         tracing::debug!(mime_type, target = %source.annotation_target(), "extracting text");
         // Check cache first.
@@ -2835,8 +2817,7 @@ impl LocalClient {
     fn edges_of_sync(&self, node: &NodeRef) -> Result<Vec<(NodeRef, Edge)>> {
         let label = node.tag_label();
         let mut results = Vec::new();
-        let mut removed_ids: std::collections::HashSet<EdgeId> =
-            std::collections::HashSet::new();
+        let mut removed_ids: std::collections::HashSet<EdgeId> = std::collections::HashSet::new();
 
         let source_cids = self
             .store
@@ -2916,7 +2897,11 @@ impl LocalClient {
     ) -> Option<ExtractionResult> {
         let target = source.annotation_target();
         let legacy_target = source.legacy_target();
-        self.load_cached_extraction_by_targets(&target, legacy_target.as_deref(), source.cache_key())
+        self.load_cached_extraction_by_targets(
+            &target,
+            legacy_target.as_deref(),
+            source.cache_key(),
+        )
     }
 
     /// Load cached extraction result.
@@ -2936,7 +2921,9 @@ impl LocalClient {
         manifest_cid: &[u8],
     ) -> Option<ExtractionResult> {
         // Kept for diff continuity — original implementation below.
-        let legacy_target = legacy_target_attachment.map(|s| s.to_string()).unwrap_or_default();
+        let legacy_target = legacy_target_attachment
+            .map(|s| s.to_string())
+            .unwrap_or_default();
 
         // Try new unified annotation format first, then legacy manifest_update.
         let mut ann_cids = self.store.query_by_tag("_ann", &target, 0, 10).ok()?;
@@ -2962,10 +2949,7 @@ impl LocalClient {
             // Unified annotation format — pull `data` via the view first;
             // fall back to the legacy top-level layout if the field is
             // absent.
-            let data_field_owned = view
-                .field("data")
-                .cloned()
-                .unwrap_or_else(|| val.clone());
+            let data_field_owned = view.field("data").cloned().unwrap_or_else(|| val.clone());
             let data_field = &data_field_owned;
 
             if let Some(err) = data_field.get("extraction_error").and_then(|v| v.as_str()) {
@@ -3194,7 +3178,11 @@ impl LocalClient {
                 serde_json::json!({ "start_ms": s.start_ms, "end_ms": s.end_ms, "text": text })
             })
             .collect();
-        let kind = if mime.starts_with("audio/") { "transcript" } else { "ocr" };
+        let kind = if mime.starts_with("audio/") {
+            "transcript"
+        } else {
+            "ocr"
+        };
         let extractor = format!("{}@{}", extracted.extractor, extracted.extractor_version);
 
         let target = format!("file:{}", hex::encode(manifest_cid));
@@ -3211,7 +3199,8 @@ impl LocalClient {
             }),
         );
 
-        self.reindex_attachment_text(manifest_cid, &extracted.text).await;
+        self.reindex_attachment_text(manifest_cid, &extracted.text)
+            .await;
     }
 
     /// Persist a media extraction failure so the cluster converges on the
@@ -3265,13 +3254,18 @@ impl LocalClient {
                         .iter()
                         .filter_map(|t| {
                             let pair = t.as_array()?;
-                            Some((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()))
+                            Some((
+                                pair.first()?.as_str()?.to_string(),
+                                pair.get(1)?.as_str()?.to_string(),
+                            ))
                         })
                         .collect();
                 }
                 break;
             }
-            let bucket_hex = self.inferred_attachment_bucket(manifest_cid).map(hex::encode);
+            let bucket_hex = self
+                .inferred_attachment_bucket(manifest_cid)
+                .map(hex::encode);
             (filename, mime_type, tags, bucket_hex)
         };
 
@@ -3307,9 +3301,7 @@ impl LocalClient {
 
     /// Rebuild all derived state if the blockstore version is outdated.
     /// Rebuild derived state if blockstore version is outdated (sync).
-    pub fn rebuild_if_needed(
-        &self,
-    ) -> Result<Option<crate::rebuild::RebuildReport>> {
+    pub fn rebuild_if_needed(&self) -> Result<Option<crate::rebuild::RebuildReport>> {
         crate::rebuild::rebuild_if_needed(self)
     }
 
@@ -3493,10 +3485,12 @@ impl LocalClient {
                 Some((filename, mime, tags, bucket_hex))
             })?;
             // Cached extraction only (no re-extraction on the read path).
-            let text = self.load_cached_extraction(&manifest_cid).and_then(|r| match r {
-                ExtractionResult::Ok { text, .. } => Some(text),
-                _ => None,
-            });
+            let text = self
+                .load_cached_extraction(&manifest_cid)
+                .and_then(|r| match r {
+                    ExtractionResult::Ok { text, .. } => Some(text),
+                    _ => None,
+                });
             Some(PreparedIndex::Attachment {
                 manifest_cid,
                 filename,
@@ -3981,11 +3975,17 @@ impl LocalClient {
         let fetch = limit.saturating_mul(4).max(limit);
         let (hits, view_set) = {
             let idx = self.index.read().await;
-            let view_set: Option<std::collections::HashSet<String>> = view_tags
-                .as_ref()
-                .map(|t| idx.members_of_view_mode(t, scope.retraction).into_iter().collect());
-            let hits =
-                idx.search_unified_mode(query, scope.entity_kind.as_deref(), scope.retraction, fetch);
+            let view_set: Option<std::collections::HashSet<String>> = view_tags.as_ref().map(|t| {
+                idx.members_of_view_mode(t, scope.retraction)
+                    .into_iter()
+                    .collect()
+            });
+            let hits = idx.search_unified_mode(
+                query,
+                scope.entity_kind.as_deref(),
+                scope.retraction,
+                fetch,
+            );
             (hits, view_set)
         };
         let mut out = Vec::new();
@@ -4096,9 +4096,9 @@ impl LocalClient {
                 .inferred_bucket_for_node_id(&nid)
                 .and_then(|b| b.try_into().ok());
             if nb == Some(bucket.0) {
-                let _ = self
-                    .store
-                    .scope_member_upsert(&vbsid, &nid, retracted_set.contains(&nid), 0);
+                let _ =
+                    self.store
+                        .scope_member_upsert(&vbsid, &nid, retracted_set.contains(&nid), 0);
             }
         }
         self.store.scope_register(
@@ -4140,7 +4140,11 @@ impl LocalClient {
         // least one CID in the bucket. The `_manifest` tag's label is the hex
         // manifest CID — the file node's surrogate id.
         let mut members: Vec<String> = Vec::new();
-        for (scope, prefix) in [("doc", "doc:"), ("entity", "entity:"), ("_manifest", "file:")] {
+        for (scope, prefix) in [
+            ("doc", "doc:"),
+            ("entity", "entity:"),
+            ("_manifest", "file:"),
+        ] {
             for label in self.store.query_unique_labels(scope, usize::MAX)? {
                 let cids = self
                     .store
@@ -4231,14 +4235,13 @@ impl LocalClient {
         // The RESULT is still capped at `limit` below (pagination). See
         // standards: exhaustive-lookups.
         let scan_cap = usize::MAX;
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
-                Some(bucket_cids.into_iter().collect())
-            } else {
-                let all = self.accessible_bucket_cids(scan_cap)?;
-                if all.is_empty() { None } else { Some(all) }
-            };
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
+            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
+            Some(bucket_cids.into_iter().collect())
+        } else {
+            let all = self.accessible_bucket_cids(scan_cap)?;
+            if all.is_empty() { None } else { Some(all) }
+        };
 
         let cids = if let Some((ref scope, ref label)) = tag_filter {
             self.store.query_by_tag(scope, label, 0, limit * 5)?
@@ -4341,14 +4344,13 @@ impl LocalClient {
         // The RESULT is still capped at `limit` below (pagination). See
         // standards: exhaustive-lookups.
         let scan_cap = usize::MAX;
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> =
-            if let Some(bid) = bucket {
-                let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
-                Some(bucket_cids.into_iter().collect())
-            } else {
-                let all = self.accessible_bucket_cids(scan_cap)?;
-                if all.is_empty() { None } else { Some(all) }
-            };
+        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
+            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
+            Some(bucket_cids.into_iter().collect())
+        } else {
+            let all = self.accessible_bucket_cids(scan_cap)?;
+            if all.is_empty() { None } else { Some(all) }
+        };
 
         // When scoped to a bucket, the global `limit` cap on labels would
         // wrongly drop entities (including the per-bucket VFS root, which
@@ -4384,10 +4386,7 @@ impl LocalClient {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&id_bytes);
             let entity_id = EntityId(arr);
-            if let Ok(Some(entity)) = self
-                .get_entity_async(&entity_id, include_retracted)
-                .await
-            {
+            if let Ok(Some(entity)) = self.get_entity_async(&entity_id, include_retracted).await {
                 entities.push(entity);
             }
         }
@@ -4523,7 +4522,9 @@ impl LocalClient {
                     .iter()
                     .all(|(s, l)| tags.iter().any(|(ts, tl)| ts == s && tl == l));
             if matches {
-                let _ = self.store.scope_member_upsert(&vbsid, node_id, retracted, 0);
+                let _ = self
+                    .store
+                    .scope_member_upsert(&vbsid, node_id, retracted, 0);
             } else {
                 let _ = self.store.scope_member_remove(&vbsid, node_id);
             }
@@ -4900,11 +4901,7 @@ impl LocalClient {
                 {
                     continue;
                 }
-                if let Some(alias) = edge
-                    .props
-                    .get("pending_alias")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(alias) = edge.props.get("pending_alias").and_then(|v| v.as_str()) {
                     out.push((node.clone(), alias.to_string()));
                 }
             }
@@ -4977,15 +4974,10 @@ impl LocalClient {
         // existing readers (`list_docs` extracting `DocCreate`, etc.).
         // `cluster_id` is conveyed via `meta` for indexing rather than
         // a top-level envelope field.
-        let payload = serde_json::to_value(op)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
-            payload,
-            tags,
-            vis.clone(),
-            wall_ns,
-            bucket_id.as_deref(),
-        )?;
+        let payload =
+            serde_json::to_value(op).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let (cid_bytes, envelope_bytes) =
+            self.build_signed_envelope(payload, tags, vis.clone(), wall_ns, bucket_id.as_deref())?;
 
         let meta = EnvelopeMeta {
             author: self.effective_author(),
@@ -5077,9 +5069,9 @@ impl LocalClient {
         // attested). The signer pubkey is recorded in the grant and bound
         // into its signature, so ACL enforcement can verify both the
         // signature and the issuer's authority.
-        let (signer, admin_pubkey) = self.pick_grant_signer(bucket_id).ok_or_else(|| {
-            ApiError::Other("no grant-signing authority for this bucket".into())
-        })?;
+        let (signer, admin_pubkey) = self
+            .pick_grant_signer(bucket_id)
+            .ok_or_else(|| ApiError::Other("no grant-signing authority for this bucket".into()))?;
 
         // `saturating_*` so callers can pass `u64::MAX` for "never expires"
         // without wrapping.
@@ -5145,7 +5137,7 @@ impl LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(bucket_id.0.to_vec()),
-                    ..Default::default()
+            ..Default::default()
         };
         self.store.insert_envelope(&cid_bytes, &grant_json, &meta)?;
 
@@ -5162,7 +5154,9 @@ impl LocalClient {
     /// Returns the stored grant CID.
     pub fn submit_signed_grant(&self, grant: &memvault_auth::Grant) -> Result<Vec<u8>> {
         if grant.is_legacy_unsigned() || grant.verify_admin_signature().is_err() {
-            return Err(ApiError::Forbidden("grant signature is not authentic".into()));
+            return Err(ApiError::Forbidden(
+                "grant signature is not authentic".into(),
+            ));
         }
         // Exactly one bucket scope, so authority is unambiguous.
         let bucket_id = match grant.bucket_scopes.as_slice() {
@@ -5228,7 +5222,9 @@ impl LocalClient {
         let mut grants = Vec::new();
         for cid in cids {
             if let Ok(Some(data)) = self.store.get_block(&cid) {
-                if let Some(grant) = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&data) {
+                if let Some(grant) =
+                    memvault_store::deserialize_block_as::<memvault_auth::Grant>(&data)
+                {
                     grants.push((cid, grant));
                 }
             }
@@ -5283,7 +5279,10 @@ impl LocalClient {
         }
         if fixed > 0 {
             self.bump_alias_generation();
-            tracing::info!(repaired = fixed, "reindexed previously-untagged bucket merges");
+            tracing::info!(
+                repaired = fixed,
+                "reindexed previously-untagged bucket merges"
+            );
         }
         Ok(fixed)
     }
@@ -5746,9 +5745,7 @@ impl LocalClient {
         let mut cids = Vec::new();
         for source in sources {
             if source.0 == canonical.0 {
-                return Err(ApiError::Other(
-                    "cannot merge a bucket into itself".into(),
-                ));
+                return Err(ApiError::Other("cannot merge a bucket into itself".into()));
             }
             // The same issuer must also be authorised on the source bucket,
             // so an owner of the canonical can't annex a bucket they don't
@@ -5889,11 +5886,7 @@ impl LocalClient {
     /// require a second `GrantRevocation` variant signed by the owner
     /// agent's key + a verifier path that looks up the bucket's
     /// `owner_agent` — not implemented yet.
-    pub async fn revoke_bucket_grant(
-        &self,
-        grant_cid: &[u8],
-        reason: &str,
-    ) -> Result<Vec<u8>> {
+    pub async fn revoke_bucket_grant(&self, grant_cid: &[u8], reason: &str) -> Result<Vec<u8>> {
         // Confirm the target actually IS a grant block in this store —
         // catches typos and prevents accidentally poisoning the
         // revocation table with an unrelated CID.
@@ -5908,13 +5901,9 @@ impl LocalClient {
                 ))
             })?;
         // Confirm the target really is a Grant block before revoking.
-        let grant = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw)
-            .ok_or_else(|| {
-                ApiError::Other(format!(
-                    "block {} is not a Grant",
-                    hex::encode(grant_cid)
-                ))
-            })?;
+        let grant = memvault_store::deserialize_block_as::<memvault_auth::Grant>(&raw).ok_or_else(
+            || ApiError::Other(format!("block {} is not a Grant", hex::encode(grant_cid))),
+        )?;
 
         // Sign the revocation with whatever authority this node holds for
         // the grant's bucket (admin / owner agent / node) — symmetric with
@@ -5924,9 +5913,9 @@ impl LocalClient {
             .first()
             .cloned()
             .unwrap_or_else(|| BucketId([0u8; 32]));
-        let (signer, _signer_pk) = self.pick_grant_signer(&bucket_for_signer).ok_or_else(|| {
-            ApiError::Other("no grant-revoking authority for this bucket".into())
-        })?;
+        let (signer, _signer_pk) = self
+            .pick_grant_signer(&bucket_for_signer)
+            .ok_or_else(|| ApiError::Other("no grant-revoking authority for this bucket".into()))?;
 
         let target_cid = memvault_core::cid_from_bytes(&raw);
         let revocation = memvault_auth::sign_grant_revocation(&signer, target_cid, reason)
@@ -5955,11 +5944,7 @@ impl LocalClient {
         Ok(rev_cid_bytes)
     }
 
-    pub async fn adopt_doc_into_bucket(
-        &self,
-        doc_id: &DocId,
-        bucket: &BucketId,
-    ) -> Result<bool> {
+    pub async fn adopt_doc_into_bucket(&self, doc_id: &DocId, bucket: &BucketId) -> Result<bool> {
         if self.inferred_doc_bucket(doc_id).is_some() {
             return Ok(false);
         }
@@ -5983,7 +5968,6 @@ impl LocalClient {
         self.store_op(&op, &tags, &Visibility::Internal, Some(bucket))?;
         Ok(true)
     }
-
 }
 
 impl Drop for LocalClient {
@@ -6137,7 +6121,9 @@ impl MemvaultClient for LocalClient {
                 // include_active is always true; include_retracted gates the
                 // retracted partition. Unlimited at the store level — we filter
                 // to docs and page at `limit` after.
-                let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+                let members = self
+                    .store
+                    .scope_members(&bsid, true, include_retracted, 0)?;
                 for (node_id, _wall) in &members {
                     if summaries.len() >= limit {
                         break 'outer;
@@ -6207,8 +6193,8 @@ impl MemvaultClient for LocalClient {
         };
 
         // Encode manifest and store
-        let manifest_bytes =
-            serde_ipld_dagcbor::to_vec(&manifest).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let manifest_bytes = serde_ipld_dagcbor::to_vec(&manifest)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let manifest_cid = cid_from_bytes(&manifest_bytes);
         let manifest_cid_bytes = manifest_cid.to_bytes();
         self.store.put_block(&manifest_cid_bytes, &manifest_bytes)?;
@@ -6227,7 +6213,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id,
-                    ..Default::default()
+            ..Default::default()
         };
         meta.tags
             .push(("_manifest".to_string(), hex::encode(&manifest_cid_bytes)));
@@ -6347,7 +6333,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn read_extraction(&self, manifest_cid: &[u8]) -> Result<crate::types::ExtractionInfo> {
-        use crate::extraction::{classify_mime, ExtractOp, MediaClass};
+        use crate::extraction::{ExtractOp, MediaClass, classify_mime};
         use crate::types::{ExtractionInfo, MediaJobStatus};
 
         // The durable record wins — locally produced or synced from a peer.
@@ -6417,7 +6403,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn read_page_render(&self, manifest_cid: &[u8]) -> Result<crate::types::PageRenderInfo> {
-        use crate::extraction::{classify_mime, ExtractOp, MediaClass};
+        use crate::extraction::{ExtractOp, MediaClass, classify_mime};
         use crate::types::{MediaJobStatus, PageRenderInfo};
 
         if let Some(data) = self.load_page_render_annotation(manifest_cid) {
@@ -6436,7 +6422,10 @@ impl MemvaultClient for LocalClient {
             error,
         };
 
-        if !matches!(class, MediaClass::Pdf | MediaClass::Image | MediaClass::Office) {
+        if !matches!(
+            class,
+            MediaClass::Pdf | MediaClass::Image | MediaClass::Office
+        ) {
             return Ok(empty(MediaJobStatus::Unsupported, None));
         }
 
@@ -6703,7 +6692,9 @@ impl MemvaultClient for LocalClient {
             'outer: for b in &buckets {
                 self.ensure_bucket_partition(b).await?;
                 let bsid = memvault_core::bucket_scope_id(b);
-                let members = self.store.scope_members(&bsid, true, include_retracted, 0)?;
+                let members = self
+                    .store
+                    .scope_members(&bsid, true, include_retracted, 0)?;
                 for (node_id, _wall) in &members {
                     if entities.len() >= limit {
                         break 'outer;
@@ -6720,8 +6711,9 @@ impl MemvaultClient for LocalClient {
                     if !seen.insert(arr) {
                         continue;
                     }
-                    if let Ok(Some(entity)) =
-                        self.get_entity_async(&EntityId(arr), include_retracted).await
+                    if let Ok(Some(entity)) = self
+                        .get_entity_async(&EntityId(arr), include_retracted)
+                        .await
                     {
                         entities.push(entity);
                     }
@@ -6734,7 +6726,8 @@ impl MemvaultClient for LocalClient {
             }
             return Ok(entities);
         }
-        self.list_entities_scan(limit, bucket, include_retracted).await
+        self.list_entities_scan(limit, bucket, include_retracted)
+            .await
     }
 
     // -- Links (cross-type edges) --
@@ -7021,7 +7014,11 @@ impl MemvaultClient for LocalClient {
         // Accessible (all-buckets) / pre-genesis: scan all index rows. A global
         // cap drops nodes of a bucket outside the global first-N, so fetch all
         // when bucketed (see standards/bucket-scoping.md).
-        let fetch = if bucket.is_some() { usize::MAX } else { limit * 2 };
+        let fetch = if bucket.is_some() {
+            usize::MAX
+        } else {
+            limit * 2
+        };
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
         let all: Vec<(String, String, String, Vec<(String, String)>)> = idx
@@ -7039,10 +7036,12 @@ impl MemvaultClient for LocalClient {
         let accessible: Vec<Vec<u8>> = buckets.into_iter().map(|(id, _)| id).collect();
         Ok(all
             .into_iter()
-            .filter(|(node_id, _, _, _)| match self.inferred_bucket_for_node_id(node_id) {
-                Some(node_bucket) => accessible.iter().any(|b| *b == node_bucket),
-                None => false,
-            })
+            .filter(
+                |(node_id, _, _, _)| match self.inferred_bucket_for_node_id(node_id) {
+                    Some(node_bucket) => accessible.iter().any(|b| *b == node_bucket),
+                    None => false,
+                },
+            )
             .take(limit)
             .collect())
     }
@@ -7243,7 +7242,9 @@ impl MemvaultClient for LocalClient {
                 continue;
             }
             if let Some(data) = self.store.get_block(&cid_bytes)? {
-                if let Some(mut view) = memvault_store::deserialize_block_as::<crate::types::View>(&data) {
+                if let Some(mut view) =
+                    memvault_store::deserialize_block_as::<crate::types::View>(&data)
+                {
                     view.cid = label.clone();
                     views.push(view);
                 }
@@ -7261,8 +7262,8 @@ impl MemvaultClient for LocalClient {
         // payload" rather than "audit log of authored events". Don't
         // route this through Signed<T> without coordinated reader
         // changes in list_views / get_view / delete_view.
-        let view_bytes =
-            serde_ipld_dagcbor::to_vec(&view).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let view_bytes = serde_ipld_dagcbor::to_vec(&view)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let cid = cid_from_bytes(&view_bytes);
         let cid_bytes = cid.to_bytes();
         let cid_hex = hex::encode(&cid_bytes);
@@ -7274,7 +7275,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: None,
-                    ..Default::default()
+            ..Default::default()
         };
         self.store.insert_envelope(&cid_bytes, &view_bytes, &meta)?;
         tracing::info!(name = %view.name, tag_count = view.tags.len(), "view created");
@@ -7327,7 +7328,6 @@ impl MemvaultClient for LocalClient {
         .await
     }
 
-
     async fn bucket_list_filtered(
         &self,
         include_merged: bool,
@@ -7352,8 +7352,7 @@ impl MemvaultClient for LocalClient {
         // so its data isn't orphaned — otherwise the merged buckets vanish
         // entirely (source hidden + canonical absent). Callers that want every
         // source pass `include_merged`.
-        let present: std::collections::HashSet<[u8; 32]> =
-            infos.iter().map(|i| i.id.0).collect();
+        let present: std::collections::HashSet<[u8; 32]> = infos.iter().map(|i| i.id.0).collect();
         infos.retain(|i| match &i.merged_into {
             Some(canonical) => !present.contains(&canonical.0),
             None => true,
@@ -7388,13 +7387,8 @@ impl MemvaultClient for LocalClient {
                 "wall_ns": wall_ns,
             }
         });
-        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
-            payload,
-            &tags,
-            Visibility::Internal,
-            wall_ns,
-            Some(&id.0),
-        )?;
+        let (cid_bytes, envelope_bytes) =
+            self.build_signed_envelope(payload, &tags, Visibility::Internal, wall_ns, Some(&id.0))?;
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
             tags,
@@ -7403,7 +7397,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
-                    ..Default::default()
+            ..Default::default()
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -7430,7 +7424,7 @@ impl MemvaultClient for LocalClient {
                             provenance: vec![],
                             cluster_id: Some(self.cluster_id.clone()),
                             bucket_id: Some(id.0.to_vec()),
-                                                    ..Default::default()
+                            ..Default::default()
                         },
                     )?;
                     self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
@@ -7530,8 +7524,7 @@ impl MemvaultClient for LocalClient {
         bucket_id: &memvault_core::BucketId,
         cluster_id: &memvault_core::ClusterId,
     ) -> Result<()> {
-        self.store
-            .bind_bucket(&bucket_id.0, &cluster_id.0)?;
+        self.store.bind_bucket(&bucket_id.0, &cluster_id.0)?;
         tracing::info!(bucket = %bucket_id, cluster = %cluster_id, "bucket bound to cluster");
         Ok(())
     }
@@ -7555,8 +7548,8 @@ impl MemvaultClient for LocalClient {
         }
 
         decl.private_to_peer = None;
-        let new_bytes =
-            serde_ipld_dagcbor::to_vec(&decl).map_err(|e| ApiError::Serialization(e.to_string()))?;
+        let new_bytes = serde_ipld_dagcbor::to_vec(&decl)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let new_cid = memvault_core::cid_from_bytes(&new_bytes);
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
@@ -7569,7 +7562,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
-                    ..Default::default()
+            ..Default::default()
         };
         self.store
             .insert_envelope(&new_cid.to_bytes(), &new_bytes, &meta)?;
@@ -7599,13 +7592,8 @@ impl MemvaultClient for LocalClient {
                 "archived_at_ns": now_ns,
             }
         });
-        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
-            payload,
-            &tags,
-            Visibility::Internal,
-            now_ns,
-            Some(&id.0),
-        )?;
+        let (cid_bytes, envelope_bytes) =
+            self.build_signed_envelope(payload, &tags, Visibility::Internal, now_ns, Some(&id.0))?;
         let meta = memvault_store::insert::EnvelopeMeta {
             author: self.effective_author(),
             tags,
@@ -7614,7 +7602,7 @@ impl MemvaultClient for LocalClient {
             provenance: vec![],
             cluster_id: Some(self.cluster_id.clone()),
             bucket_id: Some(id.0.to_vec()),
-                    ..Default::default()
+            ..Default::default()
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
@@ -7646,7 +7634,7 @@ impl MemvaultClient for LocalClient {
                             provenance: vec![],
                             cluster_id: Some(self.cluster_id.clone()),
                             bucket_id: Some(id.0.to_vec()),
-                                                    ..Default::default()
+                            ..Default::default()
                         },
                     )?;
                     self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
@@ -7735,8 +7723,8 @@ impl MemvaultClient for LocalClient {
             if let Some(admin_key) = self.admin_signing_key() {
                 // Load the proposal to get bucket/cluster info
                 if let Some(proposal_block) = self.store.get_block(proposal_cid)? {
-                    if let Ok(proposal) =
-                        memvault_store::deserialize_block(&proposal_block).ok_or_else(|| ApiError::Other("cannot parse proposal".into()))
+                    if let Ok(proposal) = memvault_store::deserialize_block(&proposal_block)
+                        .ok_or_else(|| ApiError::Other("cannot parse proposal".into()))
                     {
                         let from_bucket: Option<Vec<u8>> = proposal
                             .get("from_bucket")
@@ -7771,8 +7759,8 @@ impl MemvaultClient for LocalClient {
 
                             match trust.sign(&admin_key) {
                                 Ok(signed_trust) => {
-                                    let trust_bytes =
-                                        serde_ipld_dagcbor::to_vec(&signed_trust).unwrap_or_default();
+                                    let trust_bytes = serde_ipld_dagcbor::to_vec(&signed_trust)
+                                        .unwrap_or_default();
                                     let trust_cid = memvault_core::cid_from_bytes(&trust_bytes);
 
                                     // Store the trust in BUCKET_TRUST
@@ -7795,7 +7783,7 @@ impl MemvaultClient for LocalClient {
                                         provenance: vec![],
                                         cluster_id: Some(self.cluster_id.clone()),
                                         bucket_id: Some(bucket_bytes),
-                                                                            ..Default::default()
+                                        ..Default::default()
                                     };
                                     let _ = self.store.insert_envelope(
                                         &trust_cid.to_bytes(),
@@ -7854,11 +7842,7 @@ impl MemvaultClient for LocalClient {
             .ok_or_else(|| ApiError::Other("no legacy bucket configured".into()))
     }
 
-    async fn ensure_agent_bucket(
-        &self,
-        agent_pubkey: &[u8],
-        name_hint: &str,
-    ) -> Result<BucketId> {
+    async fn ensure_agent_bucket(&self, agent_pubkey: &[u8], name_hint: &str) -> Result<BucketId> {
         // Delegate to the inherent pubkey-keyed helper (also used by the
         // server-side HTTP handlers and the enroll path).
         LocalClient::ensure_agent_bucket_for_pubkey(self, agent_pubkey, name_hint).await

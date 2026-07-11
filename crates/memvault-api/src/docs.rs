@@ -86,9 +86,7 @@ pub fn parse_tags(tags: &[String]) -> Vec<(String, String)> {
 /// Parse a comma-separated list of `"scope:label"` tags.
 /// Entries without a colon are skipped.
 pub fn parse_tags_csv(s: &str) -> Vec<(String, String)> {
-    s.split(',')
-        .filter_map(parse_tag_filter)
-        .collect()
+    s.split(',').filter_map(parse_tag_filter).collect()
 }
 
 /// Parse a visibility string.

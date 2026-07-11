@@ -80,7 +80,11 @@ pub async fn traverse(
     crate::api::auth::enforce_node_action(&auth.claims, &params.from, memvault_auth::Action::Read)?;
     let hits = state
         .client
-        .traverse_from(&from, params.relation.as_deref(), params.max_depth.unwrap_or(2))
+        .traverse_from(
+            &from,
+            params.relation.as_deref(),
+            params.max_depth.unwrap_or(2),
+        )
         .await?;
     let results: Vec<serde_json::Value> = hits
         .into_iter()
@@ -172,9 +176,13 @@ pub async fn create_entity(
 
     if let Some(vfs_path) = &req.vfs_path {
         if let Some(bucket) = bucket_id.as_ref() {
-            if let Err(e) =
-                memvault_api::vfs::link_node_at_path(state.client.as_ref(), bucket, vfs_path, &node_id)
-                    .await
+            if let Err(e) = memvault_api::vfs::link_node_at_path(
+                state.client.as_ref(),
+                bucket,
+                vfs_path,
+                &node_id,
+            )
+            .await
             {
                 tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
             }
@@ -200,7 +208,10 @@ pub async fn get_entity(
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let entity = state
         .client
-        .get_entity_scoped(&entity_id, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
+        .get_entity_scoped(
+            &entity_id,
+            &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
+        )
         .await?
         .ok_or_else(|| ApiError::not_found("Entity not found"))?;
 
@@ -231,7 +242,11 @@ pub async fn delete_entity(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let entity_id = parse_entity_id(&id)?;
-    crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Write)?;
+    crate::api::auth::enforce_entity_action(
+        &auth.claims,
+        &entity_id,
+        memvault_auth::Action::Write,
+    )?;
     // External (validated) node retract: refuses reserved kinds (skill,
     // vfs:dir), which must be removed via their dedicated API.
     let node_id = format!("entity:{}", hex::encode(entity_id.0));
@@ -239,7 +254,9 @@ pub async fn delete_entity(
         .client
         .retract_node(&node_id, "deleted via API")
         .await?;
-    Ok(Json(serde_json::json!({ "status": "retracted", "node_id": node_id })))
+    Ok(Json(
+        serde_json::json!({ "status": "retracted", "node_id": node_id }),
+    ))
 }
 
 /// Parse an entity ID from either "entity:<hex>" or raw "<hex>" format.

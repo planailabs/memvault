@@ -61,10 +61,7 @@ static MODEL_CACHE: OnceLock<Mutex<Option<WhisperContext>>> = OnceLock::new();
 /// Run `f` with the cached model for `dir`, (re)loading it if needed. The
 /// model persists across calls in the same plugin instance. Load failures
 /// are returned as the error string; `f`'s result is passed through.
-pub fn with_model<R>(
-    dir: &str,
-    f: impl FnOnce(&mut WhisperContext) -> R,
-) -> Result<R, String> {
+pub fn with_model<R>(dir: &str, f: impl FnOnce(&mut WhisperContext) -> R) -> Result<R, String> {
     let cell = MODEL_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let cached = matches!(guard.as_ref(), Some(ctx) if ctx.dir == dir);
@@ -107,7 +104,11 @@ impl WhisperContext {
 
         let suppress_tokens: Vec<f32> = (0..config.vocab_size as u32)
             .map(|i| {
-                if config.suppress_tokens.contains(&i) { f32::NEG_INFINITY } else { 0f32 }
+                if config.suppress_tokens.contains(&i) {
+                    f32::NEG_INFINITY
+                } else {
+                    0f32
+                }
             })
             .collect();
         let suppress_tokens = Tensor::new(suppress_tokens.as_slice(), &device)
@@ -118,8 +119,9 @@ impl WhisperContext {
         let translate_token = token_id(&tokenizer, m::TRANSLATE_TOKEN)?;
         let eot_token = token_id(&tokenizer, m::EOT_TOKEN)?;
         let no_timestamps_token = token_id(&tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
-        let no_speech_token =
-            m::NO_SPEECH_TOKENS.iter().find_map(|t| tokenizer.token_to_id(t));
+        let no_speech_token = m::NO_SPEECH_TOKENS
+            .iter()
+            .find_map(|t| tokenizer.token_to_id(t));
         let multilingual = tokenizer.token_to_id("<|en|>").is_some();
 
         Ok(Self {
@@ -219,7 +221,10 @@ impl WhisperContext {
             // cache for this window's audio features. Self-attention K/V are
             // recomputed from the full token prefix each step, so feeding
             // the whole sequence is correct (as in the candle example).
-            let ys = self.model.decoder.forward(&tokens_t, audio_features, i == 0)?;
+            let ys = self
+                .model
+                .decoder
+                .forward(&tokens_t, audio_features, i == 0)?;
             if i == 0 {
                 if let Some(ns) = self.no_speech_token {
                     let logits = self.model.decoder.final_linear(&ys.i(..1)?)?.i(0)?.i(0)?;
@@ -246,8 +251,9 @@ impl WhisperContext {
             if next_token == self.eot_token || tokens.len() > self.config.max_target_positions {
                 return Ok(true);
             }
-            let prob =
-                softmax(&logits, D::Minus1)?.i(next_token as usize)?.to_scalar::<f32>()? as f64;
+            let prob = softmax(&logits, D::Minus1)?
+                .i(next_token as usize)?
+                .to_scalar::<f32>()? as f64;
             *sum_logprob += prob.ln();
             Ok(false)
         };
@@ -265,6 +271,10 @@ impl WhisperContext {
             .decode(&tokens, true)
             .map_err(|e| format!("token decoding failed: {e}"))?;
         let avg_logprob = sum_logprob / tokens.len() as f64;
-        Ok(WindowDecode { text, avg_logprob, no_speech_prob })
+        Ok(WindowDecode {
+            text,
+            avg_logprob,
+            no_speech_prob,
+        })
     }
 }

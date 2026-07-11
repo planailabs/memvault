@@ -175,10 +175,7 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
         let mut author_hex = String::new();
         let mut agent_id: Option<String> = None;
         if let Some(local) = local.as_ref() {
-            if let Ok(env_cids) = local
-                .store()
-                .query_by_tag("_manifest", &mcid_hex, 0, 1)
-            {
+            if let Ok(env_cids) = local.store().query_by_tag("_manifest", &mcid_hex, 0, 1) {
                 if let Some(env_cid) = env_cids.into_iter().next() {
                     if let Ok(Some(bytes)) = local.store().get_block(&env_cid) {
                         if let Some(view) = memvault_store::EnvelopeView::parse(&bytes) {
@@ -187,8 +184,7 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
                                 author_hex = hex::encode(&author);
                             }
                             if let Some(att_cid) = view.agent_attestation_cid() {
-                                let index =
-                                    crate::api::agents::build_agent_id_index(local);
+                                let index = crate::api::agents::build_agent_id_index(local);
                                 agent_id = index.get(&att_cid).cloned();
                             }
                         }
@@ -333,7 +329,10 @@ fn FileView(data: FileData) -> Element {
         .as_ref()
         .and_then(|e| e.text.clone())
         .or_else(|| data.extracted_text.clone());
-    let segments = ext.as_ref().and_then(|e| e.segments.clone()).unwrap_or_default();
+    let segments = ext
+        .as_ref()
+        .and_then(|e| e.segments.clone())
+        .unwrap_or_default();
     let page_count = pages.as_ref().map(|p| p.page_count).unwrap_or(0);
     let show_pages_link = pages
         .as_ref()

@@ -15,8 +15,8 @@ use dioxus::prelude::*;
 
 use super::controls::GraphSettings;
 use super::explorer::{
-    display_kind_for, expand_node, get_node_detail, kind_halo_color, kind_svg_palette, NodeDetail,
-    Viewport,
+    NodeDetail, Viewport, display_kind_for, expand_node, get_node_detail, kind_halo_color,
+    kind_svg_palette,
 };
 use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
 
@@ -49,7 +49,12 @@ pub fn short_ref(node_ref: &str) -> String {
 
 /// Resolve a human label: name -> title -> "<kind> · <short-id>".
 /// Never returns a raw `entity:<hex>` ref.
-pub fn display_label(name: Option<&str>, title: Option<&str>, kind: &str, node_ref: &str) -> String {
+pub fn display_label(
+    name: Option<&str>,
+    title: Option<&str>,
+    kind: &str,
+    node_ref: &str,
+) -> String {
     name.filter(|s| !s.trim().is_empty())
         .or_else(|| title.filter(|s| !s.trim().is_empty()))
         .map(|s| s.to_string())
@@ -545,14 +550,29 @@ mod tests {
 
     #[test]
     fn display_label_prefers_name_then_title() {
-        assert_eq!(display_label(Some("Atlas"), Some("T"), "person", "entity:abc123"), "Atlas");
-        assert_eq!(display_label(None, Some("The Title"), "paper", "entity:abc123"), "The Title");
-        assert_eq!(display_label(Some("  "), None, "paper", "entity:abc123"), "paper · abc123");
+        assert_eq!(
+            display_label(Some("Atlas"), Some("T"), "person", "entity:abc123"),
+            "Atlas"
+        );
+        assert_eq!(
+            display_label(None, Some("The Title"), "paper", "entity:abc123"),
+            "The Title"
+        );
+        assert_eq!(
+            display_label(Some("  "), None, "paper", "entity:abc123"),
+            "paper · abc123"
+        );
     }
 
     #[test]
     fn display_label_falls_back_to_kind_and_short_id() {
-        assert_eq!(display_label(None, None, "paper", "entity:08a5c9986bd0"), "paper · 08a5c9");
-        assert_eq!(display_label(None, None, "entity", "entity:08a5c9986bd0"), "entity · 08a5c9");
+        assert_eq!(
+            display_label(None, None, "paper", "entity:08a5c9986bd0"),
+            "paper · 08a5c9"
+        );
+        assert_eq!(
+            display_label(None, None, "entity", "entity:08a5c9986bd0"),
+            "entity · 08a5c9"
+        );
     }
 }

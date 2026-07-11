@@ -5,13 +5,31 @@ use memvault_core::{BucketId, DocId, EntityId};
 /// Events published by the memvault system.
 #[derive(Debug, Clone)]
 pub enum MemvaultEvent {
-    DocCreated { doc_id: DocId, cid: Vec<u8> },
-    DocUpdated { doc_id: DocId, cid: Vec<u8> },
-    FileAttached { doc_id: DocId, name: String },
-    EntityCreated { entity_id: EntityId },
-    BucketCreated { bucket_id: BucketId, cid: Vec<u8> },
-    Retracted { cid: Vec<u8> },
-    TokenConsumed { token_cid: Vec<u8> },
+    DocCreated {
+        doc_id: DocId,
+        cid: Vec<u8>,
+    },
+    DocUpdated {
+        doc_id: DocId,
+        cid: Vec<u8>,
+    },
+    FileAttached {
+        doc_id: DocId,
+        name: String,
+    },
+    EntityCreated {
+        entity_id: EntityId,
+    },
+    BucketCreated {
+        bucket_id: BucketId,
+        cid: Vec<u8>,
+    },
+    Retracted {
+        cid: Vec<u8>,
+    },
+    TokenConsumed {
+        token_cid: Vec<u8>,
+    },
     /// A new sigchain block was persisted (locally created or received from
     /// a peer via RBSR sync). Watchers update their in-memory trust tables
     /// without restarting the daemon.

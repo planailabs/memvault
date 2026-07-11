@@ -13,18 +13,19 @@ pub mod time;
 pub mod vfs;
 pub mod visibility;
 
+pub use self::cid::codec as cid_codec;
 pub use self::cid::{
     cid_bytes_from_string, cid_bytes_lenient, cid_from_bytes, cid_from_string, cid_from_value,
     cid_string_from_bytes, cid_to_string, cid_with_codec, verify_cid,
 };
-pub use self::cid::codec as cid_codec;
+pub use bucket::{BucketBinding, BucketDecl, BucketRole};
 pub use classification::Classification;
 pub use codec::{decode, encode};
 pub use envelope::Signed;
 pub use error::{Error, Result};
-pub use bucket::{BucketBinding, BucketDecl, BucketRole};
 pub use ids::{
-    AgentName, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId, b58_decode, b58_encode,
+    AgentName, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef, PeerId, b58_decode,
+    b58_encode,
 };
 pub use scope::{
     BucketSelector, DetailLevel, NodeKind, QueryScope, RetractionMode, bucket_scope_id,

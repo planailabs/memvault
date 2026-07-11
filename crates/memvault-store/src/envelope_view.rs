@@ -134,7 +134,10 @@ mod tests {
         let view = EnvelopeView::from_value(v).unwrap();
         assert_eq!(view.str_field("kind"), Some("attachment"));
         assert_eq!(view.str_field("filename"), Some("x.txt"));
-        assert_eq!(view.get_as::<Vec<u8>>("manifest_cid"), Some(vec![1, 2, 3, 4]));
+        assert_eq!(
+            view.get_as::<Vec<u8>>("manifest_cid"),
+            Some(vec![1, 2, 3, 4])
+        );
         assert_eq!(view.author(), vec![9, 9, 9]);
     }
 

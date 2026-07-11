@@ -15,8 +15,8 @@ pub mod insert;
 pub mod keys;
 pub mod query;
 pub mod retracted;
-pub mod scope_members;
 pub mod rotation_state;
+pub mod scope_members;
 pub mod tables;
 
 pub use envelope_view::EnvelopeView;
@@ -235,7 +235,7 @@ mod tests {
             provenance: vec![],
             cluster_id: None,
             bucket_id: None,
-                    ..Default::default()
+            ..Default::default()
         };
         store.insert_envelope(cid, b"envelope-data", &meta).unwrap();
 
@@ -261,7 +261,7 @@ mod tests {
             provenance: vec![],
             cluster_id: None,
             bucket_id: None,
-                    ..Default::default()
+            ..Default::default()
         };
         store.insert_envelope(cid, b"data", &meta).unwrap();
 
@@ -284,7 +284,7 @@ mod tests {
                 provenance: vec![],
                 cluster_id: None,
                 bucket_id: None,
-                            ..Default::default()
+                ..Default::default()
             };
             store
                 .insert_envelope(cid.as_bytes(), b"data", &meta)
@@ -379,7 +379,7 @@ mod tests {
             provenance: vec![parent_cid.to_vec()],
             cluster_id: Some(b"cluster-1".to_vec()),
             bucket_id: None,
-                    ..Default::default()
+            ..Default::default()
         };
         store
             .insert_envelope(child_cid, b"child-data", &meta)
@@ -404,7 +404,7 @@ mod tests {
                 provenance: vec![],
                 cluster_id: None,
                 bucket_id: None,
-                            ..Default::default()
+                ..Default::default()
             };
             store
                 .insert_envelope(cid.as_bytes(), b"data", &meta)

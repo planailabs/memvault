@@ -45,7 +45,10 @@ async fn agent_rename_sets_label() {
         "no label before rename"
     );
 
-    node.client.agent_rename(&pk, "Alice").await.expect("rename");
+    node.client
+        .agent_rename(&pk, "Alice")
+        .await
+        .expect("rename");
 
     assert_eq!(
         sigchain::agent_label(&node.client, &pk).expect("label lookup"),
@@ -85,13 +88,21 @@ async fn agent_rename_does_not_affect_access() {
         .await
         .expect("bucket");
     node.client
-        .issue_bucket_grant(&bucket, GrantAudience::AgentKey(pk), vec![Action::Read], u64::MAX)
+        .issue_bucket_grant(
+            &bucket,
+            GrantAudience::AgentKey(pk),
+            vec![Action::Read],
+            u64::MAX,
+        )
         .await
         .expect("grant");
 
     acl::check_bucket_access(&node.client, &pk, &bucket, Action::Read)
         .expect("access before rename");
-    node.client.agent_rename(&pk, "Renamed").await.expect("rename");
+    node.client
+        .agent_rename(&pk, "Renamed")
+        .await
+        .expect("rename");
     acl::check_bucket_access(&node.client, &pk, &bucket, Action::Read)
         .expect("access must be unchanged by a label rename");
 }
@@ -145,17 +156,17 @@ async fn agent_rename_from_untrusted_signer_ignored() {
         payload,
         &forger,
         memvault_core::PeerId(forger_pub.to_vec()),
-        vec![],                            // causal
-        vec![],                            // provenance
-        vec![],                            // tags
+        vec![], // causal
+        vec![], // provenance
+        vec![], // tags
         Visibility::Internal,
-        0,                                 // lamport
+        0, // lamport
         memvault_core::wall_ns(),
-        None,                              // capability
-        None,                              // bucket_id
-        None,                              // node_attestation
-        None,                              // agent_attestation
-        None,                              // agent_signing_key
+        None, // capability
+        None, // bucket_id
+        None, // node_attestation
+        None, // agent_attestation
+        None, // agent_signing_key
     )
     .expect("sign forged envelope");
     let bytes = serde_ipld_dagcbor::to_vec(&signed).expect("encode");

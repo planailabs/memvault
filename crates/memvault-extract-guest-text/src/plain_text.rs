@@ -1,4 +1,4 @@
-use memvault_extract_abi::{ExtractionHints, ExtractedText};
+use memvault_extract_abi::{ExtractedText, ExtractionHints};
 
 pub fn extract(content: &[u8], hints: &ExtractionHints) -> Result<ExtractedText, String> {
     let mut text = String::from_utf8_lossy(content).into_owned();

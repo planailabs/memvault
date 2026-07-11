@@ -266,10 +266,10 @@ impl AsF32 for u8 {
 
 #[cfg(test)]
 mod tests {
-    use rten_tensor::prelude::*;
     use rten_tensor::NdTensor;
+    use rten_tensor::prelude::*;
 
-    use super::{prepare_image, DimOrder, ImageSource, ImageSourceError, BLACK_VALUE};
+    use super::{BLACK_VALUE, DimOrder, ImageSource, ImageSourceError, prepare_image};
 
     #[test]
     fn test_image_source_from_bytes() {

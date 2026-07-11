@@ -254,7 +254,14 @@ pub mod tpm {
         let sensitive = SensitiveData::try_from(data_key.to_vec())
             .map_err(|e| KeyStoreError::Cipher(format!("TPM sensitive data: {e}")))?;
         let created = ctx
-            .create(primary, sealed_object_public()?, None, Some(sensitive), None, None)
+            .create(
+                primary,
+                sealed_object_public()?,
+                None,
+                Some(sensitive),
+                None,
+                None,
+            )
             .map_err(|e| KeyStoreError::Cipher(format!("TPM seal (create): {e}")))?;
 
         let pub_bytes = created
@@ -591,7 +598,10 @@ impl KeyStore {
     /// Whether a key exists.
     pub fn contains(&self, key: &[u8]) -> bool {
         let _ = self.refresh_if_changed();
-        self.map.read().map(|m| m.contains_key(key)).unwrap_or(false)
+        self.map
+            .read()
+            .map(|m| m.contains_key(key))
+            .unwrap_or(false)
     }
 
     /// All keys that start with `prefix` (e.g. `b"token:"`).
@@ -660,7 +670,8 @@ impl KeyStore {
         f.seek(SeekFrom::End(0))?;
         f.write_all(rec)?;
         f.sync_all()?;
-        self.loaded_len.fetch_add(rec.len() as u64, Ordering::AcqRel);
+        self.loaded_len
+            .fetch_add(rec.len() as u64, Ordering::AcqRel);
         Ok(())
     }
 
@@ -698,7 +709,8 @@ impl KeyStore {
             file.seek(SeekFrom::End(0))?;
             file.write_all(&rec)?;
             file.sync_all()?;
-            self.loaded_len.fetch_add(rec.len() as u64, Ordering::AcqRel);
+            self.loaded_len
+                .fetch_add(rec.len() as u64, Ordering::AcqRel);
             if let Ok(mut m) = self.map.write() {
                 match &new {
                     Some(v) => {
@@ -775,10 +787,7 @@ impl KeyStore {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &tmp,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
                 }
                 out.write_all(MAGIC)?;
                 out.write_all(&[VERSION])?;
@@ -1007,7 +1016,10 @@ mod tests {
         );
         // Reopening with the same cipher recovers it.
         let ks = KeyStore::open_with_cipher(&path, mk_cipher()).unwrap();
-        assert_eq!(ks.get(b"token:secret").as_deref(), Some(&b"top-secret-seed"[..]));
+        assert_eq!(
+            ks.get(b"token:secret").as_deref(),
+            Some(&b"top-secret-seed"[..])
+        );
     }
 
     #[test]
@@ -1023,9 +1035,7 @@ mod tests {
         // Plaintext must not appear on disk.
         let raw = std::fs::read(&path).unwrap();
         assert!(
-            !raw
-                .windows(25)
-                .any(|w| w == b"super-secret-signing-seed"),
+            !raw.windows(25).any(|w| w == b"super-secret-signing-seed"),
             "plaintext leaked to disk under AEAD"
         );
         // Correct key recovers it across reopen.
@@ -1034,7 +1044,10 @@ mod tests {
             ks.get(b"adminkey:1").as_deref(),
             Some(&b"super-secret-signing-seed"[..])
         );
-        assert_eq!(ks.get(b"token:1").as_deref(), Some(&b"join-token-bytes"[..]));
+        assert_eq!(
+            ks.get(b"token:1").as_deref(),
+            Some(&b"join-token-bytes"[..])
+        );
     }
 
     #[test]
@@ -1212,20 +1225,28 @@ mod tests {
         let n = 150;
         let ta = {
             let a = Arc::clone(&a);
-            thread::spawn(move || for _ in 0..n {
-                a.fetch_add_u32(b"hits", 1).unwrap();
+            thread::spawn(move || {
+                for _ in 0..n {
+                    a.fetch_add_u32(b"hits", 1).unwrap();
+                }
             })
         };
         let tb = {
             let b = Arc::clone(&b);
-            thread::spawn(move || for _ in 0..n {
-                b.fetch_add_u32(b"hits", 1).unwrap();
+            thread::spawn(move || {
+                for _ in 0..n {
+                    b.fetch_add_u32(b"hits", 1).unwrap();
+                }
             })
         };
         ta.join().unwrap();
         tb.join().unwrap();
         let c = KeyStore::open(&path).unwrap();
-        assert_eq!(c.get_u32(b"hits"), n * 2, "no lost updates under contention");
+        assert_eq!(
+            c.get_u32(b"hits"),
+            n * 2,
+            "no lost updates under contention"
+        );
     }
 
     #[test]

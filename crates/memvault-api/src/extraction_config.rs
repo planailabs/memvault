@@ -145,8 +145,8 @@ impl ExtractionConfig {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         toml::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
     }
 
@@ -188,7 +188,13 @@ impl ExtractionConfig {
             return None;
         }
         let models_dir = self.models_dir.as_ref()?;
-        let abs = |p: &PathBuf| if p.is_absolute() { p.clone() } else { models_dir.join(p) };
+        let abs = |p: &PathBuf| {
+            if p.is_absolute() {
+                p.clone()
+            } else {
+                models_dir.join(p)
+            }
+        };
         let det = abs(&self.ocr.detection_model);
         let rec = abs(&self.ocr.recognition_model);
         (det.is_file() && rec.is_file()).then_some((det, rec))
@@ -228,7 +234,10 @@ impl ExtractionConfig {
         );
         let mut hasher = blake3::Hasher::new();
         hasher.update(canonical.as_bytes());
-        format!("blake3:{}", hex::encode(&hasher.finalize().as_bytes()[..16]))
+        format!(
+            "blake3:{}",
+            hex::encode(&hasher.finalize().as_bytes()[..16])
+        )
     }
 }
 
@@ -258,16 +267,21 @@ mod tests {
         let cfg = ExtractionConfig::load(dir.path()).unwrap();
         assert_eq!(cfg.render.dpi, 96);
         assert_eq!(cfg.render.max_pages, 200); // untouched default
-        assert!(cfg
-            .whisper_unavailable_reason()
-            .unwrap()
-            .contains("whisper.enabled"));
+        assert!(
+            cfg.whisper_unavailable_reason()
+                .unwrap()
+                .contains("whisper.enabled")
+        );
     }
 
     #[test]
     fn malformed_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("extraction.toml"), "[render]\ndpi = \"x\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("extraction.toml"),
+            "[render]\ndpi = \"x\"\n",
+        )
+        .unwrap();
         assert!(ExtractionConfig::load(dir.path()).is_err());
     }
 

@@ -4,9 +4,9 @@ use cid::Cid;
 use ed25519_dalek::VerifyingKey;
 use memvault_core::PeerId;
 
-use crate::node_attestation::NodeAttestation;
 use crate::error::{AuthError, Result};
 use crate::key_state::AdminKeyState;
+use crate::node_attestation::NodeAttestation;
 use crate::trust::ClusterTrust;
 
 /// Trait for checking whether a CID has been revoked.
@@ -88,11 +88,7 @@ impl AuthVerifier {
     }
 
     /// Try to verify the attestation signature against local admin keys valid at now_ns.
-    fn verify_with_local_keys(
-        &self,
-        attestation: &NodeAttestation,
-        now_ns: u64,
-    ) -> Result<()> {
+    fn verify_with_local_keys(&self, attestation: &NodeAttestation, now_ns: u64) -> Result<()> {
         let valid_keys = self.local_key_state.valid_keys_at(now_ns);
         for key_bytes in valid_keys {
             if let Ok(verifying_key) = VerifyingKey::from_bytes(&key_bytes) {

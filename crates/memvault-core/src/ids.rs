@@ -52,9 +52,7 @@ pub fn b58_decode(s: &str) -> Result<Vec<u8>, bs58::decode::Error> {
 /// Parse a hex string (with an optional `prefix:` like `doc:` or `entity:`)
 /// into a 32-byte array. Used by the per-Id `from_hex` constructors below.
 fn parse_hex_id(s: &str, expected_prefix: &str) -> Result<[u8; 32], hex::FromHexError> {
-    let s = s
-        .strip_prefix(expected_prefix)
-        .unwrap_or(s);
+    let s = s.strip_prefix(expected_prefix).unwrap_or(s);
     let bytes = hex::decode(s)?;
     if bytes.len() != 32 {
         return Err(hex::FromHexError::InvalidStringLength);

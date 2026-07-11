@@ -146,7 +146,14 @@ async fn upload_skill_file(
         .ok_or_else(|| ServerFnError::new("could not resolve the skill's bucket".to_string()))?;
     let mime = memvault_api::files::detect_mime(std::path::Path::new(&filename));
     let cid = client
-        .upload_file(&data, Some(&filename), mime, vec![], "internal", Some(&bucket))
+        .upload_file(
+            &data,
+            Some(&filename),
+            mime,
+            vec![],
+            "internal",
+            Some(&bucket),
+        )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     let bundle_path = if path.trim().is_empty() {

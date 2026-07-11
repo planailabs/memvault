@@ -204,11 +204,21 @@ async fn skill_publish_get_list_rename_roundtrip() {
         .unwrap();
 
     // get() assembles the manifest plus the linked instruction doc.
-    let bundle = client.skill_get(&skill_id).await.unwrap().expect("skill exists");
+    let bundle = client
+        .skill_get(&skill_id)
+        .await
+        .unwrap()
+        .expect("skill exists");
     assert_eq!(bundle.info.name, "Code Review");
-    assert_eq!(bundle.info.description.as_deref(), Some("Review a diff for bugs"));
+    assert_eq!(
+        bundle.info.description.as_deref(),
+        Some("Review a diff for bugs")
+    );
     assert_eq!(bundle.instructions.len(), 1);
-    assert_eq!(bundle.instructions[0].relation, memvault_core::SKILL_INSTRUCTION_REL);
+    assert_eq!(
+        bundle.instructions[0].relation,
+        memvault_core::SKILL_INSTRUCTION_REL
+    );
     assert!(bundle.instructions[0].node.starts_with("doc:"));
 
     // A plain (non-skill) entity must not appear in skill_list.
@@ -218,7 +228,10 @@ async fn skill_publish_get_list_rename_roundtrip() {
         props: BTreeMap::new(),
         edges_out: vec![],
     };
-    client.add_entity(other, Visibility::Internal, None).await.unwrap();
+    client
+        .add_entity(other, Visibility::Internal, None)
+        .await
+        .unwrap();
 
     let skills = client.skill_list(100, None).await.unwrap();
     assert_eq!(skills.len(), 1, "only the skill, not the person entity");
@@ -255,7 +268,10 @@ async fn skill_publish_get_list_rename_roundtrip() {
     assert!(bundle.resources[0].executable);
 
     // Unlink the resource.
-    client.skill_unlink_resource(&skill_id, &edge_id).await.unwrap();
+    client
+        .skill_unlink_resource(&skill_id, &edge_id)
+        .await
+        .unwrap();
     let bundle = client.skill_get(&skill_id).await.unwrap().unwrap();
     assert_eq!(bundle.resources.len(), 0);
 
@@ -350,7 +366,14 @@ async fn skill_hydrate_materializes_bundle() {
 
     let script = b"#!/bin/sh\necho deploying\n";
     let cid = client
-        .upload_file(script, Some("run.sh"), "text/x-shellscript", vec![], "internal", None)
+        .upload_file(
+            script,
+            Some("run.sh"),
+            "text/x-shellscript",
+            vec![],
+            "internal",
+            None,
+        )
         .await
         .unwrap();
     client
@@ -366,14 +389,10 @@ async fn skill_hydrate_materializes_bundle() {
         .unwrap();
 
     let out = tempfile::tempdir().unwrap();
-    let report = memvault_api::skill_hydrate::hydrate_skill(
-        client.as_ref(),
-        &skill_id,
-        out.path(),
-        true,
-    )
-    .await
-    .unwrap();
+    let report =
+        memvault_api::skill_hydrate::hydrate_skill(client.as_ref(), &skill_id, out.path(), true)
+            .await
+            .unwrap();
 
     // SKILL.md (instruction) + scripts/run.sh (resource) both written.
     let skill_md = std::fs::read_to_string(out.path().join("SKILL.md")).unwrap();
@@ -385,12 +404,12 @@ async fn skill_hydrate_materializes_bundle() {
     // Trust gate: the test harness writes as the node (no bound agent
     // identity), so the manifest carries no agent attestation — the executable
     // bit is withheld even though set_executable=true was requested.
-    assert!(!report.author_attested, "node-authored skill is not attested");
     assert!(
-        report
-            .skipped
-            .iter()
-            .any(|s| s.contains("not attested")),
+        !report.author_attested,
+        "node-authored skill is not attested"
+    );
+    assert!(
+        report.skipped.iter().any(|s| s.contains("not attested")),
         "withholding the exec bit is reported, got {:?}",
         report.skipped
     );
@@ -414,10 +433,12 @@ async fn skill_hydrate_materializes_bundle() {
     client
         .skill_link_resource(
             &skill_id,
-            &NodeRef::Attachment(client
-                .upload_file(b"x", Some("x"), "text/plain", vec![], "internal", None)
-                .await
-                .unwrap()),
+            &NodeRef::Attachment(
+                client
+                    .upload_file(b"x", Some("x"), "text/plain", vec![], "internal", None)
+                    .await
+                    .unwrap(),
+            ),
             memvault_core::SKILL_RESOURCE_REL,
             Some("../escape.sh"),
             false,
@@ -425,13 +446,9 @@ async fn skill_hydrate_materializes_bundle() {
         )
         .await
         .unwrap();
-    let res = memvault_api::skill_hydrate::hydrate_skill(
-        client.as_ref(),
-        &skill_id,
-        evil.path(),
-        false,
-    )
-    .await;
+    let res =
+        memvault_api::skill_hydrate::hydrate_skill(client.as_ref(), &skill_id, evil.path(), false)
+            .await;
     assert!(res.is_err(), "traversal path must be rejected");
 }
 
@@ -649,10 +666,7 @@ async fn bucket_bind_to_cluster() {
     assert!(info.cluster_id.is_none());
 
     let cluster_id = memvault_core::ClusterId([1u8; 32]);
-    client
-        .bucket_bind(&bucket_id, &cluster_id)
-        .await
-        .unwrap();
+    client.bucket_bind(&bucket_id, &cluster_id).await.unwrap();
 
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(cluster_id));
@@ -873,16 +887,10 @@ async fn bucket_bind_exclusive_to_one_cluster() {
     let cluster_b = memvault_core::ClusterId([2u8; 32]);
 
     // Bind to cluster A succeeds
-    client
-        .bucket_bind(&bucket_id, &cluster_a)
-        .await
-        .unwrap();
+    client.bucket_bind(&bucket_id, &cluster_a).await.unwrap();
 
     // Rebind to same cluster A is idempotent
-    client
-        .bucket_bind(&bucket_id, &cluster_a)
-        .await
-        .unwrap();
+    client.bucket_bind(&bucket_id, &cluster_a).await.unwrap();
 
     // Bind to different cluster B fails
     let result = client.bucket_bind(&bucket_id, &cluster_b).await;
@@ -919,10 +927,7 @@ async fn bucket_bind_idempotent_same_cluster() {
     let cluster = memvault_core::ClusterId([5u8; 32]);
 
     // Bind as non-default
-    client
-        .bucket_bind(&bucket_id, &cluster)
-        .await
-        .unwrap();
+    client.bucket_bind(&bucket_id, &cluster).await.unwrap();
     let info = client.bucket_get(&bucket_id).await.unwrap().unwrap();
     assert_eq!(info.cluster_id, Some(cluster));
 }
@@ -1170,7 +1175,9 @@ fn join_token_role_is_signature_bound() {
         signature: [0u8; 64],
     };
     token.signature = sk.sign(&token.signing_bytes().unwrap()).to_bytes();
-    token.verify_signature(&vk).expect("admin node-join token verifies");
+    token
+        .verify_signature(&vk)
+        .expect("admin node-join token verifies");
     assert!(token.admits_as_admin());
 
     // Downgrading the role to a plain node join must invalidate the signature.
@@ -1220,14 +1227,24 @@ fn admin_key_persists_to_keystore_and_reloads() {
     let a = bare_client(&dir, b"node-a");
     assert_eq!(a.load_admin_keys_from_keystore(), 0, "empty to start");
     a.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed));
-    assert!(a.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey));
+    assert!(
+        a.admin_verifying_keys()
+            .iter()
+            .any(|k| k.to_bytes() == pubkey)
+    );
 
     // A second client (own redb, shared keystore) recovers the admin key —
     // no plaintext admin.key file in play.
     let b = bare_client(&dir, b"node-b");
-    assert_eq!(b.load_admin_keys_from_keystore(), 1, "reloaded from keystore");
+    assert_eq!(
+        b.load_admin_keys_from_keystore(),
+        1,
+        "reloaded from keystore"
+    );
     assert!(
-        b.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey),
+        b.admin_verifying_keys()
+            .iter()
+            .any(|k| k.to_bytes() == pubkey),
         "admin pubkey visible across handles"
     );
 }
@@ -1259,7 +1276,10 @@ fn encrypted_keystore_open_round_trips_and_hides_plaintext() {
         "seed leaked to disk under encryption"
     );
     let ks = memvault_api::keystore_open::open_encrypted(&path, b"correct horse").unwrap();
-    assert_eq!(ks.get(b"adminkey:1").as_deref(), Some(&b"super-secret-seed"[..]));
+    assert_eq!(
+        ks.get(b"adminkey:1").as_deref(),
+        Some(&b"super-secret-seed"[..])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,10 +1293,17 @@ async fn token_lifecycle_through_keystore_is_cross_process() {
 
     // Issuer (e.g. the daemon): keystore auto-opened beside its store.
     let issuer = bare_client(&dir, b"issuer");
-    issuer.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]));
+    issuer.set_admin_signing_key(memvault_api::ed25519_dalek::SigningKey::from_bytes(
+        &[5u8; 32],
+    ));
 
     let _tok = issuer
-        .issue_token(memvault_auth::TokenRole::Agent(memvault_auth::AgentRole::AgentHost), 3600, 2, Some("k".into()))
+        .issue_token(
+            memvault_auth::TokenRole::Agent(memvault_auth::AgentRole::AgentHost),
+            3600,
+            2,
+            Some("k".into()),
+        )
         .await
         .unwrap();
 
@@ -1288,11 +1315,19 @@ async fn token_lifecycle_through_keystore_is_cross_process() {
 
     // A SECOND process (e.g. memctl): own redb, shared keystore.
     let other = bare_client(&dir, b"memctl");
-    assert_eq!(other.list_tokens().await.unwrap().len(), 1, "cross-process list");
+    assert_eq!(
+        other.list_tokens().await.unwrap().len(),
+        1,
+        "cross-process list"
+    );
 
     // Consume from the issuer; the other process observes the count.
     assert_eq!(issuer.record_token_consumption(&cid, b"agent-x", 1), 1);
-    assert_eq!(other.token_consumption_count(&cid), 1, "cross-process count");
+    assert_eq!(
+        other.token_consumption_count(&cid),
+        1,
+        "cross-process count"
+    );
 
     // Revoke from the second process; the issuer observes it.
     other.revoke_token(&cid, "compromised").await.unwrap();
@@ -1317,8 +1352,8 @@ fn legacy_identity_files_migrate_to_keystore() {
     let admin_sk = memvault_api::ed25519_dalek::SigningKey::from_bytes(&seed);
     let admin_pubkey = admin_sk.verifying_key().to_bytes();
     let cluster = memvault_core::ClusterId([3u8; 32]);
-    let genesis = memvault_auth::sign_admin_genesis(&admin_sk, cluster.clone(), 1_000)
-        .expect("sign genesis");
+    let genesis =
+        memvault_auth::sign_admin_genesis(&admin_sk, cluster.clone(), 1_000).expect("sign genesis");
     std::fs::write(identity.join("admin.key"), seed).unwrap();
     std::fs::write(
         identity.join("cluster_admin_genesis.cbor"),
@@ -1337,16 +1372,26 @@ fn legacy_identity_files_migrate_to_keystore() {
         !identity.join("cluster_admin_genesis.cbor").exists(),
         "genesis.cbor removed"
     );
-    assert!(!dir.path().join("cluster_id").exists(), "cluster_id file removed");
+    assert!(
+        !dir.path().join("cluster_id").exists(),
+        "cluster_id file removed"
+    );
 
     // …and the values now live in the keystore / store.
-    assert_eq!(c.load_admin_keys_from_keystore(), 1, "admin key in keystore");
-    assert!(c.admin_verifying_keys().iter().any(|k| k.to_bytes() == admin_pubkey));
+    assert_eq!(
+        c.load_admin_keys_from_keystore(),
+        1,
+        "admin key in keystore"
+    );
+    assert!(
+        c.admin_verifying_keys()
+            .iter()
+            .any(|k| k.to_bytes() == admin_pubkey)
+    );
     let pinned = c
         .pinned_admin_genesis_bytes_from_keystore()
         .expect("genesis in keystore");
-    let decoded: memvault_auth::AdminGenesis =
-        serde_ipld_dagcbor::from_slice(&pinned).unwrap();
+    let decoded: memvault_auth::AdminGenesis = serde_ipld_dagcbor::from_slice(&pinned).unwrap();
     assert_eq!(decoded.admin_pubkey, admin_pubkey);
     assert_eq!(
         c.store().get_local_cluster_id().unwrap().as_deref(),
@@ -1372,10 +1417,15 @@ fn admitted_admin_key_activates_live_from_keystore() {
 
     // Secret present in the keystore but NOT yet held in memory.
     c.keystore()
-        .put(format!("adminkey:{}", hex::encode(pubkey)).as_bytes(), &seed)
+        .put(
+            format!("adminkey:{}", hex::encode(pubkey)).as_bytes(),
+            &seed,
+        )
         .unwrap();
     assert!(
-        !c.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey),
+        !c.admin_verifying_keys()
+            .iter()
+            .any(|k| k.to_bytes() == pubkey),
         "not held before the state names it"
     );
 
@@ -1385,7 +1435,9 @@ fn admitted_admin_key_activates_live_from_keystore() {
 
     // Now it's activated live (held in memory) without a reload/restart.
     assert!(
-        c.admin_verifying_keys().iter().any(|k| k.to_bytes() == pubkey),
+        c.admin_verifying_keys()
+            .iter()
+            .any(|k| k.to_bytes() == pubkey),
         "admitted admin key activated from keystore"
     );
 }
@@ -1394,7 +1446,11 @@ fn admitted_admin_key_activates_live_from_keystore() {
 // Genesis: identity in the keystore yields tokens that embed the AdminGenesis
 // ---------------------------------------------------------------------------
 
-fn client_with_cluster(dir: &tempfile::TempDir, name: &[u8], cluster: &[u8; 32]) -> Arc<LocalClient> {
+fn client_with_cluster(
+    dir: &tempfile::TempDir,
+    name: &[u8],
+    cluster: &[u8; 32],
+) -> Arc<LocalClient> {
     let redb_name = format!("redb-{}", String::from_utf8_lossy(name));
     let store = Arc::new(MemvaultStore::open(dir.path().join(redb_name)).unwrap());
     let quotas = Arc::new(RwLock::new(QuotaManager::default()));
@@ -1420,12 +1476,9 @@ async fn genesis_identity_yields_tokens_embedding_genesis() {
     // into the keystore (what `memctl genesis` now does, no loose files).
     let admin_sk = memvault_api::ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
     let admin_pubkey = admin_sk.verifying_key().to_bytes();
-    let genesis = memvault_auth::sign_admin_genesis(
-        &admin_sk,
-        memvault_core::ClusterId(cluster),
-        1_234,
-    )
-    .expect("sign genesis");
+    let genesis =
+        memvault_auth::sign_admin_genesis(&admin_sk, memvault_core::ClusterId(cluster), 1_234)
+            .expect("sign genesis");
     {
         let a = client_with_cluster(&dir, b"genesis", &cluster);
         a.set_admin_signing_key(admin_sk.clone());
@@ -1436,20 +1489,31 @@ async fn genesis_identity_yields_tokens_embedding_genesis() {
     // genesis identity and issues a token — which must embed the AdminGenesis
     // so a joining node can pin cluster trust.
     let issuer = client_with_cluster(&dir, b"issuer", &cluster);
-    assert_eq!(issuer.load_admin_keys_from_keystore(), 1, "admin key from keystore");
+    assert_eq!(
+        issuer.load_admin_keys_from_keystore(),
+        1,
+        "admin key from keystore"
+    );
     let pin = issuer
         .pinned_admin_genesis_bytes_from_keystore()
         .expect("genesis in keystore");
     issuer.set_pinned_admin_genesis(serde_ipld_dagcbor::from_slice(&pin).unwrap());
 
     let token_str = issuer
-        .issue_token(memvault_auth::TokenRole::Agent(memvault_auth::AgentRole::AgentHost), 3600, 1, None)
+        .issue_token(
+            memvault_auth::TokenRole::Agent(memvault_auth::AgentRole::AgentHost),
+            3600,
+            1,
+            None,
+        )
         .await
         .unwrap();
     let decoded = memvault_auth::decode_token_string(&token_str).unwrap();
     let embedded = decoded.admin_genesis.expect("token embeds AdminGenesis");
     assert_eq!(embedded.admin_pubkey, admin_pubkey, "genesis admin matches");
-    embedded.verify_self_signature().expect("embedded genesis self-signature");
+    embedded
+        .verify_self_signature()
+        .expect("embedded genesis self-signature");
     assert_eq!(decoded.cluster_id.0, cluster, "token cluster matches");
 }
 
@@ -1480,11 +1544,7 @@ async fn scoped_list_spans_multiple_buckets() {
 
     // One doc per bucket.
     for (i, b) in ids.iter().enumerate() {
-        let doc = Document::new(
-            DocId::random(),
-            format!("shared note {i}"),
-            BTreeMap::new(),
-        );
+        let doc = Document::new(DocId::random(), format!("shared note {i}"), BTreeMap::new());
         client
             .put_doc(doc, vec![], Visibility::Internal, Some(b))
             .await
@@ -1492,10 +1552,7 @@ async fn scoped_list_spans_multiple_buckets() {
     }
 
     // All accessible buckets → 3.
-    let all = client
-        .list_scoped(&QueryScope::all(), 100)
-        .await
-        .unwrap();
+    let all = client.list_scoped(&QueryScope::all(), 100).await.unwrap();
     assert_eq!(all.len(), 3, "all buckets");
 
     // Two of three explicitly → 2 (the multi-bucket agent case).
@@ -1629,7 +1686,12 @@ async fn scoped_retraction_modes_and_count() {
 
     // Include retracted → 2.
     let incl = client
-        .list_scoped(&scope.clone().with_retraction(RetractionMode::IncludeRetracted), 100)
+        .list_scoped(
+            &scope
+                .clone()
+                .with_retraction(RetractionMode::IncludeRetracted),
+            100,
+        )
         .await
         .unwrap();
     assert_eq!(incl.len(), 2);
@@ -1637,14 +1699,24 @@ async fn scoped_retraction_modes_and_count() {
 
     // Retracted only → 1 (drop), and it still resolves its label.
     let only = client
-        .list_scoped(&scope.clone().with_retraction(RetractionMode::RetractedOnly), 100)
+        .list_scoped(
+            &scope.clone().with_retraction(RetractionMode::RetractedOnly),
+            100,
+        )
         .await
         .unwrap();
     assert_eq!(only.len(), 1);
     assert!(only[0].retracted);
 
     // Counts.
-    let c = client.count_scoped(&scope.clone().with_retraction(RetractionMode::IncludeRetracted)).await.unwrap();
+    let c = client
+        .count_scoped(
+            &scope
+                .clone()
+                .with_retraction(RetractionMode::IncludeRetracted),
+        )
+        .await
+        .unwrap();
     assert_eq!(c.active, 1);
     assert_eq!(c.retracted, 1);
     assert_eq!(c.total(), 2);
@@ -1652,8 +1724,8 @@ async fn scoped_retraction_modes_and_count() {
 
 #[tokio::test]
 async fn scoped_view_bucket_partition_counts() {
-    use memvault_core::{BucketId, QueryScope};
     use memvault_api::View;
+    use memvault_core::{BucketId, QueryScope};
 
     let (_dir, client) = make_client();
     let bucket = client
@@ -1770,7 +1842,14 @@ async fn scoped_list_filters_by_node_kind() {
         .await
         .unwrap();
     client
-        .upload_file(b"hello", Some("f.txt"), "text/plain", vec![], "internal", Some(&bucket))
+        .upload_file(
+            b"hello",
+            Some("f.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&bucket),
+        )
         .await
         .unwrap();
 
@@ -2054,10 +2133,7 @@ async fn vfs_mkdir_then_resolve_ls_tree() {
     let leaf = client.vfs_mkdir(&bucket, "/probe/sub").await.unwrap();
 
     // The leaf dir must resolve, and so must the parent.
-    let parent = client
-        .vfs_resolve(&bucket, "/probe")
-        .await
-        .unwrap();
+    let parent = client.vfs_resolve(&bucket, "/probe").await.unwrap();
     assert!(parent.is_some(), "/probe must resolve after mkdir");
     let sub = client.vfs_resolve(&bucket, "/probe/sub").await.unwrap();
     assert!(sub.is_some(), "/probe/sub must resolve after mkdir");
@@ -2130,12 +2206,20 @@ async fn merge_read_union_for_docs() {
         .list_scoped(&QueryScope::all().with_bucket(Some(a.clone())), 100)
         .await
         .unwrap();
-    assert_eq!(union.len(), 2, "canonical A surfaces B's content after merge");
+    assert_eq!(
+        union.len(),
+        2,
+        "canonical A surfaces B's content after merge"
+    );
 
     // canonical_of / members reflect the edge.
     assert_eq!(client.canonical_of(&b.0), a.0, "B resolves to A");
     assert_eq!(client.canonical_of(&a.0), a.0, "A resolves to itself");
-    assert_eq!(client.bucket_merge_members(&a.0), vec![b.0], "A members = [B]");
+    assert_eq!(
+        client.bucket_merge_members(&a.0),
+        vec![b.0],
+        "A members = [B]"
+    );
 }
 
 #[tokio::test]
@@ -2183,7 +2267,10 @@ async fn merge_chain_list_shows_only_terminal() {
 
     // C is the terminal — not itself marked merged.
     let c_info = visible.iter().find(|bi| bi.id == c).unwrap();
-    assert_eq!(c_info.merged_into, None, "terminal canonical has no merged_into");
+    assert_eq!(
+        c_info.merged_into, None,
+        "terminal canonical has no merged_into"
+    );
 
     // With include_merged, all three appear and A/B point at their terminal C.
     let all = client.bucket_list_filtered(true).await.unwrap();
@@ -2191,8 +2278,16 @@ async fn merge_chain_list_shows_only_terminal() {
     assert!(all_ids.contains(&a) && all_ids.contains(&b) && all_ids.contains(&c));
     let a_info = all.iter().find(|bi| bi.id == a).unwrap();
     let b_info = all.iter().find(|bi| bi.id == b).unwrap();
-    assert_eq!(a_info.merged_into, Some(c.clone()), "A resolves to terminal C");
-    assert_eq!(b_info.merged_into, Some(c.clone()), "B resolves to terminal C");
+    assert_eq!(
+        a_info.merged_into,
+        Some(c.clone()),
+        "A resolves to terminal C"
+    );
+    assert_eq!(
+        b_info.merged_into,
+        Some(c.clone()),
+        "B resolves to terminal C"
+    );
 }
 
 #[tokio::test]
@@ -2204,7 +2299,11 @@ async fn merge_into_phantom_canonical_keeps_source_visible() {
     let phantom = memvault_core::BucketId([0x42u8; 32]);
 
     client.bucket_merge_sync(&[a.clone()], &phantom).unwrap();
-    assert_eq!(client.canonical_of(&a.0), phantom.0, "A resolves to phantom");
+    assert_eq!(
+        client.canonical_of(&a.0),
+        phantom.0,
+        "A resolves to phantom"
+    );
 
     // The phantom canonical can't be listed (no decl), so hiding A would orphan
     // its data. A must stay visible in the default listing.
@@ -2294,7 +2393,10 @@ async fn unmerge_emits_syncable_retraction_block() {
         .store()
         .query_by_tag("sigchain", "retraction", 0, usize::MAX)
         .unwrap();
-    assert!(!retr.is_empty(), "unmerge emitted a syncable retraction block");
+    assert!(
+        !retr.is_empty(),
+        "unmerge emitted a syncable retraction block"
+    );
 }
 
 #[tokio::test]
@@ -2334,19 +2436,27 @@ async fn reindex_bucket_merges_heals_untagged_records() {
     // bucket_merge index entry) — the pre-fix behaviour. Sign with the admin
     // key the test client holds so verify_signature passes.
     let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-    let rec = memvault_auth::sign_bucket_merge(&key, source.clone(), canonical.clone(), 123).unwrap();
+    let rec =
+        memvault_auth::sign_bucket_merge(&key, source.clone(), canonical.clone(), 123).unwrap();
     let bytes = serde_ipld_dagcbor::to_vec(&rec).unwrap();
     let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
     client.store().put_block(&cid, &bytes).unwrap();
 
     // Invisible until reindexed.
     client.bump_alias_generation();
-    assert!(client.bucket_merges().is_empty(), "untagged merge is invisible");
+    assert!(
+        client.bucket_merges().is_empty(),
+        "untagged merge is invisible"
+    );
     assert_eq!(client.canonical_of(&source.0), source.0);
 
     // Heal, then the alias resolves.
     assert_eq!(client.reindex_bucket_merges().unwrap(), 1);
-    assert_eq!(client.canonical_of(&source.0), canonical.0, "alias resolves after reindex");
+    assert_eq!(
+        client.canonical_of(&source.0),
+        canonical.0,
+        "alias resolves after reindex"
+    );
 
     // Idempotent: a second run repairs nothing (already indexed).
     assert_eq!(client.reindex_bucket_merges().unwrap(), 0);
@@ -2379,7 +2489,9 @@ async fn merge_union_in_list_entities_and_docs() {
     let ents_before = client.list_entities(100, Some(&canonical)).await.unwrap();
     assert!(!ents_before.iter().any(|e| e.id == ent_id));
 
-    client.bucket_merge_sync(&[source.clone()], &canonical).unwrap();
+    client
+        .bucket_merge_sync(&[source.clone()], &canonical)
+        .unwrap();
 
     // After the merge: a listing scoped to the canonical surfaces the source's
     // doc + entity (the graph view + MCP list tools rely on this).
@@ -2561,13 +2673,23 @@ async fn agent_bucket_migration_materializes_missing_canonical() {
     // listable agent bucket instead of a phantom.
     client.run_agent_bucket_migration();
     let made = client.bucket_get(&canonical).await.unwrap();
-    assert!(made.is_some(), "migration materializes the canonical agent bucket");
-    assert_eq!(make_role(&made.unwrap()), "Agent", "created as an agent bucket");
+    assert!(
+        made.is_some(),
+        "migration materializes the canonical agent bucket"
+    );
+    assert_eq!(
+        make_role(&made.unwrap()),
+        "Agent",
+        "created as an agent bucket"
+    );
 
     // The canonical now appears in the default listing; the legacy source is
     // hidden under it (not orphaned).
     let visible = client.bucket_list_filtered(false).await.unwrap();
-    assert!(visible.iter().any(|b| b.id == canonical), "canonical listed");
+    assert!(
+        visible.iter().any(|b| b.id == canonical),
+        "canonical listed"
+    );
     assert!(
         !visible.iter().any(|b| b.id == legacy),
         "legacy source hidden under its (now real) canonical"
@@ -2596,7 +2718,11 @@ async fn merged_source_is_marked_in_bucket_info() {
 
     // The source records its canonical; the canonical is unmarked.
     let bi = client.bucket_get(&b).await.unwrap().unwrap();
-    assert_eq!(bi.merged_into, Some(a.clone()), "source marks its canonical");
+    assert_eq!(
+        bi.merged_into,
+        Some(a.clone()),
+        "source marks its canonical"
+    );
     let ai = client.bucket_get(&a).await.unwrap().unwrap();
     assert_eq!(ai.merged_into, None, "canonical is not a merged source");
 }
@@ -2610,7 +2736,10 @@ async fn merged_source_is_hidden_from_bucket_list() {
     // Both buckets are listed before the merge.
     let before = client.bucket_list().await.unwrap();
     assert!(before.iter().any(|bi| bi.id == a), "canonical listed");
-    assert!(before.iter().any(|bi| bi.id == b), "source listed pre-merge");
+    assert!(
+        before.iter().any(|bi| bi.id == b),
+        "source listed pre-merge"
+    );
 
     client.bucket_merge_sync(&[b.clone()], &a).unwrap();
 
@@ -2855,7 +2984,11 @@ async fn scoped_list_member_path_post_sync() {
 
     // B registers the (empty) bucket partition via a scoped list.
     let pre = client_b.list_scoped(&scope, 100).await.unwrap();
-    assert_eq!(pre.len(), 0, "B's scoped bucket is empty before the doc syncs");
+    assert_eq!(
+        pre.len(),
+        0,
+        "B's scoped bucket is empty before the doc syncs"
+    );
 
     // Sync the doc into B (maintenance wiring upserts it into the set).
     sync_block(&client_a, &client_b, &cid);
@@ -2936,7 +3069,9 @@ async fn list_all_member_path_bucket_scoped() {
     let a_all = client.list_all(None, 100, Some(&a)).await.unwrap();
     assert_eq!(a_all.len(), 3, "bucket A active nodes (no view)");
     assert!(
-        !a_all.iter().any(|(nid, _, _, _)| *nid == format!("doc:{}", hex::encode(gone.0))),
+        !a_all
+            .iter()
+            .any(|(nid, _, _, _)| *nid == format!("doc:{}", hex::encode(gone.0))),
         "retracted doc excluded"
     );
 

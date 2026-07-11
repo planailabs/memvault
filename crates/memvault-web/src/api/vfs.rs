@@ -208,7 +208,9 @@ pub async fn vfs_tree(
     let tree = vfs_ops::tree(state.client.as_ref(), &bucket, &params.path, max_depth)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(Json(serde_json::json!({ "path": params.path, "tree": tree })))
+    Ok(Json(
+        serde_json::json!({ "path": params.path, "tree": tree }),
+    ))
 }
 
 /// GET /api/v1/vfs/find?bucket=<hex>&target=entity:<hex>
@@ -224,7 +226,9 @@ pub async fn vfs_find(
     let paths = vfs_ops::find_paths(state.client.as_ref(), &bucket, &target)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(Json(serde_json::json!({ "target": params.target, "paths": paths })))
+    Ok(Json(
+        serde_json::json!({ "target": params.target, "paths": paths }),
+    ))
 }
 
 /// POST /api/v1/vfs/mv  body: { from, to, bucket }

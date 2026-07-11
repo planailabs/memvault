@@ -115,9 +115,18 @@ mod tests {
         let data = b"file chunk bytes";
         let sha_raw = Cid::new_v1(codec::RAW, Code::Sha2_256.digest(data));
         let sha_raw_bytes = sha_raw.to_bytes();
-        assert!(sha_raw_bytes.starts_with(&[0x01, 0x55, 0x12, 0x20]), "raw+sha256 prefix");
-        assert!(verify_cid(&sha_raw_bytes, data).unwrap(), "raw/sha256 chunk verifies");
-        assert!(!verify_cid(&sha_raw_bytes, b"tampered").unwrap(), "tampered rejected");
+        assert!(
+            sha_raw_bytes.starts_with(&[0x01, 0x55, 0x12, 0x20]),
+            "raw+sha256 prefix"
+        );
+        assert!(
+            verify_cid(&sha_raw_bytes, data).unwrap(),
+            "raw/sha256 chunk verifies"
+        );
+        assert!(
+            !verify_cid(&sha_raw_bytes, b"tampered").unwrap(),
+            "tampered rejected"
+        );
 
         // The default Blake3/DAG-CBOR envelope path still verifies.
         let blake = cid_from_bytes(data);

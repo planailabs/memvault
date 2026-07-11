@@ -45,7 +45,8 @@ mod inner {
     }
 
     /// Get the concrete LocalClient (for grant/ACL operations).
-    pub fn local_client() -> Result<Arc<memvault_api::LocalClient>, dioxus::prelude::ServerFnError> {
+    pub fn local_client() -> Result<Arc<memvault_api::LocalClient>, dioxus::prelude::ServerFnError>
+    {
         // Ensure lazy init happened
         let _ = client()?;
         LOCAL_CLIENT

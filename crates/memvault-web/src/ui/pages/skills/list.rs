@@ -215,7 +215,10 @@ fn SkillTable(list: ReadSignal<Vec<SkillRow>>) -> Element {
         let (key, asc) = sort.read().clone();
         items.sort_by(|a, b| {
             let ord = match key.as_str() {
-                "description" => a.description.to_lowercase().cmp(&b.description.to_lowercase()),
+                "description" => a
+                    .description
+                    .to_lowercase()
+                    .cmp(&b.description.to_lowercase()),
                 _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             };
             if asc { ord } else { ord.reverse() }

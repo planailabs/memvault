@@ -65,9 +65,7 @@ pub async fn standalone_swarm(
                 [(StreamProtocol::new(BLOCK_PROTOCOL), ProtocolSupport::Full)],
                 request_response::Config::default()
                     .with_request_timeout(std::time::Duration::from_secs(120))
-                    .with_max_concurrent_streams(
-                        crate::block_proto::MAX_CONCURRENT_BLOCK_STREAMS,
-                    ),
+                    .with_max_concurrent_streams(crate::block_proto::MAX_CONCURRENT_BLOCK_STREAMS),
             );
 
             // Enable gossipsub Peer eXchange: on PRUNE a node hands the pruned
@@ -153,7 +151,10 @@ fn companion_listen_addrs(addr: &Multiaddr) -> Vec<Multiaddr> {
     let Some(ip) = addr.iter().next() else {
         return Vec::new();
     };
-    let port = addr.iter().find_map(|p| if let Tcp(n) = p { Some(n) } else { None }).unwrap_or(0);
+    let port = addr
+        .iter()
+        .find_map(|p| if let Tcp(n) = p { Some(n) } else { None })
+        .unwrap_or(0);
     let tcp = |f: Protocol| Multiaddr::empty().with(f).with(Tcp(port));
     let quic = |f: Protocol| Multiaddr::empty().with(f).with(Udp(port)).with(QuicV1);
 

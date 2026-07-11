@@ -68,7 +68,9 @@ pub async fn page_image(
 
     // Conditional request: the content for a (cid, page) pair is immutable,
     // so a matching If-None-Match short-circuits before touching the blob.
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
         && inm.split(',').any(|t| t.trim() == etag || t.trim() == "*")
     {
         return Ok((

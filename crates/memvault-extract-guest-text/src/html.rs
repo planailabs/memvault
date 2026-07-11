@@ -13,8 +13,7 @@ pub fn extract(content: &[u8], hints: &ExtractionHints) -> Result<ExtractedText,
     let break_selector =
         Selector::parse("h1, h2, hr, section").unwrap_or_else(|_| Selector::parse("*").unwrap());
 
-    let body_selector =
-        Selector::parse("body").unwrap_or_else(|_| Selector::parse("*").unwrap());
+    let body_selector = Selector::parse("body").unwrap_or_else(|_| Selector::parse("*").unwrap());
 
     if let Some(body) = document.select(&body_selector).next() {
         extract_text_recursive(&body, &mut text, &mut page_breaks, &break_selector);
@@ -172,8 +171,7 @@ fn extract_attr(attrs: &str, name: &str) -> Option<String> {
         }
         let quote = bytes[value_start];
         if quote == b'"' || quote == b'\'' {
-            let end_q = value_start + 1
-                + attrs[value_start + 1..].find(quote as char)?;
+            let end_q = value_start + 1 + attrs[value_start + 1..].find(quote as char)?;
             return Some(attrs[value_start + 1..end_q].to_string());
         }
         // Unquoted: read until whitespace or '/'.
@@ -233,8 +231,20 @@ fn extract_text_recursive(
 
             let is_block = matches!(
                 tag_name,
-                "p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "br" | "tr"
-                    | "section" | "article" | "header" | "footer"
+                "p" | "div"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "li"
+                    | "br"
+                    | "tr"
+                    | "section"
+                    | "article"
+                    | "header"
+                    | "footer"
             );
 
             extract_text_recursive(&el, text, page_breaks, _break_selector);
@@ -292,9 +302,8 @@ mod tests {
 
     #[test]
     fn anchor_with_nested_markup() {
-        let links = links_of(
-            r#"<a href="memvault://doc/abcd"><span>Hello</span> <b>World</b></a>"#,
-        );
+        let links =
+            links_of(r#"<a href="memvault://doc/abcd"><span>Hello</span> <b>World</b></a>"#);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].display_text.as_deref(), Some("Hello World"));
     }
@@ -312,7 +321,10 @@ mod tests {
         let links = links_of(src);
         assert_eq!(links.len(), 1);
         let (start, end) = links[0].byte_span;
-        assert_eq!(&src[start as usize..end as usize], r#"<a href="memvault://doc/abcd">x</a>"#);
+        assert_eq!(
+            &src[start as usize..end as usize],
+            r#"<a href="memvault://doc/abcd">x</a>"#
+        );
     }
 
     #[test]

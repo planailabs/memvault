@@ -10,9 +10,7 @@ use crate::sink::ExportSink;
 /// Export every block in the store to the sink, using the hex-encoded CID
 /// as the filename.  Returns the number of blocks written.
 pub fn export_blocks(store: &MemvaultStore, sink: &mut dyn ExportSink) -> Result<usize> {
-    let blocks = store
-        .iter_blocks()
-        .context("iterating blocks")?;
+    let blocks = store.iter_blocks().context("iterating blocks")?;
 
     let mut count = 0usize;
     for (cid, data) in &blocks {

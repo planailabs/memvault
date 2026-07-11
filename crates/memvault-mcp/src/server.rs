@@ -6,9 +6,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
+use memvault_api::MemvaultClient;
 use memvault_api::docs::{create_doc, parse_tags, parse_visibility};
 use memvault_api::files::{detect_mime, upload_file};
-use memvault_api::MemvaultClient;
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Edge, Entity};
 use memvault_query::AuditQuery;
@@ -217,14 +217,15 @@ impl MemvaultServer {
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(10);
         match self.client.search(&params.query, limit).await {
-            Ok(hits) => serde_json::json!(hits
-                .iter()
-                .map(|h| serde_json::json!({
-                    "doc_id": hex::encode(h.doc_id.0),
-                    "score": h.score,
-                    "snippet": h.snippet,
-                }))
-                .collect::<Vec<_>>())
+            Ok(hits) => serde_json::json!(
+                hits.iter()
+                    .map(|h| serde_json::json!({
+                        "doc_id": hex::encode(h.doc_id.0),
+                        "score": h.score,
+                        "snippet": h.snippet,
+                    }))
+                    .collect::<Vec<_>>()
+            )
             .to_string(),
             Err(e) => format!("error: {e}"),
         }
@@ -246,15 +247,20 @@ impl MemvaultServer {
             (Some(s), Some(l)) => Some((s, l)),
             _ => None,
         };
-        match self.client.list_docs(tag_filter, limit, Some(&bucket)).await {
-            Ok(docs) => serde_json::json!(docs
-                .iter()
-                .map(|d| serde_json::json!({
-                    "id": hex::encode(d.id.0),
-                    "title": d.title,
-                    "updated_ns": d.updated_ns,
-                }))
-                .collect::<Vec<_>>())
+        match self
+            .client
+            .list_docs(tag_filter, limit, Some(&bucket))
+            .await
+        {
+            Ok(docs) => serde_json::json!(
+                docs.iter()
+                    .map(|d| serde_json::json!({
+                        "id": hex::encode(d.id.0),
+                        "title": d.title,
+                        "updated_ns": d.updated_ns,
+                    }))
+                    .collect::<Vec<_>>()
+            )
             .to_string(),
             Err(e) => format!("error: {e}"),
         }
@@ -270,14 +276,16 @@ impl MemvaultServer {
             Err(e) => return format!("error: {e}"),
         };
         match self.client.history_of(&id).await {
-            Ok(records) => serde_json::json!(records
-                .iter()
-                .map(|r| serde_json::json!({
-                    "cid": cid_out(&r.cid),
-                    "op_kind": format!("{:?}", r.op_kind),
-                    "wall_ns": r.wall_ns,
-                }))
-                .collect::<Vec<_>>())
+            Ok(records) => serde_json::json!(
+                records
+                    .iter()
+                    .map(|r| serde_json::json!({
+                        "cid": cid_out(&r.cid),
+                        "op_kind": format!("{:?}", r.op_kind),
+                        "wall_ns": r.wall_ns,
+                    }))
+                    .collect::<Vec<_>>()
+            )
             .to_string(),
             Err(e) => format!("error: {e}"),
         }
@@ -358,7 +366,11 @@ impl MemvaultServer {
             Ok(b) => b,
             Err(e) => return format!("error: invalid hex: {e}"),
         };
-        match self.client.read_file_range(&cid, params.start, params.end).await {
+        match self
+            .client
+            .read_file_range(&cid, params.start, params.end)
+            .await
+        {
             Ok(data) => {
                 use base64::Engine;
                 serde_json::json!({
@@ -420,8 +432,7 @@ impl MemvaultServer {
         };
         match self.client.read_extracted_text(&cid).await {
             Ok(Some(text)) => {
-                serde_json::json!({ "manifest_cid": params.manifest_cid, "text": text })
-                    .to_string()
+                serde_json::json!({ "manifest_cid": params.manifest_cid, "text": text }).to_string()
             }
             Ok(None) => serde_json::json!({
                 "manifest_cid": params.manifest_cid,
@@ -483,8 +494,7 @@ impl MemvaultServer {
         match self.client.add_entity(entity, vis, Some(&bucket)).await {
             Ok(id) => {
                 let node_id = format!("entity:{}", hex::encode(id.0));
-                let mut result =
-                    serde_json::json!({ "node_id": node_id, "status": "created" });
+                let mut result = serde_json::json!({ "node_id": node_id, "status": "created" });
                 if let Some(vfs_path) = &params.vfs_path {
                     let target = NodeRef::Entity(id.clone());
                     if let Err(e) = self.client.vfs_link(&bucket, vfs_path, &target).await {
@@ -569,9 +579,7 @@ impl MemvaultServer {
         };
         let limit = params.limit.unwrap_or(100);
         match self.client.skill_list(limit, bucket.as_ref()).await {
-            Ok(skills) => {
-                serde_json::to_string(&skills).unwrap_or_else(|e| format!("error: {e}"))
-            }
+            Ok(skills) => serde_json::to_string(&skills).unwrap_or_else(|e| format!("error: {e}")),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -744,16 +752,18 @@ impl MemvaultServer {
             .await
         {
             Ok(entities) => serde_json::json!(
-                entities.iter()
+                entities
+                    .iter()
                     // Hide managed kinds (skill, vfs:dir) — use the skill/VFS tools.
                     .filter(|e| !memvault_core::is_reserved_entity_kind(&e.kind))
                     .map(|e| serde_json::json!({
-                    "id": hex::encode(e.id.0),
-                    "kind": e.kind,
-                    "label": e.props.get("name").or_else(|| e.props.get("title"))
-                        .and_then(|v| v.as_str()).unwrap_or(&e.kind),
-                    "edge_count": e.edges_out.len(),
-                })).collect::<Vec<_>>()
+                        "id": hex::encode(e.id.0),
+                        "kind": e.kind,
+                        "label": e.props.get("name").or_else(|| e.props.get("title"))
+                            .and_then(|v| v.as_str()).unwrap_or(&e.kind),
+                        "edge_count": e.edges_out.len(),
+                    }))
+                    .collect::<Vec<_>>()
             )
             .to_string(),
             Err(e) => format!("error: {e}"),
@@ -771,18 +781,24 @@ impl MemvaultServer {
         };
         match self
             .client
-            .traverse_from(&node, params.relation.as_deref(), params.max_depth.unwrap_or(2))
+            .traverse_from(
+                &node,
+                params.relation.as_deref(),
+                params.max_depth.unwrap_or(2),
+            )
             .await
         {
             Ok(hits) => serde_json::json!(
-                hits.iter().map(|h| serde_json::json!({
-                    "node": h.node.tag_label(),
-                    "depth": h.depth,
-                    "path": h.path.iter().map(|(eid, rel)| serde_json::json!({
-                        "edge_id": hex::encode(eid.0),
-                        "relation": rel,
-                    })).collect::<Vec<_>>(),
-                })).collect::<Vec<_>>()
+                hits.iter()
+                    .map(|h| serde_json::json!({
+                        "node": h.node.tag_label(),
+                        "depth": h.depth,
+                        "path": h.path.iter().map(|(eid, rel)| serde_json::json!({
+                            "edge_id": hex::encode(eid.0),
+                            "relation": rel,
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>()
             )
             .to_string(),
             Err(e) => format!("error: {e}"),
@@ -877,18 +893,24 @@ impl MemvaultServer {
         };
         match self
             .client
-            .list_all(params.view.as_deref(), params.limit.unwrap_or(100), Some(&bucket))
+            .list_all(
+                params.view.as_deref(),
+                params.limit.unwrap_or(100),
+                Some(&bucket),
+            )
             .await
         {
-            Ok(items) => serde_json::json!(items
-                .iter()
-                .map(|(id, nt, label, tags)| serde_json::json!({
-                    "node_id": id,
-                    "node_type": nt,
-                    "label": label,
-                    "tags": tags,
-                }))
-                .collect::<Vec<_>>())
+            Ok(items) => serde_json::json!(
+                items
+                    .iter()
+                    .map(|(id, nt, label, tags)| serde_json::json!({
+                        "node_id": id,
+                        "node_type": nt,
+                        "label": label,
+                        "tags": tags,
+                    }))
+                    .collect::<Vec<_>>()
+            )
             .to_string(),
             Err(e) => format!("error: {e}"),
         }
@@ -900,11 +922,7 @@ impl MemvaultServer {
     )]
     async fn retract(&self, Parameters(params): Parameters<RetractParams>) -> String {
         // External (validated) retract: refuses reserved kinds (skill, vfs:dir).
-        match self
-            .client
-            .retract_node(&params.node, &params.reason)
-            .await
-        {
+        match self.client.retract_node(&params.node, &params.reason).await {
             Ok(()) => serde_json::json!({
                 "node_id": params.node,
                 "status": "retracted",
@@ -1027,19 +1045,25 @@ impl MemvaultServer {
         &self,
         Parameters(params): Parameters<crate::types::BucketListParams>,
     ) -> String {
-        match self.client.bucket_list_filtered(params.include_merged).await {
-            Ok(buckets) => serde_json::json!(buckets
-                .iter()
-                .map(|b| serde_json::json!({
-                    "id": hex::encode(b.id.0),
-                    "name": b.name,
-                    "description": b.description,
-                    "owner_agent": b.owner_agent.as_ref().map(|a| &a.0),
-                    "is_attached": b.is_attached,
-                    "envelope_count": b.envelope_count,
-                    "created_ns": b.created_ns,
-                }))
-                .collect::<Vec<_>>())
+        match self
+            .client
+            .bucket_list_filtered(params.include_merged)
+            .await
+        {
+            Ok(buckets) => serde_json::json!(
+                buckets
+                    .iter()
+                    .map(|b| serde_json::json!({
+                        "id": hex::encode(b.id.0),
+                        "name": b.name,
+                        "description": b.description,
+                        "owner_agent": b.owner_agent.as_ref().map(|a| &a.0),
+                        "is_attached": b.is_attached,
+                        "envelope_count": b.envelope_count,
+                        "created_ns": b.created_ns,
+                    }))
+                    .collect::<Vec<_>>()
+            )
             .to_string(),
             Err(e) => format!("error: {e}"),
         }
@@ -1061,10 +1085,8 @@ impl MemvaultServer {
             )
             .await
         {
-            Ok(id) => {
-                serde_json::json!({ "bucket_id": hex::encode(id.0), "name": params.name })
-                    .to_string()
-            }
+            Ok(id) => serde_json::json!({ "bucket_id": hex::encode(id.0), "name": params.name })
+                .to_string(),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -1354,16 +1376,18 @@ impl MemvaultServer {
             ..Default::default()
         };
         match self.client.audit(query).await {
-            Ok(records) => serde_json::json!(records
-                .iter()
-                .map(|r| serde_json::json!({
-                    "cid": cid_out(&r.cid),
-                    "op_kind": format!("{:?}", r.op_kind),
-                    "author": hex::encode(&r.author),
-                    "wall_ns": r.wall_ns,
-                    "tags": r.tags,
-                }))
-                .collect::<Vec<_>>())
+            Ok(records) => serde_json::json!(
+                records
+                    .iter()
+                    .map(|r| serde_json::json!({
+                        "cid": cid_out(&r.cid),
+                        "op_kind": format!("{:?}", r.op_kind),
+                        "author": hex::encode(&r.author),
+                        "wall_ns": r.wall_ns,
+                        "tags": r.tags,
+                    }))
+                    .collect::<Vec<_>>()
+            )
             .to_string(),
             Err(e) => format!("error: {e}"),
         }
@@ -1468,7 +1492,11 @@ impl MemvaultServer {
             Some(n) => n,
             None => return format!("error: invalid target: {}", params.target),
         };
-        match self.client.vfs_link(&bucket, &params.path, &target_ref).await {
+        match self
+            .client
+            .vfs_link(&bucket, &params.path, &target_ref)
+            .await
+        {
             Ok(edge_id) => serde_json::json!({
                 "path": params.path,
                 "target": params.target,
@@ -1642,7 +1670,11 @@ impl MemvaultServer {
             props,
             provenance: None,
         };
-        match self.client.add_link(&source_ref, edge, Visibility::Internal).await {
+        match self
+            .client
+            .add_link(&source_ref, edge, Visibility::Internal)
+            .await
+        {
             Ok(edge_id) => serde_json::json!({
                 "edge_id": hex::encode(edge_id.0),
                 "status": "linked",
@@ -1658,17 +1690,19 @@ impl MemvaultServer {
             None => return format!("error: invalid node: {node}"),
         };
         match self.client.edges_of(&node_ref).await {
-            Ok(edges) => serde_json::json!(edges
-                .iter()
-                .map(|(src, edge)| serde_json::json!({
-                    "edge_id": hex::encode(edge.id.0),
-                    "source": src.tag_label(),
-                    "target": edge.target.tag_label(),
-                    "relation": edge.relation,
-                    "weight": edge.weight,
-                    "props": edge.props,
-                }))
-                .collect::<Vec<_>>())
+            Ok(edges) => serde_json::json!(
+                edges
+                    .iter()
+                    .map(|(src, edge)| serde_json::json!({
+                        "edge_id": hex::encode(edge.id.0),
+                        "source": src.tag_label(),
+                        "target": edge.target.tag_label(),
+                        "relation": edge.relation,
+                        "weight": edge.weight,
+                        "props": edge.props,
+                    }))
+                    .collect::<Vec<_>>()
+            )
             .to_string(),
             Err(e) => format!("error: {e}"),
         }
@@ -1705,11 +1739,12 @@ mod tool_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let store =
-            Arc::new(memvault_store::MemvaultStore::open(dir.join("blocks.redb")).unwrap());
+        let store = Arc::new(memvault_store::MemvaultStore::open(dir.join("blocks.redb")).unwrap());
         let client = memvault_api::LocalClient::new(
             store,
-            Arc::new(RwLock::new(memvault_query::QuotaManager::new(Default::default()))),
+            Arc::new(RwLock::new(memvault_query::QuotaManager::new(
+                Default::default(),
+            ))),
             Arc::new(memvault_api::EventBus::new(16)),
             node.verifying_key().to_bytes().to_vec(),
             cluster.0.to_vec(),
@@ -1813,13 +1848,19 @@ mod tool_tests {
             }))
             .await;
         assert_ok(&ls);
-        assert!(ls.contains("projects"), "vfs_ls / must list 'projects': {ls}");
+        assert!(
+            ls.contains("projects"),
+            "vfs_ls / must list 'projects': {ls}"
+        );
     }
 
     #[tokio::test]
     async fn bucket_status_list_via_tools() {
         let srv = test_server().await;
-        assert_ok(&srv.bucket_list(Parameters(crate::types::BucketListParams::default())).await);
+        assert_ok(
+            &srv.bucket_list(Parameters(crate::types::BucketListParams::default()))
+                .await,
+        );
         assert_ok(&srv.status().await);
         assert_ok(
             &srv.list_all(Parameters(crate::types::ListAllParams {
@@ -1872,10 +1913,17 @@ mod tool_tests {
         let doc_hex = jget(&put, "doc_id");
         assert!(!doc_hex.is_empty(), "put must return doc_id: {put}");
 
-        assert_ok(&srv.get(Parameters(t::GetParams { cid: doc_hex.clone() })).await);
         assert_ok(
-            &srv.doc_history(Parameters(t::DocHistoryParams { doc_id: doc_hex.clone() }))
-                .await,
+            &srv.get(Parameters(t::GetParams {
+                cid: doc_hex.clone(),
+            }))
+            .await,
+        );
+        assert_ok(
+            &srv.doc_history(Parameters(t::DocHistoryParams {
+                doc_id: doc_hex.clone(),
+            }))
+            .await,
         );
         assert_ok(
             &srv.list(Parameters(t::ListParams {
@@ -1920,13 +1968,18 @@ mod tool_tests {
         // The MCP tool now emits the canonical manifest CID string and accepts
         // it back on the manifest_cid params (cid_bytes_lenient).
         let cid = jget(&up, "cid");
-        assert!(cid.starts_with('b'), "upload cid must be a CID string: {up}");
+        assert!(
+            cid.starts_with('b'),
+            "upload cid must be a CID string: {up}"
+        );
 
         // file_info parses the manifest block as JSON, but manifests are
         // stored as dag-cbor — a real shape mismatch (see the wire-standards
         // work). Here we only require the tool path to execute.
         let info = srv
-            .file_info(Parameters(t::FileInfoParams { manifest_cid: cid.clone() }))
+            .file_info(Parameters(t::FileInfoParams {
+                manifest_cid: cid.clone(),
+            }))
             .await;
         assert!(!info.is_empty(), "file_info produced no output");
         assert_ok(
@@ -1937,9 +1990,22 @@ mod tool_tests {
             }))
             .await,
         );
-        assert_ok(&srv.pin(Parameters(t::PinParams { manifest_cid: cid.clone() })).await);
-        assert_ok(&srv.unpin(Parameters(t::UnpinParams { manifest_cid: cid.clone() })).await);
-        assert_ok(&srv.extract_text(Parameters(t::ExtractTextParams { manifest_cid: cid })).await);
+        assert_ok(
+            &srv.pin(Parameters(t::PinParams {
+                manifest_cid: cid.clone(),
+            }))
+            .await,
+        );
+        assert_ok(
+            &srv.unpin(Parameters(t::UnpinParams {
+                manifest_cid: cid.clone(),
+            }))
+            .await,
+        );
+        assert_ok(
+            &srv.extract_text(Parameters(t::ExtractTextParams { manifest_cid: cid }))
+                .await,
+        );
     }
 
     #[tokio::test]
@@ -1947,11 +2013,17 @@ mod tool_tests {
         let srv = test_server().await;
         let a = jget(&srv.graph_add(Parameters(ga("person"))).await, "node_id");
         let b = jget(&srv.graph_add(Parameters(ga("person"))).await, "node_id");
-        assert!(!a.is_empty() && !b.is_empty(), "graph_add must return node_id");
+        assert!(
+            !a.is_empty() && !b.is_empty(),
+            "graph_add must return node_id"
+        );
         let a_hex = a.rsplit(':').next().unwrap().to_string();
         let b_hex = b.rsplit(':').next().unwrap().to_string();
 
-        assert_ok(&srv.get_entity(Parameters(t::GetEntityParams { id: a_hex.clone() })).await);
+        assert_ok(
+            &srv.get_entity(Parameters(t::GetEntityParams { id: a_hex.clone() }))
+                .await,
+        );
         assert_ok(
             &srv.list_entities(Parameters(t::ListEntitiesParams {
                 limit: Some(50),
@@ -1999,8 +2071,14 @@ mod tool_tests {
         assert_ok(&link);
         let edge_id = jget(&link, "edge_id");
         assert!(!edge_id.is_empty(), "link must return edge_id: {link}");
-        assert_ok(&srv.edges(Parameters(t::EdgesOfParams { node: a.clone() })).await);
-        assert_ok(&srv.unlink(Parameters(t::UnlinkParams { edge_id, source: a })).await);
+        assert_ok(
+            &srv.edges(Parameters(t::EdgesOfParams { node: a.clone() }))
+                .await,
+        );
+        assert_ok(
+            &srv.unlink(Parameters(t::UnlinkParams { edge_id, source: a }))
+                .await,
+        );
     }
 
     #[tokio::test]
@@ -2016,7 +2094,9 @@ mod tool_tests {
             }))
             .await,
         );
-        let tags = srv.get_tags(Parameters(t::GetTagsParams { node: node.clone() })).await;
+        let tags = srv
+            .get_tags(Parameters(t::GetTagsParams { node: node.clone() }))
+            .await;
         assert_ok(&tags);
         assert!(tags.contains("blue"), "get_tags must show the tag: {tags}");
         assert_ok(
@@ -2049,7 +2129,12 @@ mod tool_tests {
             }))
             .await,
         );
-        assert_ok(&srv.view_delete(Parameters(t::ViewDeleteParams { name: "v1".to_string() })).await);
+        assert_ok(
+            &srv.view_delete(Parameters(t::ViewDeleteParams {
+                name: "v1".to_string(),
+            }))
+            .await,
+        );
     }
 
     #[tokio::test]
@@ -2065,7 +2150,10 @@ mod tool_tests {
         let id = jget(&bc, "bucket_id");
         assert!(!id.is_empty(), "bucket_create must return bucket_id: {bc}");
 
-        assert_ok(&srv.bucket_get(Parameters(t::BucketGetParams { id: id.clone() })).await);
+        assert_ok(
+            &srv.bucket_get(Parameters(t::BucketGetParams { id: id.clone() }))
+                .await,
+        );
         assert_ok(
             &srv.bucket_rename(Parameters(t::BucketRenameParams {
                 id: id.clone(),
@@ -2074,8 +2162,10 @@ mod tool_tests {
             .await,
         );
         assert_ok(
-            &srv.bucket_grants_list(Parameters(t::BucketGrantsListParams { bucket: Some(id.clone()) }))
-                .await,
+            &srv.bucket_grants_list(Parameters(t::BucketGrantsListParams {
+                bucket: Some(id.clone()),
+            }))
+            .await,
         );
         assert_ok(
             &srv.bucket_archive(Parameters(t::BucketArchiveParams {
@@ -2089,8 +2179,14 @@ mod tool_tests {
     #[tokio::test]
     async fn share_tools_via_tools() {
         let srv = test_server().await;
-        assert_ok(&srv.share_inbox(Parameters(t::ShareInboxParams::default())).await);
-        assert_ok(&srv.share_outbox(Parameters(t::ShareOutboxParams::default())).await);
+        assert_ok(
+            &srv.share_inbox(Parameters(t::ShareInboxParams::default()))
+                .await,
+        );
+        assert_ok(
+            &srv.share_outbox(Parameters(t::ShareOutboxParams::default()))
+                .await,
+        );
         // No real proposal exists, so share_decide returns an error string —
         // we only require its path to execute (param parse + client call).
         let r = srv
@@ -2144,7 +2240,13 @@ mod tool_tests {
     #[tokio::test]
     async fn vfs_full_via_tools() {
         let srv = test_server().await;
-        assert_ok(&srv.vfs_mkdir(Parameters(t::VfsMkdirParams { path: "/p/a".to_string(), bucket: None })).await);
+        assert_ok(
+            &srv.vfs_mkdir(Parameters(t::VfsMkdirParams {
+                path: "/p/a".to_string(),
+                bucket: None,
+            }))
+            .await,
+        );
         assert_ok(
             &srv.vfs_tree(Parameters(t::VfsTreeParams {
                 path: Some("/".to_string()),
@@ -2163,7 +2265,10 @@ mod tool_tests {
             }))
             .await,
         );
-        assert_ok(&srv.vfs_find(Parameters(t::VfsFindParams { node, bucket: None })).await);
+        assert_ok(
+            &srv.vfs_find(Parameters(t::VfsFindParams { node, bucket: None }))
+                .await,
+        );
         assert_ok(
             &srv.vfs_mv(Parameters(t::VfsMvParams {
                 from: "/p/note".to_string(),
@@ -2172,6 +2277,12 @@ mod tool_tests {
             }))
             .await,
         );
-        assert_ok(&srv.vfs_unlink(Parameters(t::VfsUnlinkParams { path: "/p/note2".to_string(), bucket: None })).await);
+        assert_ok(
+            &srv.vfs_unlink(Parameters(t::VfsUnlinkParams {
+                path: "/p/note2".to_string(),
+                bucket: None,
+            }))
+            .await,
+        );
     }
 }

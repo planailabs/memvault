@@ -156,8 +156,7 @@ mod tests {
         let issuer = make_key();
         let rec = sign_bucket_merge(&issuer, bid(3), bid(7), 99).unwrap();
         let bytes = serde_ipld_dagcbor::to_vec(&rec).expect("encode");
-        let decoded: BucketMergeRecord =
-            serde_ipld_dagcbor::from_slice(&bytes).expect("decode");
+        let decoded: BucketMergeRecord = serde_ipld_dagcbor::from_slice(&bytes).expect("decode");
         assert_eq!(
             rec.signing_bytes().unwrap(),
             decoded.signing_bytes().unwrap()

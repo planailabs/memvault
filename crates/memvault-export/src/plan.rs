@@ -41,7 +41,9 @@ pub async fn build_plan(client: &dyn MemvaultClient, opts: &ExportOptions) -> Re
 
     // Use list_all for a unified listing, filtered by view if specified.
     // Vault export is cross-bucket by design → no bucket scope.
-    let all_nodes = client.list_all(opts.view_filter.as_deref(), 10_000, None).await?;
+    let all_nodes = client
+        .list_all(opts.view_filter.as_deref(), 10_000, None)
+        .await?;
 
     for (node_id, node_type, label, tags) in &all_nodes {
         // Apply tag filter if specified

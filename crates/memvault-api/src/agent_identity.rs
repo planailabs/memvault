@@ -32,7 +32,6 @@ pub struct AgentIdentity {
     pub verifying_key: VerifyingKey,
 }
 
-
 impl AgentIdentity {
     /// Load an existing agent identity from an identity directory.
     ///
@@ -208,10 +207,13 @@ pub fn enroll_local_agent(
 ) -> Result<AgentIdentity> {
     let node_signing_key = client
         .node_signing_key()
-        .ok_or_else(|| ApiError::Other(
-            "enroll_local_agent: node signing key not set on LocalClient; \
-             call set_node_signing_key first".into(),
-        ))?
+        .ok_or_else(|| {
+            ApiError::Other(
+                "enroll_local_agent: node signing key not set on LocalClient; \
+             call set_node_signing_key first"
+                    .into(),
+            )
+        })?
         .clone();
     let node_pubkey_bytes = node_signing_key.verifying_key().to_bytes();
 
@@ -232,26 +234,25 @@ pub fn enroll_local_agent(
     // truth-of-record.
     let existing = if AgentIdentity::exists(identity_dir) {
         match AgentIdentity::load(identity_dir) {
-            Ok(id) => match crate::sigchain::find_agent_attestation(
-                client,
-                &id.verifying_key.to_bytes(),
-            ) {
-                Ok(Some(att))
-                    if att.node_pubkey == node_pubkey_bytes
-                        && att.not_after_ns > now_ns =>
+            Ok(id) => {
+                match crate::sigchain::find_agent_attestation(client, &id.verifying_key.to_bytes())
                 {
-                    Some((id, att))
-                }
-                _ => {
-                    tracing::info!(
-                        agent_id,
-                        "agent attestation on-chain is missing, expired, or signed by a \
+                    Ok(Some(att))
+                        if att.node_pubkey == node_pubkey_bytes && att.not_after_ns > now_ns =>
+                    {
+                        Some((id, att))
+                    }
+                    _ => {
+                        tracing::info!(
+                            agent_id,
+                            "agent attestation on-chain is missing, expired, or signed by a \
                          rotated node key; regenerating"
-                    );
-                    let _ = std::fs::remove_dir_all(identity_dir);
-                    None
+                        );
+                        let _ = std::fs::remove_dir_all(identity_dir);
+                        None
+                    }
                 }
-            },
+            }
             Err(e) => {
                 tracing::warn!(agent_id, error = %e, "agent identity unreadable; regenerating");
                 let _ = std::fs::remove_dir_all(identity_dir);
@@ -466,8 +467,8 @@ pub fn enroll_remote_agent(
     }
 
     // CID of the token, for consumption tracking + revocation lookup.
-    let token_cbor = serde_ipld_dagcbor::to_vec(&token)
-        .map_err(|e| ApiError::Serialization(e.to_string()))?;
+    let token_cbor =
+        serde_ipld_dagcbor::to_vec(&token).map_err(|e| ApiError::Serialization(e.to_string()))?;
     let token_cid = memvault_core::cid_from_bytes(&token_cbor).to_bytes();
 
     if client.token_is_revoked(&token_cid) {

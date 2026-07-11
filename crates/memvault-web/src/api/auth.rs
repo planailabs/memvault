@@ -78,8 +78,7 @@ pub async fn get_session_token(
     jar: CookieJar,
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
 ) -> Result<(CookieJar, axum::Json<serde_json::Value>), StatusCode> {
-    let identity =
-        crate::ui::state::ui_agent_identity().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let identity = crate::ui::state::ui_agent_identity().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let token = identity
         .issue_jwt("read write admin", SESSION_TTL_SECS as u64)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -154,9 +153,8 @@ async fn verify_bearer(
     parts: &mut Parts,
     state: &Arc<AppState>,
 ) -> Result<AgentTokenClaims, AuthRejection> {
-    let token = extract_token(&parts.headers).ok_or_else(|| {
-        AuthRejection("missing Authorization header or session cookie".into())
-    })?;
+    let token = extract_token(&parts.headers)
+        .ok_or_else(|| AuthRejection("missing Authorization header or session cookie".into()))?;
     let token = token.as_str();
     // The web auth path normally runs against the daemon's LocalClient
     // (set via `ui::state::set_client` at bootstrap), but tests/headless
@@ -419,14 +417,14 @@ pub fn enforce_bucket_action(
         .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
     let pubkey = hex::decode(&claims.sub)
         .map_err(|e| crate::error::ApiError::bad_request(format!("claims.sub hex: {e}")))?;
-    memvault_api::acl::check_bucket_access(&client, &pubkey, bucket_id, action)
-        .map_err(|e| match e {
-            memvault_api::ApiError::Forbidden(msg) => crate::error::ApiError {
-                status: axum::http::StatusCode::FORBIDDEN,
-                message: msg,
-            },
-            other => crate::error::ApiError::internal(other.to_string()),
-        })
+    memvault_api::acl::check_bucket_access(&client, &pubkey, bucket_id, action).map_err(|e| match e
+    {
+        memvault_api::ApiError::Forbidden(msg) => crate::error::ApiError {
+            status: axum::http::StatusCode::FORBIDDEN,
+            message: msg,
+        },
+        other => crate::error::ApiError::internal(other.to_string()),
+    })
 }
 
 /// Same as [`enforce_bucket_action`] but resolves the target bucket from
@@ -596,10 +594,7 @@ pub async fn origin_guard(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if matches!(
-        *req.method(),
-        Method::GET | Method::HEAD | Method::OPTIONS
-    ) {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return Ok(next.run(req).await);
     }
     let headers = req.headers();

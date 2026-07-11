@@ -9,9 +9,7 @@ use dioxus::prelude::*;
 use dioxus_i18n::t;
 use plan_ai_design::{Card, Dot, Pill, PillVariant};
 
-use super::explorer::{
-    display_kind_for, get_node_detail, kind_variant, EdgeDetail, NodeDetail,
-};
+use super::explorer::{EdgeDetail, NodeDetail, display_kind_for, get_node_detail, kind_variant};
 use crate::ui::app::Route;
 use crate::ui::components::cid_display::CidDisplay;
 

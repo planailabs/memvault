@@ -37,10 +37,7 @@ impl VfsRow {
 // ── Server functions ───────────────────────────────────────────────
 
 #[server]
-async fn list_vfs_entries(
-    path: String,
-    bucket_hex: String,
-) -> Result<Vec<VfsRow>, ServerFnError> {
+async fn list_vfs_entries(path: String, bucket_hex: String) -> Result<Vec<VfsRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let bucket = memvault_core::BucketId::from_hex(&bucket_hex)
         .map_err(|e| ServerFnError::new(format!("invalid bucket: {e}")))?;

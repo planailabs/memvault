@@ -75,10 +75,7 @@ pub fn use_session_provider() -> SessionSignal {
                             .saturating_sub(SESSION_RENEW_LEAD_SECS)
                             .max(60);
                         session.set(SessionState::Active(info));
-                        gloo_timers::future::TimeoutFuture::new(
-                            (sleep_secs * 1000) as u32,
-                        )
-                        .await;
+                        gloo_timers::future::TimeoutFuture::new((sleep_secs * 1000) as u32).await;
                     }
                     Err(e) => {
                         session.set(SessionState::Failed(e));

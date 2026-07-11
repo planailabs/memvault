@@ -12,7 +12,7 @@ use super::canvas::GraphCanvas;
 // client build stays warning-free.
 #[cfg(feature = "server")]
 use super::canvas::display_label;
-use super::controls::{load_settings, save_settings, GraphSettings, SettingsPanel};
+use super::controls::{GraphSettings, SettingsPanel, load_settings, save_settings};
 use super::layout_engine::{ForceSimulation, GraphEdge, GraphNode};
 use super::panel::DetailPanel;
 use crate::ui::topbar::use_topbar;
@@ -110,7 +110,14 @@ async fn list_graph_nodes(
                 if let Some(memvault_core::NodeRef::Entity(eid)) =
                     memvault_core::NodeRef::from_tag_label(id)
                 {
-                    if let Ok(Some(e)) = client.get_entity_scoped(&eid, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
+                    if let Ok(Some(e)) = client
+                        .get_entity_scoped(
+                            &eid,
+                            &memvault_core::QueryScope::all()
+                                .with_include_retracted(show_retracted),
+                        )
+                        .await
+                    {
                         if memvault_core::is_reserved_entity_kind(&e.kind) {
                             continue;
                         }
@@ -205,7 +212,10 @@ async fn list_graph_nodes(
         let (node_type, kind, label) = match &node_ref {
             memvault_core::NodeRef::Doc(did) => {
                 let title = client
-                    .get_doc_scoped(did, &memvault_core::QueryScope::all().with_include_retracted(show_retracted))
+                    .get_doc_scoped(
+                        did,
+                        &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+                    )
                     .await
                     .ok()
                     .flatten()
@@ -235,7 +245,13 @@ async fn list_graph_nodes(
             }
             memvault_core::NodeRef::Entity(eid) => {
                 // Skip vfs:dir entities that appear as edge targets.
-                if let Ok(Some(e)) = client.get_entity_scoped(eid, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
+                if let Ok(Some(e)) = client
+                    .get_entity_scoped(
+                        eid,
+                        &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+                    )
+                    .await
+                {
                     if e.kind == memvault_core::VFS_DIR_KIND {
                         continue;
                     }
@@ -278,7 +294,13 @@ pub(crate) async fn get_node_detail(
     // Get properties + basic info
     let (kind, label, props) = match &node_ref {
         memvault_core::NodeRef::Entity(id) => {
-            if let Ok(Some(entity)) = client.get_entity_scoped(id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
+            if let Ok(Some(entity)) = client
+                .get_entity_scoped(
+                    id,
+                    &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+                )
+                .await
+            {
                 let label = entity
                     .props
                     .get("name")
@@ -292,7 +314,13 @@ pub(crate) async fn get_node_detail(
             }
         }
         memvault_core::NodeRef::Doc(id) => {
-            let label = if let Ok(Some(doc)) = client.get_doc_scoped(id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
+            let label = if let Ok(Some(doc)) = client
+                .get_doc_scoped(
+                    id,
+                    &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+                )
+                .await
+            {
                 doc.frontmatter
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -319,8 +347,7 @@ pub(crate) async fn get_node_detail(
                 ("incoming".to_string(), source.clone())
             };
             let other_node = other_ref.tag_label();
-            let scope =
-                memvault_core::QueryScope::all().with_include_retracted(show_retracted);
+            let scope = memvault_core::QueryScope::all().with_include_retracted(show_retracted);
             let (other_node_type, other_kind, other_label) = match &other_ref {
                 memvault_core::NodeRef::Entity(eid) => {
                     if let Ok(Some(e)) = client.get_entity_scoped(eid, &scope).await {
@@ -343,7 +370,12 @@ pub(crate) async fn get_node_detail(
                         .await
                         .ok()
                         .flatten()
-                        .and_then(|d| d.frontmatter.get("title").and_then(|v| v.as_str()).map(String::from));
+                        .and_then(|d| {
+                            d.frontmatter
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        });
                     let label = display_label(title.as_deref(), None, "document", &other_node);
                     ("doc".to_string(), "document".to_string(), label)
                 }
@@ -388,7 +420,10 @@ pub(crate) async fn get_node_detail(
 }
 
 #[server]
-pub(crate) async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<NodeSummary>, ServerFnError> {
+pub(crate) async fn expand_node(
+    id: String,
+    show_retracted: bool,
+) -> Result<Vec<NodeSummary>, ServerFnError> {
     let client = crate::ui::state::client()?;
     let node_ref = memvault_core::NodeRef::from_tag_label(&id)
         .ok_or_else(|| ServerFnError::new("Invalid node ID"))?;
@@ -404,7 +439,13 @@ pub(crate) async fn expand_node(id: String, show_retracted: bool) -> Result<Vec<
             let other_id = other.tag_label();
             // Try to get entity details for entity nodes
             if let memvault_core::NodeRef::Entity(eid) = other {
-                if let Ok(Some(entity)) = client.get_entity_scoped(eid, &memvault_core::QueryScope::all().with_include_retracted(show_retracted)).await {
+                if let Ok(Some(entity)) = client
+                    .get_entity_scoped(
+                        eid,
+                        &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+                    )
+                    .await
+                {
                     let label = entity
                         .props
                         .get("name")
@@ -528,12 +569,30 @@ fn hash_color(s: &str) -> String {
 /// hashed hue so dense graphs stay colorful and kinds are distinguishable.
 pub(crate) fn kind_svg_palette(display_kind: &str) -> (String, String) {
     match kind_variant_opt(display_kind) {
-        Some(PillVariant::Info) => ("rgb(var(--c-info-soft))".into(), "rgb(var(--c-info))".into()),
-        Some(PillVariant::Accent) => ("rgb(var(--c-brand-soft))".into(), "rgb(var(--c-brand))".into()),
-        Some(PillVariant::Ok) => ("rgb(var(--c-success-soft))".into(), "rgb(var(--c-success))".into()),
-        Some(PillVariant::Warn) => ("rgb(var(--c-warn-soft))".into(), "rgb(var(--c-warn-strong))".into()),
-        Some(PillVariant::Bad) => ("rgb(var(--c-danger-soft))".into(), "rgb(var(--c-danger))".into()),
-        Some(PillVariant::Muted) => ("rgb(var(--c-surface-2))".into(), "rgb(var(--c-fg-faint))".into()),
+        Some(PillVariant::Info) => (
+            "rgb(var(--c-info-soft))".into(),
+            "rgb(var(--c-info))".into(),
+        ),
+        Some(PillVariant::Accent) => (
+            "rgb(var(--c-brand-soft))".into(),
+            "rgb(var(--c-brand))".into(),
+        ),
+        Some(PillVariant::Ok) => (
+            "rgb(var(--c-success-soft))".into(),
+            "rgb(var(--c-success))".into(),
+        ),
+        Some(PillVariant::Warn) => (
+            "rgb(var(--c-warn-soft))".into(),
+            "rgb(var(--c-warn-strong))".into(),
+        ),
+        Some(PillVariant::Bad) => (
+            "rgb(var(--c-danger-soft))".into(),
+            "rgb(var(--c-danger))".into(),
+        ),
+        Some(PillVariant::Muted) => (
+            "rgb(var(--c-surface-2))".into(),
+            "rgb(var(--c-fg-faint))".into(),
+        ),
         None => {
             let c = hash_color(display_kind);
             (c.clone(), c)

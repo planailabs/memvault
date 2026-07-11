@@ -62,7 +62,8 @@ struct StoredFields {
 /// Split a stored "scope:label" tag into a `(scope, label)` pair on the first
 /// colon. Returns `None` if there's no colon.
 fn split_tag(t: &str) -> Option<(String, String)> {
-    t.split_once(':').map(|(s, l)| (s.to_string(), l.to_string()))
+    t.split_once(':')
+        .map(|(s, l)| (s.to_string(), l.to_string()))
 }
 
 /// True if the query uses Tantivy query syntax (boolean operators, phrases,
@@ -480,8 +481,7 @@ impl TantivyIndex {
         if !query_text.is_empty() {
             let mut match_subs: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-            let mut parser =
-                QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
+            let mut parser = QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
             parser.set_field_boost(self.f_label, 3.0);
             let advanced = is_advanced_query(query_text);
             let parsed_ok = match parser.parse_query(query_text) {
@@ -626,7 +626,10 @@ impl TantivyIndex {
             nd.add_u64(self.f_wall_ns, wall_ns);
             nd.add_text(self.f_bucket_id, self.get_text_field(&d, self.f_bucket_id));
             nd.add_u64(self.f_retracted, flag);
-            nd.add_text(self.f_entity_kind, self.get_text_field(&d, self.f_entity_kind));
+            nd.add_text(
+                self.f_entity_kind,
+                self.get_text_field(&d, self.f_entity_kind),
+            );
             self.writer
                 .add_document(nd)
                 .map_err(|e| QueryError::Other(e.to_string()))?;
@@ -667,9 +670,15 @@ impl TantivyIndex {
             body: self.get_text_field(d, self.f_body),
             label: self.get_text_field(d, self.f_label),
             tags,
-            wall_ns: d.get_first(self.f_wall_ns).and_then(|v| v.as_u64()).unwrap_or(0),
+            wall_ns: d
+                .get_first(self.f_wall_ns)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             bucket_id: self.get_text_field(d, self.f_bucket_id),
-            retracted: d.get_first(self.f_retracted).and_then(|v| v.as_u64()).unwrap_or(0),
+            retracted: d
+                .get_first(self.f_retracted)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             entity_kind: self.get_text_field(d, self.f_entity_kind),
         }
     }
@@ -700,7 +709,9 @@ impl TantivyIndex {
 
     /// Whether a node is currently flagged retracted.
     pub fn is_retracted(&self, node_id: &str) -> bool {
-        self.read_fields(node_id).map(|f| f.retracted != 0).unwrap_or(false)
+        self.read_fields(node_id)
+            .map(|f| f.retracted != 0)
+            .unwrap_or(false)
     }
 
     /// A node's effective tags as `(scope, label)` pairs.
@@ -1029,7 +1040,14 @@ mod tests {
         assert_eq!(retr.len(), 1);
         // Include-retracted finds it.
         let incl = idx
-            .search_scoped("content", &[], &[], None, RetractionMode::IncludeRetracted, 10)
+            .search_scoped(
+                "content",
+                &[],
+                &[],
+                None,
+                RetractionMode::IncludeRetracted,
+                10,
+            )
             .unwrap();
         assert_eq!(incl.len(), 1);
 
@@ -1055,7 +1073,14 @@ mod tests {
 
         // Union of two of three buckets.
         let hits = idx
-            .search_scoped("shared", &["baaa", "bbbb"], &[], None, RetractionMode::ActiveOnly, 10)
+            .search_scoped(
+                "shared",
+                &["baaa", "bbbb"],
+                &[],
+                None,
+                RetractionMode::ActiveOnly,
+                10,
+            )
             .unwrap();
         assert_eq!(hits.len(), 2);
         // All buckets (empty filter).
@@ -1083,33 +1108,86 @@ mod tests {
         // get_tags
         let mut tags = idx.get_tags("doc:1");
         tags.sort();
-        assert_eq!(tags, vec![("a".to_string(), "x".to_string()), ("b".to_string(), "y".to_string())]);
+        assert_eq!(
+            tags,
+            vec![
+                ("a".to_string(), "x".to_string()),
+                ("b".to_string(), "y".to_string())
+            ]
+        );
         // is_retracted
         assert!(!idx.is_retracted("doc:1"));
         // resolve_label_mode
-        assert_eq!(idx.resolve_label_mode("doc:1", RetractionMode::ActiveOnly).as_deref(), Some("Label"));
+        assert_eq!(
+            idx.resolve_label_mode("doc:1", RetractionMode::ActiveOnly)
+                .as_deref(),
+            Some("Label")
+        );
 
         // apply_tag_update: remove b:y, add c:z
-        idx.apply_tag_update("doc:1", &[("c".into(), "z".into())], &[("b".into(), "y".into())]).unwrap();
+        idx.apply_tag_update(
+            "doc:1",
+            &[("c".into(), "z".into())],
+            &[("b".into(), "y".into())],
+        )
+        .unwrap();
         idx.commit().unwrap();
         let mut tags = idx.get_tags("doc:1");
         tags.sort();
-        assert_eq!(tags, vec![("a".to_string(), "x".to_string()), ("c".to_string(), "z".to_string())]);
+        assert_eq!(
+            tags,
+            vec![
+                ("a".to_string(), "x".to_string()),
+                ("c".to_string(), "z".to_string())
+            ]
+        );
         // bucket + body preserved across the rewrite
-        let hit = idx.search_scoped("body", &["bkt"], &[], None, RetractionMode::ActiveOnly, 10).unwrap();
+        let hit = idx
+            .search_scoped("body", &["bkt"], &[], None, RetractionMode::ActiveOnly, 10)
+            .unwrap();
         assert_eq!(hit.len(), 1);
     }
 
     #[test]
     fn test_members_and_list_modes() {
         let (_dir, mut idx) = make_index();
-        idx.add_document("c1", "doc:1", "alpha", "A", &[("kind".into(), "note".into())], None, 1).unwrap();
-        idx.add_document("c2", "doc:2", "beta", "B", &[("kind".into(), "note".into())], None, 2).unwrap();
-        idx.add_document("c3", "doc:3", "gamma", "C", &[("kind".into(), "memo".into())], None, 3).unwrap();
+        idx.add_document(
+            "c1",
+            "doc:1",
+            "alpha",
+            "A",
+            &[("kind".into(), "note".into())],
+            None,
+            1,
+        )
+        .unwrap();
+        idx.add_document(
+            "c2",
+            "doc:2",
+            "beta",
+            "B",
+            &[("kind".into(), "note".into())],
+            None,
+            2,
+        )
+        .unwrap();
+        idx.add_document(
+            "c3",
+            "doc:3",
+            "gamma",
+            "C",
+            &[("kind".into(), "memo".into())],
+            None,
+            3,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         // members of view {kind:note}
-        let mut m = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::ActiveOnly);
+        let mut m = idx.members_of_view_mode(
+            &[("kind".into(), "note".into())],
+            RetractionMode::ActiveOnly,
+        );
         m.sort();
         assert_eq!(m, vec!["doc:1".to_string(), "doc:2".to_string()]);
 
@@ -1120,15 +1198,31 @@ mod tests {
         // retract doc:2, then modes
         idx.retract("doc:2").unwrap();
         idx.commit().unwrap();
-        let active = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::ActiveOnly);
+        let active = idx.members_of_view_mode(
+            &[("kind".into(), "note".into())],
+            RetractionMode::ActiveOnly,
+        );
         assert_eq!(active, vec!["doc:1".to_string()]);
-        let only = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::RetractedOnly);
+        let only = idx.members_of_view_mode(
+            &[("kind".into(), "note".into())],
+            RetractionMode::RetractedOnly,
+        );
         assert_eq!(only, vec!["doc:2".to_string()]);
-        let incl = idx.members_of_view_mode(&[("kind".into(), "note".into())], RetractionMode::IncludeRetracted);
+        let incl = idx.members_of_view_mode(
+            &[("kind".into(), "note".into())],
+            RetractionMode::IncludeRetracted,
+        );
         assert_eq!(incl.len(), 2);
         // resolve_label of retracted node: hidden under ActiveOnly, shown under IncludeRetracted
-        assert!(idx.resolve_label_mode("doc:2", RetractionMode::ActiveOnly).is_none());
-        assert_eq!(idx.resolve_label_mode("doc:2", RetractionMode::IncludeRetracted).as_deref(), Some("B"));
+        assert!(
+            idx.resolve_label_mode("doc:2", RetractionMode::ActiveOnly)
+                .is_none()
+        );
+        assert_eq!(
+            idx.resolve_label_mode("doc:2", RetractionMode::IncludeRetracted)
+                .as_deref(),
+            Some("B")
+        );
 
         // search_unified_mode returns UnifiedHit
         let hits = idx.search_unified_mode("alpha", None, RetractionMode::ActiveOnly, 10);
@@ -1212,14 +1306,26 @@ mod tests {
     #[test]
     fn test_substring_matching() {
         let (_dir, mut idx) = make_index();
-        idx.add_document("c1", "doc:1", "scalable messaging pipeline", "Notes", &[], None, 1)
-            .unwrap();
+        idx.add_document(
+            "c1",
+            "doc:1",
+            "scalable messaging pipeline",
+            "Notes",
+            &[],
+            None,
+            1,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         // Whole word matches.
         assert_eq!(idx.search_unified("messaging", None, 10).unwrap().len(), 1);
         // Partial / prefix matches (regression: whole-token Tantivy dropped these).
-        assert_eq!(idx.search_unified("messag", None, 10).unwrap().len(), 1, "prefix");
+        assert_eq!(
+            idx.search_unified("messag", None, 10).unwrap().len(),
+            1,
+            "prefix"
+        );
         assert_eq!(
             idx.search_unified("essagin", None, 10).unwrap().len(),
             1,
@@ -1236,8 +1342,16 @@ mod tests {
             .unwrap();
         idx.add_document("c2", "doc:2", "serotonin reuptake", "B", &[], None, 2)
             .unwrap();
-        idx.add_document("c3", "doc:3", "dopamine and serotonin balance", "C", &[], None, 3)
-            .unwrap();
+        idx.add_document(
+            "c3",
+            "doc:3",
+            "dopamine and serotonin balance",
+            "C",
+            &[],
+            None,
+            3,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         let n = |q: &str| idx.search_unified(q, None, 10).unwrap().len();
@@ -1253,10 +1367,26 @@ mod tests {
     fn test_label_boost() {
         let (_dir, mut idx) = make_index();
         // doc:title has the term only in its title; doc:body only in its body.
-        idx.add_document("c1", "doc:title", "general notes here", "kubernetes", &[], None, 1)
-            .unwrap();
-        idx.add_document("c2", "doc:body", "kubernetes orchestration details", "Notes", &[], None, 2)
-            .unwrap();
+        idx.add_document(
+            "c1",
+            "doc:title",
+            "general notes here",
+            "kubernetes",
+            &[],
+            None,
+            1,
+        )
+        .unwrap();
+        idx.add_document(
+            "c2",
+            "doc:body",
+            "kubernetes orchestration details",
+            "Notes",
+            &[],
+            None,
+            2,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         let hits = idx.search_unified("kubernetes", None, 10).unwrap();
@@ -1315,12 +1445,39 @@ mod tests {
     fn test_entity_kind_filter() {
         let (_dir, mut idx) = make_index();
         // Two skills, one ordinary entity, all sharing a body term.
-        idx.add_entity("c1", "entity:1", "skill", "Code Review", "review code lint", &[], None, 1)
-            .unwrap();
-        idx.add_entity("c2", "entity:2", "skill", "Deploy", "deploy code ship", &[], None, 2)
-            .unwrap();
-        idx.add_entity("c3", "entity:3", "person", "Alice", "writes code daily", &[], None, 3)
-            .unwrap();
+        idx.add_entity(
+            "c1",
+            "entity:1",
+            "skill",
+            "Code Review",
+            "review code lint",
+            &[],
+            None,
+            1,
+        )
+        .unwrap();
+        idx.add_entity(
+            "c2",
+            "entity:2",
+            "skill",
+            "Deploy",
+            "deploy code ship",
+            &[],
+            None,
+            2,
+        )
+        .unwrap();
+        idx.add_entity(
+            "c3",
+            "entity:3",
+            "person",
+            "Alice",
+            "writes code daily",
+            &[],
+            None,
+            3,
+        )
+        .unwrap();
         idx.commit().unwrap();
 
         // Listing narrowed to kind=skill returns only the two skills.
@@ -1329,11 +1486,22 @@ mod tests {
         assert!(skills.iter().all(|(_, ty, _, _, _)| ty == "entity"));
 
         // No filter returns all three.
-        assert_eq!(idx.list_all_mode(None, None, RetractionMode::ActiveOnly, 100).len(), 3);
+        assert_eq!(
+            idx.list_all_mode(None, None, RetractionMode::ActiveOnly, 100)
+                .len(),
+            3
+        );
 
         // Full-text search narrowed to kind=skill excludes the person.
         let hits = idx
-            .search_scoped("code", &[], &[], Some("skill"), RetractionMode::ActiveOnly, 10)
+            .search_scoped(
+                "code",
+                &[],
+                &[],
+                Some("skill"),
+                RetractionMode::ActiveOnly,
+                10,
+            )
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|h| h.node_type == "entity"));

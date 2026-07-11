@@ -8,13 +8,13 @@
 
 use std::collections::BTreeMap;
 
+use crate::ocrs::{ImageSource, OcrEngine, TextItem};
 use image::RgbImage;
 use memvault_extract_abi::{
     ExtractedText, ExtractionHints, ExtractionResponse, ExtractorCapability, MatchRule,
     PluginCapabilities, RenderImageFormat, RenderParams, RenderResponse, RenderedPage,
     RenderedPages, TextSource, WordBox,
 };
-use crate::ocrs::{ImageSource, OcrEngine, TextItem};
 
 // Vendored engine keeps its full upstream public surface; parts of it are
 // unused here.
@@ -34,12 +34,24 @@ pub const MODEL_KEY_RECOGNITION: &str = "ocr-recognition";
 pub fn plugin_capabilities() -> PluginCapabilities {
     let mut capabilities = Vec::new();
     for mime in IMAGE_MIMES {
-        capabilities.push(ExtractorCapability::extract(MatchRule::Mime(mime.to_string()), 0));
-        capabilities.push(ExtractorCapability::render(MatchRule::Mime(mime.to_string()), 0));
+        capabilities.push(ExtractorCapability::extract(
+            MatchRule::Mime(mime.to_string()),
+            0,
+        ));
+        capabilities.push(ExtractorCapability::render(
+            MatchRule::Mime(mime.to_string()),
+            0,
+        ));
     }
     for ext in IMAGE_EXTS {
-        capabilities.push(ExtractorCapability::extract(MatchRule::Extension(ext.to_string()), 0));
-        capabilities.push(ExtractorCapability::render(MatchRule::Extension(ext.to_string()), 0));
+        capabilities.push(ExtractorCapability::extract(
+            MatchRule::Extension(ext.to_string()),
+            0,
+        ));
+        capabilities.push(ExtractorCapability::render(
+            MatchRule::Extension(ext.to_string()),
+            0,
+        ));
     }
     PluginCapabilities {
         id: EXTRACTOR.to_string(),
@@ -59,7 +71,10 @@ struct OcrError {
 
 impl OcrError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -95,11 +110,17 @@ pub fn extract_image(content: &[u8], hints: &ExtractionHints) -> ExtractionRespo
                 segments: Vec::new(),
             })
         }
-        Err(e) => ExtractionResponse::Err { code: e.code.to_string(), message: e.message },
+        Err(e) => ExtractionResponse::Err {
+            code: e.code.to_string(),
+            message: e.message,
+        },
     }
 }
 
-fn ocr_text(content: &[u8], model_paths: &BTreeMap<String, String>) -> Result<Vec<String>, OcrError> {
+fn ocr_text(
+    content: &[u8],
+    model_paths: &BTreeMap<String, String>,
+) -> Result<Vec<String>, OcrError> {
     let (det, rec) = required_model_paths(model_paths)?;
     let rgb = decode_image(content)?;
     engine::with_engine(&det, &rec, |eng| run_ocr(eng, &rgb))?.map(|out| out.lines)
@@ -136,7 +157,10 @@ pub fn render_image_page(content: &[u8], params: &RenderParams) -> RenderRespons
     let page = match render_one_page(content, params, &mut warnings) {
         Ok(p) => p,
         Err(e) => {
-            return RenderResponse::Err { code: e.code.to_string(), message: e.message };
+            return RenderResponse::Err {
+                code: e.code.to_string(),
+                message: e.message,
+            };
         }
     };
     ok_pages(vec![page], warnings)
@@ -173,12 +197,23 @@ fn render_one_page(
             Vec::new()
         }
     };
-    let text_source = if words.is_empty() { TextSource::None } else { TextSource::Ocr };
+    let text_source = if words.is_empty() {
+        TextSource::None
+    } else {
+        TextSource::Ocr
+    };
 
     let image = encode_png(&rgb)
         .map_err(|e| OcrError::new("encode", format!("png encoding failed: {e}")))?;
 
-    Ok(RenderedPage { page_no: 1, width_px, height_px, image, words, text_source })
+    Ok(RenderedPage {
+        page_no: 1,
+        width_px,
+        height_px,
+        image,
+        words,
+        text_source,
+    })
 }
 
 // ─── Model path / cache plumbing ───────────────────────────────────────────────
@@ -219,9 +254,8 @@ mod engine {
         let bytes = std::fs::read(path).map_err(|e| {
             OcrError::new("model", format!("failed to read {role} model {path}: {e}"))
         })?;
-        rten::Model::load(bytes).map_err(|e| {
-            OcrError::new("model", format!("failed to load {role} model {path}: {e}"))
-        })
+        rten::Model::load(bytes)
+            .map_err(|e| OcrError::new("model", format!("failed to load {role} model {path}: {e}")))
     }
 
     fn load_engine(det: &str, rec: &str) -> Result<OcrEngine, OcrError> {
@@ -286,7 +320,9 @@ fn downscaled_dimensions(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
 /// Downscale so the longest edge is at most `max_edge_px` (no-op if already
 /// within bounds or no limit given).
 fn downscale_to_max_edge(img: RgbImage, max_edge_px: Option<u32>) -> RgbImage {
-    let Some(max_edge) = max_edge_px else { return img };
+    let Some(max_edge) = max_edge_px else {
+        return img;
+    };
     let (w, h) = img.dimensions();
     let (nw, nh) = downscaled_dimensions(w, h, max_edge);
     if (nw, nh) == (w, h) {
@@ -369,7 +405,12 @@ fn aabb_from_corners(corners: [(f32, f32); 4]) -> (f32, f32, f32, f32) {
         max_x = max_x.max(x);
         max_y = max_y.max(y);
     }
-    (min_x, min_y, (max_x - min_x).max(0.0), (max_y - min_y).max(0.0))
+    (
+        min_x,
+        min_y,
+        (max_x - min_x).max(0.0),
+        (max_y - min_y).max(0.0),
+    )
 }
 
 /// Truncate `text` to at most `max` bytes on a char boundary.
@@ -403,7 +444,11 @@ mod tests {
     }
 
     fn extract_with(content: &[u8], hints: ExtractionHints) -> ExtractionResponse {
-        let input = ExtractionInput { mime: "image/png".to_string(), extension: None, hints };
+        let input = ExtractionInput {
+            mime: "image/png".to_string(),
+            extension: None,
+            hints,
+        };
         let envelope = memvault_extract_abi::encode_envelope(&input, content);
         extract_envelope(&envelope)
     }
@@ -420,8 +465,11 @@ mod tests {
     }
 
     fn render_with(content: &[u8], params: RenderParams) -> RenderResponse {
-        let input =
-            RenderInput { mime: "image/png".to_string(), extension: None, params };
+        let input = RenderInput {
+            mime: "image/png".to_string(),
+            extension: None,
+            params,
+        };
         let envelope = memvault_extract_abi::encode_render_envelope(&input, content);
         render_pages_envelope(&envelope)
     }
@@ -486,8 +534,10 @@ mod tests {
 
     #[test]
     fn extract_garbage_model_file_is_model_error() {
-        let path = std::env::temp_dir()
-            .join(format!("memvault-ocr-test-garbage-{}.rten", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "memvault-ocr-test-garbage-{}.rten",
+            std::process::id()
+        ));
         std::fs::write(&path, b"not an rten model").unwrap();
         let p = path.to_string_lossy().to_string();
         let hints = ExtractionHints {
@@ -564,7 +614,10 @@ mod tests {
 
         // None and large limits leave the image untouched.
         let img = RgbImage::from_pixel(40, 10, image::Rgb([0, 0, 0]));
-        assert_eq!(downscale_to_max_edge(img.clone(), None).dimensions(), (40, 10));
+        assert_eq!(
+            downscale_to_max_edge(img.clone(), None).dimensions(),
+            (40, 10)
+        );
         assert_eq!(downscale_to_max_edge(img, Some(40)).dimensions(), (40, 10));
     }
 
@@ -585,9 +638,21 @@ mod tests {
     #[test]
     fn cache_reload_logic() {
         assert!(needs_reload(None, "/m/det.rten", "/m/rec.rten"));
-        assert!(!needs_reload(Some(("/m/det.rten", "/m/rec.rten")), "/m/det.rten", "/m/rec.rten"));
-        assert!(needs_reload(Some(("/m/det.rten", "/m/rec.rten")), "/m/det2.rten", "/m/rec.rten"));
-        assert!(needs_reload(Some(("/m/det.rten", "/m/rec.rten")), "/m/det.rten", "/m/rec2.rten"));
+        assert!(!needs_reload(
+            Some(("/m/det.rten", "/m/rec.rten")),
+            "/m/det.rten",
+            "/m/rec.rten"
+        ));
+        assert!(needs_reload(
+            Some(("/m/det.rten", "/m/rec.rten")),
+            "/m/det2.rten",
+            "/m/rec.rten"
+        ));
+        assert!(needs_reload(
+            Some(("/m/det.rten", "/m/rec.rten")),
+            "/m/det.rten",
+            "/m/rec2.rten"
+        ));
     }
 
     #[test]

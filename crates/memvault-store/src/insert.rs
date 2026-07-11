@@ -230,14 +230,18 @@ impl MemvaultStore {
             .and_then(|v| v.field("wall_ns"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let causal: Vec<Vec<u8>> = view.as_ref().and_then(|v| v.get_as("causal")).unwrap_or_default();
-        let provenance: Vec<Vec<u8>> =
-            view.as_ref().and_then(|v| v.get_as("provenance")).unwrap_or_default();
+        let causal: Vec<Vec<u8>> = view
+            .as_ref()
+            .and_then(|v| v.get_as("causal"))
+            .unwrap_or_default();
+        let provenance: Vec<Vec<u8>> = view
+            .as_ref()
+            .and_then(|v| v.get_as("provenance"))
+            .unwrap_or_default();
         let bucket_bytes: Option<Vec<u8>> = view.as_ref().and_then(|v| v.get_as("bucket_id"));
 
         // Did the bytes carry any envelope metadata of their own?
-        let had_envelope_meta =
-            wall_ns_bytes != 0 || !author_bytes.is_empty() || !tags.is_empty();
+        let had_envelope_meta = wall_ns_bytes != 0 || !author_bytes.is_empty() || !tags.is_empty();
 
         // ── Layer the caller overrides ──────────────────────────────
         // Tags: union (bytes ∪ extra), de-duplicated.
@@ -434,7 +438,8 @@ impl MemvaultStore {
         cid_bytes: &[u8],
         envelope_bytes: &[u8],
     ) -> Result<bool, StoreError> {
-        let (meta, raw, had_envelope_meta) = Self::extract_meta(envelope_bytes, &IngestMeta::default());
+        let (meta, raw, had_envelope_meta) =
+            Self::extract_meta(envelope_bytes, &IngestMeta::default());
         if !had_envelope_meta {
             return Ok(false); // not an envelope
         }
@@ -601,8 +606,12 @@ mod bind_tests {
         let block_cluster = [1u8; 32];
         let local = [7u8; 32];
         assert!(
-            s.reindex_bucket_decl(b"cid2", &decl_block(bid, Some(&block_cluster)), Some(&local))
-                .unwrap()
+            s.reindex_bucket_decl(
+                b"cid2",
+                &decl_block(bid, Some(&block_cluster)),
+                Some(&local)
+            )
+            .unwrap()
         );
         assert_eq!(
             s.get_bucket_cluster(&bid).unwrap(),
@@ -621,6 +630,9 @@ mod bind_tests {
             s.reindex_bucket_decl(b"cid3", &decl_block(bid, None), Some(&[7u8; 32]))
                 .unwrap()
         );
-        assert_eq!(s.get_bucket_cluster(&bid).unwrap(), Some([2u8; 32].to_vec()));
+        assert_eq!(
+            s.get_bucket_cluster(&bid).unwrap(),
+            Some([2u8; 32].to_vec())
+        );
     }
 }

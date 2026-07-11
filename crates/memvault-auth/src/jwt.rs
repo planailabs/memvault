@@ -31,8 +31,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_attestation::AgentAttestation;
-use crate::node_attestation::NodeAttestation;
 use crate::error::{AuthError, Result};
+use crate::node_attestation::NodeAttestation;
 
 const ALG: &str = "EdDSA";
 const TYP: &str = "JWT";
@@ -70,8 +70,8 @@ impl AgentTokenClaims {
 
     /// Parse `sub` as a 32-byte ed25519 pubkey.
     pub fn agent_pubkey(&self) -> Result<[u8; 32]> {
-        let bytes = hex::decode(&self.sub)
-            .map_err(|e| AuthError::InvalidToken(format!("sub hex: {e}")))?;
+        let bytes =
+            hex::decode(&self.sub).map_err(|e| AuthError::InvalidToken(format!("sub hex: {e}")))?;
         bytes
             .try_into()
             .map_err(|_| AuthError::InvalidToken("sub must decode to 32 bytes".into()))
@@ -204,7 +204,9 @@ where
     let header: serde_json::Value = serde_json::from_slice(&header_bytes)
         .map_err(|e| AuthError::InvalidToken(format!("header json: {e}")))?;
     if header.get("alg").and_then(|v| v.as_str()) != Some(ALG) {
-        return Err(AuthError::InvalidToken(format!("unsupported alg: {header}")));
+        return Err(AuthError::InvalidToken(format!(
+            "unsupported alg: {header}"
+        )));
     }
 
     let mut claims: AgentTokenClaims = serde_json::from_slice(&payload_bytes)
@@ -501,7 +503,10 @@ mod tests {
             |_| Some(NodeTrust::Attested(n_att.clone())),
         )
         .expect("iss mismatch must not reject a signature-valid token");
-        assert_eq!(claims.iss, "alice", "iss canonicalized to on-chain agent_id");
+        assert_eq!(
+            claims.iss, "alice",
+            "iss canonicalized to on-chain agent_id"
+        );
     }
 
     #[test]
@@ -535,18 +540,13 @@ mod tests {
     #[test]
     fn rejects_unknown_agent() {
         let (tok, admin_pk, _, _) = build_token("read", 300);
-        assert!(
-            verify(&tok, &[admin_pk], |_| None, |_| None).is_err()
-        );
+        assert!(verify(&tok, &[admin_pk], |_| None, |_| None).is_err());
     }
 
     #[test]
     fn rejects_unknown_node() {
         let (tok, admin_pk, _, a_att) = build_token("read", 300);
-        assert!(
-            verify(&tok, &[admin_pk], |_| Some(a_att.clone()), |_| None)
-                .is_err()
-        );
+        assert!(verify(&tok, &[admin_pk], |_| Some(a_att.clone()), |_| None).is_err());
     }
 
     #[test]
@@ -568,9 +568,8 @@ mod tests {
     fn rejects_tampered_payload() {
         let (tok, admin_pk, n_att, a_att) = build_token("read", 300);
         let parts: Vec<&str> = tok.split('.').collect();
-        let new_payload = b64_url().encode(
-            br#"{"iss":"alice","sub":"00","exp":99999999999,"iat":0,"scope":"admin"}"#,
-        );
+        let new_payload = b64_url()
+            .encode(br#"{"iss":"alice","sub":"00","exp":99999999999,"iat":0,"scope":"admin"}"#);
         let tampered = format!("{}.{}.{}", parts[0], new_payload, parts[2]);
         assert!(
             verify(

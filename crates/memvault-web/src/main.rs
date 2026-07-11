@@ -48,9 +48,7 @@ fn main() {
                     // Inside dioxus::serve's async closure, a tokio runtime is
                     // active — start the shared host services (trust bootstrap,
                     // sigchain watcher, batched index commits + flusher) on it.
-                    let trust = match memvault_api::bootstrap::start_host_services(
-                        &local_client,
-                    ) {
+                    let trust = match memvault_api::bootstrap::start_host_services(&local_client) {
                         Ok(services) => services.trust,
                         Err(e) => {
                             eprintln!("memvault: API routes NOT mounted (host services: {e})");
@@ -63,16 +61,15 @@ fn main() {
                         return Ok(router);
                     }
 
-                    let allowed_origins: Vec<String> =
-                        std::env::var("MEMVAULT_ALLOWED_ORIGINS")
-                            .ok()
-                            .map(|v| {
-                                v.split(',')
-                                    .map(|s| s.trim().to_string())
-                                    .filter(|s| !s.is_empty())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                    let allowed_origins: Vec<String> = std::env::var("MEMVAULT_ALLOWED_ORIGINS")
+                        .ok()
+                        .map(|v| {
+                            v.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
 
                     let app_state = Arc::new(memvault_web::AppState {
                         client,

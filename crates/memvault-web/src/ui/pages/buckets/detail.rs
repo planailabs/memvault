@@ -1,9 +1,7 @@
 //! Bucket detail page — shows metadata, actions, and contents.
 
 use dioxus::prelude::*;
-use plan_ai_design::{
-    Button, ButtonVariant, Card, PageHeader, Pill, PillVariant, SectionHeading,
-};
+use plan_ai_design::{Button, ButtonVariant, Card, PageHeader, Pill, PillVariant, SectionHeading};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::topbar::use_topbar;
@@ -190,8 +188,7 @@ async fn archive_bucket(id: String, reason: String) -> Result<(), ServerFnError>
 
 #[server]
 async fn list_grants(id: String) -> Result<Vec<GrantRow>, ServerFnError> {
-    let bucket_bytes =
-        hex::decode(&id).map_err(|e| ServerFnError::new(format!("bad hex: {e}")))?;
+    let bucket_bytes = hex::decode(&id).map_err(|e| ServerFnError::new(format!("bad hex: {e}")))?;
     let bucket_arr: [u8; 32] = bucket_bytes
         .try_into()
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
@@ -254,8 +251,8 @@ async fn create_grant(
     admin: bool,
     ttl_hours: u64,
 ) -> Result<(), ServerFnError> {
-    let bucket_bytes = hex::decode(&bucket_id_hex)
-        .map_err(|e| ServerFnError::new(format!("bad hex: {e}")))?;
+    let bucket_bytes =
+        hex::decode(&bucket_id_hex).map_err(|e| ServerFnError::new(format!("bad hex: {e}")))?;
     let bucket_arr: [u8; 32] = bucket_bytes
         .try_into()
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
@@ -268,7 +265,11 @@ async fn create_grant(
                 "agent_host" => memvault_auth::AgentRole::AgentHost,
                 "auditor" => memvault_auth::AgentRole::Auditor,
                 "service" => memvault_auth::AgentRole::Service,
-                _ => return Err(ServerFnError::new(format!("unknown role: {audience_value}"))),
+                _ => {
+                    return Err(ServerFnError::new(format!(
+                        "unknown role: {audience_value}"
+                    )));
+                }
             };
             memvault_auth::GrantAudience::Role(role)
         }
@@ -280,7 +281,11 @@ async fn create_grant(
                 .map_err(|_| ServerFnError::new("agent public key must be 32 bytes".to_string()))?;
             memvault_auth::GrantAudience::AgentKey(arr)
         }
-        _ => return Err(ServerFnError::new(format!("unsupported audience type: {audience_type}"))),
+        _ => {
+            return Err(ServerFnError::new(format!(
+                "unsupported audience type: {audience_type}"
+            )));
+        }
     };
 
     let mut actions = Vec::new();
@@ -294,7 +299,9 @@ async fn create_grant(
         actions.push(memvault_auth::Action::Admin);
     }
     if actions.is_empty() {
-        return Err(ServerFnError::new("at least one action required".to_string()));
+        return Err(ServerFnError::new(
+            "at least one action required".to_string(),
+        ));
     }
 
     let local = crate::ui::state::local_client()?;

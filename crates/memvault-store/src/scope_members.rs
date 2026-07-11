@@ -149,9 +149,9 @@ impl MemvaultStore {
         let mut d_retracted: i64 = 0;
         {
             let mut members = txn.open_table(SCOPE_MEMBERS)?;
-            let prev = members.get(key.as_slice())?.map(|v| {
-                keys::unpack_scope_member_value(v.value()).unwrap_or((false, 0))
-            });
+            let prev = members
+                .get(key.as_slice())?
+                .map(|v| keys::unpack_scope_member_value(v.value()).unwrap_or((false, 0)));
             match prev {
                 None => {
                     if retracted {
@@ -180,11 +180,7 @@ impl MemvaultStore {
     }
 
     /// Remove a node from a scope partition entirely (both partitions).
-    pub fn scope_member_remove(
-        &self,
-        scope_id: &[u8],
-        node_id: &str,
-    ) -> Result<(), StoreError> {
+    pub fn scope_member_remove(&self, scope_id: &[u8], node_id: &str) -> Result<(), StoreError> {
         let key = keys::pack_scope_member_key(scope_id, node_id);
         let txn = self.db.begin_write()?;
         let mut d_active: i64 = 0;

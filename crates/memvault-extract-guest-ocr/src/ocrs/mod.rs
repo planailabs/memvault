@@ -17,8 +17,8 @@
 
 use anyhow::anyhow;
 use rten_imageproc::RotatedRect;
-use rten_tensor::prelude::*;
 use rten_tensor::NdTensor;
+use rten_tensor::prelude::*;
 
 mod detection;
 mod errors;
@@ -318,12 +318,12 @@ mod tests {
     use std::error::Error;
 
     use rten::Dimension;
-    use rten_imageproc::{fill_rect, BoundingRect, Rect, RectF, RotatedRect};
-    use rten_tensor::prelude::*;
+    use rten_imageproc::{BoundingRect, Rect, RectF, RotatedRect, fill_rect};
     use rten_tensor::TensorView;
+    use rten_tensor::prelude::*;
     use rten_tensor::{NdTensor, NdTensorView, Tensor};
 
-    use super::{DimOrder, ImageSource, Model, OcrEngine, OcrEngineParamsImpl, DEFAULT_ALPHABET};
+    use super::{DEFAULT_ALPHABET, DimOrder, ImageSource, Model, OcrEngine, OcrEngineParamsImpl};
 
     /// Generate a dummy CHW input image for OCR processing.
     ///

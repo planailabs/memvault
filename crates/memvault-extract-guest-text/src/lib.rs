@@ -1,6 +1,6 @@
 use extism_pdk::*;
 use memvault_extract_abi::{
-    ExtractionHints, ExtractionResponse, ExtractedText, ExtractorCapability, MatchRule,
+    ExtractedText, ExtractionHints, ExtractionResponse, ExtractorCapability, MatchRule,
     PluginCapabilities,
 };
 
@@ -38,10 +38,13 @@ pub fn capabilities(_input: Vec<u8>) -> FnResult<Vec<u8>> {
             ExtractorCapability::extract(MatchRule::Mime("application/pdf".to_string()), 0),
             ExtractorCapability::extract(MatchRule::Extension("pdf".to_string()), 0),
             // DOCX
-            ExtractorCapability::extract(MatchRule::Mime(
+            ExtractorCapability::extract(
+                MatchRule::Mime(
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         .to_string(),
-                ), 0),
+                ),
+                0,
+            ),
             ExtractorCapability::extract(MatchRule::Extension("docx".to_string()), 0),
         ],
     };
@@ -62,7 +65,12 @@ pub fn extract(input: Vec<u8>) -> FnResult<Vec<u8>> {
         }
     };
 
-    let result = dispatch(&header.mime, header.extension.as_deref(), content, &header.hints);
+    let result = dispatch(
+        &header.mime,
+        header.extension.as_deref(),
+        content,
+        &header.hints,
+    );
 
     let resp = match result {
         Ok(text) => ExtractionResponse::Ok(text),
@@ -96,9 +104,7 @@ fn dispatch(
     if mime == "application/pdf" {
         return pdf::extract(content, hints);
     }
-    if mime
-        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    {
+    if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
         return docx::extract(content, hints);
     }
 

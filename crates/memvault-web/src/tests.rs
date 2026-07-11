@@ -395,7 +395,11 @@ impl MemvaultClient for MockClient {
     async fn get_tags(&self, _node_id: &str) -> memvault_api::Result<Vec<(String, String)>> {
         Ok(vec![])
     }
-    async fn retract_node_internal(&self, _node_id: &str, _reason: &str) -> memvault_api::Result<()> {
+    async fn retract_node_internal(
+        &self,
+        _node_id: &str,
+        _reason: &str,
+    ) -> memvault_api::Result<()> {
         Ok(())
     }
     async fn list_all(
@@ -870,7 +874,6 @@ async fn test_reserved_kind_rejected_on_generic_entity_create() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 }
-
 
 #[tokio::test]
 async fn test_get_doc() {

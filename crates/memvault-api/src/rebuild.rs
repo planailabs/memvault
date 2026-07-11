@@ -152,10 +152,10 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                         None,
                     )?;
                     // Bind to cluster if one exists.
-                if client.cluster_id().iter().any(|&b| b != 0) {
-                    let _ = store.bind_bucket(&det_id.0, client.cluster_id());
-                }
-                tracing::info!(bucket = %det_id, "created legacy bucket");
+                    if client.cluster_id().iter().any(|&b| b != 0) {
+                        let _ = store.bind_bucket(&det_id.0, client.cluster_id());
+                    }
+                    tracing::info!(bucket = %det_id, "created legacy bucket");
                 }
                 det_id
             }
@@ -187,8 +187,7 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
 
     // Apply rewrites in chronological order (causal refs point backward).
     to_rewrite.sort_by_key(|(_, _, ns)| *ns);
-    let mut cid_map: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-        std::collections::HashMap::new();
+    let mut cid_map: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
 
     if let Some(ref bucket) = legacy_bucket {
         // Re-sign rewritten envelopes with the local node key so they
@@ -219,8 +218,7 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             for field in &["causal", "provenance"] {
                 if let Some(arr) = val.get_mut(field).and_then(|v| v.as_array_mut()) {
                     for entry in arr.iter_mut() {
-                        if let Some(old_ref) =
-                            serde_json::from_value::<Vec<u8>>(entry.clone()).ok()
+                        if let Some(old_ref) = serde_json::from_value::<Vec<u8>>(entry.clone()).ok()
                         {
                             if let Some(new_ref) = cid_map.get(&old_ref) {
                                 *entry = serde_json::json!(new_ref);
@@ -237,21 +235,17 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
             // preserve. If we can't even shape the payload into a
             // Signed<T> for this specific block, skip it rather than
             // commit an unsigned variant.
-            let new_bytes = match resign_legacy_envelope(
-                &val,
-                bucket,
-                node_signing_key,
-                client.peer_id(),
-            ) {
-                Some(b) => b,
-                None => {
-                    tracing::warn!(
-                        old_cid = %hex::encode(old_cid),
-                        "skipping legacy envelope: could not coerce to Signed<T> shape"
-                    );
-                    continue;
-                }
-            };
+            let new_bytes =
+                match resign_legacy_envelope(&val, bucket, node_signing_key, client.peer_id()) {
+                    Some(b) => b,
+                    None => {
+                        tracing::warn!(
+                            old_cid = %hex::encode(old_cid),
+                            "skipping legacy envelope: could not coerce to Signed<T> shape"
+                        );
+                        continue;
+                    }
+                };
             let new_cid_bytes = memvault_core::cid_from_bytes(&new_bytes).to_bytes();
 
             cid_map.insert(old_cid.clone(), new_cid_bytes.clone());
@@ -262,7 +256,10 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
     }
 
     if report.unbucketed_rewritten > 0 {
-        tracing::info!(rewritten = report.unbucketed_rewritten, "rewrote unbucketed envelopes");
+        tracing::info!(
+            rewritten = report.unbucketed_rewritten,
+            "rewrote unbucketed envelopes"
+        );
     }
 
     // ── Rebuild secondary indexes from clean block set ─────────────────
@@ -421,7 +418,6 @@ pub fn rebuild_if_needed(client: &LocalClient) -> Result<Option<RebuildReport>> 
 // in populate_index_sync.  Everything runs sync during rebuild.
 // (Old async functions deleted — see git history.)
 
-
 // ── Sync VFS tree repair ──────────────────────────────────────────────
 //
 // Operates directly on the store — no async trait methods.
@@ -431,9 +427,9 @@ fn repair_vfs_sync(
     store: &memvault_store::MemvaultStore,
     client: &LocalClient,
 ) -> Result<(usize, usize)> {
-    use std::collections::HashSet;
     use memvault_core::{EdgeId, NodeRef};
     use memvault_doc::Op;
+    use std::collections::HashSet;
 
     let vfs_dir_kind = crate::vfs::VFS_DIR_KIND;
     let vfs_child_rel = crate::vfs::VFS_CHILD_REL;
@@ -441,18 +437,23 @@ fn repair_vfs_sync(
     // 1. Collect all VFS dir entities with names. Exhaustive (see standards:
     //    exhaustive-lookups) — a cap would silently drop dirs and corrupt the
     //    rebuilt VFS tree.
-    let labels = store.query_unique_labels("entity", usize::MAX)
+    let labels = store
+        .query_unique_labels("entity", usize::MAX)
         .map_err(|e| ApiError::Other(format!("query entities: {e}")))?;
     let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
 
     for label in &labels {
         let id_bytes = hex::decode(label).unwrap_or_default();
-        if id_bytes.len() != 32 { continue; }
+        if id_bytes.len() != 32 {
+            continue;
+        }
         let mut id = [0u8; 32];
         id.copy_from_slice(&id_bytes);
 
         // Get the latest block for this entity to read kind + props.
-        let cids = store.query_by_tag("entity", label, 0, 10).unwrap_or_default();
+        let cids = store
+            .query_by_tag("entity", label, 0, 10)
+            .unwrap_or_default();
         let mut kind = String::new();
         let mut name = String::new();
         for cid in cids.iter().rev() {
@@ -463,16 +464,20 @@ fn repair_vfs_sync(
                             if let Some(k) = ec.get("kind").and_then(|v| v.as_str()) {
                                 kind = k.to_string();
                             }
-                            if let Some(n) = ec.get("initial_props")
+                            if let Some(n) = ec
+                                .get("initial_props")
                                 .and_then(|p| p.get("name"))
-                                .and_then(|v| v.as_str()) {
+                                .and_then(|v| v.as_str())
+                            {
                                 name = n.to_string();
                             }
                         }
                         if let Some(eu) = payload.get("EntityUpdate") {
-                            if let Some(n) = eu.get("props")
+                            if let Some(n) = eu
+                                .get("props")
                                 .and_then(|p| p.get("name"))
-                                .and_then(|v| v.as_str()) {
+                                .and_then(|v| v.as_str())
+                            {
                                 name = n.to_string();
                             }
                         }
@@ -508,7 +513,9 @@ fn repair_vfs_sync(
     for &dup in &root_candidates[1..] {
         // Retract by creating a retraction block.
         let dup_label = hex::encode(dup);
-        let dup_cids = store.query_by_tag("entity", &dup_label, 0, 1).unwrap_or_default();
+        let dup_cids = store
+            .query_by_tag("entity", &dup_label, 0, 1)
+            .unwrap_or_default();
         for target_cid in &dup_cids {
             let _ = store.record_retraction(target_cid, target_cid);
         }
@@ -523,20 +530,25 @@ fn repair_vfs_sync(
     while let Some(current) = stack.pop() {
         let current_label = hex::encode(current);
         let source_label = format!("entity:{current_label}");
-        let edge_cids = store.query_by_tag("edge_source", &source_label, 0, 1000).unwrap_or_default();
+        let edge_cids = store
+            .query_by_tag("edge_source", &source_label, 0, 1000)
+            .unwrap_or_default();
         for cid in &edge_cids {
             if let Ok(Some(data)) = store.get_block(cid) {
                 if let Some(val) = memvault_store::deserialize_block(&data) {
                     if let Some(payload) = val.get("payload") {
                         if let Some(edge_add) = payload.get("EdgeAdd") {
                             if let Some(edge) = edge_add.get("edge") {
-                                let rel = edge.get("relation").and_then(|v| v.as_str()).unwrap_or("");
-                                if rel != vfs_child_rel { continue; }
+                                let rel =
+                                    edge.get("relation").and_then(|v| v.as_str()).unwrap_or("");
+                                if rel != vfs_child_rel {
+                                    continue;
+                                }
                                 // Extract target entity ID.
                                 if let Some(target) = edge.get("target") {
-                                    if let Some(eid) = target.get("Entity")
-                                        .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok())
-                                    {
+                                    if let Some(eid) = target.get("Entity").and_then(|v| {
+                                        serde_json::from_value::<[u8; 32]>(v.clone()).ok()
+                                    }) {
                                         if reachable.insert(eid) {
                                             stack.push(eid);
                                         }
@@ -614,7 +626,7 @@ fn repair_vfs_sync(
                 provenance: vec![],
                 cluster_id: Some(client.cluster_id().to_vec()),
                 bucket_id: Some(legacy_bucket.0.to_vec()),
-                            ..Default::default()
+                ..Default::default()
             };
             let _ = store.insert_envelope(&cid.to_bytes(), &bytes, &meta);
             linked += 1;
@@ -672,10 +684,7 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
         .unwrap_or(false);
 
     // Legacy extraction block: has extractor+text but no payload/kind.
-    if !is_envelope
-        && val.get("extractor").is_some()
-        && val.get("text").is_some()
-    {
+    if !is_envelope && val.get("extractor").is_some() && val.get("text").is_some() {
         return Verdict::Drop;
     }
 
@@ -694,10 +703,7 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
     }
 
     // Synthesized manifest with broken CID: content_size+filename, no payload.
-    if !is_envelope
-        && val.get("content_size").is_some()
-        && val.get("filename").is_some()
-    {
+    if !is_envelope && val.get("content_size").is_some() && val.get("filename").is_some() {
         if !matches!(memvault_core::verify_cid(cid, data), Ok(true)) {
             return Verdict::Drop;
         }
@@ -750,17 +756,16 @@ fn resign_legacy_envelope(
     // shape — coerce to Vec<Tag> so the re-signed envelope speaks the
     // canonical wire format.
     let tags_value = val.get("tags").cloned().unwrap_or(serde_json::json!([]));
-    let tags: Vec<memvault_core::Tag> = serde_json::from_value::<Vec<memvault_core::Tag>>(
-        tags_value.clone(),
-    )
-    .or_else(|_| {
-        serde_json::from_value::<Vec<(String, String)>>(tags_value).map(|v| {
-            v.into_iter()
-                .map(|(s, l)| memvault_core::Tag::new(s, l))
-                .collect()
-        })
-    })
-    .ok()?;
+    let tags: Vec<memvault_core::Tag> =
+        serde_json::from_value::<Vec<memvault_core::Tag>>(tags_value.clone())
+            .or_else(|_| {
+                serde_json::from_value::<Vec<(String, String)>>(tags_value).map(|v| {
+                    v.into_iter()
+                        .map(|(s, l)| memvault_core::Tag::new(s, l))
+                        .collect()
+                })
+            })
+            .ok()?;
 
     let envelope = memvault_core::Signed::sign(
         payload,
@@ -807,9 +812,9 @@ mod classify_tests {
 
     #[test]
     fn drops_agent_string_grant() {
-        let bytes = grant_with(memvault_auth::GrantAudience::Agent(memvault_core::AgentName(
-            "alice".into(),
-        )));
+        let bytes = grant_with(memvault_auth::GrantAudience::Agent(
+            memvault_core::AgentName("alice".into()),
+        ));
         let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
         assert!(matches!(classify_block(&cid, &bytes), Verdict::Drop));
     }

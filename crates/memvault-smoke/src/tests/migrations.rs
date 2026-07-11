@@ -54,7 +54,7 @@ fn old_envelope_without_bucket_indexes_correctly() {
         provenance: vec![],
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: None, // old format
-            ..Default::default()
+        ..Default::default()
     };
     store
         .insert_envelope(b"old-cid-001", b"old data", &meta)
@@ -131,9 +131,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
             )
             .await
             .unwrap();
-        store
-            .bind_bucket(&default_bucket.0, &cluster_id.0)
-            .unwrap();
+        store.bind_bucket(&default_bucket.0, &cluster_id.0).unwrap();
 
         let entity_label = hex::encode(entity.id.0);
         let wall_ns = wall_ns();
@@ -159,7 +157,7 @@ async fn repair_index_adopts_legacy_unbucketed_entities_into_default_bucket() {
             provenance: vec![],
             cluster_id: Some(cluster_id.0.to_vec()),
             bucket_id: None,
-                    ..Default::default()
+            ..Default::default()
         };
         store
             .insert_envelope(&cid.to_bytes(), &envelope_bytes, &meta)
@@ -523,7 +521,7 @@ fn reindex_mixed_v1_v2_envelopes() {
         provenance: vec![],
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: None,
-            ..Default::default()
+        ..Default::default()
     };
     store
         .insert_envelope(b"cid-v1", b"v1-data", &meta_v1)
@@ -539,7 +537,7 @@ fn reindex_mixed_v1_v2_envelopes() {
         provenance: vec![],
         cluster_id: Some(vec![1u8; 32]),
         bucket_id: Some(bucket.to_vec()),
-            ..Default::default()
+        ..Default::default()
     };
     store
         .insert_envelope(b"cid-v2", b"v2-data", &meta_v2)

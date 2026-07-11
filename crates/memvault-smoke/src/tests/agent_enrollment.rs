@@ -46,9 +46,7 @@ async fn enroll_agent_then_write_and_verify_authorship() {
             node.client.peer_id().to_vec(),
             node.cluster_id.0.to_vec(),
         );
-        c.set_admin_signing_key(
-            node.client.admin_signing_key().unwrap().clone(),
-        );
+        c.set_admin_signing_key(node.client.admin_signing_key().unwrap().clone());
         c.set_node_signing_key(node_sk.clone());
         c
     });
@@ -71,7 +69,12 @@ async fn enroll_agent_then_write_and_verify_authorship() {
 
     // ── 2. Issue a join token (the `memctl token-issue` path) ──────
     let token_str = client_arc
-        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, Some("test-agent".into()))
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            3600,
+            1,
+            Some("test-agent".into()),
+        )
         .await
         .unwrap();
     assert!(token_str.starts_with("mvjoin1:"));
@@ -111,9 +114,8 @@ async fn enroll_agent_then_write_and_verify_authorship() {
     // it to the agent-bound LocalClient below — AgentIdentity no
     // longer carries the CID after the disk-state slimdown, and the
     // cache is per-LocalClient.
-    let attestation_cid =
-        sigchain::publish_agent_attestation(&client_arc, &attestation)
-            .expect("publish agent attestation");
+    let attestation_cid = sigchain::publish_agent_attestation(&client_arc, &attestation)
+        .expect("publish agent attestation");
 
     // ── 4. Bind agent to a writing client + put a bucket and a doc ──
     // We need an agent-bound client to author writes. Build one off the
@@ -121,7 +123,9 @@ async fn enroll_agent_then_write_and_verify_authorship() {
     let agent_pk_bytes = agent.verifying_key.to_bytes();
     let agent_client = memvault_api::LocalClient::new(
         std::sync::Arc::clone(&node.store),
-        std::sync::Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            memvault_query::QuotaManager::default(),
+        )),
         std::sync::Arc::new(memvault_api::EventBus::new(64)),
         node.client.peer_id().to_vec(),
         node.cluster_id.0.to_vec(),

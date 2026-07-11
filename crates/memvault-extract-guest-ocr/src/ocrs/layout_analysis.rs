@@ -1,9 +1,9 @@
-use rten_imageproc::{bounding_rect, BoundingRect, Line, LineF, Point, Rect, RotatedRect};
+use rten_imageproc::{BoundingRect, Line, LineF, Point, Rect, RotatedRect, bounding_rect};
 
 use crate::ocrs::geom_util::{leftmost_edge, rightmost_edge};
 
 mod empty_rects;
-use empty_rects::{max_empty_rects, FilterOverlapping};
+use empty_rects::{FilterOverlapping, max_empty_rects};
 
 fn rects_separated_by_line(a: &RotatedRect, b: &RotatedRect, l: LineF) -> bool {
     let a_to_b = LineF::from_endpoints(a.center(), b.center());

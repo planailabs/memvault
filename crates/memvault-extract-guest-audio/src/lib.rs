@@ -38,7 +38,10 @@ pub fn plugin_capabilities() -> PluginCapabilities {
         0,
     )];
     for ext in AUDIO_EXTS {
-        capabilities.push(ExtractorCapability::extract(MatchRule::Extension(ext.to_string()), 0));
+        capabilities.push(ExtractorCapability::extract(
+            MatchRule::Extension(ext.to_string()),
+            0,
+        ));
     }
     PluginCapabilities {
         id: EXTRACTOR.to_string(),
@@ -73,13 +76,23 @@ fn transcribe(input: &ExtractionInput, content: &[u8]) -> ExtractionResponse {
     // 2. Probe the container/codec before paying for model load.
     let stream = match pcm::AudioStream::open(content, input.extension.as_deref(), &input.mime) {
         Ok(s) => s,
-        Err(e) => return ExtractionResponse::Err { code: "decode".to_string(), message: e },
+        Err(e) => {
+            return ExtractionResponse::Err {
+                code: "decode".to_string(),
+                message: e,
+            };
+        }
     };
 
     // 3. Load (or reuse the cached) model, then run the streaming loop.
-    match whisper::with_model(model_dir, |ctx| run_transcription(ctx, stream, &input.hints)) {
+    match whisper::with_model(model_dir, |ctx| {
+        run_transcription(ctx, stream, &input.hints)
+    }) {
         Ok(response) => response,
-        Err(e) => ExtractionResponse::Err { code: "model".to_string(), message: e },
+        Err(e) => ExtractionResponse::Err {
+            code: "model".to_string(),
+            message: e,
+        },
     }
 }
 
@@ -97,12 +110,22 @@ fn resolve_language(
     hint: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> LangMode {
-    let normalized = hint.map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty());
+    let normalized = hint
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| !l.is_empty());
     let Some(lang) = normalized else {
-        return if ctx.multilingual { LangMode::Detect } else { LangMode::Fixed(None) };
+        return if ctx.multilingual {
+            LangMode::Detect
+        } else {
+            LangMode::Fixed(None)
+        };
     };
     if lang == "auto" {
-        return if ctx.multilingual { LangMode::Detect } else { LangMode::Fixed(None) };
+        return if ctx.multilingual {
+            LangMode::Detect
+        } else {
+            LangMode::Fixed(None)
+        };
     }
     // BCP-47 → whisper's two-letter primary subtag ("en-US" → "en").
     let primary = lang.split(['-', '_']).next().unwrap_or(&lang);
@@ -144,7 +167,11 @@ fn append_segment(
     let start = text.len() as u32;
     text.push_str(seg_text);
     let end = text.len() as u32;
-    segments.push(TranscriptSegment { start_ms, end_ms, byte_span: (start, end) });
+    segments.push(TranscriptSegment {
+        start_ms,
+        end_ms,
+        byte_span: (start, end),
+    });
 }
 
 fn samples_to_ms(samples: u64) -> u64 {
@@ -170,18 +197,20 @@ fn run_transcription(
 
     // Transcribe one window. `real_len` is the number of non-padding samples.
     let process_window = |ctx: &mut whisper::WhisperContext,
-                              window: &[f32],
-                              real_len: usize,
-                              start_sample: u64,
-                              lang_mode: &mut LangMode,
-                              text: &mut String,
-                              segments: &mut Vec<TranscriptSegment>,
-                              warnings: &mut Vec<String>|
+                          window: &[f32],
+                          real_len: usize,
+                          start_sample: u64,
+                          lang_mode: &mut LangMode,
+                          text: &mut String,
+                          segments: &mut Vec<TranscriptSegment>,
+                          warnings: &mut Vec<String>|
      -> Result<(), String> {
         let features = ctx.encode_window(window)?;
         if let LangMode::Detect = lang_mode {
             let token = ctx.detect_language(&features)?;
-            let shown = ctx.token_text(token).unwrap_or_else(|| format!("token {token}"));
+            let shown = ctx
+                .token_text(token)
+                .unwrap_or_else(|| format!("token {token}"));
             warnings.push(format!("detected language {shown}"));
             *lang_mode = LangMode::Fixed(Some(token));
         }
@@ -199,15 +228,20 @@ fn run_transcription(
         Ok(())
     };
 
-    let inference_err =
-        |message: String| ExtractionResponse::Err { code: "inference".to_string(), message };
+    let inference_err = |message: String| ExtractionResponse::Err {
+        code: "inference".to_string(),
+        message,
+    };
 
     'outer: loop {
         let chunk = match stream.next_chunk() {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(e) => {
-                return ExtractionResponse::Err { code: "decode".to_string(), message: e };
+                return ExtractionResponse::Err {
+                    code: "decode".to_string(),
+                    message: e,
+                };
             }
         };
         received += chunk.len() as u64;
@@ -261,12 +295,18 @@ fn run_transcription(
 
     if let Some(reason) = stream.abort_reason.take() {
         if received == 0 {
-            return ExtractionResponse::Err { code: "decode".to_string(), message: reason };
+            return ExtractionResponse::Err {
+                code: "decode".to_string(),
+                message: reason,
+            };
         }
         warnings.push(format!("audio stream ended early: {reason}"));
     }
     if stream.skipped_packets > 0 {
-        warnings.push(format!("skipped {} undecodable packets", stream.skipped_packets));
+        warnings.push(format!(
+            "skipped {} undecodable packets",
+            stream.skipped_packets
+        ));
     }
     if received == 0 {
         warnings.push("no audio samples decoded".to_string());
@@ -357,13 +397,17 @@ mod tests {
     fn capabilities_cover_audio() {
         let caps = plugin_capabilities();
         assert_eq!(caps.id, EXTRACTOR);
-        assert!(caps.capabilities.iter().any(
-            |c| matches!(&c.match_rule, MatchRule::MimePrefix(p) if p == "audio/")
-        ));
+        assert!(
+            caps.capabilities
+                .iter()
+                .any(|c| matches!(&c.match_rule, MatchRule::MimePrefix(p) if p == "audio/"))
+        );
         for ext in AUDIO_EXTS {
-            assert!(caps.capabilities.iter().any(
-                |c| matches!(&c.match_rule, MatchRule::Extension(e) if e == ext)
-            ));
+            assert!(
+                caps.capabilities
+                    .iter()
+                    .any(|c| matches!(&c.match_rule, MatchRule::Extension(e) if e == ext))
+            );
         }
     }
 
@@ -395,7 +439,10 @@ mod tests {
             (got - expected).abs() < 1500,
             "expected ~{expected} samples at 16 kHz, got {got}"
         );
-        assert!(samples.iter().all(|s| s.is_finite()), "resampled output contains NaN/inf");
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "resampled output contains NaN/inf"
+        );
         // The sine survives the mixdown + resample with real energy.
         let peak = samples.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!(peak > 0.4, "expected sine energy, peak was {peak}");
@@ -421,7 +468,10 @@ mod tests {
 
         assert_eq!(text, "héllo wörld\n日本語のテスト\nplain");
         assert_eq!(segments.len(), 3);
-        for (seg, expected) in segments.iter().zip(["héllo wörld", "日本語のテスト", "plain"]) {
+        for (seg, expected) in segments
+            .iter()
+            .zip(["héllo wörld", "日本語のテスト", "plain"])
+        {
             let (s, e) = seg.byte_span;
             assert_eq!(&text[s as usize..e as usize], expected);
         }
@@ -471,7 +521,10 @@ mod tests {
         match extract_envelope(&env) {
             ExtractionResponse::Err { code, message } => {
                 assert_eq!(code, "model");
-                assert!(message.contains("config.json"), "unexpected message: {message}");
+                assert!(
+                    message.contains("config.json"),
+                    "unexpected message: {message}"
+                );
             }
             ExtractionResponse::Ok(_) => panic!("expected model error"),
         }

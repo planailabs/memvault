@@ -133,9 +133,7 @@ pub async fn create_doc(
                 .client
                 .ensure_agent_bucket(&pubkey_bytes, &auth.claims.iss)
                 .await
-                .map_err(|e| {
-                    ApiError::internal(format!("ensure agent bucket: {e}"))
-                })?
+                .map_err(|e| ApiError::internal(format!("ensure agent bucket: {e}")))?
         }
     };
 
@@ -176,7 +174,10 @@ pub async fn get_doc(
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     let doc = state
         .client
-        .get_doc_scoped(&doc_id, &memvault_core::QueryScope::all().with_include_retracted(include_retracted))
+        .get_doc_scoped(
+            &doc_id,
+            &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
+        )
         .await?
         .ok_or_else(|| ApiError::not_found("Document not found"))?;
 

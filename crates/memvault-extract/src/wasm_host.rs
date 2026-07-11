@@ -46,7 +46,10 @@ pub struct PluginOptions {
 impl PluginOptions {
     /// Options matching the legacy `ResourceLimits`-only behavior.
     pub fn from_limits(limits: ResourceLimits) -> Self {
-        Self { limits, ..Default::default() }
+        Self {
+            limits,
+            ..Default::default()
+        }
     }
 }
 
@@ -128,7 +131,8 @@ impl WasmExtractor {
 
     /// Check if this plugin supports a given file extension (for `Extract`).
     pub fn supports_extension(&self, ext: &str) -> bool {
-        self.priority_for_extension_op(ext, PluginOp::Extract).is_some()
+        self.priority_for_extension_op(ext, PluginOp::Extract)
+            .is_some()
     }
 
     /// Check if this plugin serves `op` for the given MIME type.

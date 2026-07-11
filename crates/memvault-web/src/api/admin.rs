@@ -224,7 +224,9 @@ pub async fn retire_admin_key(
         .retire_admin_key(pk, reason)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    Ok(Json(serde_json::json!({ "retirement_cid": hex::encode(cid) })))
+    Ok(Json(
+        serde_json::json!({ "retirement_cid": hex::encode(cid) }),
+    ))
 }
 
 /// GET /api/v1/admin/keys — list admin keys and validity windows.

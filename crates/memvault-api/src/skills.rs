@@ -14,7 +14,9 @@
 
 use std::collections::BTreeMap;
 
-use memvault_core::{BucketId, DetailLevel, DocId, EdgeId, EntityId, NodeRef, QueryScope, Visibility};
+use memvault_core::{
+    BucketId, DetailLevel, DocId, EdgeId, EntityId, NodeRef, QueryScope, Visibility,
+};
 use memvault_doc::{Document, Edge, Entity};
 
 use crate::client::MemvaultClient;

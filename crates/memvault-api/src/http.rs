@@ -163,7 +163,11 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
 fn parse_audit_record(v: &serde_json::Value) -> AuditRecord {
     // CID-valued fields are CID strings; key/opaque-id fields are hex.
     let hexvec = |key: &str| v[key].as_str().and_then(|s| hex::decode(s).ok());
-    let cidvec = |key: &str| v[key].as_str().and_then(|s| memvault_core::cid_bytes_lenient(s).ok());
+    let cidvec = |key: &str| {
+        v[key]
+            .as_str()
+            .and_then(|s| memvault_core::cid_bytes_lenient(s).ok())
+    };
     AuditRecord {
         cid: cidvec("cid").unwrap_or_default(),
         op_kind: v
@@ -680,7 +684,10 @@ impl MemvaultClient for HttpApiClient {
             .json()
             .await
             .map_err(map_reqwest)?;
-        Ok(wire.into_iter().filter_map(|w| w.into_source_edge()).collect())
+        Ok(wire
+            .into_iter()
+            .filter_map(|w| w.into_source_edge())
+            .collect())
     }
 
     async fn traverse_from(
@@ -1089,7 +1096,10 @@ impl MemvaultClient for HttpApiClient {
             params.push(format!("author={}", hex::encode(a)));
         }
         if let Some(k) = &query.op_kind {
-            if let Some(s) = serde_json::to_value(k).ok().and_then(|v| v.as_str().map(String::from)) {
+            if let Some(s) = serde_json::to_value(k)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+            {
                 params.push(format!("op_kind={s}"));
             }
         }
@@ -1747,10 +1757,7 @@ impl MemvaultClient for HttpApiClient {
     async fn bucket_grants_list(&self, bucket_id: &BucketId) -> Result<Vec<GrantInfo>> {
         let resp = self
             .client
-            .get(self.url(&format!(
-                "/buckets/{}/grants",
-                hex::encode(bucket_id.0)
-            )))
+            .get(self.url(&format!("/buckets/{}/grants", hex::encode(bucket_id.0))))
             .send()
             .await
             .map_err(map_reqwest)?
@@ -1767,10 +1774,7 @@ impl MemvaultClient for HttpApiClient {
         let body = serde_json::json!({ "reason": reason });
         let resp = self
             .client
-            .post(self.url(&format!(
-                "/grants/{}/revoke",
-                hex::encode(grant_cid)
-            )))
+            .post(self.url(&format!("/grants/{}/revoke", hex::encode(grant_cid))))
             .json(&body)
             .send()
             .await
@@ -1842,14 +1846,10 @@ impl MemvaultClient for HttpApiClient {
             .error_for_status()
             .map_err(map_reqwest)?;
         let parsed: Resp = resp.json().await.map_err(map_reqwest)?;
-        hex::decode(parsed.grant_cid)
-            .map_err(|e| ApiError::Other(format!("decode grant_cid: {e}")))
+        hex::decode(parsed.grant_cid).map_err(|e| ApiError::Other(format!("decode grant_cid: {e}")))
     }
 
-    async fn share_get_proposal(
-        &self,
-        _proposal_cid: &[u8],
-    ) -> Result<Option<ShareProposalInfo>> {
+    async fn share_get_proposal(&self, _proposal_cid: &[u8]) -> Result<Option<ShareProposalInfo>> {
         Err(ApiError::Other(
             "share_get_proposal is not available over HTTP".into(),
         ))
@@ -1975,11 +1975,7 @@ impl MemvaultClient for HttpApiClient {
         Ok(BucketId([0u8; 32]))
     }
 
-    async fn ensure_agent_bucket(
-        &self,
-        _agent_pubkey: &[u8],
-        name_hint: &str,
-    ) -> Result<BucketId> {
+    async fn ensure_agent_bucket(&self, _agent_pubkey: &[u8], name_hint: &str) -> Result<BucketId> {
         // The server derives the bucket from the verified JWT pubkey
         // (`claims.sub`), so it can only ever ensure THIS agent's bucket —
         // the passed pubkey is ignored over HTTP. `name_hint` is the display
@@ -2008,5 +2004,4 @@ impl MemvaultClient for HttpApiClient {
         arr.copy_from_slice(&bytes);
         Ok(BucketId(arr))
     }
-
 }

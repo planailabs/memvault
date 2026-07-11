@@ -15,11 +15,7 @@ use crate::harness::TestNode;
 /// Build a node, mint an agent attestation against the node key, and
 /// publish it. Returns the agent's ed25519 verifying key bytes — the
 /// authoritative caller identity used by `check_bucket_access`.
-async fn setup_agent(
-    node: &TestNode,
-    agent_name: &str,
-    role: AgentRole,
-) -> ([u8; 32], AgentName) {
+async fn setup_agent(node: &TestNode, agent_name: &str, role: AgentRole) -> ([u8; 32], AgentName) {
     let node_sk = node
         .client
         .node_signing_key()
@@ -179,12 +175,13 @@ async fn owner_agent_bypasses_grants() {
 
     // No explicit grant on chain — pure owner bypass.
     let grants = node.client.list_bucket_grants(&bucket).expect("list");
-    assert!(grants.is_empty(), "no grants should exist for fresh agent bucket");
+    assert!(
+        grants.is_empty(),
+        "no grants should exist for fresh agent bucket"
+    );
 
-    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
-        .expect("owner Read");
-    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
-        .expect("owner Write");
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read).expect("owner Read");
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write).expect("owner Write");
 }
 
 /// Regression: when the HTTP `POST /buckets` handler creates a bucket
@@ -195,8 +192,7 @@ async fn owner_agent_bypasses_grants() {
 #[tokio::test]
 async fn bucket_create_as_sets_owner_and_grants_access() {
     let node = TestNode::new();
-    let (agent_pk, agent_id) =
-        setup_agent(&node, "create-as-agent", AgentRole::AgentHost).await;
+    let (agent_pk, agent_id) = setup_agent(&node, "create-as-agent", AgentRole::AgentHost).await;
 
     let bucket = node
         .client
@@ -230,8 +226,7 @@ async fn bucket_create_as_sets_owner_and_grants_access() {
         "creating a bucket must not require/issue a separate grant"
     );
 
-    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read)
-        .expect("creator Read");
+    acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Read).expect("creator Read");
     acl::check_bucket_access(&node.client, &agent_pk, &bucket, Action::Write)
         .expect("creator Write");
 }
@@ -720,7 +715,6 @@ async fn cannot_retire_last_admin() {
     assert!(matches!(err, memvault_api::ApiError::Other(_)));
 }
 
-
 /// A grant whose signed `bucket_scopes` is bucket A must NOT authorize
 /// bucket B even if its storage tag points at B (tag is unsigned; the
 /// signed scope is authoritative). Guards the tag-vs-scope confusion.
@@ -867,8 +861,8 @@ async fn synced_grant_revocation_applies_on_scan() {
 /// another node's agents.
 #[tokio::test]
 async fn agent_revocation_must_come_from_attesting_node() {
-    use std::collections::HashMap;
     use memvault_auth::jwt::NodeTrust;
+    use std::collections::HashMap;
 
     let node = TestNode::new();
     let (agent_pk, _) = setup_agent(&node, "rev-bind-agent", AgentRole::AgentHost).await;
@@ -888,8 +882,7 @@ async fn agent_revocation_must_come_from_attesting_node() {
     let foreign_pk = foreign.verifying_key().to_bytes();
     let rev = memvault_auth::sign_agent_revocation(&foreign, agent_pk, "malicious")
         .expect("sign foreign revocation");
-    memvault_api::sigchain::publish_agent_revocation(&node.client, &rev)
-        .expect("publish");
+    memvault_api::sigchain::publish_agent_revocation(&node.client, &rev).expect("publish");
 
     // Trust map with BOTH nodes trusted.
     let mut node_trust: HashMap<[u8; 32], NodeTrust> = HashMap::new();
@@ -909,8 +902,7 @@ async fn agent_revocation_must_come_from_attesting_node() {
     let node_sk = node.client.node_signing_key().expect("node key").clone();
     let rev2 = memvault_auth::sign_agent_revocation(&node_sk, agent_pk, "legitimate")
         .expect("sign attester revocation");
-    memvault_api::sigchain::publish_agent_revocation(&node.client, &rev2)
-        .expect("publish2");
+    memvault_api::sigchain::publish_agent_revocation(&node.client, &rev2).expect("publish2");
     let (revoked2, _) =
         memvault_api::sigchain::scan_revocations(&node.client, &admin_keys, &node_trust)
             .expect("scan2");
@@ -1259,14 +1251,9 @@ async fn conflicting_attestations_deny_host_authority() {
     let mut seed = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
     let rival = SigningKey::from_bytes(&seed);
-    let rival_att = sign_agent_attestation(
-        &rival,
-        owner_id,
-        owner_pk,
-        AgentRole::AgentHost,
-        u64::MAX,
-    )
-    .expect("rival attestation");
+    let rival_att =
+        sign_agent_attestation(&rival, owner_id, owner_pk, AgentRole::AgentHost, u64::MAX)
+            .expect("rival attestation");
     memvault_api::sigchain::publish_agent_attestation(&node.client, &rival_att)
         .expect("publish rival attestation");
 
@@ -1525,8 +1512,7 @@ async fn prune_orphaned_agent_attestations_sweeps_orphans_only() {
         u64::MAX,
     )
     .expect("sign orphan");
-    memvault_api::sigchain::publish_agent_attestation(&node.client, &att)
-        .expect("publish orphan");
+    memvault_api::sigchain::publish_agent_attestation(&node.client, &att).expect("publish orphan");
 
     // Sweep.
     let pruned = node
@@ -1558,16 +1544,15 @@ async fn prune_orphaned_agent_attestations_sweeps_orphans_only() {
 /// what broke the MCP's `/buckets/agent` call. This pins the invariant.
 #[tokio::test]
 async fn post_genesis_founder_self_attests_and_local_agent_is_trusted() {
-    use std::sync::Arc;
     use ed25519_dalek::SigningKey;
     use memvault_auth::jwt::NodeTrust;
     use memvault_core::ClusterId;
+    use std::sync::Arc;
     use tokio::sync::RwLock;
 
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        memvault_store::MemvaultStore::open(dir.path().join("blocks.redb")).unwrap(),
-    );
+    let store =
+        Arc::new(memvault_store::MemvaultStore::open(dir.path().join("blocks.redb")).unwrap());
     let cluster_id = ClusterId([3u8; 32]);
     store.set_local_cluster_id(&cluster_id.0).unwrap();
     let mut peer_id = vec![0u8; 32];
@@ -1612,9 +1597,10 @@ async fn post_genesis_founder_self_attests_and_local_agent_is_trusted() {
         u64::MAX,
     )
     .expect("enroll local agent");
-    let att = memvault_api::sigchain::find_agent_attestation(&client, &agent.verifying_key.to_bytes())
-        .unwrap()
-        .expect("agent attestation present");
+    let att =
+        memvault_api::sigchain::find_agent_attestation(&client, &agent.verifying_key.to_bytes())
+            .unwrap()
+            .expect("agent attestation present");
     assert_eq!(
         att.node_pubkey, node_pk,
         "local agent is attested by the local node key"
@@ -1631,7 +1617,11 @@ async fn post_genesis_founder_self_attests_and_local_agent_is_trusted() {
     let claims = memvault_auth::jwt::verify(
         &token,
         &admin_keys,
-        |pk| memvault_api::sigchain::find_agent_attestation(&client, pk).ok().flatten(),
+        |pk| {
+            memvault_api::sigchain::find_agent_attestation(&client, pk)
+                .ok()
+                .flatten()
+        },
         |npk| node_trust.get(npk).cloned(),
     )
     .expect("never-expiry local agent must authenticate");

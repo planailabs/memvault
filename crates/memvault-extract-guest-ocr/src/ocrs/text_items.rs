@@ -1,7 +1,7 @@
 use std::fmt;
 use std::fmt::Write;
 
-use rten_imageproc::{bounding_rect, min_area_rect, Point, Rect, RotatedRect, Vec2};
+use rten_imageproc::{Point, Rect, RotatedRect, Vec2, bounding_rect, min_area_rect};
 
 /// A non-empty sequence of recognized characters ([TextChar]) that constitute a
 /// logical unit of a document such as a word or line.

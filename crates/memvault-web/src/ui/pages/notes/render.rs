@@ -68,11 +68,7 @@ fn preprocess_wikilinks(source: &str) -> String {
             at_line_start = false;
             continue;
         }
-        if !in_fence
-            && i + 1 < bytes.len()
-            && bytes[i] == b'['
-            && bytes[i + 1] == b'['
-        {
+        if !in_fence && i + 1 < bytes.len() && bytes[i] == b'[' && bytes[i + 1] == b'[' {
             if let Some(end) = find_close(bytes, i + 2) {
                 let inner = &source[i + 2..end];
                 if let Some(parsed) = parse_shorthand(inner) {
@@ -340,6 +336,9 @@ mod tests {
     #[test]
     fn unresolved_alias_routes_to_search() {
         let html = render_doc_body("[[Hello World]]");
-        assert!(html.contains("href=\"/search?q=Hello+World\""), "got: {html}");
+        assert!(
+            html.contains("href=\"/search?q=Hello+World\""),
+            "got: {html}"
+        );
     }
 }

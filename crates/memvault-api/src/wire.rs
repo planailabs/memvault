@@ -178,8 +178,8 @@ pub mod cid_str_opt {
     pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
         match v {
             Some(bytes) => {
-                let cid =
-                    memvault_core::cid_string_from_bytes(bytes).map_err(serde::ser::Error::custom)?;
+                let cid = memvault_core::cid_string_from_bytes(bytes)
+                    .map_err(serde::ser::Error::custom)?;
                 s.serialize_some(&cid)
             }
             None => s.serialize_none(),
@@ -253,7 +253,11 @@ impl EntityWire {
             id,
             kind: self.kind,
             props: self.props,
-            edges_out: self.edges.into_iter().filter_map(|e| e.into_edge()).collect(),
+            edges_out: self
+                .edges
+                .into_iter()
+                .filter_map(|e| e.into_edge())
+                .collect(),
         })
     }
 }
@@ -318,18 +322,32 @@ mod tests {
         };
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["id"], "ab".repeat(32));
-        assert!(json["id"].is_string(), "ids must be hex strings, not arrays");
+        assert!(
+            json["id"].is_string(),
+            "ids must be hex strings, not arrays"
+        );
     }
 
     #[test]
     fn cid_field_is_canonical_cid_string_not_hex() {
         let cid_bytes = memvault_core::cid_from_bytes(b"hello").to_bytes();
-        let s = Sample { id: BucketId([0; 32]), cid: cid_bytes.clone(), cluster: None };
+        let s = Sample {
+            id: BucketId([0; 32]),
+            cid: cid_bytes.clone(),
+            cluster: None,
+        };
         let json = serde_json::to_value(&s).unwrap();
         let cid_field = json["cid"].as_str().unwrap();
         // Canonical CIDv1 multibase strings begin with 'b'; never raw hex.
-        assert!(cid_field.starts_with('b'), "cid must be a CID string: {cid_field}");
-        assert_ne!(cid_field, hex::encode(&cid_bytes), "cid must not be bare hex");
+        assert!(
+            cid_field.starts_with('b'),
+            "cid must be a CID string: {cid_field}"
+        );
+        assert_ne!(
+            cid_field,
+            hex::encode(&cid_bytes),
+            "cid must not be bare hex"
+        );
     }
 
     #[test]

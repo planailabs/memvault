@@ -64,7 +64,10 @@ async fn get_note(id: String, show_retracted: bool) -> Result<NoteData, ServerFn
     let doc_id =
         crate::api::docs::parse_doc_id(&id).map_err(|e| ServerFnError::new(format!("{e}")))?;
     let doc = client
-        .get_doc_scoped(&doc_id, &memvault_core::QueryScope::all().with_include_retracted(show_retracted))
+        .get_doc_scoped(
+            &doc_id,
+            &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
+        )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("Document not found"))?;
@@ -95,9 +98,7 @@ async fn get_note(id: String, show_retracted: bool) -> Result<NoteData, ServerFn
                 // DAG-CBOR via the canonical helper — plain
                 // serde_json::from_slice would silently drop every
                 // field and produce blank "unnamed" rows.
-                if let Some(manifest) =
-                    memvault_store::deserialize_block(&manifest_bytes)
-                {
+                if let Some(manifest) = memvault_store::deserialize_block(&manifest_bytes) {
                     attachments.push(AttachmentInfo {
                         cid: hex::encode(&manifest_cid),
                         filename: manifest

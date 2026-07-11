@@ -47,8 +47,8 @@ pub fn check_bucket_access(
     let canonical = BucketId(client.canonical_of(&bucket_id.0));
     let bucket_id = &canonical;
 
-    let attestation = crate::sigchain::find_agent_attestation(client, &pubkey_arr)?
-        .ok_or_else(|| {
+    let attestation =
+        crate::sigchain::find_agent_attestation(client, &pubkey_arr)?.ok_or_else(|| {
             ApiError::Forbidden(format!(
                 "no agent attestation on chain for pubkey {}",
                 hex::encode(pubkey_arr)
@@ -168,8 +168,6 @@ pub fn check_bucket_access(
 
     Err(ApiError::Forbidden(format!(
         "agent {} not authorised for {:?} on bucket {}",
-        attestation.agent_id.0,
-        action,
-        bucket_id
+        attestation.agent_id.0, action, bucket_id
     )))
 }

@@ -27,10 +27,7 @@ fn generate_and_load_identity() {
     // Attestation is returned but not persisted — verify it here, then
     // confirm no other files leak onto disk.
     attestation.verify_signature().unwrap();
-    assert_eq!(
-        attestation.node_pubkey,
-        node_sk.verifying_key().to_bytes()
-    );
+    assert_eq!(attestation.node_pubkey, node_sk.verifying_key().to_bytes());
     assert!(!identity_dir.join("attestation.cbor").exists());
     assert!(!identity_dir.join("agent.json").exists());
 

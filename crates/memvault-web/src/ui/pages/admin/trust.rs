@@ -32,9 +32,7 @@ impl AgentRow {
                     Some(self.agent_id.clone())
                 }
             })
-            .unwrap_or_else(|| {
-                format!("{}…", &self.pubkey[..self.pubkey.len().min(8)])
-            })
+            .unwrap_or_else(|| format!("{}…", &self.pubkey[..self.pubkey.len().min(8)]))
     }
 }
 
@@ -210,7 +208,11 @@ async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
             })
         })
         .collect();
-    orphan_agents.sort_by(|a, b| a.node_pubkey.cmp(&b.node_pubkey).then(a.pubkey.cmp(&b.pubkey)));
+    orphan_agents.sort_by(|a, b| {
+        a.node_pubkey
+            .cmp(&b.node_pubkey)
+            .then(a.pubkey.cmp(&b.pubkey))
+    });
 
     Ok(TrustTree {
         admin_pubkey,

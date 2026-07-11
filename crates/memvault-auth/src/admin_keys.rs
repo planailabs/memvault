@@ -361,9 +361,8 @@ mod tests {
         let admin = make_key();
         let cid = cluster();
         let pop = sign_admin_pop(&make_key(), &cid, u64::MAX);
-        let adm =
-            sign_admin_admission(&admin, [1u8; 32], cid.clone(), 1, 1, u64::MAX, None, pop)
-                .unwrap();
+        let adm = sign_admin_admission(&admin, [1u8; 32], cid.clone(), 1, 1, u64::MAX, None, pop)
+            .unwrap();
         let ret = sign_admin_retirement(&admin, [1u8; 32], cid, 1, "x", None).unwrap();
         // Each type's signed bytes start with its own domain tag, so a
         // signature over one can never verify as the other.
@@ -429,15 +428,8 @@ mod tests {
     fn retirement_roundtrip() {
         let surviving = make_key();
         let retired = make_key().verifying_key().to_bytes();
-        let ret = sign_admin_retirement(
-            &surviving,
-            retired,
-            cluster(),
-            200,
-            "offboarding",
-            None,
-        )
-        .unwrap();
+        let ret = sign_admin_retirement(&surviving, retired, cluster(), 200, "offboarding", None)
+            .unwrap();
         ret.verify_retiring_signature().unwrap();
         assert_eq!(ret.retired_pubkey, retired);
     }

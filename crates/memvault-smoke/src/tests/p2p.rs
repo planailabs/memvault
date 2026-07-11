@@ -156,8 +156,14 @@ async fn wait_for_mesh(
             }
         }
     }
-    assert!(a_saw_b, "swarm_a never saw swarm_b subscribe to {topic_hash}");
-    assert!(b_saw_a, "swarm_b never saw swarm_a subscribe to {topic_hash}");
+    assert!(
+        a_saw_b,
+        "swarm_a never saw swarm_b subscribe to {topic_hash}"
+    );
+    assert!(
+        b_saw_a,
+        "swarm_b never saw swarm_a subscribe to {topic_hash}"
+    );
 }
 
 #[tokio::test]

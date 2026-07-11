@@ -229,8 +229,8 @@ mod tests {
         use crate::sign_admin_retirement;
         let surviving = make_key();
         let retired = make_key().verifying_key().to_bytes();
-        let ret =
-            sign_admin_retirement(&surviving, retired, ClusterId([1u8; 32]), 20, "x", None).unwrap();
+        let ret = sign_admin_retirement(&surviving, retired, ClusterId([1u8; 32]), 20, "x", None)
+            .unwrap();
         let bytes = serde_ipld_dagcbor::to_vec(&ret).unwrap();
         assert_eq!(sigchain_label_for(&bytes), Some("admin_retirement"));
     }

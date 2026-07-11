@@ -78,8 +78,7 @@ impl AliasIndex {
                     let Ok(Some(data)) = store.get_block(cid) else {
                         continue;
                     };
-                    let Some(val) = memvault_store::deserialize_block(&data)
-                    else {
+                    let Some(val) = memvault_store::deserialize_block(&data) else {
                         continue;
                     };
                     if let Some(payload) = val.get("payload") {
@@ -124,8 +123,7 @@ impl AliasIndex {
                     let Ok(Some(data)) = store.get_block(cid) else {
                         continue;
                     };
-                    let Some(val) = memvault_store::deserialize_block(&data)
-                    else {
+                    let Some(val) = memvault_store::deserialize_block(&data) else {
                         continue;
                     };
                     if let Some(payload) = val.get("payload") {
@@ -161,10 +159,7 @@ impl AliasIndex {
 /// Resolve an `ExtractedLink` URI to a graph-ready `ResolvedLink`. Returns
 /// `None` if the URI is malformed. Pending aliases produce a placeholder
 /// target via `pending_node_for_alias`.
-pub fn resolve_extracted_link(
-    link: &ExtractedLink,
-    index: &AliasIndex,
-) -> Option<ResolvedLink> {
+pub fn resolve_extracted_link(link: &ExtractedLink, index: &AliasIndex) -> Option<ResolvedLink> {
     let parsed: ParsedUri = parse_uri(&link.uri).ok()?;
     let (target, pending_alias) = match parsed.kind {
         LinkTargetKind::Doc => (NodeRef::Doc(DocId(decode_32(&parsed.ident)?)), None),
@@ -185,9 +180,7 @@ pub fn resolve_extracted_link(
     Some(ResolvedLink {
         target,
         relation,
-        display_text: parsed
-            .alias
-            .or_else(|| link.display_text.clone()),
+        display_text: parsed.alias.or_else(|| link.display_text.clone()),
         pending_alias,
     })
 }
@@ -376,10 +369,7 @@ mod tests {
     fn relation_demoted_when_outside_allowlist() {
         let idx = AliasIndex::new();
         let link = ExtractedLink {
-            uri: format!(
-                "memvault://doc/{}?rel=super-secret",
-                hex::encode([3; 32])
-            ),
+            uri: format!("memvault://doc/{}?rel=super-secret", hex::encode([3; 32])),
             display_text: None,
             byte_span: (0, 0),
             syntax: LinkSyntax::MarkdownLink,

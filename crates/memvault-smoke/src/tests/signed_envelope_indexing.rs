@@ -226,7 +226,9 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
     // Build a separate agent-bound client off the same store.
     let agent_client = memvault_api::LocalClient::new(
         Arc::clone(&node.store),
-        Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
+        Arc::new(tokio::sync::RwLock::new(
+            memvault_query::QuotaManager::default(),
+        )),
         Arc::new(memvault_api::EventBus::new(64)),
         node.client.peer_id().to_vec(),
         node.cluster_id.0.to_vec(),
@@ -266,11 +268,7 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
         .expect("agent put_doc");
 
     // ── history_of must return an AuditRecord with agent_attestation ──
-    let records = node
-        .client
-        .history_of(&doc_id)
-        .await
-        .expect("history_of");
+    let records = node.client.history_of(&doc_id).await.expect("history_of");
     assert!(
         !records.is_empty(),
         "history_of must return at least the DocCreate after agent-bound Signed<T> write"
@@ -316,7 +314,9 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
     // Build a separate agent-bound client off the same store.
     let agent_client = memvault_api::LocalClient::new(
         Arc::clone(&node.store),
-        Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
+        Arc::new(tokio::sync::RwLock::new(
+            memvault_query::QuotaManager::default(),
+        )),
         Arc::new(memvault_api::EventBus::new(64)),
         node.client.peer_id().to_vec(),
         node.cluster_id.0.to_vec(),

@@ -51,7 +51,6 @@ pub const BUCKETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("buckets
 /// A bucket with no entry here is unbound (pre-genesis or standalone).
 pub const BUCKET_CLUSTER: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bucket_cluster");
 
-
 // ── Share tables (added B5) ────────────────────────────────────────
 
 /// Share inbox: packed(to_cluster, wall_ns, proposal_cid) -> status_byte.

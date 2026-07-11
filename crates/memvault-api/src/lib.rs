@@ -18,11 +18,11 @@ pub mod local;
 pub mod metrics;
 pub mod node_key;
 pub mod office_convert;
-pub mod rebuild;
-pub mod sigchain;
 pub mod otel;
 pub mod quotas;
+pub mod rebuild;
 pub mod rotation;
+pub mod sigchain;
 // JSON-RPC over a Unix domain socket — Unix-only transport. (Windows would use
 // a named pipe; no consumer needs it in the cross-compiled daemon build.)
 #[cfg(unix)]
@@ -36,15 +36,15 @@ pub mod vfs;
 pub mod wire;
 
 pub use client::MemvaultClient;
-/// The query-scope triplet types live in `memvault-core` (so `memvault-query`
-/// can share them); re-exported here for API-layer convenience.
-pub use memvault_core::scope;
-pub use memvault_core::{BucketSelector, QueryScope, RetractionMode};
 pub use ed25519_dalek;
 pub use error::{ApiError, Result};
 #[cfg(feature = "http-client")]
 pub use http::HttpApiClient;
 pub use local::LocalClient;
+/// The query-scope triplet types live in `memvault-core` (so `memvault-query`
+/// can share them); re-exported here for API-layer convenience.
+pub use memvault_core::scope;
+pub use memvault_core::{BucketSelector, QueryScope, RetractionMode};
 pub use subscription::{EventBus, MemvaultEvent};
 pub use types::{
     DocSummary, GrantInfo, NodeDetail, NodeStatus, NodeSummary, RotationInfo, ScopeCount,
@@ -111,7 +111,10 @@ impl ClientArgs {
             // Load the agent identity and hand it to HttpApiClient. Every
             // outgoing request gets a freshly-issued JWT signed with the
             // agent's private key, auto-renewed near expiry.
-            let identity_dir = self.identity_dir.clone().unwrap_or_else(default_identity_dir);
+            let identity_dir = self
+                .identity_dir
+                .clone()
+                .unwrap_or_else(default_identity_dir);
             let identity =
                 crate::agent_identity::AgentIdentity::load(&identity_dir).map_err(|e| {
                     anyhow::anyhow!(
@@ -132,7 +135,10 @@ impl ClientArgs {
         if self.db.is_some() {
             return None;
         }
-        let identity_dir = self.identity_dir.clone().unwrap_or_else(default_identity_dir);
+        let identity_dir = self
+            .identity_dir
+            .clone()
+            .unwrap_or_else(default_identity_dir);
         crate::agent_identity::AgentIdentity::load(&identity_dir)
             .ok()
             .map(|id| id.verifying_key.to_bytes())

@@ -56,7 +56,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let tag_filter = cli.tag.as_deref().and_then(memvault_api::docs::parse_tag_filter);
+    let tag_filter = cli
+        .tag
+        .as_deref()
+        .and_then(memvault_api::docs::parse_tag_filter);
 
     let opts = ExportOptions {
         history: cli.history,

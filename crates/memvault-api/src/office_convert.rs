@@ -55,7 +55,10 @@ pub(crate) async fn convert_office_to_pdf(
 
     // A dedicated UserInstallation avoids lock contention with any other
     // LibreOffice instance (including concurrent conversions).
-    let profile = format!("-env:UserInstallation=file://{}/lo-profile", dir.path().display());
+    let profile = format!(
+        "-env:UserInstallation=file://{}/lo-profile",
+        dir.path().display()
+    );
 
     let child = tokio::process::Command::new(&soffice)
         .arg(profile)

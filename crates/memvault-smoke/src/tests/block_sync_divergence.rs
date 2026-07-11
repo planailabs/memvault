@@ -84,7 +84,9 @@ fn compute_fingerprints(
         } else {
             start + window_size
         };
-        let (count, xor) = store.range_fingerprint(start, end).unwrap_or((0, [0u8; 32]));
+        let (count, xor) = store
+            .range_fingerprint(start, end)
+            .unwrap_or((0, [0u8; 32]));
         fps.push((start, end, count, xor));
     }
     fps
@@ -228,8 +230,14 @@ async fn chunked_fetch_syncs_all_blocks() {
 
     let now_ns = base_ns + 500_000;
 
-    let a_count = store_a.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
-    let b_count = store_b.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
+    let a_count = store_a
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
+    let b_count = store_b
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
     assert_eq!(a_count, 4175);
     assert_eq!(b_count, 936);
 
@@ -240,8 +248,16 @@ async fn chunked_fetch_syncs_all_blocks() {
     let fps_a = compute_fingerprints(&store_a, 64, now_ns);
     let fps_b = compute_fingerprints(&store_b, 64, now_ns);
     for (a, b) in fps_a.iter().zip(fps_b.iter()) {
-        assert_eq!(a.2, b.2, "block count mismatch in window [{}, {})", a.0, a.1);
-        assert_eq!(a.3, b.3, "XOR fingerprint mismatch in window [{}, {})", a.0, a.1);
+        assert_eq!(
+            a.2, b.2,
+            "block count mismatch in window [{}, {})",
+            a.0, a.1
+        );
+        assert_eq!(
+            a.3, b.3,
+            "XOR fingerprint mismatch in window [{}, {})",
+            a.0, a.1
+        );
     }
 }
 
@@ -264,13 +280,19 @@ async fn periodic_resync_heals_divergence() {
     let synced1 = simulate_full_sync(&store_a, &store_b, 1000, 500, now_ns);
     assert!(synced1 <= 1000, "initial sync capped at 1000");
 
-    let b_count = store_b.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
+    let b_count = store_b
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
     assert!(b_count < 1500, "node B should be behind after capped sync");
 
     let synced2 = simulate_full_sync(&store_a, &store_b, usize::MAX, 500, now_ns);
     assert!(synced2 > 0, "resync should fetch remaining blocks");
 
-    let b_count_after = store_b.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
+    let b_count_after = store_b
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
     assert_eq!(
         b_count_after, 1500,
         "node B should have all blocks after resync"
@@ -304,8 +326,14 @@ async fn bidirectional_divergence_converges() {
     let synced_b_to_a = simulate_full_sync(&store_b, &store_a, usize::MAX, 500, now_ns);
     assert_eq!(synced_b_to_a, 300);
 
-    let a_count = store_a.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
-    let b_count = store_b.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
+    let a_count = store_a
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
+    let b_count = store_b
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
     assert_eq!(a_count, 800);
     assert_eq!(b_count, 800);
 
@@ -342,7 +370,9 @@ fn upload_file_to_store(
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let manifest_cid = cid_from_bytes(&manifest_bytes);
     let manifest_cid_bytes = manifest_cid.to_bytes();
-    store.put_block(&manifest_cid_bytes, &manifest_bytes).unwrap();
+    store
+        .put_block(&manifest_cid_bytes, &manifest_bytes)
+        .unwrap();
     all_cids.push(manifest_cid_bytes.clone());
 
     let envelope = serde_json::json!({
@@ -368,7 +398,7 @@ fn upload_file_to_store(
         provenance: vec![],
         cluster_id: Some(vec![0u8; 32]),
         bucket_id: None,
-            ..Default::default()
+        ..Default::default()
     };
     store
         .insert_envelope(&env_cid_bytes, &envelope_bytes, &meta)
@@ -389,34 +419,50 @@ async fn file_chunks_invisible_to_rbsr() {
     let base_ns: u64 = 1_700_000_000_000_000_000;
 
     let file_data = vec![42u8; 512 * 1024];
-    let (env_cid, manifest_cid, all_cids) =
-        upload_file_to_store(&store_a, &file_data, base_ns);
+    let (env_cid, manifest_cid, all_cids) = upload_file_to_store(&store_a, &file_data, base_ns);
 
     let total_blocks = all_cids.len();
-    assert!(total_blocks >= 3, "file should produce envelope + manifest + chunks, got {total_blocks}");
+    assert!(
+        total_blocks >= 3,
+        "file should produce envelope + manifest + chunks, got {total_blocks}"
+    );
 
     let now_ns = base_ns + 10_000;
     let synced = simulate_full_sync(&store_a, &store_b, usize::MAX, 500, now_ns);
 
     assert_eq!(synced, 1, "RBSR should only sync the envelope (BY_TIME)");
 
-    assert!(store_b.has_block(&env_cid).unwrap(), "node B should have envelope");
-    assert!(!store_b.has_block(&manifest_cid).unwrap(), "node B should NOT have manifest (not in BY_TIME)");
+    assert!(
+        store_b.has_block(&env_cid).unwrap(),
+        "node B should have envelope"
+    );
+    assert!(
+        !store_b.has_block(&manifest_cid).unwrap(),
+        "node B should NOT have manifest (not in BY_TIME)"
+    );
 
-    let missing = all_cids.iter().filter(|c| !store_b.has_block(c).unwrap()).count();
-    assert!(missing >= 2, "node B should be missing manifest + chunks: missing {missing}");
+    let missing = all_cids
+        .iter()
+        .filter(|c| !store_b.has_block(c).unwrap())
+        .count();
+    assert!(
+        missing >= 2,
+        "node B should be missing manifest + chunks: missing {missing}"
+    );
 }
 
 /// Extract dependent CIDs from a block (mirrors extract_dependent_cids in swarm).
 fn extract_deps(data: &[u8]) -> Vec<Vec<u8>> {
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(data) {
         let mut deps = Vec::new();
-        if let Some(mcid) = val.get("manifest_cid")
+        if let Some(mcid) = val
+            .get("manifest_cid")
             .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
         {
             deps.push(mcid);
         }
-        if let Some(root) = val.get("content_root")
+        if let Some(root) = val
+            .get("content_root")
             .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok())
         {
             deps.push(root);
@@ -483,8 +529,7 @@ async fn reference_chasing_syncs_file_chunks() {
     let base_ns: u64 = 1_700_000_000_000_000_000;
 
     let file_data = vec![42u8; 512 * 1024];
-    let (env_cid, manifest_cid, all_cids) =
-        upload_file_to_store(&store_a, &file_data, base_ns);
+    let (env_cid, manifest_cid, all_cids) = upload_file_to_store(&store_a, &file_data, base_ns);
 
     let total_blocks = all_cids.len();
 
@@ -494,10 +539,17 @@ async fn reference_chasing_syncs_file_chunks() {
 
     let synced = simulate_chasing_sync(&store_a, &store_b, &[env_cid.clone()]);
 
-    assert!(synced >= 1, "should sync at least manifest: synced {synced}");
-    assert!(store_b.has_block(&manifest_cid).unwrap(), "node B should now have manifest");
+    assert!(
+        synced >= 1,
+        "should sync at least manifest: synced {synced}"
+    );
+    assert!(
+        store_b.has_block(&manifest_cid).unwrap(),
+        "node B should now have manifest"
+    );
 
-    let still_missing: Vec<_> = all_cids.iter()
+    let still_missing: Vec<_> = all_cids
+        .iter()
         .filter(|c| !store_b.has_block(c).unwrap())
         .collect();
     assert!(
@@ -542,10 +594,19 @@ async fn mixed_docs_and_files_converge() {
     let chase_synced = simulate_chasing_sync(&store_a, &store_b, &file_seed_cids);
     assert!(chase_synced > 0, "chasing should sync manifest + chunks");
 
-    let a_block_count = store_a.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
-    let b_block_count = store_b.query_by_time(0, u64::MAX, usize::MAX).unwrap().len();
+    let a_block_count = store_a
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
+    let b_block_count = store_b
+        .query_by_time(0, u64::MAX, usize::MAX)
+        .unwrap()
+        .len();
 
-    assert_eq!(a_block_count, b_block_count, "BY_TIME indexed block counts should match");
+    assert_eq!(
+        a_block_count, b_block_count,
+        "BY_TIME indexed block counts should match"
+    );
 
     let a_all = store_a.iter_blocks().unwrap();
     let mut b_missing = 0;
@@ -554,5 +615,8 @@ async fn mixed_docs_and_files_converge() {
             b_missing += 1;
         }
     }
-    assert_eq!(b_missing, 0, "node B should have ALL blocks including file chunks");
+    assert_eq!(
+        b_missing, 0,
+        "node B should have ALL blocks including file chunks"
+    );
 }

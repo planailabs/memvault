@@ -17,7 +17,13 @@ async fn create_bucket() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("test", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "test",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     assert_ne!(id, BucketId([0u8; 32]));
@@ -72,15 +78,33 @@ async fn list_empty_buckets() {
 async fn list_multiple_buckets() {
     let node = TestNode::new();
     node.client
-        .bucket_create("a", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "a",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     node.client
-        .bucket_create("b", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "b",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     node.client
-        .bucket_create("c", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "c",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     let buckets = node.client.bucket_list().await.unwrap();
@@ -99,7 +123,13 @@ async fn rename_bucket() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("old", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "old",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     node.client.bucket_rename(&id, "new").await.unwrap();
@@ -112,7 +142,13 @@ async fn rename_bucket_multiple_times() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("v1", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "v1",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     node.client.bucket_rename(&id, "v2").await.unwrap();
@@ -173,7 +209,13 @@ async fn bucket_attach_idempotent() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("idem", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "idem",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     node.client.bucket_attach(&id).await.unwrap();
@@ -188,7 +230,13 @@ async fn bucket_archive() {
     let node = TestNode::new();
     let id = node
         .client
-        .bucket_create("temp", None, Visibility::Internal, Classification::Internal, BucketRole::Standard)
+        .bucket_create(
+            "temp",
+            None,
+            Visibility::Internal,
+            Classification::Internal,
+            BucketRole::Standard,
+        )
         .await
         .unwrap();
     node.client

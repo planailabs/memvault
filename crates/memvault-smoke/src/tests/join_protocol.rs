@@ -38,10 +38,7 @@ fn libp2p_keypair_from_seed(seed: &[u8; 32]) -> identity::Keypair {
 }
 
 fn pubkey_from_libp2p(kp: &identity::Keypair) -> [u8; 32] {
-    kp.public()
-        .try_into_ed25519()
-        .expect("ed25519")
-        .to_bytes()
+    kp.public().try_into_ed25519().expect("ed25519").to_bytes()
 }
 
 /// Build a signed JoinToken with the AdminGenesis embedded — the
@@ -134,13 +131,9 @@ async fn join_protocol_promotes_peer_to_attested() {
     // ── Two stores under tempdirs ───────────────────────────────────
     let admin_dir = tempfile::tempdir().unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
-    let admin_store =
-        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
-    let peer_store =
-        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
-    admin_store
-        .set_local_cluster_id(&cluster_id.0)
-        .unwrap();
+    let admin_store = Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store = Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
     peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
 
     // ── Build the two swarms ────────────────────────────────────────
@@ -231,9 +224,7 @@ async fn join_protocol_promotes_peer_to_attested() {
         loop {
             // Look for any sigchain/node_att block on the peer's store
             // whose `member` matches peer's pubkey.
-            if let Ok(cids) =
-                peer_store.query_by_tag("sigchain", "node_att", 0, 64)
-            {
+            if let Ok(cids) = peer_store.query_by_tag("sigchain", "node_att", 0, 64) {
                 for cid in cids {
                     if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
                         if let Ok(att) =
@@ -256,8 +247,7 @@ async fn join_protocol_promotes_peer_to_attested() {
     assert_eq!(att.cluster_id.0, cluster_id.0, "cluster_id matches");
 
     // Signature must verify against admin pubkey (the pin).
-    let admin_vk =
-        ed25519_dalek::VerifyingKey::from_bytes(&admin_pubkey).expect("admin pubkey");
+    let admin_vk = ed25519_dalek::VerifyingKey::from_bytes(&admin_pubkey).expect("admin pubkey");
     att.verify_signature(&admin_vk)
         .expect("admin signature on NodeAttestation");
 
@@ -296,24 +286,18 @@ fn libp2p_key_drives_both_swarm_and_node_signing_key() {
     let kp = libp2p::identity::Keypair::generate_ed25519();
     let ed_kp = kp.clone().try_into_ed25519().expect("ed25519");
     let full = ed_kp.to_bytes(); // 64 bytes (seed + pub)
-    std::fs::write(
-        dir.path().join("identity").join("libp2p.key"),
-        &full[..32],
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("identity").join("libp2p.key"), &full[..32]).unwrap();
 
-    let kp_loaded = memctl::load_or_generate_keypair(
-        &dir.path().join("identity").join("libp2p.key"),
-    )
-    .expect("load_or_generate_keypair");
+    let kp_loaded =
+        memctl::load_or_generate_keypair(&dir.path().join("identity").join("libp2p.key"))
+            .expect("load_or_generate_keypair");
     let swarm_pubkey: [u8; 32] = kp_loaded
         .public()
         .try_into_ed25519()
         .expect("ed25519")
         .to_bytes();
 
-    let node_sk = memctl::libp2p_node_signing_key(dir.path())
-        .expect("libp2p_node_signing_key");
+    let node_sk = memctl::libp2p_node_signing_key(dir.path()).expect("libp2p_node_signing_key");
     let bootstrap_pubkey = node_sk.verifying_key().to_bytes();
 
     assert_eq!(
@@ -362,10 +346,8 @@ async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
 
     let admin_dir = tempfile::tempdir().unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
-    let admin_store =
-        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
-    let peer_store =
-        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    let admin_store = Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store = Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
     admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
     peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
 
@@ -454,9 +436,8 @@ async fn join_protocol_attests_peer_under_bootstrap_pubkey() {
             if let Ok(cids) = peer_store.query_by_tag("sigchain", "node_att", 0, 64) {
                 for cid in cids {
                     if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
-                        if let Ok(att) = serde_ipld_dagcbor::from_slice::<
-                            memvault_auth::NodeAttestation,
-                        >(&bytes)
+                        if let Ok(att) =
+                            serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
                         {
                             if att.member.0 == peer_bootstrap_pubkey.to_vec() {
                                 return true;
@@ -514,10 +495,8 @@ async fn agent_attestation_syncs_with_correct_tag() {
     // ── Stores ─────────────────────────────────────────────────────
     let admin_dir = tempfile::tempdir().unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
-    let admin_store =
-        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
-    let peer_store =
-        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    let admin_store = Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store = Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
     admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
     peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
 
@@ -585,13 +564,14 @@ async fn agent_attestation_syncs_with_correct_tag() {
     // `serve_block_request` refuses to serve blocks to it and sync
     // never delivers the AgentAttestation. Issue a token here.
     let admin_peer_for_token = PeerId(admin_node_pubkey.to_vec());
-    let admin_genesis = sign_admin_genesis(
+    let admin_genesis = sign_admin_genesis(&admin_sk, cluster_id.clone(), memvault_core::wall_ns())
+        .expect("sign admin_genesis");
+    let token = issue_token(
         &admin_sk,
-        cluster_id.clone(),
-        memvault_core::wall_ns(),
-    )
-    .expect("sign admin_genesis");
-    let token = issue_token(&admin_sk, &admin_peer_for_token, &cluster_id, &admin_genesis);
+        &admin_peer_for_token,
+        &cluster_id,
+        &admin_genesis,
+    );
     let token_str = encode_token_string(&token).expect("encode token");
 
     let peer_join = JoinConfig {
@@ -645,10 +625,9 @@ async fn agent_attestation_syncs_with_correct_tag() {
             if let Ok(cids) = peer_store.query_by_tag("sigchain", "agent_att", 0, 64) {
                 for cid in cids {
                     if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
-                        if let Ok(att) =
-                            serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(
-                                &bytes,
-                            )
+                        if let Ok(att) = serde_ipld_dagcbor::from_slice::<
+                            memvault_auth::AgentAttestation,
+                        >(&bytes)
                         {
                             if att.agent_pubkey == agent_sk.verifying_key().to_bytes() {
                                 return true;
@@ -687,11 +666,7 @@ async fn agent_attestation_syncs_with_correct_tag() {
 /// would silently return empty.
 #[tokio::test]
 async fn rebuild_retags_sigchain_blocks() {
-    use memvault_api::{
-        EventBus, LocalClient,
-        bootstrap::bootstrap_cluster_trust,
-        sigchain,
-    };
+    use memvault_api::{EventBus, LocalClient, bootstrap::bootstrap_cluster_trust, sigchain};
     use memvault_core::ClusterId;
     use memvault_query::QuotaManager;
     use std::sync::Arc;
@@ -819,10 +794,8 @@ async fn join_bundles_admin_node_attestation() {
 
     let admin_dir = tempfile::tempdir().unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
-    let admin_store =
-        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
-    let peer_store =
-        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    let admin_store = Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store = Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
     admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
     peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
 
@@ -930,9 +903,8 @@ async fn join_bundles_admin_node_attestation() {
             if let Ok(cids) = peer_store.query_by_tag("sigchain", "node_att", 0, 64) {
                 for cid in cids {
                     if let Ok(Some(bytes)) = peer_store.get_block(&cid) {
-                        if let Ok(att) = serde_ipld_dagcbor::from_slice::<
-                            memvault_auth::NodeAttestation,
-                        >(&bytes)
+                        if let Ok(att) =
+                            serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
                         {
                             // Admin's attestation: `member` == admin's
                             // node pubkey.
@@ -993,10 +965,8 @@ async fn join_consumes_token_once_and_refuses_replay() {
 
     let admin_dir = tempfile::tempdir().unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
-    let admin_store =
-        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
-    let peer_store =
-        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    let admin_store = Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store = Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
     admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
     peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
 
@@ -1080,9 +1050,8 @@ async fn join_consumes_token_once_and_refuses_replay() {
             if let Ok(cids) = admin_store.query_by_tag("sigchain", "node_att", 0, 64) {
                 for cid in cids {
                     if let Ok(Some(bytes)) = admin_store.get_block(&cid) {
-                        if let Ok(att) = serde_ipld_dagcbor::from_slice::<
-                            memvault_auth::NodeAttestation,
-                        >(&bytes)
+                        if let Ok(att) =
+                            serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
                         {
                             if att.member.0 == peer_pubkey.to_vec() {
                                 return;
@@ -1097,8 +1066,9 @@ async fn join_consumes_token_once_and_refuses_replay() {
     .await;
 
     // First success must have ticked the consumption counter once.
-    let count_after_first =
-        admin_store.get_token_consumption_count(&token_cid).unwrap_or(0);
+    let count_after_first = admin_store
+        .get_token_consumption_count(&token_cid)
+        .unwrap_or(0);
     assert_eq!(
         count_after_first, 1,
         "consumption count must tick on successful /join/1.0"
@@ -1112,8 +1082,9 @@ async fn join_consumes_token_once_and_refuses_replay() {
     // Simulate by sleeping enough for the retry timer to fire at least
     // once if the runtime gets to it within the window.
     tokio::time::sleep(Duration::from_secs(16)).await;
-    let count_after_retry =
-        admin_store.get_token_consumption_count(&token_cid).unwrap_or(0);
+    let count_after_retry = admin_store
+        .get_token_consumption_count(&token_cid)
+        .unwrap_or(0);
     assert_eq!(
         count_after_retry, 1,
         "peer retry must NOT increment consumption — same peer, same attestation"
@@ -1129,7 +1100,9 @@ async fn join_consumes_token_once_and_refuses_replay() {
     // `build_join_response`. Driving a second real swarm is racy;
     // assert the invariant via the store instead:
     assert_eq!(
-        admin_store.get_token_consumption_count(&token_cid).unwrap_or(0),
+        admin_store
+            .get_token_consumption_count(&token_cid)
+            .unwrap_or(0),
         1,
         "consumption count must equal 1, equalling token.max_uses — \
          further peers would hit the `used >= max_uses` refuse branch"
@@ -1159,15 +1132,19 @@ async fn join_admits_co_admin_when_token_allows() {
 
     // Token issued WITH admit-as-admin.
     let admin_peer_for_token = PeerId(admin_node_pubkey.to_vec());
-    let token = issue_token_ex(&admin_sk, &admin_peer_for_token, &cluster_id, &genesis, true);
+    let token = issue_token_ex(
+        &admin_sk,
+        &admin_peer_for_token,
+        &cluster_id,
+        &genesis,
+        true,
+    );
     let token_str = encode_token_string(&token).expect("encode token");
 
     let admin_dir = tempfile::tempdir().unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
-    let admin_store =
-        Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
-    let peer_store =
-        Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
+    let admin_store = Arc::new(MemvaultStore::open(admin_dir.path().join("blocks.redb")).unwrap());
+    let peer_store = Arc::new(MemvaultStore::open(peer_dir.path().join("blocks.redb")).unwrap());
     admin_store.set_local_cluster_id(&cluster_id.0).unwrap();
     peer_store.set_local_cluster_id(&cluster_id.0).unwrap();
 
@@ -1271,7 +1248,10 @@ async fn join_admits_co_admin_when_token_allows() {
     .await
     .expect("timed out waiting for AdminKeyAdmission");
 
-    assert_eq!(admission.new_pubkey, co_admin_pubkey, "admitted the peer's key");
+    assert_eq!(
+        admission.new_pubkey, co_admin_pubkey,
+        "admitted the peer's key"
+    );
     assert_eq!(
         admission.admitting_pubkey, admin_pubkey,
         "admitted by the cluster admin"

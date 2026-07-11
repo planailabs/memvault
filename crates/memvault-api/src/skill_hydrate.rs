@@ -110,8 +110,7 @@ pub async fn hydrate_skill(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("skill {}", hex::encode(skill_id.0))))?;
 
-    std::fs::create_dir_all(dest)
-        .map_err(|e| ApiError::Other(format!("create {dest:?}: {e}")))?;
+    std::fs::create_dir_all(dest).map_err(|e| ApiError::Other(format!("create {dest:?}: {e}")))?;
 
     // Trust gate: the executable bit is only honoured when the manifest was
     // authored by an attested agent (its EntityCreate carried an attestation).

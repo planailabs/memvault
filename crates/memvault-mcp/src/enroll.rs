@@ -112,10 +112,7 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
         let detail = resp.text().await.unwrap_or_default();
         return Err(anyhow!("enroll endpoint returned {status}: {detail}"));
     }
-    let parsed: serde_json::Value = resp
-        .json()
-        .await
-        .context("parse enroll response as JSON")?;
+    let parsed: serde_json::Value = resp.json().await.context("parse enroll response as JSON")?;
 
     let att_hex = parsed
         .get("attestation_cbor_hex")
@@ -126,8 +123,7 @@ pub async fn run(args: EnrollArgs) -> Result<()> {
                  enrollment can persist a local identity"
             )
         })?;
-    let att_bytes =
-        hex::decode(att_hex).context("decode attestation_cbor_hex from response")?;
+    let att_bytes = hex::decode(att_hex).context("decode attestation_cbor_hex from response")?;
     let attestation: memvault_auth::AgentAttestation =
         serde_ipld_dagcbor::from_slice(&att_bytes).context("decode attestation CBOR")?;
 

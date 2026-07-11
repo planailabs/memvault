@@ -224,12 +224,14 @@ fn sigchain_record(
     let role_str = |r: &memvault_auth::AgentRole| format!("{r:?}").to_lowercase();
     match label {
         "token_redeem" => {
-            let tc = serde_ipld_dagcbor::from_slice::<memvault_auth::TokenConsumption>(data).ok()?;
+            let tc =
+                serde_ipld_dagcbor::from_slice::<memvault_auth::TokenConsumption>(data).ok()?;
             let att_cid = tc.issued_attestation.to_bytes();
             // Best-effort: classify the minted attestation for nicer display.
             let att_type = match store.get_block(&att_cid) {
                 Ok(Some(b)) => {
-                    if serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&b).is_ok() {
+                    if serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&b).is_ok()
+                    {
                         "node"
                     } else if serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(&b)
                         .is_ok()
@@ -260,7 +262,8 @@ fn sigchain_record(
             ))
         }
         "agent_att" => {
-            let aa = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(data).ok()?;
+            let aa =
+                serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(data).ok()?;
             Some(mk(
                 OpKind::AgentEnroll,
                 aa.agent_pubkey.to_vec(),
@@ -310,10 +313,7 @@ fn sigchain_record(
 pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
     let view = memvault_store::EnvelopeView::from_value(val.clone());
 
-    let author: Vec<u8> = view
-        .as_ref()
-        .map(|v| v.author())
-        .unwrap_or_default();
+    let author: Vec<u8> = view.as_ref().map(|v| v.author()).unwrap_or_default();
 
     let wall_ns = view
         .as_ref()
@@ -329,15 +329,8 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         .as_ref()
         .and_then(|v| v.field("tags"))
         .and_then(|raw| {
-            if let Ok(structured) =
-                serde_json::from_value::<Vec<memvault_core::Tag>>(raw.clone())
-            {
-                Some(
-                    structured
-                        .into_iter()
-                        .map(|t| (t.scope, t.label))
-                        .collect(),
-                )
+            if let Ok(structured) = serde_json::from_value::<Vec<memvault_core::Tag>>(raw.clone()) {
+                Some(structured.into_iter().map(|t| (t.scope, t.label)).collect())
             } else {
                 serde_json::from_value::<Vec<(String, String)>>(raw.clone()).ok()
             }
@@ -452,13 +445,11 @@ pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
         None
     });
 
-    let attachment_cid: Option<Vec<u8>> =
-        view.as_ref().and_then(|v| v.get_as("manifest_cid"));
+    let attachment_cid: Option<Vec<u8>> = view.as_ref().and_then(|v| v.get_as("manifest_cid"));
 
     // Agent attribution lives in `agent_attestation` on Signed<T> v3+
     // envelopes. Absent on legacy raw-JSON envelopes (None).
-    let agent_attestation: Option<Vec<u8>> =
-        view.as_ref().and_then(|v| v.agent_attestation_cid());
+    let agent_attestation: Option<Vec<u8>> = view.as_ref().and_then(|v| v.agent_attestation_cid());
 
     AuditRecord {
         cid: cid.to_vec(),

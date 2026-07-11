@@ -74,10 +74,16 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route("/docs/{id}/history", get(docs::doc_history))
         // ── Entities (type-specific, accepts raw hex or entity:hex)
-        .route("/entities", post(graph::create_entity).get(graph::list_entities))
+        .route(
+            "/entities",
+            post(graph::create_entity).get(graph::list_entities),
+        )
         .route("/traverse", get(graph::traverse))
         // ── Skills (first-class entity aggregates) ─────────────────
-        .route("/skills", get(skills::list_skills).post(skills::publish_skill))
+        .route(
+            "/skills",
+            get(skills::list_skills).post(skills::publish_skill),
+        )
         .route(
             "/skills/{id}",
             get(skills::get_skill)
