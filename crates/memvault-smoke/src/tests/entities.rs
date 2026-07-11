@@ -1,8 +1,8 @@
 //! Entity/graph operation smoke tests.
 
 use memvault_api::MemvaultClient;
-use memvault_core::{EntityId, NodeRef, Visibility};
-use memvault_doc::{Edge, Entity};
+use memvault_core::{EntityId, Visibility};
+use memvault_doc::Entity;
 use std::collections::BTreeMap;
 
 use crate::harness::TestNode;

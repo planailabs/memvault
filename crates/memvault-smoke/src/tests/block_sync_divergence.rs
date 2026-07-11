@@ -576,13 +576,11 @@ async fn mixed_docs_and_files_converge() {
     }
 
     let mut file_seed_cids = Vec::new();
-    let mut total_file_blocks = 0;
     for (idx, size) in [64 * 1024, 256 * 1024, 512 * 1024].iter().enumerate() {
         let file_data = vec![(idx + 1) as u8; *size];
-        let (env_cid, _, all_cids) =
+        let (env_cid, _, _all_cids) =
             upload_file_to_store(&store_a, &file_data, base_ns + 200_000 + idx as u64);
         file_seed_cids.push(env_cid);
-        total_file_blocks += all_cids.len();
     }
 
     let now_ns = base_ns + 500_000;

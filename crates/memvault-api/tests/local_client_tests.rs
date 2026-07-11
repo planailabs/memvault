@@ -10,7 +10,6 @@ use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{BucketRole, Document, Edge, Entity};
 use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
-use rand::RngCore;
 
 fn make_client() -> (tempfile::TempDir, Arc<LocalClient>) {
     let dir = tempfile::tempdir().unwrap();
@@ -1052,7 +1051,7 @@ fn join_token_roundtrip_with_verify() {
 #[test]
 fn envelope_v1_no_bucket_roundtrip() {
     use memvault_core::tags::Tag;
-    use memvault_core::{BucketId, PeerId, Signed, Visibility};
+    use memvault_core::{PeerId, Signed, Visibility};
 
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);

@@ -648,11 +648,13 @@ async fn unbound_buckets_auto_bind_when_client_opens_with_cluster() {
             .unwrap();
 
         // Verify they're unbound
-        let info = client.bucket_get(&b1).await.unwrap().unwrap();
-        assert!(
-            info.cluster_id.is_none(),
-            "should be unbound with no cluster"
-        );
+        for b in [&b1, &b2] {
+            let info = client.bucket_get(b).await.unwrap().unwrap();
+            assert!(
+                info.cluster_id.is_none(),
+                "should be unbound with no cluster"
+            );
+        }
     }
 
     // Phase 2: re-open the store WITH a cluster_id (simulates post-genesis)

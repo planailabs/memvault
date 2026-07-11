@@ -11,8 +11,7 @@ use tokio::time::timeout;
 
 use memvault_net::gossip;
 use memvault_net::{
-    AdminAnnouncement, AuthRequest, AuthResponse, FederationAnnouncement, JoinRequest, JoinResult,
-    standalone_swarm,
+    AdminAnnouncement, AuthRequest, AuthResponse, JoinRequest, JoinResult, standalone_swarm,
 };
 
 /// Spawn a swarm on a random port and return it with its listen address.
@@ -250,7 +249,7 @@ async fn gossip_bucket_created_propagates() {
 
 #[tokio::test]
 async fn auth_request_response() {
-    let (mut swarm_a, _addr_a, peer_a) = spawn_swarm().await;
+    let (mut swarm_a, _addr_a, _peer_a) = spawn_swarm().await;
     let (mut swarm_b, addr_b, peer_b) = spawn_swarm().await;
 
     connect_swarms(&mut swarm_a, &mut swarm_b, &addr_b).await;
@@ -281,7 +280,7 @@ async fn auth_request_response() {
                 }
                 event = swarm_b.next() => {
                     if let Some(SwarmEvent::Behaviour(memvault_net::StandaloneMemvaultBehaviourEvent::Auth(
-                        libp2p::request_response::Event::Message { message, peer, .. }
+                        libp2p::request_response::Event::Message { message, .. }
                     ))) = event {
                         if let libp2p::request_response::Message::Request { channel, request, .. } = message {
                             assert_eq!(request.cluster_id, vec![1u8; 32]);
@@ -382,9 +381,7 @@ async fn join_request_response() {
 #[test]
 fn visibility_filter_internal_blocks_remote() {
     use memvault_core::Visibility;
-    use memvault_net::{
-        ConnectionState, FederationState, ServeDecision, ServeRefuseReason, VisibilityFilter,
-    };
+    use memvault_net::{ConnectionState, FederationState, VisibilityFilter};
 
     let filter = VisibilityFilter::new(b"cluster-1".to_vec());
     let fed_state = FederationState::new(b"cluster-1".to_vec());

@@ -54,10 +54,6 @@ impl FileData {
         self.mime_type.starts_with("image/")
     }
 
-    fn is_text(&self) -> bool {
-        self.mime_type.starts_with("text/") || self.mime_type == "application/json"
-    }
-
     fn is_audio(&self) -> bool {
         self.mime_type.starts_with("audio/")
     }

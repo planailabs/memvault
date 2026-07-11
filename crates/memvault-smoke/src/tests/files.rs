@@ -1,7 +1,6 @@
 //! File upload/download smoke tests.
 
 use memvault_api::MemvaultClient;
-use memvault_core::Visibility;
 
 use crate::harness::TestNode;
 
