@@ -11,10 +11,14 @@
 
 use std::sync::Arc;
 
+use memvault_api::MemvaultClient;
 use memvault_attach::chunk_file;
-use memvault_core::cid_from_bytes;
+use memvault_core::{BucketId, DocId, QueryScope, Visibility, cid_from_bytes};
+use memvault_doc::Document;
 use memvault_store::MemvaultStore;
 use prost::Message;
+
+use crate::harness::TestNode;
 
 fn open_temp_store(dir: &tempfile::TempDir, name: &str) -> Arc<MemvaultStore> {
     let path = dir.path().join(format!("{name}.redb"));
@@ -207,6 +211,52 @@ async fn rbsr_full_sync_converges() {
     let synced = simulate_full_sync(&store_a, &store_b, usize::MAX, 500, now_ns);
 
     assert_eq!(synced, 2000, "all blocks should sync with no cap");
+}
+
+#[tokio::test]
+async fn synced_doc_reindex_preserves_bucket_scope() {
+    let (node_a, node_b) = TestNode::cluster_pair();
+    node_a.client.install_sigchain_notifier();
+    node_b.client.install_sigchain_notifier();
+
+    let bucket = node_a
+        .client
+        .bucket_create(
+            "synced-doc-scope",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+    node_b.store.put_bucket(&bucket.0, b"bucket-decl").unwrap();
+
+    let doc = Document::new(
+        DocId::random(),
+        "hello-from-rbsr-live-reindex".into(),
+        Default::default(),
+    );
+    let cid = node_a
+        .client
+        .put_doc(doc.clone(), vec![], Visibility::Internal, Some(&bucket))
+        .await
+        .unwrap();
+    let data = node_a.store.get_block(&cid).unwrap().unwrap();
+
+    node_b.store.put_block(&cid, &data).unwrap();
+    assert!(node_b.store.reindex_block(&cid, &data).unwrap());
+
+    let rows = node_b
+        .client
+        .list_scoped(&QueryScope::all().with_bucket(Some(BucketId(bucket.0))), 10)
+        .await
+        .unwrap();
+    let doc_id = format!("doc:{}", hex::encode(doc.id.0));
+    assert!(
+        rows.iter().any(|row| row.node_id == doc_id),
+        "synced doc should be indexed into its BY_BUCKET scope after live reindex; got {rows:?}"
+    );
 }
 
 /// After fix: chunked fetch handles large block counts.

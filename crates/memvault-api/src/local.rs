@@ -3441,7 +3441,10 @@ impl LocalClient {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             let tags = self.extract_creation_tags("doc", hex_id);
-            let bucket_hex = self.inferred_doc_bucket(&id).map(hex::encode);
+            let bucket_hex = self
+                .index_bucket_for_node("doc", hex_id)
+                .or_else(|| self.inferred_doc_bucket(&id))
+                .map(hex::encode);
             Some(PreparedIndex::Doc {
                 id,
                 body: doc.body,
@@ -3453,7 +3456,10 @@ impl LocalClient {
             let id = EntityId(decode32(hex_id)?);
             let entity = self.get_entity_sync(&id, true).ok().flatten()?;
             let tags = self.extract_creation_tags("entity", hex_id);
-            let bucket_hex = self.inferred_entity_bucket(&id).map(hex::encode);
+            let bucket_hex = self
+                .index_bucket_for_node("entity", hex_id)
+                .or_else(|| self.inferred_entity_bucket(&id))
+                .map(hex::encode);
             Some(PreparedIndex::Entity {
                 id,
                 kind: entity.kind,
@@ -3481,7 +3487,10 @@ impl LocalClient {
                     .unwrap_or("application/octet-stream")
                     .to_string();
                 let tags: Vec<(String, String)> = view.get_as("tags").unwrap_or_default();
-                let bucket_hex = view.get_as::<Vec<u8>>("bucket_id").map(hex::encode);
+                let bucket_hex = view
+                    .get_as::<Vec<u8>>("bucket_id")
+                    .or_else(|| self.bucket_for_cid(cid))
+                    .map(hex::encode);
                 Some((filename, mime, tags, bucket_hex))
             })?;
             // Cached extraction only (no re-extraction on the read path).
@@ -4676,6 +4685,30 @@ impl LocalClient {
             }
         }
         bucket_id
+    }
+
+    fn bucket_for_cid(&self, cid: &[u8]) -> Option<Vec<u8>> {
+        self.store
+            .list_buckets()
+            .ok()?
+            .into_iter()
+            .find_map(|(bid, _)| {
+                let found = self
+                    .store
+                    .query_by_bucket(&bid, 0, usize::MAX)
+                    .ok()?
+                    .into_iter()
+                    .any(|bucket_cid| bucket_cid == cid);
+                found.then_some(bid)
+            })
+    }
+
+    fn index_bucket_for_node(&self, scope: &str, label: &str) -> Option<Vec<u8>> {
+        self.store
+            .query_by_tag(scope, label, 0, usize::MAX)
+            .ok()?
+            .iter()
+            .find_map(|cid| self.bucket_for_cid(cid))
     }
 
     fn inferred_doc_bucket(&self, id: &DocId) -> Option<Vec<u8>> {
@@ -6024,7 +6057,11 @@ impl MemvaultClient for LocalClient {
             .get("title")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let bucket_hex = self.inferred_doc_bucket(&doc.id).map(hex::encode);
+        let (_, doc_label) = Self::doc_tag(&doc.id);
+        let bucket_hex = self
+            .index_bucket_for_node("doc", &doc_label)
+            .or_else(|| self.inferred_doc_bucket(&doc.id))
+            .map(hex::encode);
         {
             let mut idx = self.index.write().await;
             let _ = idx.index_doc(
