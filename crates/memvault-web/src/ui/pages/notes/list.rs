@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use plan_ai_design::{DataTable, PageHeader, SortState, SortableTh, Td, TdMuted};
+use plan_ai_design::{DataTable, PageHeader, SortState, SortableTh, Td, TdMuted, page_window};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -129,6 +129,7 @@ pub fn NoteList() -> Element {
 fn NoteTable(list: ReadSignal<Vec<NoteRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 20usize);
+    let page = use_signal(|| 0usize);
     let sort = use_signal::<SortState>(|| ("updated".to_string(), false));
 
     let filtered = use_memo(move || {
@@ -161,11 +162,11 @@ fn NoteTable(list: ReadSignal<Vec<NoteRow>>) -> Element {
     let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
-    let shown = filtered_count.min(limit_val);
+    let (start, shown) = page_window(*page.read(), limit_val, filtered_count);
 
     rsx! {
         DataTable {
-            search, limit, total, filtered: filtered_count, shown,
+            search, limit, page, total, filtered: filtered_count, shown,
             headers: rsx! {
                 SortableTh { label: t!("notes-th-title"), sort_key: "title".to_string(), sort }
                 th { class: "th", {t!("notes-th-tags")} }
@@ -174,7 +175,7 @@ fn NoteTable(list: ReadSignal<Vec<NoteRow>>) -> Element {
                 SortableTh { label: t!("notes-th-updated"), sort_key: "updated".to_string(), sort }
             },
             body: rsx! {
-                for note in filtered.read().iter().take(limit_val) {
+                for note in filtered.read().iter().skip(start).take(limit_val) {
                     NoteRowView { key: "{note.id}", note: note.clone() }
                 }
             },

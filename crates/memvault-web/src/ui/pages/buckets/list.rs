@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use plan_ai_design::{
     Button, ButtonVariant, Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh,
-    Td, TdMuted,
+    Td, TdMuted, page_window,
 };
 use serde::{Deserialize, Serialize};
 
@@ -222,6 +222,7 @@ fn BucketListBody(refresh: ReadSignal<u32>) -> Element {
 fn BucketTable(list: ReadSignal<Vec<BucketRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 20usize);
+    let page = use_signal(|| 0usize);
     let sort = use_signal::<SortState>(|| ("name".to_string(), true));
 
     let filtered = use_memo(move || {
@@ -251,11 +252,11 @@ fn BucketTable(list: ReadSignal<Vec<BucketRow>>) -> Element {
     let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
-    let shown = filtered_count.min(limit_val);
+    let (start, shown) = page_window(*page.read(), limit_val, filtered_count);
 
     rsx! {
         DataTable {
-            search, limit, total, filtered: filtered_count, shown,
+            search, limit, page, total, filtered: filtered_count, shown,
             headers: rsx! {
                 SortableTh { label: "Name".to_string(), sort_key: "name".to_string(), sort }
                 SortableTh { label: "Status".to_string(), sort_key: "status".to_string(), sort }
@@ -265,7 +266,7 @@ fn BucketTable(list: ReadSignal<Vec<BucketRow>>) -> Element {
                 SortableTh { label: "Items".to_string(), sort_key: "items".to_string(), sort }
             },
             body: rsx! {
-                for b in filtered.read().iter().take(limit_val) {
+                for b in filtered.read().iter().skip(start).take(limit_val) {
                     tr {
                         key: "{b.id_hex}",
                         class: "cursor-pointer hover:bg-surface-3",

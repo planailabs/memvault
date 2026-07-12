@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use dioxus_i18n::t;
 use plan_ai_design::{
     DataTable, FormField, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted,
+    page_window,
 };
 use serde::{Deserialize, Serialize};
 
@@ -529,6 +530,7 @@ pub fn AuditLog() -> Element {
 fn AuditTable(list: ReadSignal<Vec<AuditRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 50usize);
+    let page = use_signal(|| 0usize);
     let sort = use_signal::<SortState>(|| ("time".to_string(), false));
     let mut op_filter = use_signal(|| "all".to_string());
     let mut author_filter = use_signal(String::new);
@@ -566,7 +568,7 @@ fn AuditTable(list: ReadSignal<Vec<AuditRow>>) -> Element {
     let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
-    let shown = filtered_count.min(limit_val);
+    let (start, shown) = page_window(*page.read(), limit_val, filtered_count);
 
     // Collect unique op kinds for filter dropdown.
     let mut op_kinds: Vec<String> = list.read().iter().map(|r| r.op_kind.clone()).collect();
@@ -603,7 +605,7 @@ fn AuditTable(list: ReadSignal<Vec<AuditRow>>) -> Element {
         }
 
         DataTable {
-            search, limit, total, filtered: filtered_count, shown,
+            search, limit, page, total, filtered: filtered_count, shown,
             headers: rsx! {
                 SortableTh { label: t!("audit-th-operation"), sort_key: "op".to_string(), sort }
                 th { class: "th", {t!("audit-th-description")} }
@@ -611,7 +613,7 @@ fn AuditTable(list: ReadSignal<Vec<AuditRow>>) -> Element {
                 SortableTh { label: t!("audit-th-time"), sort_key: "time".to_string(), sort }
             },
             body: rsx! {
-                for row in filtered.read().iter().take(limit_val) {
+                for row in filtered.read().iter().skip(start).take(limit_val) {
                     tr { key: "{row.cid}",
                         Td { OpKindBadge { kind: row.op_kind.clone() } }
                         Td {

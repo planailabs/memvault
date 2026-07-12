@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use dioxus_i18n::t;
 use plan_ai_design::{
     Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted,
+    page_window,
 };
 use serde::{Deserialize, Serialize};
 
@@ -230,6 +231,7 @@ fn FileGrid(list: Vec<FileRow>) -> Element {
 fn FileTable(list: ReadSignal<Vec<FileRow>>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 20usize);
+    let page = use_signal(|| 0usize);
     let sort = use_signal::<SortState>(|| ("wall_ns".to_string(), false));
 
     let filtered = use_memo(move || {
@@ -261,11 +263,11 @@ fn FileTable(list: ReadSignal<Vec<FileRow>>) -> Element {
     let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
-    let shown = filtered_count.min(limit_val);
+    let (start, shown) = page_window(*page.read(), limit_val, filtered_count);
 
     rsx! {
         DataTable {
-            search, limit, total, filtered: filtered_count, shown,
+            search, limit, page, total, filtered: filtered_count, shown,
             headers: rsx! {
                 SortableTh { label: t!("files-th-name"), sort_key: "name".to_string(), sort }
                 SortableTh { label: t!("files-th-type"), sort_key: "type".to_string(), sort }
@@ -274,7 +276,7 @@ fn FileTable(list: ReadSignal<Vec<FileRow>>) -> Element {
                 SortableTh { label: t!("files-th-uploaded"), sort_key: "wall_ns".to_string(), sort }
             },
             body: rsx! {
-                for file in filtered.read().iter().take(limit_val) {
+                for file in filtered.read().iter().skip(start).take(limit_val) {
                     tr { key: "{file.cid}",
                         Td {
                             Link { to: Route::FileDetail { cid: file.cid.clone() }, class: "link",

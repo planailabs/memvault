@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use plan_ai_design::{Card, DataTable, Pill, PillVariant, SortState, SortableTh, Td, TdMuted};
+use plan_ai_design::{
+    Card, DataTable, Pill, PillVariant, SortState, SortableTh, Td, TdMuted, page_window,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -312,6 +314,7 @@ fn render_grid_card(entry: &VfsRow, mut path: Signal<String>) -> Element {
 fn VfsTable(list: ReadSignal<Vec<VfsRow>>, path: Signal<String>) -> Element {
     let search = use_signal(String::new);
     let limit = use_signal(|| 50usize);
+    let page = use_signal(|| 0usize);
     let sort = use_signal::<SortState>(|| ("name".to_string(), true));
 
     let filtered = use_memo(move || {
@@ -341,18 +344,18 @@ fn VfsTable(list: ReadSignal<Vec<VfsRow>>, path: Signal<String>) -> Element {
     let total = list.read().len();
     let filtered_count = filtered.read().len();
     let limit_val = *limit.read();
-    let shown = filtered_count.min(limit_val);
+    let (start, shown) = page_window(*page.read(), limit_val, filtered_count);
 
     rsx! {
         DataTable {
-            search, limit, total, filtered: filtered_count, shown,
+            search, limit, page, total, filtered: filtered_count, shown,
             headers: rsx! {
                 SortableTh { label: t!("vfs-th-name"), sort_key: "name".to_string(), sort }
                 SortableTh { label: t!("vfs-th-type"), sort_key: "type".to_string(), sort }
                 SortableTh { label: t!("vfs-th-node-id"), sort_key: "node_id".to_string(), sort }
             },
             body: rsx! {
-                for entry in filtered.read().iter().take(limit_val) {
+                for entry in filtered.read().iter().skip(start).take(limit_val) {
                     VfsTableRow { entry: entry.clone(), path }
                 }
             },
