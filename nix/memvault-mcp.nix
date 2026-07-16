@@ -31,9 +31,6 @@ rp.buildRustPackage {
     outputHashes = import ../extra-hashes.nix;
   };
   cargoBuildFlags = [ "-p" "memvault-mcp" ];
-  postPatch = ''
-    ln -s "$PWD/plan-ai-design" ../design
-  '';
   doCheck = false;
 
   nativeBuildInputs = [ pkg-config ];

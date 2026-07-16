@@ -65,10 +65,6 @@ rp.buildRustPackage ({
 
   env.GIT_SHA = gitSha;
 
-  postPatch = ''
-    ln -s "$PWD/plan-ai-design" ../design
-  '';
-
   doCheck = false;
 } // (if slim then {
   # Plain cargo build of memctl only. Faster than dx by a wide margin;
