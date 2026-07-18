@@ -160,9 +160,10 @@ pkgs.testers.nixosTest {
     synced = False
     for attempt in range(180):
         node_b.execute("rm -rf /tmp/export && mkdir -p /tmp/export")
-        rc, _ = node_b.execute(
+        rc, export_out = node_b.execute(
             "memctl --url http://localhost:8401 "
             "--identity-dir /var/lib/memvault/agents/reader "
+            f"--bucket-id {writer_bucket} "
             "export --output /tmp/export "
             ">/tmp/export.log 2>&1"
         )
@@ -176,6 +177,8 @@ pkgs.testers.nixosTest {
                     f"node_b's reader agent observed the doc after ~{attempt}s"
                 )
                 break
+        if attempt % 30 == 29:
+            node_b.log(f"export attempt {attempt + 1} rc={rc}:\n{export_out}")
         time.sleep(1)
 
     if not synced:
