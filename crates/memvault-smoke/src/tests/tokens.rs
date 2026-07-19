@@ -118,3 +118,24 @@ async fn token_decode_roundtrip() {
     assert_eq!(decoded.label, Some("roundtrip".to_string()));
     assert_eq!(decoded.max_uses, 1);
 }
+
+#[tokio::test]
+async fn issued_token_tolerates_reader_clock_skew() {
+    let node = TestNode::new();
+    let issued_after_ns = memvault_core::wall_ns();
+    let encoded = node
+        .client
+        .issue_token(
+            TokenRole::Agent(AgentRole::AgentHost),
+            3600,
+            1,
+            Some("skew".into()),
+        )
+        .await
+        .unwrap();
+    let decoded = memvault_auth::decode_token_string(&encoded).unwrap();
+
+    decoded
+        .verify_time_bounds(issued_after_ns.saturating_sub(60_000_000_000))
+        .unwrap();
+}

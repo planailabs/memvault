@@ -33,6 +33,7 @@ pub(crate) fn token_invalidated_key(cid: &[u8]) -> Vec<u8> {
 /// How long an invalidated (revoked / expired / exhausted) token record is
 /// retained before [`gc_invalidated_tokens`] deletes it — 30 days.
 pub const INVALIDATED_TOKEN_RETENTION_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+const TOKEN_CLOCK_SKEW_NS: u64 = 5 * 60 * 1_000_000_000;
 
 /// Stamp the explicit invalidation time for a token (revocation or
 /// max-uses exhaustion). First write wins — the earliest invalidation is
@@ -139,7 +140,7 @@ pub fn issue_token(
         .collect::<Result<Vec<_>>>()?;
 
     let now_ns = memvault_core::time::wall_ns();
-    let ttl_ns = ttl_secs * 1_000_000_000;
+    let ttl_ns = ttl_secs.saturating_mul(1_000_000_000);
     let mut nonce = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
 
@@ -148,8 +149,8 @@ pub fn issue_token(
         cluster_id: cluster_id.clone(),
         role,
         initial_grants: vec![],
-        not_before_ns: now_ns,
-        not_after_ns: now_ns + ttl_ns,
+        not_before_ns: now_ns.saturating_sub(TOKEN_CLOCK_SKEW_NS),
+        not_after_ns: now_ns.saturating_add(ttl_ns),
         max_uses,
         nonce,
         label: label.clone(),

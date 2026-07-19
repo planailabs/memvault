@@ -3,8 +3,7 @@
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use plan_ai_design::{
-    Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted,
-    page_window,
+    Card, DataTable, PageHeader, Pill, PillVariant, SortState, SortableTh, Td, TdMuted, page_window,
 };
 use serde::{Deserialize, Serialize};
 
