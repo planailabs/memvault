@@ -317,6 +317,11 @@ struct OutboundGate {
     /// Peers with a block request currently on the wire (awaiting response or
     /// terminal failure).
     inflight: HashSet<PeerId>,
+    /// The request currently on the wire. Kept so transient outbound failures
+    /// can retry one-shot fetches instead of dropping the only copy of the CID.
+    active: HashMap<PeerId, BlockRequest>,
+    /// Peers whose current active request has already consumed its retry.
+    retried: HashSet<PeerId>,
     /// Per-peer backlog of requests waiting for the in-flight one to finish.
     queue: HashMap<PeerId, VecDeque<BlockRequest>>,
 }
@@ -332,6 +337,8 @@ impl OutboundGate {
     /// Send `req` now if the peer has nothing in flight, else enqueue it.
     fn send(&mut self, host: &mut impl MemvaultHost, peer: PeerId, req: BlockRequest) {
         if self.inflight.insert(peer) {
+            self.active.insert(peer, req.clone());
+            self.retried.remove(&peer);
             host.send_block_request(&peer, req);
             return;
         }
@@ -348,8 +355,11 @@ impl OutboundGate {
     /// The in-flight request for `peer` finished: send the next queued request,
     /// or clear the in-flight marker when the backlog is empty.
     fn complete(&mut self, host: &mut impl MemvaultHost, peer: PeerId) {
+        self.active.remove(&peer);
+        self.retried.remove(&peer);
         if let Some(q) = self.queue.get_mut(&peer) {
             if let Some(next) = q.pop_front() {
+                self.active.insert(peer, next.clone());
                 host.send_block_request(&peer, next); // stays in flight
                 return;
             }
@@ -358,9 +368,24 @@ impl OutboundGate {
         self.inflight.remove(&peer);
     }
 
+    /// The in-flight request failed before a response arrived. Retry concrete
+    /// fetches once before draining queued work; periodic RBSR heals broad sync.
+    fn fail(&mut self, host: &mut impl MemvaultHost, peer: PeerId) {
+        if let Some(req) = self.active.remove(&peer) {
+            if !req.cids.is_empty() && self.retried.insert(peer) {
+                self.active.insert(peer, req.clone());
+                host.send_block_request(&peer, req);
+                return;
+            }
+        }
+        self.complete(host, peer);
+    }
+
     /// Drop all state for a disconnected peer.
     fn forget(&mut self, peer: &PeerId) {
         self.inflight.remove(peer);
+        self.active.remove(peer);
+        self.retried.remove(peer);
         self.queue.remove(peer);
     }
 
@@ -662,7 +687,7 @@ impl MemvaultDriver {
     /// Releases the peer's in-flight slot so the next queued request can go out,
     /// otherwise a single dropped request would wedge the peer's queue forever.
     pub fn on_block_outbound_failure(&mut self, peer: PeerId, host: &mut impl MemvaultHost) {
-        self.outbound.complete(host, peer);
+        self.outbound.fail(host, peer);
         self.mark_sync_failed(peer);
     }
 
@@ -2673,6 +2698,25 @@ mod outbound_gate_tests {
             1,
             "redundant RBSR probes must collapse"
         );
+    }
+
+    #[test]
+    fn retries_failed_fetch_before_draining_queue() {
+        let mut host = RecordingHost::default();
+        let mut gate = OutboundGate::default();
+        let peer = PeerId::random();
+
+        gate.send(&mut host, peer, fetch(1));
+        gate.send(&mut host, peer, fetch(2));
+        gate.fail(&mut host, peer);
+
+        assert_eq!(host.sent.len(), 2);
+        assert_eq!(host.sent[1].1.cids, vec![vec![1]]);
+        assert_eq!(gate.queued_total(), 1);
+
+        gate.complete(&mut host, peer);
+        assert_eq!(host.sent.len(), 3);
+        assert_eq!(host.sent[2].1.cids, vec![vec![2]]);
     }
 
     #[test]
