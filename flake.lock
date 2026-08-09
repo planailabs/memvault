@@ -58,11 +58,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1778802548,
-        "narHash": "sha256-TnhaqfRnzyFqcuUZ88obeLk/3BnJlkvFhSOnQsJEp/o=",
+        "lastModified": 1786220203,
+        "narHash": "sha256-6gYms92VQVpBtjdEBXuramAPkjh2FA0Wp+MbVQBi7dU=",
         "ref": "refs/heads/trunk",
-        "rev": "27dca9bcfc12e9a0e46248cd55d9ce51413ad05c",
-        "revCount": 12,
+        "rev": "8ad9b74e85a2198a6afbc56dc89a5dc78e496230",
+        "revCount": 17,
         "type": "git",
         "url": "https://git.plan.ai/plan-ai/nixos2docker"
       },
@@ -73,11 +73,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1785301185,
-        "narHash": "sha256-eoS3KQTO0aPWXZvIaRbRAzSSHW3l5wdMFXtT1ISfoKA=",
+        "lastModified": 1785975029,
+        "narHash": "sha256-X44cn5rzytELc3NNoQsh0aLkjWA/QzPfc6HPQmsG3sU=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "9bc02893134c733dd85de46ee4fb2fac696b5529",
+        "rev": "70ce234312134a463ba7728e94da2486a1d237ac",
         "type": "github"
       },
       "original": {
@@ -104,11 +104,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785388444,
-        "narHash": "sha256-6gtZiMMyfgr1CHA5g6fXoIYkTngQWMm1wtp3gNtuqJU=",
+        "lastModified": 1786160316,
+        "narHash": "sha256-oLoc3ZLg1LX/S5Jb3v6MrF415AzDyC4vgeWy9UcYTQk=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "c5b112f74bdbf91c5afd2d3779d12989818c9e8c",
+        "rev": "4e1c940c96560ceab7c547f89642231371a66646",
         "type": "github"
       },
       "original": {
