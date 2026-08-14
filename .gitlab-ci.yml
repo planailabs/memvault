@@ -33,7 +33,11 @@ test:
     - nix-image
   script:
     - nix develop -c bash build-memvault.sh
-    - nix develop -c cargo test --workspace --locked
+    # memvault-smoke tests each create Tokio runtimes, stores, and networking
+    # tasks. Running the whole crate at libtest's default parallelism can
+    # exhaust runner thread stacks and abort in an unnamed worker, hiding the
+    # responsible test. Keep the suite deterministic and diagnostically useful.
+    - nix develop -c cargo test --workspace --locked -- --test-threads=1
   timeout: 3h
 
 # Standalone memctl binaries (x86_64-linux + aarch64-darwin) as downloadable
