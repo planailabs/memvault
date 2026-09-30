@@ -411,7 +411,7 @@ pub fn walk_tree<'a, C: MemvaultClient + ?Sized + Sync>(
     Box::pin(async move {
         let (node, edge) = resolve_path(client, bucket_id, path)
             .await?
-            .ok_or_else(|| crate::error::ApiError::Other(format!("path not found: {path}")))?;
+            .ok_or_else(|| crate::error::ApiError::NotFound(format!("path {path}")))?;
         let name = if path == "/" || path.is_empty() {
             "/".to_string()
         } else {

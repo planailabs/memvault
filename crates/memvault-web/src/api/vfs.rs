@@ -93,9 +93,8 @@ pub async fn vfs_ls(
     let bucket = parse_bucket(&params.bucket)?;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
     let recursive = params.recursive.unwrap_or(false);
-    let entries = vfs_ops::ls(state.client.as_ref(), &bucket, &params.path, recursive)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    // A missing path is a 404 (NotFound), not a server error.
+    let entries = vfs_ops::ls(state.client.as_ref(), &bucket, &params.path, recursive).await?;
     let out: Vec<VfsEntry> = entries
         .into_iter()
         .map(|e| VfsEntry {
@@ -205,9 +204,7 @@ pub async fn vfs_tree(
     let bucket = parse_bucket(&params.bucket)?;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
     let max_depth = params.max_depth.unwrap_or(10);
-    let tree = vfs_ops::tree(state.client.as_ref(), &bucket, &params.path, max_depth)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let tree = vfs_ops::tree(state.client.as_ref(), &bucket, &params.path, max_depth).await?;
     Ok(Json(
         serde_json::json!({ "path": params.path, "tree": tree }),
     ))

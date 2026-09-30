@@ -220,6 +220,15 @@ async fn vfs_mkdir_resolve_ls_tree_round_trip() {
         tree.contains("2026"),
         "tree must include the nested dir: {tree}"
     );
+
+    // A path that doesn't exist is "not found" (404), not a server error.
+    for err in [
+        client.vfs_ls(&bucket, "/nowhere", true).await.expect_err("ls of a missing path").to_string(),
+        client.vfs_tree(&bucket, "/nowhere", 3).await.expect_err("tree of a missing path").to_string(),
+    ] {
+        assert!(err.contains("404") || err.to_lowercase().contains("not found"), "{err}");
+        assert!(!err.contains("500"), "{err}");
+    }
 }
 
 #[tokio::test]
