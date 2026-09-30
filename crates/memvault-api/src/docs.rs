@@ -38,7 +38,23 @@ pub async fn create_doc<C: MemvaultClient + ?Sized>(
     vfs_path: Option<&str>,
     bucket: Option<&BucketId>,
 ) -> Result<CreateDocResult> {
-    let doc_id = DocId::random();
+    create_doc_with_id(client, DocId::random(), body, title, frontmatter, tags, vis, vfs_path, bucket).await
+}
+
+/// [`create_doc`] with the id chosen by the caller, so the id a client
+/// returns is the one the store knows (the HTTP API honours it).
+#[allow(clippy::too_many_arguments)]
+pub async fn create_doc_with_id<C: MemvaultClient + ?Sized>(
+    client: &C,
+    doc_id: DocId,
+    body: &str,
+    title: Option<&str>,
+    frontmatter: Option<BTreeMap<String, serde_json::Value>>,
+    tags: Vec<(String, String)>,
+    vis: Visibility,
+    vfs_path: Option<&str>,
+    bucket: Option<&BucketId>,
+) -> Result<CreateDocResult> {
     let mut fm = frontmatter.unwrap_or_default();
     if let Some(t) = title {
         fm.entry("title".to_string())

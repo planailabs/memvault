@@ -204,6 +204,11 @@ impl MemvaultClient for HttpApiClient {
             "tags": tags,
             "visibility": format!("{vis:?}").to_lowercase(),
         });
+        // The caller's id, so the id it hands out is the stored one (an
+        // all-zero id means "let the server choose").
+        if doc.id.0 != [0u8; 32] {
+            body["id"] = serde_json::Value::String(hex::encode(doc.id.0));
+        }
         if let Some(b) = bucket {
             body["bucket"] = serde_json::Value::String(hex::encode(b.0));
         }

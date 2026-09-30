@@ -34,6 +34,10 @@ pub struct CreateDocRequest {
     /// Optional bucket ID (hex) to scope this document to.
     #[serde(default)]
     pub bucket: Option<String>,
+    /// Optional document id (hex, 32 bytes) chosen by the client, so the id
+    /// it returns to its callers is the stored one. Refused if taken.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -137,8 +141,20 @@ pub async fn create_doc(
         }
     };
 
-    let result = memvault_api::docs::create_doc(
+    let doc_id = match req.id.as_deref() {
+        Some(h) => {
+            let id = parse_doc_id(h)?;
+            // A client-chosen id must be new: it can't overwrite a document.
+            if state.client.get_doc(&id).await?.is_some() {
+                return Err(ApiError::conflict(format!("document {h} already exists")));
+            }
+            id
+        }
+        None => memvault_core::DocId::random(),
+    };
+    let result = memvault_api::docs::create_doc_with_id(
         state.client.as_ref(),
+        doc_id,
         &req.body,
         None,
         req.frontmatter.clone(),
