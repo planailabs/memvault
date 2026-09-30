@@ -33,6 +33,13 @@ pub struct PutParams {
 pub struct GetParams {
     /// Hex-encoded CID of the document.
     pub cid: String,
+    /// Start of the body to return, in characters (default 0). With `limit`,
+    /// long documents are read in parts.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// How many characters of the body to return (default: all).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 // -- memvault_search --

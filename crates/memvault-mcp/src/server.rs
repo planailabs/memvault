@@ -191,7 +191,7 @@ impl MemvaultServer {
 
     #[tool(
         name = "memvault_get",
-        description = "Retrieve a memory by its hex-encoded doc ID."
+        description = "Retrieve a memory by its hex-encoded doc ID. Long documents can be read in parts with offset and limit (characters); the result then gives total_chars and next_offset."
     )]
     async fn get(&self, Parameters(params): Parameters<GetParams>) -> String {
         let id = match DocId::from_hex(&params.cid) {
@@ -199,12 +199,26 @@ impl MemvaultServer {
             Err(e) => return format!("error: {e}"),
         };
         match self.client.get_doc(&id).await {
-            Ok(Some(doc)) => serde_json::json!({
-                "doc_id": params.cid,
-                "title": doc.frontmatter.get("title").and_then(|v| v.as_str()),
-                "body": doc.body,
-            })
-            .to_string(),
+            Ok(Some(doc)) => {
+                let title = doc.frontmatter.get("title").and_then(|v| v.as_str());
+                if params.offset.is_none() && params.limit.is_none() {
+                    return serde_json::json!({"doc_id": params.cid, "title": title, "body": doc.body}).to_string();
+                }
+                let total = doc.body.chars().count();
+                let offset = params.offset.unwrap_or(0).min(total);
+                let limit = params.limit.unwrap_or(total);
+                let body: String = doc.body.chars().skip(offset).take(limit).collect();
+                let next = offset + body.chars().count();
+                serde_json::json!({
+                    "doc_id": params.cid,
+                    "title": title,
+                    "body": body,
+                    "offset": offset,
+                    "total_chars": total,
+                    "next_offset": (next < total).then_some(next),
+                })
+                .to_string()
+            }
             Ok(None) => format!("error: document not found for id {}", params.cid),
             Err(e) => format!("error: {e}"),
         }
@@ -1981,9 +1995,23 @@ mod tool_tests {
         assert_ok(
             &srv.get(Parameters(t::GetParams {
                 cid: doc_hex.clone(),
+                offset: None,
+                limit: None,
             }))
             .await,
         );
+        // In parts.
+        let part = srv
+            .get(Parameters(t::GetParams {
+                cid: doc_hex.clone(),
+                offset: Some(2),
+                limit: Some(3),
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&part).expect(&part);
+        assert_eq!(v["body"].as_str().unwrap().chars().count(), 3, "{part}");
+        assert_eq!(v["next_offset"], 5, "{part}");
+        assert!(v["total_chars"].as_u64().unwrap() > 5, "{part}");
         assert_ok(
             &srv.doc_history(Parameters(t::DocHistoryParams {
                 doc_id: doc_hex.clone(),
