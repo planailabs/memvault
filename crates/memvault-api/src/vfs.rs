@@ -281,7 +281,9 @@ pub async fn link_node_at_path<C: MemvaultClient + ?Sized>(
 ) -> Result<()> {
     let target = NodeRef::from_tag_label(node_id)
         .ok_or_else(|| crate::error::ApiError::Other(format!("invalid node_id: {node_id}")))?;
-    link_at_path(client, bucket_id, path, &target).await?;
+    // Through the client: in-process it walks the tree here; over HTTP the
+    // server does it (building directories client-side over HTTP fails).
+    client.vfs_link(bucket_id, path, &target).await?;
     Ok(())
 }
 
@@ -394,7 +396,7 @@ pub async fn mv_path<C: MemvaultClient + ?Sized>(
         .await?
         .ok_or_else(|| crate::error::ApiError::Other(format!("source not found: {from}")))?;
     unlink_path(client, bucket_id, from).await?;
-    link_at_path(client, bucket_id, to, &node).await?;
+    client.vfs_link(bucket_id, to, &node).await?;
     Ok(())
 }
 

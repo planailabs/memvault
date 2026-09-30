@@ -629,3 +629,62 @@ async fn pin_unpin_and_extracted_text() {
         .await
         .expect("read_extracted_text");
 }
+
+#[tokio::test]
+async fn links_from_documents() {
+    // A document can be a link's source like any node (it used to be a 500).
+    let (client, bucket) = client_and_bucket().await;
+    let mut fm = std::collections::BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("Converted text"));
+    let doc = memvault_doc::Document { id: memvault_core::DocId([0u8; 32]), frontmatter: fm, body: "the wombat measurements".to_string() };
+    client.put_doc(doc, vec![], Visibility::Internal, Some(&bucket)).await.expect("put_doc");
+    let doc_id = client.search("wombat", 10).await.expect("search").first().expect("the doc is indexed").doc_id.clone();
+    let doc_ref = NodeRef::Doc(doc_id);
+
+    let cid = client.upload_file(b"original bytes", Some("orig.txt"), "text/plain", vec![], "internal", Some(&bucket)).await.expect("upload_file");
+    let file_ref = NodeRef::from_tag_label(&format!("file:{}", hex::encode(&cid))).expect("a file node");
+    let entity = client
+        .add_entity(Entity { id: memvault_core::EntityId::random(), kind: "note".into(), props: Default::default(), edges_out: vec![] }, Visibility::Internal, Some(&bucket))
+        .await
+        .expect("add_entity");
+
+    for (target, relation) in [(file_ref.clone(), "original"), (NodeRef::Entity(entity), "about")] {
+        let edge = memvault_doc::Edge { id: memvault_core::EdgeId::random(), relation: relation.into(), target: target.clone(), weight: None, props: Default::default(), provenance: None };
+        client.add_link(&doc_ref, edge, Visibility::Internal).await.unwrap_or_else(|e| panic!("doc -> {relation}: {e}"));
+    }
+    let edges = client.edges_of(&doc_ref).await.expect("edges_of");
+    assert!(edges.iter().any(|(s, e)| *s == doc_ref && e.target == file_ref && e.relation == "original"), "{edges:?}");
+}
+
+#[tokio::test]
+async fn created_docs_keep_the_clients_id() {
+    // The id create_doc hands out (what memvault-mcp's put returns) must be
+    // the stored one over HTTP too; it used to be a random id the server
+    // never saw, so links from it failed.
+    let (client, bucket) = client_and_bucket().await;
+    let made = memvault_api::docs::create_doc(&client, "the quokka appendix", Some("Quokka"), None, vec![], Visibility::Internal, None, Some(&bucket))
+        .await
+        .expect("create_doc");
+    let got = client.get_doc(&made.doc_id).await.expect("get_doc").expect("the returned id is the stored one");
+    assert!(got.body.contains("quokka"));
+    let entity = client
+        .add_entity(Entity { id: memvault_core::EntityId::random(), kind: "note".into(), props: Default::default(), edges_out: vec![] }, Visibility::Internal, Some(&bucket))
+        .await
+        .expect("add_entity");
+    let edge = memvault_doc::Edge { id: memvault_core::EdgeId::random(), relation: "about".into(), target: NodeRef::Entity(entity), weight: None, props: Default::default(), provenance: None };
+    client.add_link(&NodeRef::Doc(made.doc_id.clone()), edge, Visibility::Internal).await.expect("a link from the new doc");
+    // A client can't take an existing document's id.
+    let again = memvault_doc::Document { id: made.doc_id.clone(), frontmatter: Default::default(), body: "overwrite?".into() };
+    let err = client.put_doc(again, vec![], Visibility::Internal, Some(&bucket)).await.expect_err("taken id").to_string();
+    assert!(err.contains("409"), "{err}");
+}
+
+#[tokio::test]
+async fn uploaded_files_land_at_their_vfs_path_over_http() {
+    let (client, bucket) = client_and_bucket().await;
+    let (_cid, node) = memvault_api::files::upload_file(&client, b"%PDF-1.4 tiny", Some("r.pdf"), "application/pdf", vec![], "internal", Some("/papers/r.pdf"), Some(&bucket))
+        .await
+        .expect("upload_file");
+    let resolved = client.vfs_resolve(&bucket, "/papers/r.pdf").await.expect("resolve");
+    assert_eq!(resolved.map(|(n, _)| n.tag_label()), Some(node), "the file is at its path");
+}

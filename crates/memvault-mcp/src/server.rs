@@ -2285,4 +2285,62 @@ mod tool_tests {
             .await,
         );
     }
+
+    #[tokio::test]
+    async fn links_from_a_put_document() {
+        // A document stored with memvault_put can be a link's source.
+        let srv = test_server().await;
+        let put = srv
+            .put(Parameters(crate::types::PutParams {
+                text: "the echidna notes".to_string(),
+                title: Some("Echidna".to_string()),
+                tags: vec![],
+                visibility: None,
+                vfs_path: None,
+                bucket: None,
+            }))
+            .await;
+        assert_ok(&put);
+        let doc = jget(&put, "node_id");
+        let ent = srv.graph_add(Parameters(ga("note"))).await;
+        let ent = jget(&ent, "node_id");
+        let link = srv
+            .link(Parameters(crate::types::LinkParams {
+                source: doc.clone(),
+                target: ent.clone(),
+                relation: "about".into(),
+                weight: None,
+                props: Default::default(),
+                bucket: None,
+            }))
+            .await;
+        assert_ok(&link);
+        let edges = srv.edges(Parameters(crate::types::EdgesOfParams { node: doc })).await;
+        assert!(edges.contains(&ent), "{edges}");
+    }
+
+    #[tokio::test]
+    async fn uploaded_files_land_at_their_vfs_path() {
+        let srv = test_server().await;
+        let dir = std::env::temp_dir().join(format!("mv-upload-vfs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("report.pdf");
+        std::fs::write(&f, b"%PDF-1.4 tiny").unwrap();
+        let up = srv
+            .upload_file(Parameters(crate::types::UploadFileParams {
+                path: f.to_string_lossy().into_owned(),
+                content_type: None,
+                tags: None,
+                visibility: None,
+                vfs_path: Some("/papers/2026/report.pdf".into()),
+                bucket: None,
+            }))
+            .await;
+        assert_ok(&up);
+        assert!(!up.contains("vfs_error"), "{up}");
+        let node = jget(&up, "node_id");
+        let r = srv.vfs_resolve(Parameters(crate::types::VfsResolveParams { path: "/papers/2026/report.pdf".into(), bucket: None })).await;
+        assert_eq!(jget(&r, "node_id"), node, "{r}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
