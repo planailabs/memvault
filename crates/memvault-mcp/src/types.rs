@@ -47,7 +47,7 @@ pub struct SearchParams {
     /// Optional tag filter in "scope:label" format.
     #[serde(default)]
     pub tag_filter: Option<String>,
-    /// Optional bucket ID (hex). When omitted, searches all accessible buckets.
+    /// Not supported by search yet (an error if given); searches all accessible buckets.
     #[serde(default)]
     pub bucket: Option<String>,
 }

@@ -216,19 +216,51 @@ impl MemvaultServer {
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(10);
-        match self.client.search(&params.query, limit).await {
-            Ok(hits) => serde_json::json!(
-                hits.iter()
-                    .map(|h| serde_json::json!({
-                        "doc_id": hex::encode(h.doc_id.0),
-                        "score": h.score,
-                        "snippet": h.snippet,
-                    }))
-                    .collect::<Vec<_>>()
-            )
-            .to_string(),
-            Err(e) => format!("error: {e}"),
+        if params.bucket.is_some() {
+            return "error: search can't be limited to a bucket yet; leave bucket out".to_string();
         }
+        let tag = match params.tag_filter.as_deref().filter(|t| !t.trim().is_empty()) {
+            None => None,
+            Some(t) => match memvault_api::docs::parse_tag_filter(t) {
+                Some(t) => Some(t),
+                None => return format!("error: tag_filter {t:?} isn't scope:label"),
+            },
+        };
+        // ponytail: the index doesn't filter by tag, so fetch more and keep
+        // the tagged hits; a rare tag among many matches can fall outside
+        // the first 20 × limit. Push the filter into the index if that bites.
+        let fetch = if tag.is_some() { (limit * 20).max(200) } else { limit };
+        let hits = match self.client.search(&params.query, fetch).await {
+            Ok(hits) => hits,
+            Err(e) => return format!("error: {e}"),
+        };
+        let hits = match &tag {
+            None => hits,
+            Some(tag) => {
+                let mut kept = Vec::new();
+                for h in hits {
+                    if kept.len() == limit {
+                        break;
+                    }
+                    match self.client.get_tags(&format!("doc:{}", hex::encode(h.doc_id.0))).await {
+                        Ok(tags) if tags.contains(tag) => kept.push(h),
+                        Ok(_) => {}
+                        Err(e) => return format!("error: {e}"),
+                    }
+                }
+                kept
+            }
+        };
+        serde_json::json!(
+            hits.iter()
+                .map(|h| serde_json::json!({
+                    "doc_id": hex::encode(h.doc_id.0),
+                    "score": h.score,
+                    "snippet": h.snippet,
+                }))
+                .collect::<Vec<_>>()
+        )
+        .to_string()
     }
 
     #[tool(
@@ -1803,6 +1835,39 @@ mod tool_tests {
             .await;
         assert_ok(&hits);
         assert!(hits.contains("doc_id"), "search must find the doc: {hits}");
+    }
+
+    #[tokio::test]
+    async fn search_keeps_to_the_tag_filter() {
+        let srv = test_server().await;
+        let mut ids = vec![];
+        for (title, tags) in [("Tagged", vec!["kind:library".to_string()]), ("Untagged", vec![])] {
+            let put = srv
+                .put(Parameters(crate::types::PutParams {
+                    text: "the wombat burrow survey".to_string(),
+                    title: Some(title.to_string()),
+                    tags,
+                    visibility: None,
+                    vfs_path: None,
+                    bucket: None,
+                }))
+                .await;
+            assert_ok(&put);
+            ids.push(jget(&put, "node_id").trim_start_matches("doc:").to_string());
+        }
+        let search = |tag: Option<&str>| {
+            srv.search(Parameters(crate::types::SearchParams {
+                query: "wombat".to_string(),
+                limit: Some(10),
+                tag_filter: tag.map(String::from),
+                bucket: None,
+            }))
+        };
+        let all = search(None).await;
+        assert!(all.contains(&ids[0]) && all.contains(&ids[1]), "{all}");
+        let tagged = search(Some("kind:library")).await;
+        assert!(tagged.contains(&ids[0]) && !tagged.contains(&ids[1]), "{tagged}");
+        assert!(search(Some("nocolon")).await.starts_with("error:"));
     }
 
     #[tokio::test]
