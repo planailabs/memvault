@@ -3807,14 +3807,14 @@ impl LocalClient {
         // Union the buckets' members (dedup across buckets).
         let mut node_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for b in set {
-            self.ensure_bucket_partition(&BucketId(*b)).await?;
-            let bsid = memvault_core::bucket_scope_id(&BucketId(*b));
-            for (nid, _) in self.store.scope_members(
-                &bsid,
-                scope.retraction.includes_active(),
-                scope.retraction.includes_retracted(),
-                0,
-            )? {
+            for (nid, _) in self
+                .bucket_members(
+                    &BucketId(*b),
+                    scope.retraction.includes_active(),
+                    scope.retraction.includes_retracted(),
+                )
+                .await?
+            {
                 node_ids.insert(nid);
             }
         }
@@ -4248,7 +4248,7 @@ impl LocalClient {
     /// the rebuilt sets.)
     pub(crate) async fn ensure_bucket_partition(&self, bucket: &BucketId) -> Result<()> {
         let bsid = memvault_core::bucket_scope_id(bucket);
-        if self.store.scope_is_registered(&bsid).unwrap_or(false) {
+        if self.bucket_partition_built(&bsid, bucket) {
             return Ok(());
         }
         self.flush_index().await;
@@ -4272,6 +4272,43 @@ impl LocalClient {
             }
         }
         Ok(())
+    }
+
+    /// Whether the bucket's member-set has been built: registered explicitly
+    /// by [`Self::ensure_bucket_partition`] (with its bucket id). A member
+    /// upsert registers a bare entry on its own, so registration alone could
+    /// be a build still in progress.
+    fn bucket_partition_built(&self, bsid: &[u8], bucket: &BucketId) -> bool {
+        matches!(
+            self.store.scope_registry_get(bsid),
+            Ok(Some(e)) if e.bucket_id == bucket.0
+        )
+    }
+
+    /// The bucket's member-set (built on first use). A merge clears every
+    /// set (`bump_alias_generation`); a read that raced it — the set gone, or
+    /// a rebuild under way, when it was read — is retried, so a listing
+    /// never answers from a half-built set.
+    pub(crate) async fn bucket_members(
+        &self,
+        bucket: &BucketId,
+        include_active: bool,
+        include_retracted: bool,
+    ) -> Result<Vec<(String, u64)>> {
+        let bsid = memvault_core::bucket_scope_id(bucket);
+        let mut attempts = 0;
+        loop {
+            self.ensure_bucket_partition(bucket).await?;
+            let members = self
+                .store
+                .scope_members(&bsid, include_active, include_retracted, 0)?;
+            attempts += 1;
+            // Bounded: merges back to back can't keep a reader spinning.
+            if self.bucket_partition_built(&bsid, bucket) || attempts >= 16 {
+                return Ok(members);
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     /// Every node (doc, entity, file) with a block in `bucket`, with its
@@ -4527,11 +4564,7 @@ impl LocalClient {
             let mut seen = std::collections::HashSet::new();
             let mut entities = Vec::new();
             'outer: for b in &buckets {
-                self.ensure_bucket_partition(b).await?;
-                let bsid = memvault_core::bucket_scope_id(b);
-                let members = self
-                    .store
-                    .scope_members(&bsid, true, include_retracted, 0)?;
+                let members = self.bucket_members(b, true, include_retracted).await?;
                 for (node_id, _wall) in &members {
                     if entities.len() >= limit {
                         break 'outer;
@@ -6542,14 +6575,10 @@ impl MemvaultClient for LocalClient {
             let mut seen = std::collections::HashSet::new();
             let mut summaries = Vec::new();
             'outer: for b in &buckets {
-                self.ensure_bucket_partition(b).await?;
-                let bsid = memvault_core::bucket_scope_id(b);
                 // include_active is always true; include_retracted gates the
                 // retracted partition. Unlimited at the store level — we filter
                 // to docs and page at `limit` after.
-                let members = self
-                    .store
-                    .scope_members(&bsid, true, include_retracted, 0)?;
+                let members = self.bucket_members(b, true, include_retracted).await?;
                 for (node_id, _wall) in &members {
                     if summaries.len() >= limit {
                         break 'outer;
@@ -7387,10 +7416,8 @@ impl MemvaultClient for LocalClient {
         if let Some(bid) = bucket {
             // Pre-genesis (no buckets) falls through to the scan below.
             if !self.store.list_buckets().unwrap_or_default().is_empty() {
-                self.ensure_bucket_partition(bid).await?;
-                let bsid = memvault_core::bucket_scope_id(bid);
                 // ActiveOnly: include active members, exclude retracted.
-                let members = self.store.scope_members(&bsid, true, false, 0)?;
+                let members = self.bucket_members(bid, true, false).await?;
                 let mut out = Vec::new();
                 {
                     let idx = self.index.read().await;
