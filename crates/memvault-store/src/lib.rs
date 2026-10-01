@@ -34,7 +34,11 @@ pub type IndexNotifier = std::sync::Arc<dyn Fn(&str, &str, &[u8]) + Send + Sync>
 
 /// The main memvault persistent store backed by redb.
 pub struct MemvaultStore {
-    db: redb::Database,
+    /// `None` once [`MemvaultStore::close`]d. redb marks its file clean only
+    /// when the `Database` is dropped; a store kept alive (a static client)
+    /// would otherwise leave it dirty, and the next open repairs the whole
+    /// file (a minute for 12 GB).
+    db: std::sync::RwLock<Option<redb::Database>>,
     /// Filesystem path of the redb database. Retained so upper layers can
     /// site sibling state (e.g. the keystore at `<dir>/identity/`) next to
     /// the blockstore without threading a separate data-dir everywhere.
@@ -57,8 +61,16 @@ impl MemvaultStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         // redb's page cache defaults to 1 GiB; keep it modest unless asked.
+        // A file not closed cleanly is repaired on open (it reads all of it).
+        let decile = std::sync::atomic::AtomicU32::new(u32::MAX);
         let db = redb::Builder::new()
             .set_cache_size(cache_bytes())
+            .set_repair_callback(move |r| {
+                let d = (r.progress() * 10.0) as u32;
+                if decile.swap(d, std::sync::atomic::Ordering::Relaxed) != d {
+                    tracing::warn!(progress = format!("{}%", d * 10), "repairing the store: it wasn't closed cleanly");
+                }
+            })
             .create(&path)?;
 
         // Ensure all tables exist by opening them in a write transaction.
@@ -96,10 +108,36 @@ impl MemvaultStore {
         txn.commit()?;
 
         Ok(Self {
-            db,
+            db: std::sync::RwLock::new(Some(db)),
             path,
             index_notifier: std::sync::OnceLock::new(),
         })
+    }
+
+    fn database(&self) -> Result<std::sync::RwLockReadGuard<'_, Option<redb::Database>>, StoreError> {
+        let db = self.db.read().unwrap_or_else(|e| e.into_inner());
+        if db.is_none() {
+            return Err(StoreError::Other("the store is closed".into()));
+        }
+        Ok(db)
+    }
+
+    pub(crate) fn begin_read(&self) -> Result<redb::ReadTransaction, StoreError> {
+        let db = self.database()?;
+        Ok(db.as_ref().expect("checked").begin_read()?)
+    }
+
+    pub(crate) fn begin_write(&self) -> Result<redb::WriteTransaction, StoreError> {
+        let db = self.database()?;
+        Ok(db.as_ref().expect("checked").begin_write()?)
+    }
+
+    /// Closes the database cleanly (redb records a clean shutdown, so the
+    /// next open needn't repair the file). Later calls fail with "the store
+    /// is closed". Call it when the process is about to exit.
+    pub fn close(&self) {
+        let db = self.db.write().unwrap_or_else(|e| e.into_inner()).take();
+        drop(db);
     }
 
     /// Filesystem path of the backing redb database.
@@ -125,7 +163,7 @@ impl MemvaultStore {
 
     /// Get the stored local peer ID, if any.
     pub fn get_local_peer_id(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(tables::LOCAL_IDENTITY)?;
         Ok(table.get("peer_id")?.map(|v| v.value().to_vec()))
     }
@@ -143,7 +181,7 @@ impl MemvaultStore {
             }
             return Ok(()); // already stored and matches
         }
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(tables::LOCAL_IDENTITY)?;
             table.insert("peer_id", peer_id)?;
@@ -154,14 +192,14 @@ impl MemvaultStore {
 
     /// Get the stored cluster ID, if any.
     pub fn get_local_cluster_id(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(tables::LOCAL_IDENTITY)?;
         Ok(table.get("cluster_id")?.map(|v| v.value().to_vec()))
     }
 
     /// Store the local cluster ID.
     pub fn set_local_cluster_id(&self, cluster_id: &[u8]) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(tables::LOCAL_IDENTITY)?;
             table.insert("cluster_id", cluster_id)?;
@@ -175,7 +213,7 @@ impl MemvaultStore {
     /// Current schema version.  Returns 0 for stores that pre-date the
     /// migration system.
     pub fn schema_version(&self) -> Result<u32, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(tables::LOCAL_IDENTITY)?;
         match table.get("schema_version")? {
             Some(v) => {
@@ -193,7 +231,7 @@ impl MemvaultStore {
     /// Set the schema version.  Called after a migration completes
     /// successfully so the migration is not re-run.
     pub fn set_schema_version(&self, version: u32) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(tables::LOCAL_IDENTITY)?;
             table.insert("schema_version", version.to_le_bytes().as_slice())?;
@@ -224,6 +262,24 @@ mod tests {
         store.put_block(cid, data).unwrap();
         assert!(store.has_block(cid).unwrap());
         assert_eq!(store.get_block(cid).unwrap().unwrap(), data);
+    }
+
+    #[test]
+    fn close_leaves_the_file_clean_while_others_hold_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+        let store = std::sync::Arc::new(MemvaultStore::open(&path).unwrap());
+        store.put_block(b"cid-001", b"kept").unwrap();
+        // A static client would keep a clone forever.
+        let held = store.clone();
+        store.close();
+        assert!(held.get_block(b"cid-001").is_err(), "a closed store refuses work");
+        // redb's header: magic (9 bytes), then flags; bit 2 = recovery required.
+        let flags = std::fs::read(&path).unwrap()[9];
+        assert_eq!(flags & 2, 0, "closed cleanly: the next open won't repair");
+        drop(held);
+        let reopened = MemvaultStore::open(&path).unwrap();
+        assert_eq!(reopened.get_block(b"cid-001").unwrap().unwrap(), b"kept");
     }
 
     #[test]

@@ -120,7 +120,7 @@ impl MemvaultStore {
     /// Does NOT touch BLOCKS, HEADS, REVOCATIONS, RETRACTED, CONSUMED_TOKENS, ROTATIONS, or EDGES.
     pub fn clear_secondary_indexes(&self) -> Result<(), StoreError> {
         tracing::info!("clearing secondary index tables");
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             // Drain each table by opening and removing all entries.
             let mut t = txn.open_table(BY_TAG)?;
@@ -411,7 +411,7 @@ impl MemvaultStore {
     ) -> Result<(), StoreError> {
         let (meta, raw, _) = Self::extract_meta(block_bytes, extra);
 
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut blocks = txn.open_table(BLOCKS)?;
             blocks.insert(cid_bytes, block_bytes)?;
@@ -444,7 +444,7 @@ impl MemvaultStore {
             return Ok(false); // not an envelope
         }
 
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             Self::write_block_indexes(&txn, cid_bytes, &meta, raw.as_ref())?;
         }
@@ -508,7 +508,7 @@ impl MemvaultStore {
             None => return Ok(false),
         };
 
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(BUCKETS)?;
             table.insert(bucket_id.as_slice(), cid_bytes)?;
@@ -539,7 +539,7 @@ impl MemvaultStore {
         cluster_id: &[u8],
         wall_ns: u64,
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(CLUSTER_ORIGIN)?;
             let key = keys::pack_cluster_key(cluster_id, wall_ns, cid_bytes);

@@ -16,7 +16,7 @@ impl MemvaultStore {
         after_ns: u64,
         limit: usize,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TAG)?;
 
         let start = keys::pack_tag_prefix(scope, label, after_ns);
@@ -45,7 +45,7 @@ impl MemvaultStore {
         after_ns: u64,
         limit: usize,
     ) -> Result<Vec<(u64, Vec<u8>)>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TAG)?;
 
         let start = keys::pack_tag_prefix(scope, label, after_ns);
@@ -75,7 +75,7 @@ impl MemvaultStore {
         scope: &str,
         limit: usize,
     ) -> Result<Vec<String>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TAG)?;
 
         let start = keys::pack_scope_prefix(scope);
@@ -107,7 +107,7 @@ impl MemvaultStore {
         after_ns: u64,
         limit: usize,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_AUTHOR)?;
 
         let start = keys::pack_author_prefix(author, after_ns);
@@ -133,7 +133,7 @@ impl MemvaultStore {
         before_ns: u64,
         limit: usize,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TIME)?;
 
         let start = keys::pack_time_key(after_ns, &[]);
@@ -159,7 +159,7 @@ impl MemvaultStore {
         before_ns: u64,
         limit: usize,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TIME)?;
 
         let start = keys::pack_time_key(after_ns, &[]);
@@ -193,7 +193,7 @@ impl MemvaultStore {
         after_ns: u64,
         before_ns: u64,
     ) -> Result<(usize, [u8; 32]), StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TIME)?;
         let start = keys::pack_time_key(after_ns, &[]);
         let end = keys::pack_time_key(before_ns, &[]);
@@ -222,7 +222,7 @@ impl MemvaultStore {
         after_ns: u64,
         limit: usize,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_BUCKET)?;
 
         let start = keys::pack_bucket_prefix(bucket_id, after_ns);
@@ -243,7 +243,7 @@ impl MemvaultStore {
 
     /// List all buckets (returns bucket_id → decl_cid pairs from the BUCKETS table).
     pub fn list_buckets(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BUCKETS)?;
         let mut results = Vec::new();
         for entry in table.iter()? {
@@ -255,28 +255,28 @@ impl MemvaultStore {
 
     /// Get the BucketDecl CID for a bucket.
     pub fn get_bucket(&self, bucket_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BUCKETS)?;
         Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
     }
 
     /// Get the cluster a bucket is bound to.
     pub fn get_bucket_cluster(&self, bucket_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BUCKET_CLUSTER)?;
         Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
     }
 
     /// Read the cached VFS root entity id for a bucket (derived index).
     pub fn vfs_root_get(&self, bucket_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(VFS_ROOT)?;
         Ok(table.get(bucket_id)?.map(|v| v.value().to_vec()))
     }
 
     /// Record the resolved VFS root entity id for a bucket (derived index).
     pub fn vfs_root_put(&self, bucket_id: &[u8], entity_id: &[u8]) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(VFS_ROOT)?;
             table.insert(bucket_id, entity_id)?;
@@ -287,7 +287,7 @@ impl MemvaultStore {
 
     /// Store a bucket declaration CID in the BUCKETS table.
     pub fn put_bucket(&self, bucket_id: &[u8], decl_cid: &[u8]) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(BUCKETS)?;
             table.insert(bucket_id, decl_cid)?;
@@ -306,7 +306,7 @@ impl MemvaultStore {
         wall_ns: u64,
         status: u8,
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(SHARE_INBOX)?;
             let mut key = Vec::with_capacity(to_cluster.len() + 8 + proposal_cid.len());
@@ -327,7 +327,7 @@ impl MemvaultStore {
         wall_ns: u64,
         status: u8,
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(SHARE_OUTBOX)?;
             let mut key = Vec::with_capacity(from_cluster.len() + 8 + proposal_cid.len());
@@ -342,7 +342,7 @@ impl MemvaultStore {
 
     /// List pending share proposals from the inbox.
     pub fn list_share_inbox(&self, to_cluster: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(SHARE_INBOX)?;
         let prefix = to_cluster.to_vec();
         let mut end = prefix.clone();
@@ -369,7 +369,7 @@ impl MemvaultStore {
         to_cluster: &[u8],
         trust_cid: &[u8],
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(BUCKET_TRUST)?;
             let mut key =
@@ -401,7 +401,7 @@ impl MemvaultStore {
             return Ok(()); // already bound to same cluster
         }
 
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut bc = txn.open_table(BUCKET_CLUSTER)?;
             bc.insert(bucket_id, cluster_id)?;

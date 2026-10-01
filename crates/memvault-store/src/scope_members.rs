@@ -55,7 +55,7 @@ impl MemvaultStore {
         &self,
         scope_id: &[u8],
     ) -> Result<Option<ScopeRegistryEntry>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(SCOPE_REGISTRY)?;
         let Some(v) = table.get(scope_id)? else {
             return Ok(None);
@@ -95,7 +95,7 @@ impl MemvaultStore {
         let val = keys::pack_scope_registry_value(
             kind as u8, active, retracted, built_ns, view_cid, bucket_id,
         );
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(SCOPE_REGISTRY)?;
             table.insert(scope_id, val.as_slice())?;
@@ -107,7 +107,7 @@ impl MemvaultStore {
     /// List every registered scope partition. Used at ingest time to know which
     /// view / view×bucket partitions need live updates.
     pub fn scope_registry_list(&self) -> Result<Vec<(Vec<u8>, ScopeRegistryEntry)>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(SCOPE_REGISTRY)?;
         let mut out = Vec::new();
         for entry in table.iter()? {
@@ -144,7 +144,7 @@ impl MemvaultStore {
         wall_ns: u64,
     ) -> Result<(), StoreError> {
         let key = keys::pack_scope_member_key(scope_id, node_id);
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         let mut d_active: i64 = 0;
         let mut d_retracted: i64 = 0;
         {
@@ -182,7 +182,7 @@ impl MemvaultStore {
     /// Remove a node from a scope partition entirely (both partitions).
     pub fn scope_member_remove(&self, scope_id: &[u8], node_id: &str) -> Result<(), StoreError> {
         let key = keys::pack_scope_member_key(scope_id, node_id);
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         let mut d_active: i64 = 0;
         let mut d_retracted: i64 = 0;
         {
@@ -215,7 +215,7 @@ impl MemvaultStore {
         retracted: bool,
     ) -> Result<(), StoreError> {
         let key = keys::pack_scope_member_key(scope_id, node_id);
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         let mut d_active: i64 = 0;
         let mut d_retracted: i64 = 0;
         let mut changed = false;
@@ -256,7 +256,7 @@ impl MemvaultStore {
         include_retracted: bool,
         limit: usize,
     ) -> Result<Vec<(String, u64)>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(SCOPE_MEMBERS)?;
         let start = keys::pack_scope_member_prefix(scope_id);
         let end = keys::pack_scope_member_prefix_end(scope_id);
@@ -284,7 +284,7 @@ impl MemvaultStore {
     pub fn scope_drop(&self, scope_id: &[u8]) -> Result<(), StoreError> {
         let start = keys::pack_scope_member_prefix(scope_id);
         let end = keys::pack_scope_member_prefix_end(scope_id);
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut members = txn.open_table(SCOPE_MEMBERS)?;
             let mut to_delete: Vec<Vec<u8>> = Vec::new();
@@ -305,7 +305,7 @@ impl MemvaultStore {
     /// Clear all scope member-sets and the registry. Called on a full index
     /// rebuild so stale partitions are discarded and rebuilt lazily.
     pub fn scope_clear_all(&self) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut members = txn.open_table(SCOPE_MEMBERS)?;
             while members.pop_first()?.is_some() {}

@@ -23,6 +23,7 @@ in the same change if the convention itself evolves.**
 | [listings-without-bodies.md](listings-without-bodies.md) | Listings, summaries and labels decode only the fields they show (partial heads via `deserialize_block_as`, labels from the index), never a node's whole block — a body can be a book. |
 | [bounded-memory.md](bounded-memory.md) | Every in-memory cache and engine buffer has a ceiling; machine-dependent ones are env knobs with floors, listed in the README. |
 | [client-parity.md](client-parity.md) | `LocalClient` and `HttpApiClient` answer the same: every field travels, bodies match their `Content-Type`, UI features are tested over HTTP, and listings are filtered to what the caller may read. |
+| [clean-shutdown.md](clean-shutdown.md) | A process closes the store (`MemvaultStore::close`) before exiting and stops on SIGTERM, so redb never has to repair the whole file on the next open. |
 
 ## The two rules in one sentence each
 

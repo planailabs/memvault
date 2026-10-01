@@ -15,7 +15,7 @@ impl MemvaultStore {
         wall_ns: u64,
         block_cid: &[u8],
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(ROTATIONS)?;
             let key = keys::pack_rotation_key(rotation_id, wall_ns);
@@ -27,7 +27,7 @@ impl MemvaultStore {
 
     /// Get all rotation entries as (rotation_id, wall_ns, block_cid) tuples.
     pub fn get_all_rotations(&self) -> Result<Vec<(Vec<u8>, u64, Vec<u8>)>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(ROTATIONS)?;
 
         let mut results = Vec::new();

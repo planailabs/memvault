@@ -28,7 +28,7 @@ impl MemvaultStore {
                 );
             }
         }
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(BLOCKS)?;
             table.insert(cid, data)?;
@@ -39,21 +39,21 @@ impl MemvaultStore {
 
     /// Retrieve a block by CID bytes.
     pub fn get_block(&self, cid: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
         Ok(table.get(cid)?.map(|v| v.value().to_vec()))
     }
 
     /// Check if a block exists.
     pub fn has_block(&self, cid: &[u8]) -> Result<bool, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
         Ok(table.get(cid)?.is_some())
     }
 
     /// Iterate all blocks, returning (cid_bytes, block_bytes) pairs.
     pub fn iter_blocks(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
         let mut out = Vec::new();
         for entry in table.iter()? {
@@ -64,7 +64,7 @@ impl MemvaultStore {
     }
 
     pub fn delete_block(&self, cid: &[u8]) -> Result<bool, StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         let removed = {
             let mut table = txn.open_table(BLOCKS)?;
             table.remove(cid)?.is_some()

@@ -13,7 +13,7 @@ impl MemvaultStore {
         peer_id: &[u8],
         head_cid: &[u8],
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         {
             let mut table = txn.open_table(HEADS)?;
             let key = keys::pack_heads_key(doc_id, peer_id);
@@ -25,7 +25,7 @@ impl MemvaultStore {
 
     /// Get the head CID for a (doc_id, peer_id) pair.
     pub fn get_head(&self, doc_id: &[u8], peer_id: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(HEADS)?;
         let key = keys::pack_heads_key(doc_id, peer_id);
         Ok(table.get(key.as_slice())?.map(|v| v.value().to_vec()))

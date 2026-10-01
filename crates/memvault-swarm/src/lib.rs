@@ -1001,11 +1001,34 @@ pub async fn run_sync_loop(
                 }
             } => driver.tick_redial_bootstrap(&mut StandaloneHost(swarm)),
 
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown_signal() => {
                 println!("\nShutting down...");
                 break;
             }
         }
+    }
+}
+
+/// Ctrl-C, or SIGTERM on Unix (how supervisors stop a daemon).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "no SIGTERM handler; stopping on Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

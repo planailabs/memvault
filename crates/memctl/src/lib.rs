@@ -2792,6 +2792,7 @@ mod native {
                     };
 
                     println!("Daemon running. Press Ctrl+C to stop.");
+                    let closing = store.clone();
                     memvault_swarm::run_sync_loop(
                         &mut swarm,
                         store,
@@ -2800,6 +2801,9 @@ mod native {
                         join_config,
                     )
                     .await;
+                    // Static clients keep the store alive: close it so redb
+                    // records a clean shutdown (else the next start repairs it).
+                    closing.close();
                 }
 
                 // Without the daemon feature, run P2P only (no web UI)
@@ -2828,6 +2832,7 @@ mod native {
                     };
 
                     println!("Daemon running (P2P only, no web UI). Press Ctrl+C to stop.");
+                    let closing = store.clone();
                     memvault_swarm::run_sync_loop(
                         &mut swarm,
                         store,
@@ -2836,6 +2841,9 @@ mod native {
                         join_config,
                     )
                     .await;
+                    // Static clients keep the store alive: close it so redb
+                    // records a clean shutdown (else the next start repairs it).
+                    closing.close();
                 }
             }
             Commands::ClusterJoin {

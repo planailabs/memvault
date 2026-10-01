@@ -15,7 +15,7 @@ impl MemvaultStore {
         consumer: &[u8],
         at_ns: u64,
     ) -> Result<u32, StoreError> {
-        let txn = self.db.begin_write()?;
+        let txn = self.begin_write()?;
         let new_count = {
             let mut table = txn.open_table(CONSUMED_TOKENS)?;
             let current_count = match table.get(token_cid)? {
@@ -36,7 +36,7 @@ impl MemvaultStore {
 
     /// Get the current consumption count for a token.
     pub fn get_token_consumption_count(&self, token_cid: &[u8]) -> Result<u32, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(CONSUMED_TOKENS)?;
         match table.get(token_cid)? {
             Some(v) => {
