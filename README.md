@@ -265,7 +265,7 @@ memctl genesis
 
 ## memctl CLI
 
-Management CLI. Targets a local store via `--data-dir` (looks for `blocks.redb` inside) or `--db` (path to the redb file directly), or a running daemon via `--url` with an enrolled identity. `--agent-id` binds writes to an enrolled agent's identity and bucket; `--bucket-id` targets a specific bucket.
+Management CLI. Targets a local store via `--data-dir` (looks for `blocks.redb` inside) or `--db` (path to the redb file directly), or a running daemon via `--url` with an enrolled identity. `--agent-id` binds writes to an enrolled agent's identity and bucket; `--bucket-id` targets a specific bucket. Commands that write or list bucketed content (`put`, `list`, `graph add`, `skill publish`, `skill list`, `import-files`, `import-docs`) use `--bucket-id`, else the `--agent-id` agent's bucket, and refuse without either on a local store; over `--url`, the imports default to the token's agent bucket.
 
 ### Commands
 
