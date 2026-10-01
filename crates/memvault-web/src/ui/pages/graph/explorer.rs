@@ -89,15 +89,17 @@ async fn list_graph_nodes(
         Some(memvault_core::BucketId(arr))
     });
 
-    // If a view is active, get all nodes matching the view.
-    if let Some(ref view_name) = view {
+    // If a view is active, get the nodes matching the view in the active
+    // bucket (view ∩ bucket ∩ retracted) — it dropped the bucket.
+    if view.is_some() {
+        let scope = crate::ui::state::query_scope(
+            view,
+            bucket_hex.into_iter().collect(),
+            show_retracted,
+            None,
+        );
         let items = client
-            .list_scoped(
-                &memvault_core::QueryScope::all()
-                    .with_view(Some(view_name.to_string()))
-                    .with_include_retracted(show_retracted),
-                200,
-            )
+            .list_scoped(&scope, 200)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
         let mut nodes = Vec::new();
