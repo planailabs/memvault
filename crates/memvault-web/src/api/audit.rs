@@ -32,12 +32,31 @@ pub struct AuditRecordResponse {
     pub agent_attestation: Option<String>,
     pub wall_ns: u64,
     pub doc_id: Option<String>,
+    /// Hex entity id, for entity operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    /// The file manifest's CID, for file attachments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_cid: Option<String>,
     pub tags: Vec<(String, String)>,
+}
+
+/// The node a record is about, for the bucket check.
+fn node_of(r: &AuditRecordResponse) -> String {
+    if let Some(d) = &r.doc_id {
+        format!("doc:{d}")
+    } else if let Some(e) = &r.entity_id {
+        format!("entity:{e}")
+    } else if let Some(a) = &r.attachment_cid {
+        memvault_core::cid_bytes_lenient(a).map(|b| format!("file:{}", hex::encode(b))).unwrap_or_default()
+    } else {
+        String::new()
+    }
 }
 
 /// GET /api/v1/audit
 pub async fn query_audit(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<Vec<AuditRecordResponse>>, ApiError> {
@@ -99,9 +118,16 @@ pub async fn query_audit(
             }),
             wall_ns: r.wall_ns,
             doc_id: r.doc_id.map(|d| hex::encode(d.0)),
+            entity_id: r.entity_id.as_ref().map(hex::encode),
+            attachment_cid: r.attachment_cid.as_ref().map(|c| {
+                memvault_core::cid_string_from_bytes(c).unwrap_or_else(|_| hex::encode(c))
+            }),
             tags: r.tags,
         })
         .collect();
 
+    // Only records about what the caller may read (records about no node pass).
+    // ponytail: `limit` applies before this filter, so a caller may get fewer.
+    let results = crate::api::auth::filter_readable(&auth.claims, results, node_of)?;
     Ok(Json(results))
 }

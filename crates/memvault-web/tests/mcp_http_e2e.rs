@@ -725,3 +725,27 @@ async fn labels_come_from_the_index() {
     assert_eq!(label.as_deref(), Some("A long book"));
     assert_eq!(client.resolve_label("doc:00").await.unwrap(), None, "unknown: none");
 }
+
+#[tokio::test]
+async fn audit_names_files_and_hides_other_buckets() {
+    let (client, bucket) = client_and_bucket().await;
+    let mine = client.upload_file(b"audit me", Some("mine.txt"), "text/plain", vec![], "internal", Some(&bucket)).await.unwrap();
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let theirs = local
+        .bucket_create_as(
+            AgentName("audit-other".into()),
+            Some([7u8; 32]),
+            "audit-other",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+    let other = local.upload_file(b"not yours", Some("theirs.txt"), "text/plain", vec![], "internal", Some(&theirs)).await.unwrap();
+    let q = memvault_query::AuditQuery { op_kind: Some(memvault_query::OpKind::AttachFile), limit: Some(5000), ..Default::default() };
+    let files: Vec<Vec<u8>> = client.audit(q).await.unwrap().into_iter().filter_map(|r| r.attachment_cid).collect();
+    assert!(files.contains(&mine), "an upload's record names its file (the UI's Files page lists from it)");
+    assert!(!files.contains(&other), "another agent's bucket stays out of the audit log");
+}
