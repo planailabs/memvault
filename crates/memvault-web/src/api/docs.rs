@@ -89,6 +89,25 @@ pub async fn list_docs(
     }
 
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    // No bucket named: the caller's agent bucket, like writes
+    // (standards/bucket-scoping.md) — never every bucket. Admins, who have
+    // no agent bucket, keep the cross-bucket listing (an aggregation).
+    let admin = crate::api::auth::caller_role(&state, &auth.claims) == Some(memvault_auth::AgentRole::Admin);
+    let bucket_id = match bucket_id {
+        Some(b) => Some(b),
+        None if admin => None,
+        None => {
+            let pubkey = hex::decode(&auth.claims.sub)
+                .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+            Some(
+                state
+                    .client
+                    .ensure_agent_bucket(&pubkey, &auth.claims.iss)
+                    .await
+                    .map_err(|e| ApiError::internal(format!("agent bucket: {e}")))?,
+            )
+        }
+    };
     let docs = state
         .client
         .list_docs_ex(tag_filter, limit, bucket_id.as_ref(), include_retracted)

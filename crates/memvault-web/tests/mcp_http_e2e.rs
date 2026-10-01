@@ -756,3 +756,32 @@ async fn audit_names_files_and_hides_other_buckets() {
     assert_eq!(m["filename"], "mine.txt");
     assert_eq!(m["content_size"], 8);
 }
+
+#[tokio::test]
+async fn docs_of_others_are_not_listed() {
+    let (client, bucket) = client_and_bucket().await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let theirs = local
+        .bucket_create_as(
+            AgentName("docs-other".into()),
+            Some([5u8; 32]),
+            "docs-other",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+    let titled = |t: &str| {
+        let mut fm = std::collections::BTreeMap::new();
+        fm.insert("title".to_string(), serde_json::json!(t));
+        memvault_doc::Document { id: memvault_core::DocId([0u8; 32]), frontmatter: fm, body: "text".into() }
+    };
+    client.put_doc(titled("mine, listed"), vec![], Visibility::Internal, Some(&bucket)).await.unwrap();
+    local.put_doc(titled("theirs, hidden"), vec![], Visibility::Internal, Some(&theirs)).await.unwrap();
+    // No bucket named: the caller's agent bucket (standards/bucket-scoping.md).
+    let titles: Vec<String> = client.list_docs(None, 500, None).await.unwrap().into_iter().filter_map(|d| d.title).collect();
+    assert!(titles.iter().any(|t| t == "mine, listed"), "{titles:?}");
+    assert!(!titles.iter().any(|t| t == "theirs, hidden"), "another agent's document isn't listed");
+}

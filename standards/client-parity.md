@@ -28,7 +28,9 @@ Both passed every local-client test.
 - **Server functions are tested through `HttpApiClient`.** A UI feature gets an
   e2e test in `memvault-web/tests/mcp_http_e2e.rs` that calls the client
   methods it uses over HTTP and checks the fields it shows.
-- **Listings are filtered to what the caller may read** on the server
-  (`filter_readable`, `enforce_bucket_action`): the bucket list, search, nodes
-  and the audit log. Another agent's bucket answers 404, not 403, and doesn't
-  appear in lists.
+- **Listings never show what the caller may not read.** Content reads are
+  scoped to one bucket, the caller's agent bucket by default
+  ([bucket-scoping.md](bucket-scoping.md)); the lists that are cross-bucket by
+  nature (buckets, search hits, nodes, the audit log) are filtered on the
+  server (`filter_readable`, `enforce_bucket_action`). Another agent's bucket
+  answers 404, not 403, and doesn't appear in lists.

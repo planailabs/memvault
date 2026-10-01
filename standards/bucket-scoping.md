@@ -55,6 +55,11 @@ the export caller with `None` (vault export is cross-bucket by design). The
 scoped paths (`list_all`, `scoped_list`) scan all index rows when bucketed and
 cap the *filtered* result.
 
+Also applied: `GET /api/v1/docs` without `bucket=` lists the caller's agent
+bucket (it listed every bucket's documents to any agent, so a team's memvault
+UI showed other teams' notes). Admins, who have no agent bucket, keep the
+cross-bucket listing as their aggregation.
+
 **Remaining (needs a cross-crate signature change, do as a focused pass):**
 - `audit` (`memvault_audit`) — needs a `bucket` field on
   `memvault_query::AuditQuery` and the store audit query before the tool can
