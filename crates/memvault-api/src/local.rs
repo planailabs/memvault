@@ -1219,7 +1219,7 @@ impl LocalClient {
             Some("auto-created for adoption of pre-bucket data"),
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Legacy,
+            memvault_core::BucketRole::Legacy,
             Some(node_pk),
         )
     }
@@ -1702,9 +1702,9 @@ impl LocalClient {
     /// ID + explicit owner so the bucket is locatable on later runs.
     #[allow(clippy::too_many_arguments)]
     (bucket_create_inner_sync, bucket_create_inner_async)
-    fn(&self, bucket_id: memvault_core::BucketId, name: &str, description: Option<&str>, default_visibility: Visibility, default_classification: memvault_core::classification::Classification, role: memvault_doc::BucketRole, owner_agent_override: Option<memvault_core::AgentName>, owner_agent_pubkey: Option<[u8; 32]>) -> Result<memvault_core::BucketId>
+    fn(&self, bucket_id: memvault_core::BucketId, name: &str, description: Option<&str>, default_visibility: Visibility, default_classification: memvault_core::classification::Classification, role: memvault_core::BucketRole, owner_agent_override: Option<memvault_core::AgentName>, owner_agent_pubkey: Option<[u8; 32]>) -> Result<memvault_core::BucketId>
     {
-        use memvault_doc::BucketDecl;
+        use memvault_core::BucketDecl;
 
         let now_ns = memvault_core::wall_ns();
 
@@ -1796,7 +1796,7 @@ impl LocalClient {
         description: Option<&str>,
         default_visibility: Visibility,
         default_classification: memvault_core::classification::Classification,
-        role: memvault_doc::BucketRole,
+        role: memvault_core::BucketRole,
     ) -> Result<memvault_core::BucketId> {
         self.bucket_create_inner_async(
             memvault_core::BucketId::random(),
@@ -1887,7 +1887,7 @@ impl LocalClient {
             Some("auto-created agent bucket"),
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Agent,
+            memvault_core::BucketRole::Agent,
             Some(owner_agent.clone()),
             <[u8; 32]>::try_from(agent_pubkey).ok(),
         )?;
@@ -1952,10 +1952,10 @@ impl LocalClient {
         description: Option<&str>,
         default_visibility: Visibility,
         default_classification: memvault_core::classification::Classification,
-        role: memvault_doc::BucketRole,
+        role: memvault_core::BucketRole,
         owner_node_pubkey: Option<[u8; 32]>,
     ) -> Result<()> {
-        use memvault_doc::BucketDecl;
+        use memvault_core::BucketDecl;
 
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
         let decl = BucketDecl {
@@ -4594,7 +4594,7 @@ impl LocalClient {
             for (_bucket_id_bytes, decl_cid) in &buckets {
                 if let Ok(Some(block)) = self.store.get_block(decl_cid) {
                     if let Some(decl) = Self::parse_bucket_decl(&block) {
-                        if decl.role == memvault_doc::BucketRole::Legacy {
+                        if decl.role == memvault_core::BucketRole::Legacy {
                             return Some(decl.bucket_id);
                         }
                     }
@@ -4623,11 +4623,11 @@ impl LocalClient {
 
     /// Parse a BucketDecl from a block: handles both the new envelope format
     /// (payload.BucketCreate) and the legacy raw BucketDecl JSON.
-    pub fn parse_bucket_decl_static(block: &[u8]) -> Option<memvault_doc::BucketDecl> {
+    pub fn parse_bucket_decl_static(block: &[u8]) -> Option<memvault_core::BucketDecl> {
         Self::parse_bucket_decl(block)
     }
 
-    fn parse_bucket_decl(block: &[u8]) -> Option<memvault_doc::BucketDecl> {
+    fn parse_bucket_decl(block: &[u8]) -> Option<memvault_core::BucketDecl> {
         let val: serde_json::Value = memvault_store::deserialize_block(block)?;
         if let Some(bc) = val.get("payload").and_then(|p| p.get("BucketCreate")) {
             serde_json::from_value(bc.clone()).ok()
@@ -7332,7 +7332,7 @@ impl MemvaultClient for LocalClient {
         description: Option<&str>,
         default_visibility: Visibility,
         default_classification: memvault_core::classification::Classification,
-        role: memvault_doc::BucketRole,
+        role: memvault_core::BucketRole,
     ) -> Result<memvault_core::BucketId> {
         self.bucket_create_inner_async(
             memvault_core::BucketId::random(),

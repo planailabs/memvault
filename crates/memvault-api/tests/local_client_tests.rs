@@ -7,7 +7,8 @@ use tokio::sync::RwLock;
 
 use memvault_api::{EventBus, LocalClient, MemvaultClient, MemvaultEvent};
 use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
-use memvault_doc::{BucketRole, Document, Edge, Entity};
+use memvault_core::BucketRole;
+use memvault_doc::{Document, Edge, Entity};
 use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
 

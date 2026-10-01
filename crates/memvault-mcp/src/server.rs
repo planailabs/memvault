@@ -1127,7 +1127,7 @@ impl MemvaultServer {
                 params.description.as_deref(),
                 Visibility::Internal,
                 memvault_core::classification::Classification::Internal,
-                memvault_doc::BucketRole::Standard,
+                memvault_core::BucketRole::Standard,
             )
             .await
         {

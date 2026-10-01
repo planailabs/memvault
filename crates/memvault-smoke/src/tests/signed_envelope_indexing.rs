@@ -52,7 +52,7 @@ async fn signed_doc_write_appears_in_list_and_get() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket create");
@@ -104,7 +104,7 @@ async fn signed_entity_write_appears_in_index() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket create");
@@ -152,7 +152,7 @@ async fn signed_attachment_write_appears_in_list_files() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket create");
@@ -246,7 +246,7 @@ async fn signed_write_audit_record_carries_agent_attestation_when_bound() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket create");
@@ -334,7 +334,7 @@ async fn signed_envelope_carries_inline_agent_attestation_when_bound() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket create");

@@ -3,7 +3,8 @@
 use memvault_api::MemvaultClient;
 use memvault_core::classification::Classification;
 use memvault_core::{DocId, EdgeId, EntityId, NodeRef, Visibility};
-use memvault_doc::{BucketRole, Document, Edge, Entity};
+use memvault_core::BucketRole;
+use memvault_doc::{Document, Edge, Entity};
 use std::collections::BTreeMap;
 
 use crate::harness::TestNode;

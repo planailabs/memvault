@@ -115,7 +115,7 @@ pub async fn create_bucket(
             req.description.as_deref(),
             memvault_core::Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .map_err(|e| ApiError::internal(format!("bucket_create: {e}")))?;

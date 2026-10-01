@@ -178,7 +178,7 @@ async fn fresh_bucket(client: &HttpApiClient, name: &str) -> BucketId {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket_create")
@@ -313,7 +313,7 @@ async fn buckets_list_and_get_decode() {
     let got = got.expect("agent bucket present");
     assert_eq!(got.id, bucket);
     // The elaborate fields are present (role defaults to Agent for agent buckets).
-    assert_eq!(got.role, memvault_doc::BucketRole::Agent);
+    assert_eq!(got.role, memvault_core::BucketRole::Agent);
 }
 
 #[tokio::test]
@@ -702,7 +702,7 @@ async fn buckets_of_others_are_not_listed() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -741,7 +741,7 @@ async fn audit_names_files_and_hides_other_buckets() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .unwrap();
@@ -769,7 +769,7 @@ async fn docs_of_others_are_not_listed() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .unwrap();

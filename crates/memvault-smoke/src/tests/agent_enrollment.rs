@@ -144,7 +144,7 @@ async fn enroll_agent_then_write_and_verify_authorship() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket create");

@@ -19,7 +19,6 @@ pub mod metrics;
 pub mod node_key;
 pub mod office_convert;
 pub mod otel;
-pub mod quotas;
 pub mod rebuild;
 pub mod rotation;
 pub mod sigchain;
@@ -41,10 +40,6 @@ pub use error::{ApiError, Result};
 #[cfg(feature = "http-client")]
 pub use http::HttpApiClient;
 pub use local::LocalClient;
-/// The query-scope triplet types live in `memvault-core` (so `memvault-query`
-/// can share them); re-exported here for API-layer convenience.
-pub use memvault_core::scope;
-pub use memvault_core::{BucketSelector, QueryScope, RetractionMode};
 pub use subscription::{EventBus, MemvaultEvent};
 pub use types::{
     DocSummary, GrantInfo, NodeDetail, NodeStatus, NodeSummary, RotationInfo, ScopeCount,

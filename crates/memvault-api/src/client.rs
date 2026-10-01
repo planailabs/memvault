@@ -442,7 +442,7 @@ pub trait MemvaultClient: Send + Sync {
         description: Option<&str>,
         default_visibility: Visibility,
         default_classification: Classification,
-        role: memvault_doc::BucketRole,
+        role: memvault_core::BucketRole,
     ) -> Result<BucketId>;
 
     /// List buckets in the store. Merged source buckets are hidden when

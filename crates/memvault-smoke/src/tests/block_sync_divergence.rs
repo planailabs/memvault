@@ -226,7 +226,7 @@ async fn synced_doc_reindex_preserves_bucket_scope() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .unwrap();

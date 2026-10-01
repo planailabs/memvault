@@ -2,7 +2,6 @@
 mod tests;
 
 pub mod apply;
-pub mod bucket;
 pub mod compaction;
 pub mod crdt;
 pub mod document;
@@ -17,7 +16,6 @@ pub mod op;
 pub mod snapshot;
 
 pub use apply::{GraphState, apply_doc_ops, apply_graph_ops, apply_text_patch};
-pub use bucket::{BucketBinding, BucketDecl, BucketRole};
 pub use compaction::compact;
 pub use crdt::{CrdtDocument, CrdtError};
 pub use document::Document;

@@ -51,7 +51,7 @@ async fn make_bucket(node: &TestNode, name: &str) -> BucketId {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket create")
@@ -203,7 +203,7 @@ async fn bucket_create_as_sets_owner_and_grants_access() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("bucket_create_as");
@@ -970,7 +970,7 @@ async fn make_owned_bucket(
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("create owned bucket")
@@ -1089,7 +1089,7 @@ async fn node_owned_bucket_grant_authority() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Legacy,
+            memvault_core::BucketRole::Legacy,
             Some(node_pk),
         )
         .expect("create node-owned bucket");
@@ -1384,7 +1384,7 @@ async fn legacy_owner_pubkey_absent_falls_back_to_label() {
             None,
             Visibility::Internal,
             memvault_core::classification::Classification::Internal,
-            memvault_doc::BucketRole::Standard,
+            memvault_core::BucketRole::Standard,
         )
         .await
         .expect("create legacy owned bucket");

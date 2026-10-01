@@ -232,7 +232,7 @@ pub struct BucketInfo {
     pub envelope_count: u64,
     /// The role this bucket plays (standard, legacy, agent).
     #[serde(default)]
-    pub role: memvault_doc::BucketRole,
+    pub role: memvault_core::BucketRole,
     /// When this bucket has been merged into another, the canonical bucket
     /// it resolves to. `None` for a normal (canonical or unmerged) bucket.
     /// Merged sources are hidden from default bucket listings (treated like

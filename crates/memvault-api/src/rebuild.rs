@@ -16,7 +16,7 @@ use crate::error::{ApiError, Result};
 use crate::local::LocalClient;
 use memvault_core::{BucketId, EntityId};
 
-pub use memvault_core::BLOCKSTORE_VERSION;
+use memvault_core::BLOCKSTORE_VERSION;
 
 /// Derive a deterministic legacy bucket ID.
 ///
@@ -145,7 +145,7 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
                         Some("auto-created for adoption of pre-bucket data"),
                         memvault_core::Visibility::Internal,
                         memvault_core::classification::Classification::Internal,
-                        memvault_doc::BucketRole::Legacy,
+                        memvault_core::BucketRole::Legacy,
                         // Node key isn't available during rebuild; the daemon
                         // stamps owner_node_pubkey later via
                         // ensure_legacy_bucket_node_owner.
@@ -431,8 +431,8 @@ fn repair_vfs_sync(
     use memvault_doc::Op;
     use std::collections::HashSet;
 
-    let vfs_dir_kind = crate::vfs::VFS_DIR_KIND;
-    let vfs_child_rel = crate::vfs::VFS_CHILD_REL;
+    let vfs_dir_kind = memvault_core::VFS_DIR_KIND;
+    let vfs_child_rel = memvault_core::VFS_CHILD_REL;
 
     // 1. Collect all VFS dir entities with names. Exhaustive (see standards:
     //    exhaustive-lookups) — a cap would silently drop dirs and corrupt the

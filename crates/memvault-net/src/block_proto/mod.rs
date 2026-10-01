@@ -5,8 +5,6 @@
 
 pub mod codec;
 
-pub use memvault_core::BLOCKSTORE_VERSION;
-
 pub use codec::BlockCodec;
 
 use serde::{Deserialize, Serialize};
