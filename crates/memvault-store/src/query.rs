@@ -191,7 +191,7 @@ impl MemvaultStore {
         before_ns: u64,
         mut visit: impl FnMut(u64, &[u8]) -> bool,
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TIME)?;
         let start = keys::pack_time_key(after_ns, &[]);
         let end = keys::pack_time_key(before_ns, &[]);
@@ -218,7 +218,7 @@ impl MemvaultStore {
         before_ns: u64,
         mut visit: impl FnMut(u64, &[u8]) -> bool,
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_AUTHOR)?;
         let start = keys::pack_author_prefix(author, after_ns);
         let end = keys::pack_author_prefix(author, before_ns);
@@ -246,7 +246,7 @@ impl MemvaultStore {
         before_ns: u64,
         mut visit: impl FnMut(u64, &[u8]) -> bool,
     ) -> Result<(), StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_TAG)?;
         let start = keys::pack_tag_prefix(scope, label, after_ns);
         let end = keys::pack_tag_prefix(scope, label, before_ns);
@@ -329,7 +329,7 @@ impl MemvaultStore {
         wall_ns: u64,
         cid: &[u8],
     ) -> Result<bool, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BY_BUCKET)?;
         let key = keys::pack_bucket_key(bucket_id, wall_ns, cid);
         Ok(table.get(key.as_slice())?.is_some())

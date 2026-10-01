@@ -17,7 +17,7 @@ const CID_PAGE: usize = 256;
 impl MemvaultStore {
     /// The number of stored blocks (the table length; nothing is read).
     pub fn block_count(&self) -> Result<u64, StoreError> {
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
         Ok(table.len()?)
     }
@@ -30,7 +30,7 @@ impl MemvaultStore {
         limit: usize,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         use std::ops::Bound;
-        let txn = self.db.begin_read()?;
+        let txn = self.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
         let lower = match after {
             Some(cid) => Bound::Excluded(cid),
