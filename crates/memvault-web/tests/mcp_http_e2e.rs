@@ -711,3 +711,17 @@ async fn buckets_of_others_are_not_listed() {
     assert!(!ids.contains(&theirs), "another agent's bucket isn't");
     assert!(client.bucket_get(&theirs).await.map(|b| b.is_none()).unwrap_or(true), "nor can it be opened");
 }
+
+#[tokio::test]
+async fn labels_come_from_the_index() {
+    let (client, bucket) = client_and_bucket().await;
+    let mut fm = std::collections::BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("A long book"));
+    let doc = memvault_doc::Document { id: memvault_core::DocId([0u8; 32]), frontmatter: fm, body: "word ".repeat(100_000) };
+    client.put_doc(doc, vec![], Visibility::Internal, Some(&bucket)).await.unwrap();
+    let docs = client.list_docs(None, 50, Some(&bucket)).await.unwrap();
+    let d = docs.iter().find(|d| d.title.as_deref() == Some("A long book")).expect("listed");
+    let label = client.resolve_label(&format!("doc:{}", hex::encode(d.id.0))).await.unwrap();
+    assert_eq!(label.as_deref(), Some("A long book"));
+    assert_eq!(client.resolve_label("doc:00").await.unwrap(), None, "unknown: none");
+}

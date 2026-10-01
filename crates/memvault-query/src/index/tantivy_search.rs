@@ -146,8 +146,11 @@ impl TantivyIndex {
             .try_into()
             .map_err(|e| QueryError::Other(format!("tantivy reader: {e}")))?;
 
+        // The indexing buffer: `MEMVAULT_INDEX_WRITER_MB` (default 50; Tantivy
+        // needs at least 15 per indexing thread).
+        let writer_mb = std::env::var("MEMVAULT_INDEX_WRITER_MB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(50).max(15);
         let writer = index
-            .writer(50_000_000) // 50 MB heap
+            .writer_with_num_threads(1, writer_mb * 1_000_000)
             .map_err(|e| QueryError::Other(format!("tantivy writer: {e}")))?;
 
         Ok(Self {

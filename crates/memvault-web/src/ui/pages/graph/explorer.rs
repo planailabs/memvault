@@ -210,37 +210,15 @@ async fn list_graph_nodes(
             None => continue,
         };
         let (node_type, kind, label) = match &node_ref {
-            memvault_core::NodeRef::Doc(did) => {
-                let title = client
-                    .get_doc_scoped(
-                        did,
-                        &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
-                    )
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|d| {
-                        d.frontmatter
-                            .get("title")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| "Untitled".to_string());
+            // Titles and file names come from the index: loading whole
+            // documents (library books) or manifests just for a label made
+            // the graph slow and the daemon's memory balloon.
+            memvault_core::NodeRef::Doc(_) => {
+                let title = client.resolve_label(extra_id).await.ok().flatten().unwrap_or_else(|| "Untitled".to_string());
                 ("doc".to_string(), "doc".to_string(), title)
             }
-            memvault_core::NodeRef::Attachment(cid) => {
-                let name = client
-                    .get_file_manifest(cid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .and_then(|v| {
-                        v.get("filename")
-                            .and_then(|f| f.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| "Unnamed file".to_string());
+            memvault_core::NodeRef::Attachment(_) => {
+                let name = client.resolve_label(extra_id).await.ok().flatten().unwrap_or_else(|| "Unnamed file".to_string());
                 ("file".to_string(), "file".to_string(), name)
             }
             memvault_core::NodeRef::Entity(eid) => {

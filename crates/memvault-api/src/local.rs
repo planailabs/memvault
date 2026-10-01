@@ -972,6 +972,10 @@ impl LocalClient {
         }
         let verdict = !grant.is_legacy_unsigned() && grant.verify_admin_signature().is_ok();
         if let Ok(mut cache) = self.grant_sig_cache.write() {
+            // Bounded: verdicts are cheap to recompute, memory isn't free.
+            if cache.len() >= GRANT_SIG_CACHE_MAX {
+                cache.clear();
+            }
             cache.insert(grant_cid.to_vec(), (0, verdict));
         }
         verdict
@@ -7926,6 +7930,9 @@ fn apply_retraction_mode(
         memvault_core::RetractionMode::IncludeRetracted => c,
     }
 }
+
+/// How many grant-signature verdicts are kept (then the cache starts over).
+const GRANT_SIG_CACHE_MAX: usize = 10_000;
 
 /// An envelope's tags: `{"scope", "label"}` objects (how they're written), or
 /// `[scope, label]` pairs.

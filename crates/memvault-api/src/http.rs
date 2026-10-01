@@ -1071,8 +1071,13 @@ impl MemvaultClient for HttpApiClient {
             .unwrap_or_default();
         Ok(members)
     }
-    async fn resolve_label(&self, _node_id: &str) -> Result<Option<String>> {
-        Ok(None)
+    async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
+        let resp = self.client.get(self.url(&format!("/labels/{}", urlencoded(node_id)))).send().await.map_err(map_reqwest)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let v: serde_json::Value = resp.error_for_status().map_err(map_reqwest)?.json().await.map_err(map_reqwest)?;
+        Ok(v.get("label").and_then(|l| l.as_str()).map(String::from))
     }
 
     // -- History & Audit --

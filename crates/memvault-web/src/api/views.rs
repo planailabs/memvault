@@ -68,6 +68,18 @@ pub async fn get_tags(
     ))
 }
 
+/// GET /api/v1/labels/{node_id} — a node's display label (a doc's title, a
+/// file's name, an entity's name) from the index, without loading the node.
+pub async fn get_label(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Read)?;
+    let label = state.client.resolve_label(&node_id).await?;
+    Ok(Json(serde_json::json!({ "node_id": node_id, "label": label })))
+}
+
 // ── Views ──────────────────────────────────────────────────────────
 
 /// GET /api/v1/views — list all views.

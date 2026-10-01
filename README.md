@@ -356,6 +356,17 @@ file:4a5b6c7d...          # hex-encoded manifest CID
 
 These work everywhere: MCP tools (`memvault_link`, `memvault_edges`), the REST API (`/api/v1/links`), and the web UI's quick-link forms. The legacy `attachment:` prefix on old edges is still understood on read.
 
+## Memory
+
+The daemon keeps its memory bounded:
+
+- `MEMVAULT_CACHE_MB` (default 256): the blockstore's page cache (redb's own default is 1 GiB).
+- `MEMVAULT_INDEX_WRITER_MB` (default 50, at least 15): the search index's indexing buffer (one indexing thread).
+- Grant-signature verdicts are cached up to 10 000 entries.
+- The web UI's graph reads labels from the index instead of loading whole documents.
+
+On glibc, `MALLOC_ARENA_MAX=2` keeps freed memory from piling up in per-thread arenas after a burst.
+
 ## Storage layout
 
 ```

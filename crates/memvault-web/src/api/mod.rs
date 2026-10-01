@@ -46,6 +46,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/links/{edge_id}", delete(links::delete_link))
         // ── Tags ────────────────────────────────────────────��──────
         .route(
+            "/labels/{node_id}",
+            get(views::get_label),
+        )
+        .route(
             "/tags/{node_id}",
             get(views::get_tags)
                 .put(views::add_tags)
