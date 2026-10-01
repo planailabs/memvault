@@ -2413,6 +2413,62 @@ mod tool_tests {
     }
 
     #[tokio::test]
+    async fn a_library_text_keeps_its_tags_after_linking_its_original() {
+        // The researcher's library: a tagged text, its original file, a link.
+        let srv = test_server().await;
+        let dir = std::env::temp_dir().join(format!("mv-lib-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..4 {
+            let put = srv
+                .put(Parameters(crate::types::PutParams {
+                    text: format!("capybara{i} anodes swell during lithiation"),
+                    title: Some(format!("notes{i}.md")),
+                    tags: vec!["kind:library".into(), format!("library:{i}")],
+                    visibility: None,
+                    vfs_path: None,
+                    bucket: None,
+                }))
+                .await;
+            assert_ok(&put);
+            let doc = jget(&put, "node_id");
+            let f = dir.join(format!("notes{i}.md"));
+            std::fs::write(&f, format!("# notes {i}")).unwrap();
+            let up = srv
+                .upload_file(Parameters(crate::types::UploadFileParams {
+                    path: f.to_string_lossy().into_owned(),
+                    content_type: None,
+                    tags: Some(vec!["kind:library".into()]),
+                    visibility: None,
+                    vfs_path: Some(format!("/researcher/files/f{i}-{}", std::process::id())),
+                    bucket: None,
+                }))
+                .await;
+            assert_ok(&up);
+            let file = jget(&up, "node_id");
+            let link = srv
+                .link(Parameters(crate::types::LinkParams { source: doc.clone(), target: file, relation: "original".into(), weight: None, props: Default::default(), bucket: None }))
+                .await;
+            assert_ok(&link);
+            let search = |tag: Option<&str>| {
+                srv.search(Parameters(crate::types::SearchParams { query: format!("capybara{i}"), limit: Some(10), tag_filter: tag.map(String::from), bucket: None }))
+            };
+            let id = doc.trim_start_matches("doc:").to_string();
+            let mut all = String::new();
+            for _ in 0..50 {
+                all = search(None).await;
+                if all.contains(&id) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert_eq!(all.matches(&id).count(), 1, "one hit per doc: {all}");
+            let tagged = search(Some("kind:library")).await;
+            assert!(tagged.contains(&id), "the tag survives: {tagged}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn uploaded_files_land_at_their_vfs_path() {
         let srv = test_server().await;
         let dir = std::env::temp_dir().join(format!("mv-upload-vfs-{}", std::process::id()));

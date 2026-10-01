@@ -3097,3 +3097,51 @@ async fn list_all_member_path_bucket_scoped() {
         "the matching doc carries the view's tag"
     );
 }
+
+/// A locally created doc is indexed inline and, through the store's notifier,
+/// queued for re-indexing too. Regression: the second pass added a second
+/// index entry, rebuilt from the blockstore with only creation tags (or none),
+/// so searches returned the doc twice and tag lookups could miss its tags.
+#[tokio::test]
+async fn reindexing_keeps_one_entry_and_its_tags() {
+    let (_dir, client) = make_client();
+    client.install_sigchain_notifier();
+    let doc_id = DocId::random();
+    let doc = Document::new(doc_id.clone(), "graphite anodes swell during lithiation".to_string(), BTreeMap::new());
+    client.put_doc(doc, vec![("kind".into(), "library".into())], Visibility::Internal, None).await.unwrap();
+    // A link from the doc (as when a library text links its original file):
+    // another block about the doc, queuing it for re-indexing.
+    let other = Entity { id: EntityId::random(), kind: "file".to_string(), props: BTreeMap::new(), edges_out: vec![] };
+    let other = client.add_entity(other, Visibility::Internal, None).await.unwrap();
+    let edge = Edge { id: EdgeId::random(), relation: "original".to_string(), target: NodeRef::Entity(other), weight: None, props: BTreeMap::new(), provenance: None };
+    client.add_link(&NodeRef::Doc(doc_id.clone()), edge, Visibility::Internal).await.unwrap();
+    let node = format!("doc:{}", hex::encode(doc_id.0));
+    client.add_tags(&node, vec![("seen".into(), "yes".into())]).await.unwrap();
+    for _ in 0..3 {
+        // Searching flushes the re-index queue.
+        let hits = client.search_scoped(&memvault_core::QueryScope::all(), "graphite", 10).await.unwrap();
+        assert_eq!(hits.len(), 1, "one entry per doc: {hits:?}");
+        let mut tags = client.get_tags(&node).await.unwrap();
+        tags.sort();
+        assert_eq!(tags, vec![("kind".to_string(), "library".to_string()), ("seen".to_string(), "yes".to_string())]);
+    }
+}
+
+/// A synced doc is indexed from its blocks: its tags must come along.
+/// Regression: tags are stored as `{scope, label}` objects but were read as
+/// `[scope, label]` pairs, so re-indexed nodes lost all their tags.
+#[tokio::test]
+async fn a_synced_doc_keeps_its_tags() {
+    let (_dir_a, client_a) = make_client();
+    let (_dir_b, client_b) = make_client();
+    client_b.install_sigchain_notifier();
+    let doc_id = DocId::random();
+    let doc = Document::new(doc_id.clone(), "okapi stripes".to_string(), BTreeMap::new());
+    let cid = client_a.put_doc(doc, vec![("kind".into(), "library".into())], Visibility::Internal, None).await.unwrap();
+    let block = client_a.store().get_block(&cid).unwrap().unwrap();
+    client_b.store().put_block(&cid, &block).unwrap();
+    assert!(client_b.store().reindex_block(&cid, &block).unwrap());
+    assert_eq!(client_b.search("okapi", 10).await.unwrap().len(), 1);
+    let tags = client_b.get_tags(&format!("doc:{}", hex::encode(doc_id.0))).await.unwrap();
+    assert_eq!(tags, vec![("kind".to_string(), "library".to_string())]);
+}

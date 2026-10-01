@@ -179,6 +179,9 @@ impl TantivyIndex {
         bucket_id: Option<&str>,
         wall_ns: u64,
     ) -> Result<(), QueryError> {
+        // A node has one entry: indexing it again replaces the old one (adds
+        // after this delete in the same commit survive it).
+        self.writer.delete_term(tantivy::Term::from_field_text(self.f_node_id, node_id));
         let mut doc = TantivyDocument::default();
         doc.add_text(self.f_cid, cid);
         doc.add_text(self.f_node_id, node_id);
@@ -211,6 +214,9 @@ impl TantivyIndex {
         bucket_id: Option<&str>,
         wall_ns: u64,
     ) -> Result<(), QueryError> {
+        // A node has one entry: indexing it again replaces the old one (adds
+        // after this delete in the same commit survive it).
+        self.writer.delete_term(tantivy::Term::from_field_text(self.f_node_id, node_id));
         let mut doc = TantivyDocument::default();
         doc.add_text(self.f_cid, cid);
         doc.add_text(self.f_node_id, node_id);
@@ -254,6 +260,9 @@ impl TantivyIndex {
             body_parts.push(text.to_string());
         }
 
+        // A node has one entry: indexing it again replaces the old one (adds
+        // after this delete in the same commit survive it).
+        self.writer.delete_term(tantivy::Term::from_field_text(self.f_node_id, node_id));
         let mut doc = TantivyDocument::default();
         doc.add_text(self.f_cid, cid);
         doc.add_text(self.f_node_id, node_id);
@@ -715,6 +724,11 @@ impl TantivyIndex {
     }
 
     /// A node's effective tags as `(scope, label)` pairs.
+    /// A node's tags as indexed now, or `None` if it isn't indexed.
+    pub fn indexed_tags(&self, node_id: &str) -> Option<Vec<(String, String)>> {
+        self.read_fields(node_id).map(|f| f.tags.iter().filter_map(|t| split_tag(t)).collect())
+    }
+
     pub fn get_tags(&self, node_id: &str) -> Vec<(String, String)> {
         self.read_fields(node_id)
             .map(|f| f.tags.iter().filter_map(|t| split_tag(t)).collect())
@@ -901,6 +915,27 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let idx = TantivyIndex::open(dir.path()).unwrap();
         (dir, idx)
+    }
+
+    #[test]
+    fn indexing_a_node_again_replaces_it() {
+        let (_dir, mut idx) = make_index();
+        let doc = DocId([7u8; 32]);
+        let tagged = [("kind".to_string(), "library".to_string())];
+        idx.index_doc(&doc, "graphite anodes swell", Some("Notes"), &tagged, None, 1).unwrap();
+        idx.commit().unwrap();
+        // Indexed again (another path, without the tags): one entry, the latest.
+        idx.index_doc(&doc, "graphite anodes swell", Some("Notes"), &[], None, 2).unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.search_filtered("graphite", None, 10).unwrap().len(), 1, "no duplicate");
+        assert!(idx.get_tags(&format!("doc:{}", hex::encode(doc.0))).is_empty());
+        // And a file whose text arrives later.
+        idx.index_attachment(&[1u8, 2], Some("a.pdf"), "application/pdf", None, &[], None, 1).unwrap();
+        idx.index_attachment(&[1u8, 2], Some("a.pdf"), "application/pdf", Some("lithium plating"), &tagged, None, 2).unwrap();
+        idx.commit().unwrap();
+        assert_eq!(idx.search_filtered("plating", None, 10).unwrap().len(), 1);
+        assert_eq!(idx.get_tags("file:0102"), tagged.to_vec());
+        assert_eq!(idx.num_docs(), 2);
     }
 
     #[test]

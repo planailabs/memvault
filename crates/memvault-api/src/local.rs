@@ -2502,7 +2502,7 @@ impl LocalClient {
                                     _ => None,
                                 });
                             let att_tags: Vec<(String, String)> =
-                                view.get_as("tags").unwrap_or_default();
+                                view.field("tags").map(envelope_tags).unwrap_or_default();
                             let mut idx = idx_write!();
                             let _ = idx.index_attachment(
                                 &mcid,
@@ -3424,6 +3424,14 @@ impl LocalClient {
     /// write. Returns `None` if the node is unknown or can't be rebuilt. Does
     /// **not** touch the index write lock (uses `*_sync` getters that only
     /// `try_read` the index), so it is safe to call before acquiring it.
+    /// The tags a node has in the index now (creation tags plus later tag
+    /// updates), if it's indexed. Re-indexing keeps them: rebuilding them from
+    /// the blockstore would see only creation tags (and not always the
+    /// creation block's).
+    fn current_tags(&self, node_id: &str) -> Option<Vec<(String, String)>> {
+        self.index.try_read().ok()?.indexed_tags(node_id)
+    }
+
     fn prepare_reindex(&self, node_id: &str) -> Option<PreparedIndex> {
         let decode32 = |hex_id: &str| -> Option<[u8; 32]> {
             let bytes = hex::decode(hex_id).ok()?;
@@ -3440,7 +3448,7 @@ impl LocalClient {
                 .get("title")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let tags = self.extract_creation_tags("doc", hex_id);
+            let tags = self.current_tags(node_id).unwrap_or_else(|| self.extract_creation_tags("doc", hex_id));
             let bucket_hex = self
                 .index_bucket_for_node("doc", hex_id)
                 .or_else(|| self.inferred_doc_bucket(&id))
@@ -3455,7 +3463,7 @@ impl LocalClient {
         } else if let Some(hex_id) = node_id.strip_prefix("entity:") {
             let id = EntityId(decode32(hex_id)?);
             let entity = self.get_entity_sync(&id, true).ok().flatten()?;
-            let tags = self.extract_creation_tags("entity", hex_id);
+            let tags = self.current_tags(node_id).unwrap_or_else(|| self.extract_creation_tags("entity", hex_id));
             let bucket_hex = self
                 .index_bucket_for_node("entity", hex_id)
                 .or_else(|| self.inferred_entity_bucket(&id))
@@ -3486,7 +3494,7 @@ impl LocalClient {
                     .str_field("mime_type")
                     .unwrap_or("application/octet-stream")
                     .to_string();
-                let tags: Vec<(String, String)> = view.get_as("tags").unwrap_or_default();
+                let tags: Vec<(String, String)> = self.current_tags(node_id).unwrap_or_else(|| view.field("tags").map(envelope_tags).unwrap_or_default());
                 let bucket_hex = view
                     .get_as::<Vec<u8>>("bucket_id")
                     .or_else(|| self.bucket_for_cid(cid))
@@ -4548,30 +4556,29 @@ impl LocalClient {
     /// Extract user-facing tags from the creation envelope for a given node.
     /// Scans envelopes tagged (tag_key, label) and returns all non-internal tags.
     fn extract_creation_tags(&self, tag_key: &str, label: &str) -> Vec<(String, String)> {
+        // Every block about the node carries its id tag (updates, links from
+        // it, ...): take the creation op's block, whose tags are the node's.
         let cids = self
             .store
-            .query_by_tag(tag_key, label, 0, 1)
+            .query_by_tag(tag_key, label, 0, usize::MAX)
             .unwrap_or_default();
-        for cid in &cids {
+        let creation = cids.iter().find(|cid| {
+            self.store
+                .get_block(cid)
+                .ok()
+                .flatten()
+                .and_then(|data| memvault_store::deserialize_block(&data))
+                .and_then(|env| env.get("payload").and_then(|p| p.as_object()).map(|p| p.keys().any(|k| k.ends_with("Create"))))
+                .unwrap_or(false)
+        });
+        for cid in creation.into_iter().chain(cids.first()) {
             if let Ok(Some(data)) = self.store.get_block(cid) {
                 if let Some(env) = memvault_store::deserialize_block(&data) {
-                    if let Some(tags_arr) = env.get("tags").and_then(|v| v.as_array()) {
-                        return tags_arr
-                            .iter()
-                            .filter_map(|v| {
-                                let pair = v.as_array()?;
-                                let scope = pair.first()?.as_str()?;
-                                let lbl = pair.get(1)?.as_str()?;
-                                // Skip internal tags (doc/entity ID tags).
-                                if scope == "doc"
-                                    || scope == "entity"
-                                    || scope == "edge_source"
-                                    || scope == "edge_target"
-                                {
-                                    return None;
-                                }
-                                Some((scope.to_string(), lbl.to_string()))
-                            })
+                    if let Some(tags) = env.get("tags") {
+                        // Skip internal tags (doc/entity ID tags).
+                        return envelope_tags(tags)
+                            .into_iter()
+                            .filter(|(scope, _)| !matches!(scope.as_str(), "doc" | "entity" | "edge_source" | "edge_target"))
                             .collect();
                     }
                 }
@@ -7918,4 +7925,18 @@ fn apply_retraction_mode(
         },
         memvault_core::RetractionMode::IncludeRetracted => c,
     }
+}
+
+/// An envelope's tags: `{"scope", "label"}` objects (how they're written), or
+/// `[scope, label]` pairs.
+fn envelope_tags(v: &serde_json::Value) -> Vec<(String, String)> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| match t {
+            serde_json::Value::Object(o) => Some((o.get("scope")?.as_str()?.to_string(), o.get("label")?.as_str()?.to_string())),
+            serde_json::Value::Array(a) => Some((a.first()?.as_str()?.to_string(), a.get(1)?.as_str()?.to_string())),
+            _ => None,
+        })
+        .collect()
 }
