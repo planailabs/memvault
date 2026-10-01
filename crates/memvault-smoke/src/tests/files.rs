@@ -172,3 +172,47 @@ async fn extract_text_from_plaintext() {
         assert!(t.contains("extractable"));
     }
 }
+
+/// Once a bucket exists, a file upload without one is refused, like a
+/// document write (`store_op`): it used to land unbucketed, invisible to
+/// every bucket-scoped listing (AGENTS.md, "All new data must have a bucket").
+#[tokio::test]
+async fn upload_without_a_bucket_is_refused_once_buckets_exist() {
+    let node = TestNode::new();
+    let bucket = node
+        .client
+        .bucket_create(
+            "files",
+            None,
+            memvault_core::Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_core::BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+    let unbucketed = node
+        .client
+        .upload_file(
+            b"lost",
+            Some("lost.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            None,
+        )
+        .await;
+    assert!(unbucketed.is_err(), "an upload needs a bucket post-genesis");
+    let cid = node
+        .client
+        .upload_file(
+            b"kept",
+            Some("kept.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    assert_eq!(node.client.bucket_for_file(&cid), Some(bucket));
+}

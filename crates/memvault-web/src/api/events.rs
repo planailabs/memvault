@@ -12,20 +12,51 @@ use memvault_api::MemvaultEvent;
 
 use crate::AppState;
 use crate::api::auth::RequireAuth;
+use crate::error::ApiError;
 
-/// GET /api/v1/events — SSE stream of MemvaultEvents.
+/// GET /api/v1/events — SSE stream of MemvaultEvents, only those about what
+/// the caller may read (standards/client-parity.md): a document, entity or
+/// file in a bucket it may read, a bucket it may read, and — to admins and
+/// auditors only — cluster membership events (token redemptions, sigchain
+/// blocks). Read decisions are cached per bucket for the connection.
 pub async fn events_stream(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
+    let cluster_events = matches!(
+        crate::api::auth::caller_role(&state, &auth.claims),
+        Some(memvault_auth::AgentRole::Admin) | Some(memvault_auth::AgentRole::Auditor)
+    );
     let rx = state.event_bus.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
-        match result {
-            Ok(event) => Some(Ok(event_to_sse(event))),
-            Err(_) => None, // skip lagged messages
-        }
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        // Lagged messages are skipped.
+        let event = result.ok()?;
+        visible(&event, &mut readable, cluster_events).then(|| Ok(event_to_sse(event)))
     });
-    Sse::new(stream)
+    Ok(Sse::new(stream))
+}
+
+/// Whether the caller may see `event`.
+fn visible(
+    event: &MemvaultEvent,
+    readable: &mut crate::api::auth::Readable,
+    cluster_events: bool,
+) -> bool {
+    match event {
+        MemvaultEvent::DocCreated { doc_id, .. }
+        | MemvaultEvent::DocUpdated { doc_id, .. }
+        | MemvaultEvent::FileAttached { doc_id, .. } => {
+            readable.node(&format!("doc:{}", hex::encode(doc_id.0)))
+        }
+        MemvaultEvent::EntityCreated { entity_id } => {
+            readable.node(&format!("entity:{}", hex::encode(entity_id.0)))
+        }
+        // `doc:<cid>` resolves an envelope CID to its bucket.
+        MemvaultEvent::Retracted { cid } => readable.node(&format!("doc:{}", hex::encode(cid))),
+        MemvaultEvent::BucketCreated { bucket_id, .. } => readable.bucket(bucket_id),
+        MemvaultEvent::TokenConsumed { .. } | MemvaultEvent::SigchainBlock { .. } => cluster_events,
+    }
 }
 
 fn event_to_sse(event: MemvaultEvent) -> Event {

@@ -4052,43 +4052,55 @@ impl LocalClient {
             return Ok(Vec::new());
         }
 
-        let fetch = limit.saturating_mul(4).max(limit);
-        let (hits, view_set) = {
-            let idx = self.index.read().await;
-            let view_set: Option<std::collections::HashSet<String>> = view_tags.as_ref().map(|t| {
-                idx.members_of_view_mode(t, scope.retraction)
+        let view_set: Option<std::collections::HashSet<String>> = match &view_tags {
+            Some(t) => Some(
+                self.index
+                    .read()
+                    .await
+                    .members_of_view_mode(t, scope.retraction)
                     .into_iter()
-                    .collect()
-            });
-            let hits = idx.search_unified_mode(
+                    .collect(),
+            ),
+            None => None,
+        };
+        // Filters before limits (standards/exhaustive-lookups.md): the kind,
+        // view and bucket filters drop hits, so ask the index for more until
+        // `limit` pass or it has no more — a fixed 4 × limit returned nothing
+        // once other buckets' hits outranked the scope's.
+        let mut fetch = limit.saturating_mul(4).max(limit).max(1);
+        loop {
+            let hits = self.index.read().await.search_unified_mode(
                 query,
                 scope.entity_kind.as_deref(),
                 scope.retraction,
                 fetch,
             );
-            (hits, view_set)
-        };
-        let mut out = Vec::new();
-        for h in hits {
-            if let Some(kind) = scope.kind {
-                if !kind.matches(&h.node_type) {
+            let exhausted = hits.len() < fetch;
+            let mut out = Vec::new();
+            for h in hits {
+                if let Some(kind) = scope.kind {
+                    if !kind.matches(&h.node_type) {
+                        continue;
+                    }
+                }
+                if let Some(set) = &view_set {
+                    if !set.contains(&h.node_id) {
+                        continue;
+                    }
+                }
+                if !self.node_passes_bucket(&h.node_id, &known, &eff) {
                     continue;
                 }
-            }
-            if let Some(set) = &view_set {
-                if !set.contains(&h.node_id) {
-                    continue;
+                out.push(h);
+                if out.len() >= limit {
+                    break;
                 }
             }
-            if !self.node_passes_bucket(&h.node_id, &known, &eff) {
-                continue;
+            if out.len() >= limit || exhausted || fetch == usize::MAX {
+                return Ok(out);
             }
-            out.push(h);
-            if out.len() >= limit {
-                break;
-            }
+            fetch = fetch.saturating_mul(4);
         }
-        Ok(out)
     }
 
     /// Scoped active/retracted counts.
@@ -4552,14 +4564,19 @@ impl LocalClient {
         prefix: &str,
     ) {
         let bsid = memvault_core::bucket_scope_id(bucket);
-        let members: std::collections::HashSet<String> = self
-            .store
-            .scope_members(&bsid, true, include_retracted, 0)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(nid, _)| nid)
-            .filter(|nid| nid.starts_with(prefix))
-            .collect();
+        let read_members = || -> std::collections::HashSet<String> {
+            self.store
+                .scope_members(&bsid, true, include_retracted, 0)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(nid, _)| nid)
+                .filter(|nid| nid.starts_with(prefix))
+                .collect()
+        };
+        // The scan first, the member-set after it: a write that lands
+        // between the two is then in both, or only in the set. Read the other
+        // way round, any concurrent write tripped this check (a listing
+        // racing a write panicked the daemon's handler in debug builds).
         let scan: std::collections::HashSet<String> = match prefix {
             "doc:" => self
                 .list_docs_scan(None, usize::MAX, Some(bucket), include_retracted)
@@ -4577,6 +4594,17 @@ impl LocalClient {
                 .collect(),
             _ => return,
         };
+        // A write still in flight has stored its block (the scan sees it)
+        // but not yet updated the set; give it a moment to finish.
+        let mut members = read_members();
+        for _ in 0..100 {
+            if scan.is_subset(&members) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            self.flush_index().await;
+            members = read_members();
+        }
         let missing: Vec<&String> = scan.difference(&members).collect();
         debug_assert!(
             missing.is_empty(),
@@ -4718,11 +4746,6 @@ impl LocalClient {
             }
         }
         vec![]
-    }
-
-    /// Resolve a bucket_id: explicit only, no fallback.
-    fn resolve_bucket(&self, explicit: Option<&BucketId>) -> Option<Vec<u8>> {
-        explicit.map(|b| b.0.to_vec())
     }
 
     /// Require an explicit bucket for write operations.
@@ -6508,6 +6531,9 @@ impl MemvaultClient for LocalClient {
         visibility: &str,
         bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
+        // A file needs a bucket like any other write (`store_op`); checked
+        // before any chunk is stored.
+        let bucket_id = self.require_bucket(bucket)?;
         // Chunk file into blocks using memvault-attach
         let (root_cid, blocks) = memvault_attach::chunk_file(data)?;
 
@@ -6555,7 +6581,6 @@ impl MemvaultClient for LocalClient {
         // index so `get_file_manifest` and `inferred_attachment_bucket` work
         // immediately on fresh uploads — not only after a reindex/sync. The
         // envelope's own display tags (below, via `&tags`) stay unchanged.
-        let bucket_id = self.resolve_bucket(bucket);
         let mut meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: tags.clone(),

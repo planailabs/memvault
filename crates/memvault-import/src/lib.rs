@@ -4,15 +4,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use memvault_api::MemvaultClient;
-use memvault_core::Visibility;
+use memvault_core::{BucketId, Visibility};
 
-/// Import files recursively, optionally placing them in the VFS.
+/// Import files recursively into `bucket`, optionally placing them in the
+/// VFS. `None` leaves the bucket to the client: an HTTP daemon writes to the
+/// caller's agent bucket; a local store refuses once it has buckets.
 pub async fn import_files(
     client: &dyn MemvaultClient,
     path: &Path,
     vfs_folder: Option<&str>,
     tags: &[(String, String)],
     visibility: &str,
+    bucket: Option<&BucketId>,
 ) -> Result<usize> {
     let mut files: Vec<PathBuf> = Vec::new();
     if path.is_file() {
@@ -50,7 +53,7 @@ pub async fn import_files(
             tags.to_vec(),
             visibility,
             vfs_path.as_deref(),
-            None,
+            bucket,
         )
         .await?;
         println!("  {} -> {node_id}", file_path.display());
@@ -59,13 +62,15 @@ pub async fn import_files(
     Ok(count)
 }
 
-/// Import text/markdown files as documents, optionally placing them in the VFS.
+/// Import text/markdown files as documents into `bucket` (see
+/// [`import_files`]), optionally placing them in the VFS.
 pub async fn import_docs(
     client: &dyn MemvaultClient,
     path: &Path,
     vfs_folder: Option<&str>,
     tags: &[(String, String)],
     vis: Visibility,
+    bucket: Option<&BucketId>,
 ) -> Result<usize> {
     let doc_extensions = &["md", "txt", "markdown", "text", "rst"];
     let mut files: Vec<PathBuf> = Vec::new();
@@ -103,7 +108,7 @@ pub async fn import_docs(
             tags.to_vec(),
             vis,
             vfs_path.as_deref(),
-            None,
+            bucket,
         )
         .await?;
         println!("  {} -> {}", file_path.display(), result.node_id);

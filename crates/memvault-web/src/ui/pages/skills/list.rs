@@ -28,10 +28,17 @@ impl SkillRow {
 }
 
 #[server]
-async fn list_skills() -> Result<Vec<SkillRow>, ServerFnError> {
+async fn list_skills(bucket_hex: Option<String>) -> Result<Vec<SkillRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
+    // The active bucket's skills (none selected: the daemon's default, the
+    // caller's own bucket) — not every bucket's.
+    let bucket = bucket_hex
+        .as_deref()
+        .map(memvault_core::BucketId::from_hex)
+        .transpose()
+        .map_err(|_| ServerFnError::new("invalid bucket".to_string()))?;
     let skills = client
-        .skill_list(500, None)
+        .skill_list(500, bucket.as_ref())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(skills
@@ -75,7 +82,17 @@ async fn create_skill(
 #[component]
 pub fn SkillList() -> Element {
     use_topbar("Skills");
-    let mut skills = use_server_future(list_skills)?;
+    let filters = crate::ui::filters::use_filters();
+    let mut skills = use_server_future(move || {
+        let bucket = filters.read().bucket;
+        async move { list_skills(bucket).await }
+    })?;
+    // Re-fetch when the active bucket changes while on the page.
+    use_effect(move || {
+        let _ = filters.read();
+        let mut r = skills;
+        r.restart();
+    });
     let active_bucket = use_context::<crate::ui::topbar::ActiveBucketSignal>();
     let mut show_create = use_signal(|| false);
     let mut new_name = use_signal(String::new);

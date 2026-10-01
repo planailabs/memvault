@@ -78,14 +78,41 @@ pub async fn traverse(
     let from = NodeRef::from_tag_label(&params.from)
         .ok_or_else(|| ApiError::bad_request("Invalid from: expected 'type:hex'"))?;
     crate::api::auth::enforce_node_action(&auth.claims, &params.from, memvault_auth::Action::Read)?;
-    let hits = state
-        .client
-        .traverse_from(
-            &from,
-            params.relation.as_deref(),
-            params.max_depth.unwrap_or(2),
-        )
-        .await?;
+    // The walk itself, here rather than `traverse_from`, so a node the caller
+    // may not read is neither returned nor walked through.
+    let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
+    let max_depth = params.max_depth.unwrap_or(2);
+    let mut hits: Vec<memvault_api::TraversalHit> = Vec::new();
+    let mut visited = std::collections::HashSet::from([from.clone()]);
+    let mut queue = std::collections::VecDeque::from([(from, 0usize, Vec::new())]);
+    while let Some((node, depth, path)) = queue.pop_front() {
+        if depth > 0 {
+            hits.push(memvault_api::TraversalHit {
+                node: node.clone(),
+                depth,
+                path: path.clone(),
+            });
+        }
+        if depth >= max_depth {
+            continue;
+        }
+        for (source, edge) in state.client.edges_of(&node).await? {
+            if source != node
+                || params
+                    .relation
+                    .as_deref()
+                    .is_some_and(|r| edge.relation != r)
+                || visited.contains(&edge.target)
+                || !readable.node(&edge.target.tag_label())
+            {
+                continue;
+            }
+            visited.insert(edge.target.clone());
+            let mut next = path.clone();
+            next.push((edge.id.clone(), edge.relation.clone()));
+            queue.push_back((edge.target, depth + 1, next));
+        }
+    }
     let results: Vec<serde_json::Value> = hits
         .into_iter()
         .map(|h| {
@@ -114,19 +141,30 @@ pub async fn list_entities(
     Query(params): Query<ListEntitiesQuery>,
 ) -> Result<Json<Vec<EntityResponse>>, ApiError> {
     let limit = params.limit.unwrap_or(500);
-    let bucket = params.bucket.as_deref().and_then(|h| {
-        let bytes = hex::decode(h).ok()?;
-        let arr: [u8; 32] = bytes.try_into().ok()?;
-        Some(memvault_core::BucketId(arr))
-    });
-    let entities = state.client.list_entities(limit, bucket.as_ref()).await?;
+    // No bucket named: the caller's agent bucket (admins: every bucket).
+    let named = crate::api::auth::parse_bucket_param(params.bucket.as_deref())?;
+    let bucket = crate::api::auth::read_bucket(&state, &auth.claims, named).await?;
     // The generic HTTP entity list returns all kinds (it's the low-level API +
     // introspection surface). Reserved kinds (skill, vfs:dir) are hidden from
     // the graph *view* at the presentation layer instead — the web graph
-    // explorer and the MCP list_entities tool both filter them.
+    // explorer and the MCP list_entities tool both filter them. The kind and
+    // read filters apply before the limit.
+    let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
+    let entities = crate::api::auth::fetch_kept(
+        limit,
+        |n| {
+            let state = &state;
+            let bucket = bucket.as_ref();
+            async move { Ok(state.client.list_entities(n, bucket).await?) }
+        },
+        |e: &Entity| {
+            params.kind.as_deref().is_none_or(|k| e.kind == k)
+                && readable.node(&format!("entity:{}", hex::encode(e.id.0)))
+        },
+    )
+    .await?;
     let results: Vec<EntityResponse> = entities
         .into_iter()
-        .filter(|e| params.kind.as_deref().is_none_or(|k| e.kind == k))
         .map(|e| EntityResponse {
             id: format!("entity:{}", hex::encode(e.id.0)),
             kind: e.kind,
@@ -134,7 +172,6 @@ pub async fn list_entities(
             edges: vec![],
         })
         .collect();
-    let results = crate::api::auth::filter_readable(&auth.claims, results, |r| r.id.clone())?;
     Ok(Json(results))
 }
 
@@ -152,42 +189,29 @@ pub async fn create_entity(
         edges_out: vec![],
     };
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
-    let bucket_id = req.bucket.as_deref().and_then(|h| {
-        let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut a = [0u8; 32];
-        a.copy_from_slice(&bytes);
-        Some(memvault_core::BucketId(a))
-    });
-    if let Some(bid) = &bucket_id {
-        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
-    }
+    // No bucket named: the caller's agent bucket, like `POST /docs`.
+    let named = crate::api::auth::parse_bucket_param(req.bucket.as_deref())?;
+    let bucket_id = crate::api::auth::write_bucket(&state, &auth.claims, named).await?;
     // Validated create: rejects reserved kinds (skill, vfs:dir). Safe to guard
     // here now that VFS/skills no longer ride this endpoint — they use their
     // own /vfs and /skills endpoints, so this is purely the generic node API.
     let id = state
         .client
-        .add_entity(entity, vis, bucket_id.as_ref())
+        .add_entity(entity, vis, Some(&bucket_id))
         .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     tracing::info!(kind = %kind, "API: entity created");
 
     if let Some(vfs_path) = &req.vfs_path {
-        if let Some(bucket) = bucket_id.as_ref() {
-            if let Err(e) = memvault_api::vfs::link_node_at_path(
-                state.client.as_ref(),
-                bucket,
-                vfs_path,
-                &node_id,
-            )
-            .await
-            {
-                tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
-            }
-        } else {
-            tracing::warn!(path = %vfs_path, "skipping VFS link: entity request omitted bucket");
+        if let Err(e) = memvault_api::vfs::link_node_at_path(
+            state.client.as_ref(),
+            &bucket_id,
+            vfs_path,
+            &node_id,
+        )
+        .await
+        {
+            tracing::warn!(path = %vfs_path, error = %e, "VFS link failed after entity creation");
         }
     }
 

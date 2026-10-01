@@ -77,6 +77,11 @@ pub struct AuditQuery {
     pub after_ns: Option<u64>,
     pub before_ns: Option<u64>,
     pub limit: Option<usize>,
+    /// Only records in this bucket. The other filters and the limit then
+    /// apply to the bucket's records (filters before limits); cluster
+    /// sigchain events, which belong to no bucket, are left out.
+    #[serde(default)]
+    pub bucket: Option<memvault_core::BucketId>,
 }
 
 /// Query the audit log, newest first.
@@ -130,7 +135,17 @@ pub fn query_audit(
         }
         records.len() < limit
     };
-    if let Some(author) = &query.author {
+    if let Some(bucket) = &query.bucket {
+        // The bucket's index runs oldest first; walk it newest first.
+        // ponytail: collects the bucket's CIDs (keys only, no blocks); a
+        // `scan_bucket_desc` would stream them if buckets get huge.
+        let cids = store.query_by_bucket(&bucket.0, after, usize::MAX)?;
+        for cid in cids.iter().rev() {
+            if !visit(0, cid) {
+                break;
+            }
+        }
+    } else if let Some(author) = &query.author {
         store.scan_author_desc(author, after, before, &mut visit)?;
     } else if let Some(doc_id) = &query.doc_id {
         // A document's ops are tagged with its id: walk that tag, not the
@@ -147,7 +162,7 @@ pub fn query_audit(
     // Merge in the typed sigchain records (doc_id never matches these), then
     // sort newest-first and cap to limit so the merged set stays consistent
     // with the scan ordering.
-    if query.doc_id.is_none() {
+    if query.doc_id.is_none() && query.bucket.is_none() {
         records.extend(sigchain_records(
             store, &sigchain, query, after, before, limit,
         )?);
@@ -158,9 +173,16 @@ pub fn query_audit(
     Ok(records)
 }
 
-/// The scan-side filters an envelope record must pass (the author filter is
-/// the author index itself).
+/// The scan-side filters an envelope record must pass. The author and time
+/// filters are the index itself, except on the bucket walk.
 fn envelope_matches(query: &AuditQuery, record: &AuditRecord) -> bool {
+    if query.bucket.is_some() {
+        if query.before_ns.is_some_and(|b| record.wall_ns > b)
+            || query.author.as_ref().is_some_and(|a| &record.author != a)
+        {
+            return false;
+        }
+    }
     if let Some(filter_doc) = &query.doc_id {
         if record.doc_id.as_ref() != Some(filter_doc) {
             return false;

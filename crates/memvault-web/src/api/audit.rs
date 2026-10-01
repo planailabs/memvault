@@ -18,6 +18,9 @@ pub struct AuditQueryParams {
     pub after_ns: Option<u64>,
     pub before_ns: Option<u64>,
     pub limit: Option<usize>,
+    /// Only records in this bucket (hex), which the caller must be able to
+    /// read. Without one, the log across the buckets it may read.
+    pub bucket: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -90,6 +93,11 @@ pub async fn query_audit(
         .as_deref()
         .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok());
 
+    let bucket = crate::api::auth::parse_bucket_param(params.bucket.as_deref())?;
+    if let Some(b) = &bucket {
+        crate::api::auth::enforce_bucket_action(&auth.claims, b, memvault_auth::Action::Read)?;
+    }
+
     let query = AuditQuery {
         doc_id,
         author,
@@ -97,6 +105,7 @@ pub async fn query_audit(
         after_ns: params.after_ns,
         before_ns: params.before_ns,
         limit: params.limit,
+        bucket,
     };
 
     let records = state.client.audit(query).await?;

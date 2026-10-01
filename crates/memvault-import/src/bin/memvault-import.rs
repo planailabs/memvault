@@ -14,6 +14,12 @@ struct Cli {
     #[command(flatten)]
     client: memvault_api::ClientArgs,
 
+    /// Bucket (hex id) to import into. Over HTTP, the daemon uses the
+    /// agent's own bucket when unset; a local `--db` store needs one once it
+    /// has buckets.
+    #[arg(long, global = true, env = "MEMVAULT_BUCKET_ID")]
+    bucket_id: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -61,6 +67,13 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let client = cli.client.connect().await?;
+    let bucket = cli
+        .bucket_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(memvault_core::BucketId::from_hex)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--bucket-id is not a bucket id: {e}"))?;
 
     match cli.command {
         Commands::Files {
@@ -70,9 +83,15 @@ async fn main() -> Result<()> {
             visibility,
         } => {
             let tags = memvault_api::docs::parse_tags(&tag);
-            let imported =
-                memvault_import::import_files(&*client, &path, vfs.as_deref(), &tags, &visibility)
-                    .await?;
+            let imported = memvault_import::import_files(
+                &*client,
+                &path,
+                vfs.as_deref(),
+                &tags,
+                &visibility,
+                bucket.as_ref(),
+            )
+            .await?;
             println!("Imported {imported} file(s).");
         }
         Commands::Docs {
@@ -83,8 +102,15 @@ async fn main() -> Result<()> {
         } => {
             let tags = memvault_api::docs::parse_tags(&tag);
             let vis = memvault_api::docs::parse_visibility(Some(&visibility));
-            let imported =
-                memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis).await?;
+            let imported = memvault_import::import_docs(
+                &*client,
+                &path,
+                vfs.as_deref(),
+                &tags,
+                vis,
+                bucket.as_ref(),
+            )
+            .await?;
             println!("Imported {imported} document(s).");
         }
     }

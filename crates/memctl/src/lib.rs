@@ -1190,15 +1190,8 @@ mod native {
     ///   2. The bound agent's own bucket when an agent is loaded on
     ///      the client (auto-created via `ensure_agent_bucket_for`).
     pub async fn resolve_target_bucket(client: &LocalClient) -> Result<memvault_core::BucketId> {
-        if let Ok(hex_str) = std::env::var("MEMVAULT_BUCKET_ID") {
-            if !hex_str.is_empty() {
-                let bytes = hex::decode(hex_str.trim())
-                    .map_err(|e| anyhow::anyhow!("--bucket-id is not valid hex: {e}"))?;
-                let arr: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("--bucket-id must decode to 32 bytes"))?;
-                return Ok(memvault_core::BucketId(arr));
-            }
+        if let Some(b) = explicit_bucket()? {
+            return Ok(b);
         }
         if let Some(aid) = client.agent_id().cloned() {
             return Ok(client.ensure_agent_bucket_for(&aid).await?);
@@ -1207,6 +1200,39 @@ mod native {
             "no bucket selected: pass --bucket-id <hex> or --agent-id <id> \
              (or set MEMVAULT_BUCKET_ID / MEMVAULT_AGENT_ID)"
         );
+    }
+
+    /// The bucket named by `MEMVAULT_BUCKET_ID` (the global `--bucket-id`).
+    fn explicit_bucket() -> Result<Option<memvault_core::BucketId>> {
+        match std::env::var("MEMVAULT_BUCKET_ID") {
+            Ok(hex_str) if !hex_str.is_empty() => {
+                let bytes = hex::decode(hex_str.trim())
+                    .map_err(|e| anyhow::anyhow!("--bucket-id is not valid hex: {e}"))?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("--bucket-id must decode to 32 bytes"))?;
+                Ok(Some(memvault_core::BucketId(arr)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The client and bucket an import writes with. Locally (`--db`, or the
+    /// data dir's store) the bucket is [`resolve_target_bucket`]'s; over
+    /// HTTP it is `--bucket-id`'s, else `None` — the server then writes to
+    /// the caller's agent bucket, from its token.
+    async fn import_target(
+        args: memvault_api::ClientArgs,
+        store: impl FnOnce() -> Result<Arc<MemvaultStore>>,
+    ) -> Result<(Box<dyn MemvaultClient>, Option<memvault_core::BucketId>)> {
+        if args.db.is_some() {
+            let client = create_client(store()?)?;
+            let bucket = resolve_target_bucket(&client).await?;
+            Ok((Box::new(client), Some(bucket)))
+        } else {
+            let bucket = explicit_bucket()?;
+            Ok((args.connect().await?, bucket))
+        }
     }
 
     /// Load (or generate) the swarm libp2p keypair, resolving the seed
@@ -1441,7 +1467,9 @@ mod native {
                 let store = make_store()?;
                 let client = create_client(store)?;
                 let tag_filter = scope.map(|s| (s, "*".to_string()));
-                let docs = client.list_docs(tag_filter, limit, None).await?;
+                // One bucket (standards/bucket-scoping.md), like `put`.
+                let bucket = resolve_target_bucket(&client).await?;
+                let docs = client.list_docs(tag_filter, limit, Some(&bucket)).await?;
                 for doc in docs {
                     let title = doc.title.unwrap_or_else(|| "(untitled)".into());
                     println!("{} -- {}", hex::encode(&doc.cid), title);
@@ -1706,8 +1734,9 @@ mod native {
                     props,
                     edges_out: vec![],
                 };
+                let bucket = resolve_target_bucket(&client).await?;
                 let id = client
-                    .add_entity(entity, Visibility::Internal, None)
+                    .add_entity(entity, Visibility::Internal, Some(&bucket))
                     .await?;
                 println!("{}", hex::encode(id.0));
             }
@@ -1765,15 +1794,17 @@ mod native {
                     trigger,
                     instruction_body: body,
                 };
+                let bucket = resolve_target_bucket(&client).await?;
                 let id = client
-                    .skill_publish(spec, Visibility::Internal, None)
+                    .skill_publish(spec, Visibility::Internal, Some(&bucket))
                     .await?;
                 println!("entity:{}", hex::encode(id.0));
             }
             Commands::Skill(SkillCommands::List { limit }) => {
                 let store = make_store()?;
                 let client = create_client(store)?;
-                let skills = client.skill_list(limit, None).await?;
+                let bucket = resolve_target_bucket(&client).await?;
+                let skills = client.skill_list(limit, Some(&bucket)).await?;
                 for s in skills {
                     println!(
                         "{}  {}{}",
@@ -2173,7 +2204,7 @@ mod native {
                 tag,
                 visibility,
             } => {
-                let client = connect().connect().await?;
+                let (client, bucket) = import_target(connect(), make_store).await?;
                 let tags = memvault_api::docs::parse_tags(&tag);
                 let imported = memvault_import::import_files(
                     &*client,
@@ -2181,6 +2212,7 @@ mod native {
                     vfs.as_deref(),
                     &tags,
                     &visibility,
+                    bucket.as_ref(),
                 )
                 .await?;
                 println!("Imported {imported} file(s).");
@@ -2191,12 +2223,18 @@ mod native {
                 tag,
                 visibility,
             } => {
-                let client = connect().connect().await?;
+                let (client, bucket) = import_target(connect(), make_store).await?;
                 let tags = memvault_api::docs::parse_tags(&tag);
                 let vis = memvault_api::docs::parse_visibility(Some(&visibility));
-                let imported =
-                    memvault_import::import_docs(&*client, &path, vfs.as_deref(), &tags, vis)
-                        .await?;
+                let imported = memvault_import::import_docs(
+                    &*client,
+                    &path,
+                    vfs.as_deref(),
+                    &tags,
+                    vis,
+                    bucket.as_ref(),
+                )
+                .await?;
                 println!("Imported {imported} document(s).");
             }
             Commands::Share(ShareCommands::Inbox) => {

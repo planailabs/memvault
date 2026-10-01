@@ -211,6 +211,54 @@ impl HttpApiClient {
         })
     }
 
+    /// `GET /search` — document hits, in `bucket` or (none named) the
+    /// caller's agent bucket, as `UnifiedHit`s.
+    async fn search_docs(
+        &self,
+        query: &str,
+        limit: usize,
+        bucket: Option<&BucketId>,
+    ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        let mut url = format!(
+            "{}?q={}&limit={limit}",
+            self.url("/search"),
+            urlencoded(query)
+        );
+        if let Some(b) = bucket {
+            url.push_str(&format!("&bucket={}", hex::encode(b.0)));
+        }
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        let hits = resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let doc_hex = v["doc_id"].as_str()?;
+                        Some(memvault_query::UnifiedHit {
+                            node_id: format!("doc:{doc_hex}"),
+                            node_type: "doc".to_string(),
+                            label: String::new(),
+                            score: v["score"].as_f64().unwrap_or(0.0) as f32,
+                            snippet: v["snippet"].as_str().unwrap_or_default().to_string(),
+                            match_contexts: vec![],
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(hits)
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}/api/v1{path}", self.base_url)
     }
@@ -1019,43 +1067,22 @@ impl MemvaultClient for HttpApiClient {
         query: &str,
         limit: usize,
     ) -> Result<Vec<memvault_query::UnifiedHit>> {
-        // The server's /search endpoint is doc-only; surface those hits as
-        // UnifiedHit so this is not a silent empty stub.
-        let url = format!(
-            "{}?q={}&limit={limit}",
-            self.url("/search"),
-            urlencoded(query)
-        );
-        let resp: serde_json::Value = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(map_reqwest)?
-            .error_for_status()
-            .map_err(map_reqwest)?
-            .json()
-            .await
-            .map_err(map_reqwest)?;
-        let hits = resp
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        let doc_hex = v["doc_id"].as_str()?;
-                        Some(memvault_query::UnifiedHit {
-                            node_id: format!("doc:{doc_hex}"),
-                            node_type: "doc".to_string(),
-                            label: String::new(),
-                            score: v["score"].as_f64().unwrap_or(0.0) as f32,
-                            snippet: v["snippet"].as_str().unwrap_or_default().to_string(),
-                            match_contexts: vec![],
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(hits)
+        self.search_docs(query, limit, None).await
+    }
+
+    async fn search_scoped(
+        &self,
+        scope: &memvault_core::QueryScope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<memvault_query::UnifiedHit>> {
+        // The server searches documents only, in one bucket (the named one,
+        // else the caller's agent bucket).
+        if scope.kind.is_some_and(|k| !k.matches("doc")) {
+            return Ok(vec![]);
+        }
+        let bucket = scope.buckets.explicit().and_then(|v| v.first());
+        self.search_docs(query, limit, bucket).await
     }
 
     async fn list_all(
@@ -1191,6 +1218,9 @@ impl MemvaultClient for HttpApiClient {
         }
         if let Some(n) = query.limit {
             params.push(format!("limit={n}"));
+        }
+        if let Some(b) = &query.bucket {
+            params.push(format!("bucket={}", hex::encode(b.0)));
         }
         let url = if params.is_empty() {
             self.url("/audit")

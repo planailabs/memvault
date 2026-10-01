@@ -54,7 +54,7 @@ pub struct SearchParams {
     /// Optional tag filter in "scope:label" format.
     #[serde(default)]
     pub tag_filter: Option<String>,
-    /// Not supported by search yet (an error if given); searches all accessible buckets.
+    /// Optional bucket ID (hex). When omitted, searches the agent's bucket.
     #[serde(default)]
     pub bucket: Option<String>,
 }
@@ -456,7 +456,7 @@ pub struct AuditParams {
     /// Filter by operation kind (e.g. "DocCreate", "EntityCreate", "AttachFile").
     #[serde(default)]
     pub op_kind: Option<String>,
-    /// Optional bucket ID (hex). When omitted, audits across all accessible buckets.
+    /// Optional bucket ID (hex). When omitted, audits the agent's bucket.
     #[serde(default)]
     pub bucket: Option<String>,
 }
@@ -630,7 +630,7 @@ pub struct SkillListParams {
     /// Maximum number of skills to return.
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Optional bucket ID (hex) to scope the listing.
+    /// Optional bucket ID (hex) to scope the listing. When omitted, lists the agent's bucket.
     #[serde(default)]
     pub bucket: Option<String>,
 }

@@ -76,3 +76,8 @@ Do the same elsewhere:
 - **Membership is a lookup, not a set.** "Is this CID in bucket B" is
   `MemvaultStore::bucket_contains(B, wall_ns, cid)` (a point get), never a
   `HashSet` of a bucket's every CID.
+- **Read-filtered REST listings** (`/nodes`, `/entities`, `/skills`,
+  `/search`) go through `fetch_kept` (`memvault-web/src/api/auth.rs`), which
+  asks the source for more until `limit` rows the caller may read pass.
+  A bucketed audit query (`AuditQuery::bucket`) walks the bucket's index
+  newest first the same way.

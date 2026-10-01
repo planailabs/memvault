@@ -28,9 +28,14 @@ pub async fn upload_doc_file(
     Path(id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    if let Ok(doc_id) = super::docs::parse_doc_id(&id) {
-        crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
-    }
+    let doc_id = super::docs::parse_doc_id(&id)?;
+    crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
+    // The file goes where its document is (the agent bucket for a document
+    // that predates buckets).
+    let local = crate::ui::state::local_client()
+        .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
+    let bucket =
+        crate::api::auth::write_bucket(&state, &auth.claims, local.bucket_for_doc(&doc_id)).await?;
     let field = multipart
         .next_field()
         .await
@@ -49,7 +54,14 @@ pub async fn upload_doc_file(
 
     let cid = state
         .client
-        .upload_file(&data, Some(&name), &content_type, vec![], "internal", None)
+        .upload_file(
+            &data,
+            Some(&name),
+            &content_type,
+            vec![],
+            "internal",
+            Some(&bucket),
+        )
         .await?;
 
     Ok((
@@ -105,18 +117,9 @@ pub async fn upload_file(
         .await
         .map_err(|e| ApiError::bad_request(format!("Failed to read file: {e}")))?;
 
-    let bucket_id = query.bucket.as_deref().and_then(|h| {
-        let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut a = [0u8; 32];
-        a.copy_from_slice(&bytes);
-        Some(memvault_core::BucketId(a))
-    });
-    if let Some(bid) = &bucket_id {
-        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
-    }
+    // No bucket named: the caller's agent bucket, like `POST /docs`.
+    let named = crate::api::auth::parse_bucket_param(query.bucket.as_deref())?;
+    let bucket_id = crate::api::auth::write_bucket(&state, &auth.claims, named).await?;
     let (manifest_cid, node_id) = memvault_api::files::upload_file(
         state.client.as_ref(),
         &data,
@@ -125,7 +128,7 @@ pub async fn upload_file(
         vec![],
         "internal",
         query.vfs_path.as_deref(),
-        bucket_id.as_ref(),
+        Some(&bucket_id),
     )
     .await?;
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
@@ -225,12 +228,16 @@ pub async fn extracted_text(
     Ok(Json(serde_json::json!({ "text": text })))
 }
 
-/// GET /api/v1/pins — list pinned files as [{ cid, name }].
+/// GET /api/v1/pins — list pinned files as [{ cid, name }], only those the
+/// caller may read.
 pub async fn list_pinned(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pins = state.client.list_pinned().await?;
+    let pins = crate::api::auth::filter_readable(&auth.claims, pins, |(cid, _)| {
+        format!("file:{}", hex::encode(cid))
+    })?;
     let result: Vec<serde_json::Value> = pins
         .into_iter()
         .map(|(cid, name)| {
