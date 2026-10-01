@@ -8,7 +8,7 @@ fn main() {
                 .serve_dioxus_application(ServeConfig::new(), memvault_web::ui::app::App);
 
             // Attach REST API routes (client is lazily initialized on first use).
-            match memvault_web::ui::state::client() {
+            match memvault_web::ui::state::full_client() {
                 Ok(client) => {
                     use std::sync::Arc;
 

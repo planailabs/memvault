@@ -36,6 +36,9 @@ struct AuthClient {
     inner: reqwest::Client,
     identity: Option<Arc<AgentIdentity>>,
     cached: Mutex<Option<(String, u64)>>,
+    /// A token someone else issued (e.g. the caller of the web UI); sent as
+    /// is, never renewed.
+    fixed: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -51,12 +54,16 @@ impl AuthClient {
             inner: reqwest::Client::builder().build()?,
             identity,
             cached: Mutex::new(None),
+            fixed: None,
         })
     }
 
     /// Get a valid bearer token, regenerating if cached one is near expiry.
     /// `None` if no identity is configured (unauthenticated client).
     fn bearer(&self) -> Option<String> {
+        if let Some(t) = &self.fixed {
+            return Some(t.clone());
+        }
         let id = self.identity.as_ref()?;
         let now = now_secs();
         let mut cache = self.cached.lock().ok()?;
@@ -114,6 +121,15 @@ impl HttpApiClient {
             client: AuthClient::new(identity)?,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
+    }
+
+    /// A client that acts with a token someone else holds (it isn't
+    /// renewed): the daemon's REST API then authorizes every call as that
+    /// token's agent.
+    pub fn with_token(base_url: &str, token: &str) -> std::result::Result<Self, anyhow::Error> {
+        let mut client = AuthClient::new(None)?;
+        client.fixed = Some(token.to_string());
+        Ok(Self { client, base_url: base_url.trim_end_matches('/').to_string() })
     }
 
     fn url(&self, path: &str) -> String {

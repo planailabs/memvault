@@ -12,6 +12,8 @@ pub mod api;
 pub mod components;
 #[cfg(feature = "server")]
 pub mod error;
+#[cfg(feature = "server")]
+pub mod oidc;
 
 #[cfg(feature = "webui")]
 pub mod ui;
@@ -176,7 +178,13 @@ mod server_router {
             .serve_dioxus_application(ServeConfig::new(), super::ui::app::App)
             .layer(origin_layer);
 
-        api.merge(dioxus)
+        let router = api.merge(dioxus);
+        // MEMVAULT_UI_AUTH=oidc: the provider sign-in routes.
+        if super::ui::state::ui_auth() == super::ui::state::UiAuth::Oidc {
+            router.merge(super::oidc::routes())
+        } else {
+            router
+        }
     }
 }
 

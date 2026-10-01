@@ -2694,6 +2694,13 @@ mod native {
                         .map_err(|e| anyhow::anyhow!("init ui agent: {e}"))?;
 
                     memvault_web::ui::state::set_client(std::sync::Arc::clone(&local_client));
+                    // The UI's server functions reach the API as the signed-in agent (jwt, oidc).
+                    memvault_web::ui::state::set_self_url(format!("http://127.0.0.1:{api_port}"));
+                    // Sign-in for the web UI (MEMVAULT_UI_AUTH): OIDC discovers its provider now.
+                    if memvault_web::ui::state::ui_auth() == memvault_web::ui::state::UiAuth::Oidc {
+                        let cfg = memvault_web::oidc::OidcConfig::from_env(&data_dir.join("agents")).map_err(anyhow::Error::msg)?;
+                        memvault_web::oidc::init(cfg).await.map_err(anyhow::Error::msg)?;
+                    }
                     let client_arc =
                         local_client as std::sync::Arc<dyn memvault_api::MemvaultClient>;
 

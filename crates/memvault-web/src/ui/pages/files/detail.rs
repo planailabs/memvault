@@ -166,7 +166,7 @@ async fn get_file_detail(cid: String) -> Result<FileData, ServerFnError> {
     // surface who uploaded the file. Falls back to empty author/agent
     // when the envelope can't be found (legacy data or sync gaps).
     let (uploaded_by_author, uploaded_by_agent) = {
-        let local = crate::ui::state::local_client().ok();
+        let local = crate::ui::state::ui_local_client().ok();
         let mcid_hex = hex::encode(&cid_bytes);
         let mut author_hex = String::new();
         let mut agent_id: Option<String> = None;

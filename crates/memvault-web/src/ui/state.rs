@@ -23,7 +23,83 @@ mod inner {
 
     /// Get the shared client. If not set explicitly (standalone dx serve mode),
     /// lazily opens a local redb database on first call.
+    /// How the web UI signs people in (`MEMVAULT_UI_AUTH`):
+    ///
+    /// - `open` (default): everyone is the daemon's generated `_ui` agent,
+    ///   with its full rights.
+    /// - `jwt`: a proxy in front of memvault puts an agent JWT in the
+    ///   `Authorization` header of every request; the UI signs in with it
+    ///   and acts as that agent.
+    /// - `oidc`: people sign in with an OpenID Connect provider (configured
+    ///   by `MEMVAULT_OIDC_*` variables) and act as the `_ui` agent, or as a
+    ///   local agent their address is mapped to.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum UiAuth {
+        Open,
+        Jwt,
+        Oidc,
+    }
+
+    static UI_AUTH: OnceLock<UiAuth> = OnceLock::new();
+    static SELF_URL: OnceLock<String> = OnceLock::new();
+
+    /// The UI's sign-in mode, from `MEMVAULT_UI_AUTH` (read once).
+    pub fn ui_auth() -> UiAuth {
+        *UI_AUTH.get_or_init(|| match std::env::var("MEMVAULT_UI_AUTH").as_deref().map(str::trim) {
+            Ok("jwt") => UiAuth::Jwt,
+            Ok("oidc") => UiAuth::Oidc,
+            Ok("open") | Ok("") | Err(_) => UiAuth::Open,
+            Ok(other) => panic!("MEMVAULT_UI_AUTH={other:?}: use open, jwt or oidc"),
+        })
+    }
+
+    /// Sets the mode explicitly (tests, embedders); the first call wins.
+    pub fn set_ui_auth(mode: UiAuth) {
+        let _ = UI_AUTH.set(mode);
+    }
+
+    /// The daemon's own API (`http://127.0.0.1:<port>`): in `jwt` and
+    /// `oidc` modes the UI's server functions go through it as the signed-in
+    /// agent, so they get exactly that agent's rights.
+    pub fn set_self_url(url: String) {
+        let _ = SELF_URL.set(url);
+    }
+
+    /// The agent JWT of the request being served: the proxy's
+    /// `Authorization` header, else the UI's session cookie.
+    pub fn request_token() -> Option<String> {
+        let ctx = dioxus::fullstack::FullstackContext::current()?;
+        let parts = ctx.parts_mut();
+        if let Some(t) = parts.headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) {
+            return Some(t.to_string());
+        }
+        let cookies = parts.headers.get("cookie")?.to_str().ok()?;
+        cookies.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == "memvault_session").map(|(_, v)| v.to_string())
+    }
+
+    /// The client the UI works with: in `open` mode the daemon's own (full
+    /// rights); otherwise the daemon's REST API as the signed-in agent.
     pub fn client() -> Result<Arc<dyn MemvaultClient>, dioxus::prelude::ServerFnError> {
+        if ui_auth() == UiAuth::Open {
+            return full_client();
+        }
+        let token = request_token().ok_or_else(|| dioxus::prelude::ServerFnError::new("not signed in"))?;
+        let url = SELF_URL.get().ok_or_else(|| dioxus::prelude::ServerFnError::new("the daemon's own URL isn't set"))?;
+        let c = memvault_api::HttpApiClient::with_token(url, &token).map_err(|e| dioxus::prelude::ServerFnError::new(e.to_string()))?;
+        Ok(Arc::new(c))
+    }
+
+    /// The daemon's local client for UI pages that need its own rights
+    /// (trust, bucket administration): only in `open` mode.
+    pub fn ui_local_client() -> Result<Arc<memvault_api::LocalClient>, dioxus::prelude::ServerFnError> {
+        if ui_auth() != UiAuth::Open {
+            return Err(dioxus::prelude::ServerFnError::new("this page needs the daemon's own rights; it's only available with MEMVAULT_UI_AUTH=open"));
+        }
+        local_client()
+    }
+
+    /// The daemon's own client (full rights).
+    pub fn full_client() -> Result<Arc<dyn MemvaultClient>, dioxus::prelude::ServerFnError> {
         if let Some(c) = CLIENT.get() {
             return Ok(c.clone());
         }
@@ -48,7 +124,7 @@ mod inner {
     pub fn local_client() -> Result<Arc<memvault_api::LocalClient>, dioxus::prelude::ServerFnError>
     {
         // Ensure lazy init happened
-        let _ = client()?;
+        let _ = full_client()?;
         LOCAL_CLIENT
             .get()
             .cloned()

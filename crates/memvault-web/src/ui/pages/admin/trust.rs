@@ -79,7 +79,7 @@ struct OrphanAgentRow {
 async fn get_trust_tree() -> Result<TrustTree, ServerFnError> {
     use memvault_auth::jwt::NodeTrust;
 
-    let client = crate::ui::state::local_client()?;
+    let client = crate::ui::state::ui_local_client()?;
     let state = client
         .trust_state()
         .ok_or_else(|| ServerFnError::new("trust state not bootstrapped"))?;
@@ -230,7 +230,7 @@ async fn rename_agent(pubkey: String, label: String) -> Result<(), ServerFnError
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| ServerFnError::new("agent pubkey must be 32 bytes"))?;
-    let client = crate::ui::state::local_client()?;
+    let client = crate::ui::state::ui_local_client()?;
     client
         .agent_rename(&arr, label.trim())
         .await

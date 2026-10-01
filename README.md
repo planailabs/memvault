@@ -329,6 +329,21 @@ The web UI is served by the daemon on port 8401 (by default) and provides:
 
 Global search (`Ctrl+K` or the search button) searches across all node types -- document bodies, entity properties, filenames.
 
+### Signing in to the web UI
+
+`MEMVAULT_UI_AUTH` picks how people sign in:
+
+- `open` (default): everyone is the daemon's generated `_ui` agent, with its full rights. Keep the port local.
+- `jwt`: a proxy in front of memvault sends an agent JWT in the `Authorization` header of every request; the UI signs in with it and acts as that agent. Its pages go through the REST API with that token, so they show and change only what the agent may (its bucket, its scopes). Pages that need the daemon's own rights (trust, bucket administration) are unavailable.
+- `oidc`: sign-in with an OpenID Connect provider:
+  - `MEMVAULT_OIDC_ISSUER`, `MEMVAULT_OIDC_CLIENT_ID`, `MEMVAULT_OIDC_CLIENT_SECRET`;
+  - `MEMVAULT_OIDC_REDIRECT_URL`: `<the UI's URL>/auth/oidc/callback`;
+  - `MEMVAULT_OIDC_SCOPES` (optional): the scopes to ask for, besides `openid` (default `email profile`);
+  - `MEMVAULT_OIDC_ALLOWED` (optional): addresses and `@domain`s that may sign in (default: anyone the provider signs in);
+  - `MEMVAULT_OIDC_AGENTS` (optional): `address=agent` pairs; a mapped address acts as that local agent (an identity directory: a path, or a name under `MEMVAULT_OIDC_AGENTS_DIR`, default `<data dir>/agents`), everyone else as `_ui`.
+
+  Sign-in is at `/auth/oidc/login`, sign-out at `/auth/oidc/logout`.
+
 ## Node references
 
 Cross-type linking uses a unified `NodeRef` format:

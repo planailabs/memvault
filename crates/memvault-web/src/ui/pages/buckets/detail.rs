@@ -100,7 +100,7 @@ async fn list_bucket_merge_sources(id: String) -> Result<Vec<String>, ServerFnEr
     let bucket_arr: [u8; 32] = bucket_bytes
         .try_into()
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
-    let local = crate::ui::state::local_client()?;
+    let local = crate::ui::state::ui_local_client()?;
     Ok(local
         .bucket_merge_members(&bucket_arr)
         .into_iter()
@@ -194,7 +194,7 @@ async fn list_grants(id: String) -> Result<Vec<GrantRow>, ServerFnError> {
         .map_err(|_| ServerFnError::new("bucket id must be 32 bytes".to_string()))?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
 
-    let local = crate::ui::state::local_client()?;
+    let local = crate::ui::state::ui_local_client()?;
 
     let grants = local
         .list_bucket_grants(&bucket_id)
@@ -304,7 +304,7 @@ async fn create_grant(
         ));
     }
 
-    let local = crate::ui::state::local_client()?;
+    let local = crate::ui::state::ui_local_client()?;
 
     local
         .issue_bucket_grant(&bucket_id, audience, actions, ttl_hours * 3600)

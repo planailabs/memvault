@@ -119,6 +119,18 @@ async fn fetch_session() -> Result<SessionInfo, String> {
         .map_err(|e| format!("expected Response: {e:?}"))?;
 
     if !resp.ok() {
+        // MEMVAULT_UI_AUTH=oidc: not signed in yet; the answer says where to.
+        if resp.status() == 401 {
+            if let Ok(p) = resp.json() {
+                if let Ok(body) = JsFuture::from(p).await {
+                    let login = js_sys::Reflect::get(&body, &"login".into()).ok().and_then(|v| v.as_string());
+                    if let Some(login) = login {
+                        let _ = window.location().set_href(&login);
+                        return Err("signing in".into());
+                    }
+                }
+            }
+        }
         return Err(format!("session endpoint returned {}", resp.status()));
     }
 
