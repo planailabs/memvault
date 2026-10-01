@@ -476,6 +476,20 @@ pub fn enforce_bucket_action(
         .map_err(|e| crate::error::ApiError::bad_request(format!("claims.sub hex: {e}")))?;
     memvault_api::acl::check_bucket_access(&client, &pubkey, bucket_id, action).map_err(|e| match e
     {
+        // A bucket the caller may not read doesn't exist for it: 404, and
+        // nothing about whose it is (standards/client-parity.md).
+        memvault_api::ApiError::Forbidden(_)
+            if action == memvault_auth::Action::Read
+                || memvault_api::acl::check_bucket_access(
+                    &client,
+                    &pubkey,
+                    bucket_id,
+                    memvault_auth::Action::Read,
+                )
+                .is_err() =>
+        {
+            crate::error::ApiError::not_found("not found")
+        }
         memvault_api::ApiError::Forbidden(msg) => crate::error::ApiError {
             status: axum::http::StatusCode::FORBIDDEN,
             message: msg,
@@ -547,15 +561,61 @@ pub fn enforce_node_action(
     enforce_bucket_action(claims, &bid, action)
 }
 
+/// Read decisions for one caller, cached per bucket for the life of the
+/// value (one request, or one SSE connection): a hit list with 100 docs in 3
+/// buckets runs 3 grant scans.
+pub struct Readable {
+    client: Arc<memvault_api::LocalClient>,
+    pubkey: Vec<u8>,
+    cache: std::collections::HashMap<[u8; 32], bool>,
+}
+
+impl Readable {
+    pub fn new(claims: &AgentTokenClaims) -> Result<Self, crate::error::ApiError> {
+        let client = crate::ui::state::local_client().map_err(|e| {
+            crate::error::ApiError::internal(format!("local client unavailable: {e}"))
+        })?;
+        let pubkey = hex::decode(&claims.sub)
+            .map_err(|e| crate::error::ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+        Ok(Self {
+            client,
+            pubkey,
+            cache: Default::default(),
+        })
+    }
+
+    /// Whether the caller may read `bucket`.
+    pub fn bucket(&mut self, bucket: &memvault_core::BucketId) -> bool {
+        let (client, pubkey) = (&self.client, &self.pubkey);
+        *self.cache.entry(bucket.0).or_insert_with(|| {
+            memvault_api::acl::check_bucket_access(
+                client,
+                pubkey,
+                bucket,
+                memvault_auth::Action::Read,
+            )
+            .is_ok()
+        })
+    }
+
+    /// Whether the caller may read the node (`doc:<hex>`, `entity:<hex>`,
+    /// `file:<hex>`, …). Nodes that map to no bucket (legacy / pre-bucket /
+    /// unknown id format) pass, as the by-id reads let them.
+    pub fn node(&mut self, node_id: &str) -> bool {
+        match self.client.bucket_for_node_id(node_id) {
+            Some(b) => self.bucket(&b),
+            None => true,
+        }
+    }
+}
+
 /// Drop items the caller cannot Read. Result-listing endpoints
 /// (`search`, `list_nodes`, `view_members`) call this to filter out
 /// hits from buckets the caller has no Read grant on.
 ///
 /// `key` extracts the node id string from each item; items that don't
 /// map to a bucket (legacy / pre-bucket / unknown id format) pass
-/// through. Per-bucket decisions are cached for the duration of the
-/// call so a hit list with 100 docs in 3 buckets only runs 3 grant
-/// scans.
+/// through.
 pub fn filter_readable<T, F>(
     claims: &AgentTokenClaims,
     items: Vec<T>,
@@ -564,34 +624,102 @@ pub fn filter_readable<T, F>(
 where
     F: Fn(&T) -> String,
 {
-    use std::collections::HashMap;
-    let client = crate::ui::state::local_client()
-        .map_err(|e| crate::error::ApiError::internal(format!("local client unavailable: {e}")))?;
+    let mut readable = Readable::new(claims)?;
+    Ok(items
+        .into_iter()
+        .filter(|item| readable.node(&key(item)))
+        .collect())
+}
+
+/// Up to `limit` rows that pass `keep` (standards/exhaustive-lookups.md,
+/// "Filters before limits"). `fetch(n)` returns the first `n` rows of the
+/// source; when `keep` drops some, the source is asked again for more until
+/// `limit` rows are kept or it runs dry. A plain `fetch(limit)` then filter
+/// returned fewer rows than asked for, or none, once rows the caller may
+/// not read outnumbered the rest.
+pub async fn fetch_kept<T, F, Fut, K>(
+    limit: usize,
+    mut fetch: F,
+    mut keep: K,
+) -> Result<Vec<T>, crate::error::ApiError>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<T>, crate::error::ApiError>>,
+    K: FnMut(&T) -> bool,
+{
+    let mut n = limit.max(1);
+    loop {
+        let rows = fetch(n).await?;
+        let dry = rows.len() < n;
+        let kept: Vec<T> = rows.into_iter().filter(|r| keep(r)).take(limit).collect();
+        if kept.len() >= limit || dry || n == usize::MAX {
+            return Ok(kept);
+        }
+        n = n.saturating_mul(4);
+    }
+}
+
+/// Parse an optional `bucket=<hex>` request parameter. A malformed value is
+/// a 400: it used to become "no bucket", which widened a read to every
+/// bucket or sent a write somewhere the caller didn't name.
+pub fn parse_bucket_param(
+    hex: Option<&str>,
+) -> Result<Option<memvault_core::BucketId>, crate::error::ApiError> {
+    match hex.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(h) => memvault_core::BucketId::from_hex(h)
+            .map(Some)
+            .map_err(|_| crate::error::ApiError::bad_request("invalid bucket hex")),
+    }
+}
+
+/// The caller's own agent bucket, created on first use.
+pub async fn agent_bucket(
+    state: &Arc<AppState>,
+    claims: &AgentTokenClaims,
+) -> Result<memvault_core::BucketId, crate::error::ApiError> {
     let pubkey = hex::decode(&claims.sub)
         .map_err(|e| crate::error::ApiError::bad_request(format!("claims.sub hex: {e}")))?;
+    state
+        .client
+        .ensure_agent_bucket(&pubkey, &claims.iss)
+        .await
+        .map_err(|e| crate::error::ApiError::internal(format!("agent bucket: {e}")))
+}
 
-    let mut cache: HashMap<[u8; 32], bool> = HashMap::new();
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        let node_id = key(&item);
-        let Some(bid) = client.bucket_for_node_id(&node_id) else {
-            out.push(item);
-            continue;
-        };
-        let allowed = *cache.entry(bid.0).or_insert_with(|| {
-            memvault_api::acl::check_bucket_access(
-                &client,
-                &pubkey,
-                &bid,
-                memvault_auth::Action::Read,
-            )
-            .is_ok()
-        });
-        if allowed {
-            out.push(item);
+/// The bucket a write lands in (standards/bucket-scoping.md): the named one,
+/// which the caller must be able to write, else the caller's agent bucket.
+pub async fn write_bucket(
+    state: &Arc<AppState>,
+    claims: &AgentTokenClaims,
+    named: Option<memvault_core::BucketId>,
+) -> Result<memvault_core::BucketId, crate::error::ApiError> {
+    match named {
+        Some(b) => {
+            enforce_bucket_action(claims, &b, memvault_auth::Action::Write)?;
+            Ok(b)
         }
+        None => agent_bucket(state, claims).await,
     }
-    Ok(out)
+}
+
+/// The bucket a content read is scoped to (standards/bucket-scoping.md): the
+/// named one, which the caller must be able to read, else the caller's agent
+/// bucket — never every bucket. Admins, who have no agent bucket, get `None`:
+/// the cross-bucket listing, their aggregation.
+pub async fn read_bucket(
+    state: &Arc<AppState>,
+    claims: &AgentTokenClaims,
+    named: Option<memvault_core::BucketId>,
+) -> Result<Option<memvault_core::BucketId>, crate::error::ApiError> {
+    match named {
+        Some(b) => {
+            enforce_bucket_action(claims, &b, memvault_auth::Action::Read)?;
+            Ok(Some(b))
+        }
+        None if caller_role(state, claims) == Some(memvault_auth::AgentRole::Admin) => Ok(None),
+        None => agent_bucket(state, claims).await.map(Some),
+    }
 }
 
 /// Strip the trailing slash from a configured allowed origin. Browsers

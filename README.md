@@ -149,7 +149,7 @@ memvault-mcp enroll --server http://127.0.0.1:8401 --token mvjoin1:... --agent-i
 memvault-mcp --url http://127.0.0.1:8401 --identity-dir <data-dir>/agents/claude
 ```
 
-Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent makes without an explicit bucket lands in its own agent bucket, derived from its ed25519 pubkey.
+Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent makes without an explicit bucket lands in its own agent bucket, derived from its ed25519 pubkey, and every content read without one (list, search, entities, skills, audit) reads that bucket only. Over the REST API, a bucket the caller may not read answers 404, a malformed `bucket=` 400, and admins (who have no agent bucket) list across buckets.
 
 ### MCP tools (62)
 

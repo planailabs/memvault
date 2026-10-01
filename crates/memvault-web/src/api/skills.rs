@@ -57,12 +57,6 @@ pub struct LinkResourceRequest {
     pub visibility: Option<String>,
 }
 
-fn parse_bucket(hex_str: Option<&str>) -> Option<memvault_core::BucketId> {
-    let bytes = hex::decode(hex_str?).ok()?;
-    let arr: [u8; 32] = bytes.try_into().ok()?;
-    Some(memvault_core::BucketId(arr))
-}
-
 fn parse_skill_id(input: &str) -> Result<EntityId, ApiError> {
     EntityId::from_hex(input)
         .map_err(|_| ApiError::bad_request("Invalid skill ID — expected hex or entity:<hex>"))
@@ -75,13 +69,12 @@ pub async fn publish_skill(
     Json(req): Json<PublishSkillRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
-    let bucket = parse_bucket(req.bucket.as_deref());
-    if let Some(bid) = &bucket {
-        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Write)?;
-    }
+    // No bucket named: the caller's agent bucket, like `POST /docs`.
+    let named = crate::api::auth::parse_bucket_param(req.bucket.as_deref())?;
+    let bucket = crate::api::auth::write_bucket(&state, &auth.claims, named).await?;
     let id = state
         .client
-        .skill_publish(req.spec, vis, bucket.as_ref())
+        .skill_publish(req.spec, vis, Some(&bucket))
         .await?;
     let node_id = format!("entity:{}", hex::encode(id.0));
     Ok((
@@ -97,11 +90,20 @@ pub async fn list_skills(
     Query(params): Query<ListSkillsQuery>,
 ) -> Result<Json<Vec<SkillInfo>>, ApiError> {
     let limit = params.limit.unwrap_or(500);
-    let bucket = parse_bucket(params.bucket.as_deref());
-    let skills = state.client.skill_list(limit, bucket.as_ref()).await?;
-    let skills = crate::api::auth::filter_readable(&auth.claims, skills, |s| {
-        format!("entity:{}", hex::encode(s.id.0))
-    })?;
+    // No bucket named: the caller's agent bucket (admins: every bucket),
+    // read-filtered before the limit.
+    let named = crate::api::auth::parse_bucket_param(params.bucket.as_deref())?;
+    let bucket = crate::api::auth::read_bucket(&state, &auth.claims, named).await?;
+    let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
+    let skills = crate::api::auth::fetch_kept(
+        limit,
+        |n| {
+            let (state, bucket) = (&state, bucket.as_ref());
+            async move { Ok(state.client.skill_list(n, bucket).await?) }
+        },
+        |s: &SkillInfo| readable.node(&format!("entity:{}", hex::encode(s.id.0))),
+    )
+    .await?;
     Ok(Json(skills))
 }
 
@@ -159,6 +161,8 @@ pub async fn link_resource(
     crate::api::auth::enforce_entity_action(&auth.claims, &skill_id, memvault_auth::Action::Write)?;
     let target = NodeRef::from_tag_label(&req.node)
         .ok_or_else(|| ApiError::bad_request("Invalid node: expected 'type:hex'"))?;
+    // The resource is read through the skill: the caller must be able to.
+    crate::api::auth::enforce_node_action(&auth.claims, &req.node, memvault_auth::Action::Read)?;
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
     let edge_id = state
         .client

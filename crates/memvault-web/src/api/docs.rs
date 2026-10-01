@@ -74,41 +74,12 @@ pub async fn list_docs(
     };
     let limit = params.limit.unwrap_or(100);
 
-    let bucket_id = params.bucket.as_deref().and_then(|h| {
-        let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(memvault_core::BucketId(arr))
-    });
-
-    if let Some(bid) = &bucket_id {
-        crate::api::auth::enforce_bucket_action(&auth.claims, bid, memvault_auth::Action::Read)?;
-    }
-
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
     // No bucket named: the caller's agent bucket, like writes
-    // (standards/bucket-scoping.md) — never every bucket. Admins, who have
-    // no agent bucket, keep the cross-bucket listing (an aggregation).
-    let admin = crate::api::auth::caller_role(&state, &auth.claims)
-        == Some(memvault_auth::AgentRole::Admin);
-    let bucket_id = match bucket_id {
-        Some(b) => Some(b),
-        None if admin => None,
-        None => {
-            let pubkey = hex::decode(&auth.claims.sub)
-                .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
-            Some(
-                state
-                    .client
-                    .ensure_agent_bucket(&pubkey, &auth.claims.iss)
-                    .await
-                    .map_err(|e| ApiError::internal(format!("agent bucket: {e}")))?,
-            )
-        }
-    };
+    // (standards/bucket-scoping.md) — never every bucket. Admins keep the
+    // cross-bucket listing (an aggregation).
+    let named = crate::api::auth::parse_bucket_param(params.bucket.as_deref())?;
+    let bucket_id = crate::api::auth::read_bucket(&state, &auth.claims, named).await?;
     let docs = state
         .client
         .list_docs_ex(tag_filter, limit, bucket_id.as_ref(), include_retracted)
@@ -127,46 +98,19 @@ pub async fn create_doc(
 ) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
     let vis = parse_visibility_str(req.visibility.as_deref());
 
-    let bucket_id = match req.bucket.as_deref().and_then(|h| {
-        let bytes = hex::decode(h).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(memvault_core::BucketId(arr))
-    }) {
-        Some(bid) => {
-            crate::api::auth::enforce_bucket_action(
-                &auth.claims,
-                &bid,
-                memvault_auth::Action::Write,
-            )?;
-            bid
-        }
-        None => {
-            // Auto-resolve to the caller's agent bucket — mirrors what
-            // memctl's local `put` path does via `resolve_target_bucket`.
-            // The HTTP write path used to 500 with "bucket required" here;
-            // matching the CLI behaviour means well-behaved clients like
-            // `memctl import-docs` (which doesn't thread bucket from the
-            // CLI) "just work".
-            let pubkey_bytes = hex::decode(&auth.claims.sub)
-                .map_err(|e| ApiError::bad_request(format!("claims.sub hex: {e}")))?;
-            state
-                .client
-                .ensure_agent_bucket(&pubkey_bytes, &auth.claims.iss)
-                .await
-                .map_err(|e| ApiError::internal(format!("ensure agent bucket: {e}")))?
-        }
-    };
+    // No bucket named: the caller's agent bucket — what memctl's local
+    // `put` does via `resolve_target_bucket`.
+    let named = crate::api::auth::parse_bucket_param(req.bucket.as_deref())?;
+    let bucket_id = crate::api::auth::write_bucket(&state, &auth.claims, named).await?;
 
     let doc_id = match req.id.as_deref() {
         Some(h) => {
             let id = parse_doc_id(h)?;
             // A client-chosen id must be new: it can't overwrite a document.
+            // The answer is the same whoever's document holds it (it named
+            // the id, telling the caller what other buckets hold).
             if state.client.get_doc(&id).await?.is_some() {
-                return Err(ApiError::conflict(format!("document {h} already exists")));
+                return Err(ApiError::conflict("document id unavailable"));
             }
             id
         }

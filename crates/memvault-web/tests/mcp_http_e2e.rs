@@ -30,6 +30,8 @@ const AGENT_ID: &str = "test-agent";
 struct TestServer {
     base_url: String,
     identity: Arc<AgentIdentity>,
+    /// The bus `/api/v1/events` streams from.
+    event_bus: Arc<EventBus>,
 }
 
 static SERVER: OnceCell<TestServer> = OnceCell::const_new();
@@ -114,9 +116,10 @@ async fn server() -> &'static TestServer {
             .expect("sign_agent_attestation");
             let lookup_att = agent_att.clone();
 
+            let event_bus = Arc::new(EventBus::new(64));
             let state = Arc::new(AppState {
                 client: Arc::clone(&client) as Arc<dyn MemvaultClient>,
-                event_bus: Arc::new(EventBus::new(16)),
+                event_bus: Arc::clone(&event_bus),
                 admin_pubkey: Some(admin.verifying_key()),
                 node_trust: Arc::new(std::sync::RwLock::new(trust)),
                 revoked_agents: Arc::new(std::sync::RwLock::new(HashSet::new())),
@@ -152,6 +155,7 @@ async fn server() -> &'static TestServer {
             TestServer {
                 base_url: format!("http://{addr}"),
                 identity: Arc::new(identity),
+                event_bus,
             }
         })
         .await
@@ -1015,4 +1019,491 @@ async fn docs_of_others_are_not_listed() {
         !titles.iter().any(|t| t == "theirs, hidden"),
         "another agent's document isn't listed"
     );
+}
+
+// ── Access and bucket scoping over HTTP ──────────────────────────────
+
+/// A bucket another agent owns, made directly on the daemon.
+async fn others_bucket(name: &str, seed: u8) -> BucketId {
+    let local = memvault_web::ui::state::local_client().unwrap();
+    local
+        .bucket_create_as(
+            AgentName(name.into()),
+            Some([seed; 32]),
+            name,
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_core::BucketRole::Standard,
+        )
+        .await
+        .unwrap()
+}
+
+fn entity(kind: &str) -> Entity {
+    Entity {
+        id: memvault_core::EntityId::random(),
+        kind: kind.to_string(),
+        props: Default::default(),
+        edges_out: vec![],
+    }
+}
+
+fn titled(title: &str, body: &str) -> memvault_doc::Document {
+    let mut fm = std::collections::BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!(title));
+    memvault_doc::Document {
+        id: memvault_core::DocId::random(),
+        frontmatter: fm,
+        body: body.into(),
+    }
+}
+
+/// Store a titled document in `bucket`; its id.
+async fn put(
+    c: &dyn MemvaultClient,
+    title: &str,
+    body: &str,
+    bucket: &BucketId,
+) -> memvault_core::DocId {
+    let d = titled(title, body);
+    let id = d.id.clone();
+    c.put_doc(d, vec![], Visibility::Internal, Some(bucket))
+        .await
+        .unwrap();
+    id
+}
+
+fn edge(relation: &str, target: NodeRef) -> memvault_doc::Edge {
+    memvault_doc::Edge {
+        id: memvault_core::EdgeId::random(),
+        relation: relation.to_string(),
+        target,
+        weight: None,
+        props: Default::default(),
+        provenance: None,
+    }
+}
+
+fn skill(name: &str) -> memvault_api::SkillSpec {
+    memvault_api::SkillSpec {
+        name: name.to_string(),
+        description: None,
+        trigger: None,
+        instruction_body: None,
+    }
+}
+
+/// A raw request with the test agent's token, for status codes and routes
+/// `HttpApiClient` doesn't expose.
+async fn raw(method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    let s = server().await;
+    let token = s.identity.issue_jwt("read write admin", 3600).unwrap();
+    reqwest::Client::new()
+        .request(method, format!("{}/api/v1{path}", s.base_url))
+        .bearer_auth(token)
+}
+
+#[tokio::test]
+async fn writes_without_a_bucket_land_in_the_agent_bucket() {
+    let (client, own) = client_and_bucket().await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let file = client
+        .upload_file(
+            b"no bucket named",
+            Some("nb.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            None,
+        )
+        .await
+        .expect("an upload without a bucket goes to the agent bucket");
+    assert_eq!(local.bucket_for_file(&file), Some(own.clone()));
+
+    let e = client
+        .add_entity(entity("note"), Visibility::Internal, None)
+        .await
+        .expect("an entity without a bucket goes to the agent bucket");
+    assert_eq!(local.bucket_for_entity(&e), Some(own.clone()));
+
+    let s = client
+        .skill_publish(skill("no-bucket-skill"), Visibility::Internal, None)
+        .await
+        .expect("a skill without a bucket goes to the agent bucket");
+    assert_eq!(local.bucket_for_entity(&s), Some(own.clone()));
+
+    // An entity's vfs_path is honoured without a bucket too (it was dropped).
+    let path = format!("/nb-entities/e-{}", std::process::id());
+    let resp = raw(reqwest::Method::POST, "/entities")
+        .await
+        .json(&serde_json::json!({ "kind": "note", "vfs_path": path }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let at = client.vfs_resolve(&own, &path).await.unwrap();
+    assert_eq!(at.map(|(n, _)| n.tag_label()), Some(id));
+}
+
+#[tokio::test]
+async fn entity_and_skill_listings_default_to_the_agent_bucket() {
+    let (client, own) = client_and_bucket().await;
+    let elsewhere = fresh_bucket(&client, "listing-elsewhere").await;
+    let home = client
+        .add_entity(entity("home"), Visibility::Internal, Some(&own))
+        .await
+        .unwrap();
+    let away = client
+        .add_entity(entity("away"), Visibility::Internal, Some(&elsewhere))
+        .await
+        .unwrap();
+    let ids: Vec<_> = client
+        .list_entities(usize::MAX, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(ids.contains(&home), "the agent bucket's entity is listed");
+    assert!(!ids.contains(&away), "another bucket's isn't, unless named");
+    let named: Vec<_> = client
+        .list_entities(usize::MAX, Some(&elsewhere))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(named.contains(&away));
+
+    let home = client
+        .skill_publish(skill("home-skill"), Visibility::Internal, Some(&own))
+        .await
+        .unwrap();
+    let away = client
+        .skill_publish(skill("away-skill"), Visibility::Internal, Some(&elsewhere))
+        .await
+        .unwrap();
+    let ids: Vec<_> = client
+        .skill_list(usize::MAX, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(ids.contains(&home), "the agent bucket's skill is listed");
+    assert!(!ids.contains(&away), "another bucket's isn't, unless named");
+}
+
+#[tokio::test]
+async fn traversal_and_links_skip_what_the_caller_cannot_read() {
+    let (client, own) = client_and_bucket().await;
+    let theirs = others_bucket("graph-other", 11).await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let a = NodeRef::Entity(
+        client
+            .add_entity(entity("a"), Visibility::Internal, Some(&own))
+            .await
+            .unwrap(),
+    );
+    let c = NodeRef::Entity(
+        client
+            .add_entity(entity("c"), Visibility::Internal, Some(&own))
+            .await
+            .unwrap(),
+    );
+    let t = NodeRef::Entity(
+        local
+            .add_entity(entity("t"), Visibility::Internal, Some(&theirs))
+            .await
+            .unwrap(),
+    );
+    // a → t → c, and t → a (incoming to a from an unreadable node).
+    local
+        .add_link(&a, edge("to", t.clone()), Visibility::Internal)
+        .await
+        .unwrap();
+    local
+        .add_link(&t, edge("to", c.clone()), Visibility::Internal)
+        .await
+        .unwrap();
+    local
+        .add_link(&t, edge("back", a.clone()), Visibility::Internal)
+        .await
+        .unwrap();
+
+    let reached: Vec<NodeRef> = client
+        .traverse_from(&a, None, 3)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.node)
+        .collect();
+    assert!(!reached.contains(&t), "an unreadable node isn't returned");
+    assert!(!reached.contains(&c), "nor walked through");
+
+    let touching = client.edges_of(&a).await.unwrap();
+    assert!(
+        touching.iter().all(|(src, e)| *src != t && e.target != t),
+        "edges to or from an unreadable node aren't listed: {touching:?}"
+    );
+}
+
+#[tokio::test]
+async fn pins_of_others_are_not_listed() {
+    let (client, own) = client_and_bucket().await;
+    let theirs = others_bucket("pins-other", 12).await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let other = local
+        .upload_file(
+            b"their pin",
+            Some("their-pin.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&theirs),
+        )
+        .await
+        .unwrap();
+    local.pin_file(&other).await.unwrap();
+    let mine = client
+        .upload_file(
+            b"my pin",
+            Some("my-pin.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&own),
+        )
+        .await
+        .unwrap();
+    client.pin_file(&mine).await.unwrap();
+    let pinned: Vec<Vec<u8>> = client
+        .list_pinned()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(cid, _)| cid)
+        .collect();
+    assert!(!pinned.contains(&other), "{pinned:?}");
+}
+
+#[tokio::test]
+async fn events_of_others_are_not_streamed() {
+    let (client, own) = client_and_bucket().await;
+    let theirs = others_bucket("events-other", 13).await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let their_doc = put(&*local, "theirs", "x", &theirs).await;
+    let my_doc = put(&client, "mine", "x", &own).await;
+    let mut resp = raw(reqwest::Method::GET, "/events")
+        .await
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let bus = &server().await.event_bus;
+    bus.publish(memvault_api::MemvaultEvent::DocCreated {
+        doc_id: their_doc.clone(),
+        cid: vec![1],
+    });
+    bus.publish(memvault_api::MemvaultEvent::DocCreated {
+        doc_id: my_doc.clone(),
+        cid: vec![2],
+    });
+    let mut seen = String::new();
+    let mine = hex::encode(my_doc.0);
+    while !seen.contains(&mine) {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+            .await
+            .expect("the caller's own event arrives")
+            .unwrap()
+            .expect("stream open");
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(
+        !seen.contains(&hex::encode(their_doc.0)),
+        "another agent's event isn't streamed: {seen}"
+    );
+}
+
+#[tokio::test]
+async fn buckets_of_others_cannot_be_inspected_or_changed() {
+    let (client, _own) = client_and_bucket().await;
+    let theirs = others_bucket("admin-other", 14).await;
+    let canon = others_bucket("admin-other-canon", 15).await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    local.bucket_merge(&[theirs.clone()], &canon).await.unwrap();
+
+    assert!(
+        client.bucket_grants_list(&theirs).await.is_err(),
+        "another agent's grants aren't listed"
+    );
+    let resp = raw(
+        reqwest::Method::GET,
+        &format!("/buckets/{}/grants", hex::encode(theirs.0)),
+    )
+    .await
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
+    let merges = client.bucket_merges().await.unwrap();
+    assert!(
+        !merges.iter().any(|(s, c)| *s == theirs || *c == canon),
+        "another agent's merges aren't listed: {merges:?}"
+    );
+
+    assert!(client.bucket_rename(&theirs, "pwned").await.is_err());
+    let name = local.bucket_get(&theirs).await.unwrap().unwrap().name;
+    assert_ne!(name, "pwned", "another agent's bucket keeps its name");
+    let resp = raw(
+        reqwest::Method::POST,
+        &format!("/buckets/{}/attach", hex::encode(theirs.0)),
+    )
+    .await
+    .send()
+    .await
+    .unwrap();
+    assert!(!resp.status().is_success(), "attach: {}", resp.status());
+
+    // Its own buckets it may still rename.
+    let mine = fresh_bucket(&client, "rename-me").await;
+    client.bucket_rename(&mine, "renamed").await.unwrap();
+}
+
+#[tokio::test]
+async fn limits_count_only_what_the_caller_may_read() {
+    let (client, own) = client_and_bucket().await;
+    let theirs = others_bucket("limit-other", 16).await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let word = format!("qzlimit{}", std::process::id());
+    let mine = put(&client, "mine", &word, &own).await;
+    // Newer and more relevant documents the caller may not read.
+    for i in 0..5 {
+        put(
+            &*local,
+            &format!("theirs {i}"),
+            &format!("{word} {word} {word} {word}"),
+            &theirs,
+        )
+        .await;
+        local
+            .add_entity(entity("theirs"), Visibility::Internal, Some(&theirs))
+            .await
+            .unwrap();
+    }
+    let mut hits = vec![];
+    for _ in 0..50 {
+        hits = client.search(&word, 1).await.unwrap();
+        if !hits.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        hits.iter().map(|h| h.doc_id.clone()).collect::<Vec<_>>(),
+        vec![mine],
+        "a readable hit fills the limit"
+    );
+    assert_eq!(client.list_all(None, 1, None).await.unwrap().len(), 1);
+    assert_eq!(client.list_entities(1, None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unreadable_documents_answer_404() {
+    let (client, own) = client_and_bucket().await;
+    let theirs = others_bucket("doc404-other", 17).await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let doc = put(&*local, "hidden", "x", &theirs).await;
+    let resp = raw(
+        reqwest::Method::GET,
+        &format!("/docs/{}", hex::encode(doc.0)),
+    )
+    .await
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(&hex::encode(theirs.0)), "{body}");
+
+    // A client-chosen id taken elsewhere is refused without saying so.
+    let mine = put(&client, "taken", "x", &own).await;
+    let mut messages = vec![];
+    for id in [&doc, &mine] {
+        let resp = raw(reqwest::Method::POST, "/docs")
+            .await
+            .json(&serde_json::json!({ "body": "x", "id": hex::encode(id.0) }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+        messages.push(resp.text().await.unwrap());
+    }
+    assert_eq!(messages[0], messages[1], "the same answer either way");
+    assert!(!messages[0].contains(&hex::encode(doc.0)));
+}
+
+#[tokio::test]
+async fn links_to_unreadable_nodes_are_refused() {
+    let (client, own) = client_and_bucket().await;
+    let theirs = others_bucket("link-other", 18).await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let doc = NodeRef::Doc(put(&*local, "hidden", "x", &theirs).await);
+    assert!(
+        client
+            .vfs_link(&own, &format!("/stolen-{}", std::process::id()), &doc)
+            .await
+            .is_err(),
+        "a VFS link to an unreadable node is refused"
+    );
+    let s = client
+        .skill_publish(skill("linker"), Visibility::Internal, Some(&own))
+        .await
+        .unwrap();
+    assert!(
+        client
+            .skill_link_resource(&s, &doc, "resource", None, false, Visibility::Internal)
+            .await
+            .is_err(),
+        "a skill resource on an unreadable node is refused"
+    );
+}
+
+#[tokio::test]
+async fn malformed_bucket_params_are_rejected() {
+    for path in [
+        "/docs?bucket=zz",
+        "/entities?bucket=zz",
+        "/skills?bucket=zz",
+        "/nodes?bucket=zz",
+        "/search?q=x&bucket=zz",
+    ] {
+        let resp = raw(reqwest::Method::GET, path).await.send().await.unwrap();
+        assert_eq!(resp.status(), 400, "GET {path}");
+    }
+    for path in ["/docs", "/entities", "/skills"] {
+        let resp = raw(reqwest::Method::POST, path)
+            .await
+            .json(&serde_json::json!({ "body": "x", "kind": "k", "name": "n", "bucket": "zz" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "POST {path}");
+    }
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"x".to_vec()).file_name("x.txt"),
+    );
+    let resp = raw(reqwest::Method::POST, "/files?bucket=zz")
+        .await
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "POST /files");
 }

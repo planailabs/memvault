@@ -167,6 +167,9 @@ pub async fn vfs_link(
     let target = NodeRef::from_tag_label(&req.target).ok_or_else(|| {
         ApiError::bad_request("invalid target — expected entity:<hex>, doc:<hex>, or file:<hex>")
     })?;
+    // Linking shows the target in this bucket's tree: the caller must be
+    // able to read it.
+    crate::api::auth::enforce_node_action(&auth.claims, &req.target, memvault_auth::Action::Read)?;
     let edge_id = vfs_ops::link_at_path(state.client.as_ref(), &bucket, &req.path, &target)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;

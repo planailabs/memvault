@@ -59,8 +59,13 @@ A `limit` caps the *filtered* result. Taking the newest N records and then
 filtering them (by kind, bucket, doc) returns fewer than N, or none, once other
 records outnumber the wanted ones — and nothing says so.
 
-`query_audit` still works this way (the time scan takes `limit`, then `op_kind`
-and `doc_id` filter): a caller wanting every upload can't rely on it. The
+REST listings that filter what the caller may read (`/nodes`, `/entities`,
+`/skills`, `/search`) go through `fetch_kept` (`memvault-web/src/api/auth.rs`),
+which asks the source for more until `limit` rows pass. A bucketed audit
+query (`AuditQuery::bucket`) reads the bucket's index newest first and stops
+at `limit` filtered records. The unbucketed `query_audit` still works the old
+way (the time scan takes `limit`, then `op_kind` and `doc_id` filter): a
+caller wanting every upload can't rely on it. The
 Files page lists files from the index instead and uses the audit log only for
 upload times it can find. Fixing it means filtering inside the scan (or an
 index by op kind) without decoding every block whole (see

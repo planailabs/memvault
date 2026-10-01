@@ -53,7 +53,7 @@ pub async fn list_buckets(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     // Only the buckets the caller may read (its own, granted ones; all for
-    // admins), the same rule that answers 403 when it opens another.
+    // admins), the same rule that answers 404 when it opens another.
     buckets.retain(|b| {
         crate::api::auth::enforce_bucket_action(&auth.claims, &b.id, memvault_auth::Action::Read)
             .is_ok()
@@ -139,24 +139,26 @@ pub struct RenameBucketRequest {
     pub name: String,
 }
 
+/// PATCH /api/v1/buckets/{id} — rename. Needs Admin on the bucket (its
+/// owner, a grant, or an admin): the write scope alone let any agent rename
+/// any bucket.
 pub async fn rename_bucket(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<RenameBucketRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let bucket_bytes = hex::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_arr: [u8; 32] = bucket_bytes
-        .try_into()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_id = memvault_core::BucketId(bucket_arr);
-
+) -> Result<StatusCode, ApiError> {
+    let bucket_id = parse_bucket_hex(&id)?;
+    crate::api::auth::enforce_bucket_action(
+        &auth.claims,
+        &bucket_id,
+        memvault_auth::Action::Admin,
+    )?;
     state
         .client
         .bucket_rename(&bucket_id, &req.name)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+        .map_err(|e| ApiError::internal(format!("bucket rename: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -246,9 +248,10 @@ pub struct MergeEdge {
     pub canonical: String,
 }
 
-/// GET /api/v1/buckets/merges — list all `source → canonical` edges.
+/// GET /api/v1/buckets/merges — the `source → canonical` edges whose both
+/// ends the caller may read.
 pub async fn list_merges(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<MergeEdge>>, ApiError> {
     let edges = state
@@ -256,9 +259,11 @@ pub async fn list_merges(
         .bucket_merges()
         .await
         .map_err(|e| ApiError::internal(format!("list merges: {e}")))?;
+    let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
     Ok(Json(
         edges
             .into_iter()
+            .filter(|(s, c)| readable.bucket(s) && readable.bucket(c))
             .map(|(s, c)| MergeEdge {
                 source: hex::encode(s.0),
                 canonical: hex::encode(c.0),
@@ -267,23 +272,24 @@ pub async fn list_merges(
     ))
 }
 
+/// POST /api/v1/buckets/{id}/attach — bind to this cluster. Needs Admin on
+/// the bucket, like rename.
 pub async fn attach_bucket(
-    _auth: RequireWrite,
+    auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let bucket_bytes = hex::decode(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_arr: [u8; 32] = bucket_bytes
-        .try_into()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bucket_id = memvault_core::BucketId(bucket_arr);
-
+) -> Result<StatusCode, ApiError> {
+    let bucket_id = parse_bucket_hex(&id)?;
+    crate::api::auth::enforce_bucket_action(
+        &auth.claims,
+        &bucket_id,
+        memvault_auth::Action::Admin,
+    )?;
     state
         .client
         .bucket_attach(&bucket_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+        .map_err(|e| ApiError::internal(format!("bucket attach: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -360,20 +366,18 @@ pub struct SubmitGrantRequest {
     pub grant_cbor_hex: String,
 }
 
-/// GET /api/v1/buckets/{id}/grants — list active grants on a bucket.
+/// GET /api/v1/buckets/{id}/grants — list active grants on a bucket the
+/// caller may read (404 for one it may not).
 pub async fn list_grants(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<memvault_api::GrantInfo>>, ApiError> {
-    let bucket_bytes =
-        hex::decode(&id).map_err(|_| ApiError::bad_request("invalid bucket id hex"))?;
-    let bucket_arr: [u8; 32] = bucket_bytes
-        .try_into()
-        .map_err(|_| ApiError::bad_request("bucket id must be 32 bytes"))?;
+    let bucket_id = parse_bucket_hex(&id)?;
+    crate::api::auth::enforce_bucket_action(&auth.claims, &bucket_id, memvault_auth::Action::Read)?;
     let grants = state
         .client
-        .bucket_grants_list(&memvault_core::BucketId(bucket_arr))
+        .bucket_grants_list(&bucket_id)
         .await
         .map_err(|e| ApiError::internal(format!("list grants: {e}")))?;
     Ok(Json(grants))

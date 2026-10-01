@@ -60,7 +60,14 @@ bucket (it listed every bucket's documents to any agent, so a team's memvault
 UI showed other teams' notes). Admins, who have no agent bucket, keep the
 cross-bucket listing as their aggregation.
 
-**Remaining (needs a cross-crate signature change, do as a focused pass):**
-- `audit` (`memvault_audit`) — needs a `bucket` field on
-  `memvault_query::AuditQuery` and the store audit query before the tool can
-  scope it; currently cross-bucket.
+Also applied: the REST content endpoints (`/entities`, `/skills`, `/nodes`,
+`/search`, `POST /files`, `POST /entities`, `POST /skills`) resolve their
+bucket with `parse_bucket_param` + `read_bucket`/`write_bucket`
+(`memvault-web/src/api/auth.rs`): a malformed `bucket=` is a 400 (it became
+"no bucket", widening reads), none named is the caller's agent bucket, and an
+admin's unnamed read is its cross-bucket aggregation. `memvault_search`,
+`memvault_skill_list` and `memvault_audit` use `resolve_bucket`; the audit
+log scopes through `AuditQuery::bucket`. `LocalClient::upload_file` uses
+`require_bucket` like `store_op`, and memctl / memvault-import resolve a
+bucket for `list`, `graph add`, `skill publish|list` and the imports.
+`resolve_bucket_query` is gone: no MCP tool fans out by default.

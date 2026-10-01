@@ -32,5 +32,7 @@ Both passed every local-client test.
   scoped to one bucket, the caller's agent bucket by default
   ([bucket-scoping.md](bucket-scoping.md)); the lists that are cross-bucket by
   nature (buckets, search hits, nodes, the audit log) are filtered on the
-  server (`filter_readable`, `enforce_bucket_action`). Another agent's bucket
-  answers 404, not 403, and doesn't appear in lists.
+  server (`filter_readable`, `Readable`, `enforce_bucket_action`). Another
+  agent's bucket answers 404, not 403 (`enforce_bucket_action` answers 404,
+  with no ids, whenever the caller can't read the bucket), and doesn't appear
+  in lists, traversals, edge lists, pins, merges or the event stream.

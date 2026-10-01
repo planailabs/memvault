@@ -109,8 +109,14 @@ pub async fn list_links(
 
     let edges = state.client.edges_of(&node).await?;
 
+    // Only edges whose other end the caller may read: an incoming edge from
+    // another agent's node named that node.
+    let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
     let results: Vec<LinkResponse> = edges
         .into_iter()
+        .filter(|(source, edge)| {
+            readable.node(&source.tag_label()) && readable.node(&edge.target.tag_label())
+        })
         .map(|(source, edge)| LinkResponse {
             edge_id: hex::encode(edge.id.0),
             source: source.tag_label(),
@@ -209,24 +215,25 @@ pub async fn list_nodes(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = params.limit.unwrap_or(100);
     let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
-    // Optional bucket scope (standards/bucket-scoping.md): when present, the
-    // listing is restricted to that bucket via QueryScope.
-    let bucket = params.bucket.as_deref().and_then(|h| {
-        let bytes = hex::decode(h).ok()?;
-        let arr: [u8; 32] = bytes.try_into().ok()?;
-        Some(memvault_core::BucketId(arr))
-    });
-    let items = state
-        .client
-        .list_scoped(
-            &memvault_core::QueryScope::all()
-                .with_view(params.view.clone())
-                .with_bucket(bucket)
-                .with_include_retracted(include_retracted),
-            limit,
-        )
-        .await?;
-    let items = crate::api::auth::filter_readable(&auth.claims, items, |n| n.node_id.clone())?;
+    // One bucket (standards/bucket-scoping.md): the named one, else the
+    // caller's agent bucket; admins keep the cross-bucket listing, read-
+    // filtered before the limit.
+    let named = crate::api::auth::parse_bucket_param(params.bucket.as_deref())?;
+    let bucket = crate::api::auth::read_bucket(&state, &auth.claims, named).await?;
+    let scope = memvault_core::QueryScope::all()
+        .with_view(params.view.clone())
+        .with_bucket(bucket)
+        .with_include_retracted(include_retracted);
+    let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
+    let items = crate::api::auth::fetch_kept(
+        limit,
+        |n| {
+            let (state, scope) = (&state, &scope);
+            async move { Ok(state.client.list_scoped(scope, n).await?) }
+        },
+        |n: &memvault_api::NodeSummary| readable.node(&n.node_id),
+    )
+    .await?;
     Ok(Json(serde_json::json!({
         "count": items.len(),
         "nodes": items.iter().map(|n| serde_json::json!({
