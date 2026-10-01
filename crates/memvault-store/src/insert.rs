@@ -36,6 +36,18 @@ pub fn deserialize_block_as<T: serde::de::DeserializeOwned>(data: &[u8]) -> Opti
     }
 }
 
+/// `Some(created_ns)` when `val` is a legacy saved view: the bare `View`
+/// struct (`name` + filter `tags` + `created_ns`, no envelope fields) that
+/// older builds stored. Current builds wrap views in a signed envelope.
+fn legacy_saved_view_ns(val: &serde_json::Value) -> Option<u64> {
+    if val.get("payload").is_some() || val.get("author").is_some() || val.get("wall_ns").is_some() {
+        return None;
+    }
+    val.get("name")?.as_str()?;
+    serde_json::from_value::<Vec<(String, String)>>(val.get("tags")?.clone()).ok()?;
+    val.get("created_ns")?.as_u64()
+}
+
 use crate::MemvaultStore;
 use crate::error::StoreError;
 use crate::keys;
@@ -95,9 +107,34 @@ pub struct IngestMeta {
     /// Bucket override for bare-struct blocks whose bytes carry no
     /// `bucket_id`. When set it wins; otherwise extracted from the bytes.
     pub bucket_id: Option<Vec<u8>>,
+    /// Store the block without any secondary index entry (file chunks,
+    /// attachment manifests, blob DAG nodes — reached by reference, never
+    /// by query). A block with no metadata of its own and none supplied
+    /// here is stored the same way, which is what a synced copy of such a
+    /// block gets, so local and synced copies index identically.
+    pub unindexed: bool,
 }
 
 impl IngestMeta {
+    /// Store only, no index entries (see [`IngestMeta::unindexed`]).
+    pub fn unindexed() -> Self {
+        IngestMeta {
+            unindexed: true,
+            ..Default::default()
+        }
+    }
+
+    /// Whether a block with this caller metadata gets index entries.
+    /// `bytes_had_meta`: the bytes carried envelope metadata of their own.
+    fn indexes(&self, bytes_had_meta: bool) -> bool {
+        !self.unindexed
+            && (bytes_had_meta
+                || !self.extra_tags.is_empty()
+                || self.author.as_ref().is_some_and(|a| !a.is_empty())
+                || self.wall_ns.is_some_and(|w| w != 0)
+                || self.bucket_id.is_some())
+    }
+
     /// Build the `IngestMeta` equivalent of a fully-known [`EnvelopeMeta`]
     /// (the historical `insert_envelope` contract): the caller already
     /// knows every field, so they all become overrides. Ingest still
@@ -111,6 +148,7 @@ impl IngestMeta {
             author: (!meta.author.is_empty()).then(|| meta.author.clone()),
             wall_ns: (meta.wall_ns != 0).then_some(meta.wall_ns),
             bucket_id: meta.bucket_id.clone(),
+            unindexed: false,
         }
     }
 }
@@ -171,10 +209,12 @@ impl MemvaultStore {
     /// reconstruction, and whether the bytes carried any envelope metadata
     /// of their own (so `reindex_block` can report "was this an envelope").
     fn extract_meta(
+        cid_bytes: &[u8],
         envelope_bytes: &[u8],
         extra: &IngestMeta,
     ) -> (EnvelopeMeta, Option<serde_json::Value>, bool) {
         let view = crate::EnvelopeView::parse(envelope_bytes);
+        let legacy_saved_view = view.as_ref().and_then(|v| legacy_saved_view_ns(v.raw()));
 
         // Extract envelope metadata via the canonical view — handles
         // both legacy raw-JSON envelopes and Signed<T> payload-nested
@@ -203,6 +243,15 @@ impl MemvaultStore {
             })
             .unwrap_or_default();
 
+        // A legacy saved view (a bare `View` struct) carries the view's
+        // *filter* tags in its `tags` field — they are not tags of the
+        // block. Index it under `("view", <cid hex>)`, the tag its writer
+        // gave it, so filter tags never leak into tag lookups and a synced
+        // or rebuilt copy is still listed as a view.
+        if legacy_saved_view.is_some() {
+            tags = vec![("view".to_string(), hex::encode(cid_bytes))];
+        }
+
         // Legacy annotation blocks stored tags only in EnvelopeMeta, not in
         // the body. Recover _ann tag from the annotation target field.
         if tags.is_empty() {
@@ -225,11 +274,35 @@ impl MemvaultStore {
             }
         }
 
-        let wall_ns_bytes: u64 = view
+        let mut wall_ns_bytes: u64 = view
             .as_ref()
             .and_then(|v| v.field("wall_ns"))
             .and_then(|v| v.as_u64())
+            .or(legacy_saved_view)
             .unwrap_or(0);
+
+        // Legacy bare `BucketDecl` (rename/attach/archive used to store the
+        // struct itself, carrying its tags only in the write-time meta).
+        // Recover the decl tags and time from the struct so a rebuild or a
+        // synced copy indexes it like the original write did, and
+        // `resolve_bucket_decl` can find it by its bucket tag.
+        let mut legacy_decl_bucket: Option<Vec<u8>> = None;
+        if tags.is_empty() {
+            if let Some(view) = &view {
+                if view.payload().is_none() {
+                    if let Ok(decl) =
+                        serde_json::from_value::<memvault_core::BucketDecl>(view.raw().clone())
+                    {
+                        tags.push(("kind".to_string(), "bucket-decl".to_string()));
+                        tags.push(("bucket".to_string(), decl.bucket_id.to_string()));
+                        if wall_ns_bytes == 0 {
+                            wall_ns_bytes = decl.created_ns;
+                        }
+                        legacy_decl_bucket = Some(decl.bucket_id.0.to_vec());
+                    }
+                }
+            }
+        }
         let causal: Vec<Vec<u8>> = view
             .as_ref()
             .and_then(|v| v.get_as("causal"))
@@ -238,7 +311,10 @@ impl MemvaultStore {
             .as_ref()
             .and_then(|v| v.get_as("provenance"))
             .unwrap_or_default();
-        let bucket_bytes: Option<Vec<u8>> = view.as_ref().and_then(|v| v.get_as("bucket_id"));
+        let bucket_bytes: Option<Vec<u8>> = view
+            .as_ref()
+            .and_then(|v| v.get_as("bucket_id"))
+            .or(legacy_decl_bucket);
 
         // Did the bytes carry any envelope metadata of their own?
         let had_envelope_meta = wall_ns_bytes != 0 || !author_bytes.is_empty() || !tags.is_empty();
@@ -379,8 +455,15 @@ impl MemvaultStore {
 
         let Some(bid) = bid else { return Ok(()) };
 
+        // Register the bucket on first sight only. Which decl is *current*
+        // is not decided by arrival order: `resolve_bucket_decl` picks it
+        // from every decl of the bucket (signature, owner/admin authority,
+        // wall_ns), so a forged or stale decl arriving later cannot move
+        // the pointer here.
         let mut bucket_table = txn.open_table(BUCKETS)?;
-        bucket_table.insert(bid.as_slice(), cid_bytes)?;
+        if bucket_table.get(bid.as_slice())?.is_none() {
+            bucket_table.insert(bid.as_slice(), cid_bytes)?;
+        }
 
         // Bind the bucket to the receiving node's cluster when currently
         // unbound — never overwrite an existing binding.
@@ -412,15 +495,23 @@ impl MemvaultStore {
         // Content addressing is the invariant sync, verification and dedup
         // rest on: never admit bytes under a CID they don't hash to.
         crate::blockstore::check_cid(cid_bytes, block_bytes)?;
-        let (meta, raw, _) = Self::extract_meta(block_bytes, extra);
+        let (meta, raw, had_meta) = Self::extract_meta(cid_bytes, block_bytes, extra);
+        // A raw block (chunk, manifest) gets no index entries, whether it
+        // was written here or arrived by sync — same rule as reindex.
+        let index = extra.indexes(had_meta);
 
         let txn = self.db.begin_write()?;
         {
             let mut blocks = txn.open_table(BLOCKS)?;
             blocks.insert(cid_bytes, block_bytes)?;
-            Self::write_block_indexes(&txn, cid_bytes, &meta, raw.as_ref())?;
+            if index {
+                Self::write_block_indexes(&txn, cid_bytes, &meta, raw.as_ref())?;
+            }
         }
         txn.commit()?;
+        if !index {
+            return Ok(());
+        }
 
         if let Some(notify) = self.index_notifier.get() {
             for (scope, label) in &meta.tags {
@@ -441,9 +532,22 @@ impl MemvaultStore {
         cid_bytes: &[u8],
         envelope_bytes: &[u8],
     ) -> Result<bool, StoreError> {
-        let (meta, raw, had_envelope_meta) =
-            Self::extract_meta(envelope_bytes, &IngestMeta::default());
-        if !had_envelope_meta {
+        self.reindex_block_with(cid_bytes, envelope_bytes, &IngestMeta::default())
+    }
+
+    /// [`Self::reindex_block`] with caller-supplied metadata layered on the
+    /// bytes, exactly as [`Self::ingest_block`] layers it — for bare-struct
+    /// records whose index metadata the admission gate derives. Returns
+    /// `false` (writes nothing) when neither the bytes nor `extra` carry
+    /// any metadata.
+    pub fn reindex_block_with(
+        &self,
+        cid_bytes: &[u8],
+        envelope_bytes: &[u8],
+        extra: &IngestMeta,
+    ) -> Result<bool, StoreError> {
+        let (meta, raw, had_envelope_meta) = Self::extract_meta(cid_bytes, envelope_bytes, extra);
+        if !extra.indexes(had_envelope_meta) {
             return Ok(false); // not an envelope
         }
 
@@ -513,8 +617,11 @@ impl MemvaultStore {
 
         let txn = self.db.begin_write()?;
         {
+            // First sight only — see `reconstruct_bucket_decl`.
             let mut table = txn.open_table(BUCKETS)?;
-            table.insert(bucket_id.as_slice(), cid_bytes)?;
+            if table.get(bucket_id.as_slice())?.is_none() {
+                table.insert(bucket_id.as_slice(), cid_bytes)?;
+            }
 
             // Bind to the block's cluster if it carries one (legacy raw
             // BucketDecls did); otherwise fall back to the local node's

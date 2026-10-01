@@ -16,7 +16,7 @@ pub mod visibility;
 pub use self::cid::codec as cid_codec;
 pub use self::cid::{
     cid_bytes_from_string, cid_bytes_lenient, cid_from_bytes, cid_from_string, cid_from_value,
-    cid_string_from_bytes, cid_to_string, cid_with_codec, verify_cid,
+    cid_string_from_bytes, cid_to_string, cid_with_codec, parse_cid, verify_cid,
 };
 pub use bucket::{BucketBinding, BucketDecl, BucketRole};
 pub use classification::Classification;
@@ -73,4 +73,14 @@ pub use visibility::Visibility;
 /// applying the merge. Retractions are now published as signed `retraction`
 /// sigchain blocks; this migration re-publishes one per existing local-only
 /// retraction so already-diverged clusters converge. Idempotent.
-pub const BLOCKSTORE_VERSION: u32 = 15;
+/// v16: one derivation of index metadata for local, synced and rebuilt
+/// blocks (`memvault_api::admission`). Bare sigchain records (grants,
+/// merges, attestations, token redemptions, bucket trusts, …) are indexed
+/// under their signer and their own timestamp instead of the writer's peer
+/// id and clock; raw chunks/manifests get no index entries; legacy bare
+/// bucket decls and saved views are recognised; a bucket's current decl is
+/// chosen from its signed decls (owner/admin, `wall_ns`) instead of arrival
+/// order, re-signing legacy unsigned current decls; legacy pin rows leave
+/// BLOCKS; the share inbox is derived from signed decision blocks. The
+/// rebuild re-derives all of it; idempotent and node-agnostic.
+pub const BLOCKSTORE_VERSION: u32 = 16;

@@ -6346,6 +6346,7 @@ dependencies = [
  "prost 0.13.5",
  "serde_ipld_dagcbor",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

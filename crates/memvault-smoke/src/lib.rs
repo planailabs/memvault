@@ -8,6 +8,7 @@ pub mod harness;
 #[cfg(test)]
 mod tests {
     pub mod acl;
+    pub mod admission;
     pub mod agent_enrollment;
     pub mod agent_rename;
     pub mod basic;
@@ -26,6 +27,7 @@ mod tests {
     pub mod media;
     pub mod migrations;
     pub mod p2p;
+    pub mod repair;
     pub mod sharing;
     pub mod signed_envelope_indexing;
     pub mod store_integrity;

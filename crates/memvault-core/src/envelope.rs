@@ -316,6 +316,23 @@ impl<T: Serialize + for<'de> Deserialize<'de>> Signed<T> {
             .map_err(|_| Error::SignatureInvalid)
     }
 
+    /// Verify the node signature against the envelope's own `author`
+    /// (the node pubkey). Returns that pubkey when it verifies. This is
+    /// authenticity only — whether the author is trusted is the caller's
+    /// decision.
+    pub fn verify_by_author(&self) -> Option<[u8; 32]> {
+        let author: [u8; 32] = self.author.0.as_slice().try_into().ok()?;
+        let vk = VerifyingKey::from_bytes(&author).ok()?;
+        self.verify(&vk).ok().map(|_| author)
+    }
+
+    /// [`Self::verify_agent`] for a raw 32-byte agent pubkey.
+    pub fn verify_agent_pubkey(&self, agent_pubkey: &[u8; 32]) -> bool {
+        VerifyingKey::from_bytes(agent_pubkey)
+            .map(|vk| self.verify_agent(&vk).is_ok())
+            .unwrap_or(false)
+    }
+
     /// Compute the CID of this envelope (the full signed structure).
     pub fn cid(&self) -> Result<Cid> {
         let bytes = codec::encode(self)?;

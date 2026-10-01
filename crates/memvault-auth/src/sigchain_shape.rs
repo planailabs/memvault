@@ -13,11 +13,13 @@
 //!   local mint or sync's signature check.
 //!
 //! When adding a new sigchain block type, extend [`SigchainKind`],
-//! [`sigchain_label_for`], and [`detect_sigchain_shape`].
+//! [`sigchain_label_for`], and [`detect_sigchain_shape`]; the per-kind
+//! verification and index metadata live in `memvault_api::admission`.
 
 use crate::{
     AdminGenesis, AdminKeyAdmission, AdminKeyRetirement, AgentAttestation, AgentRevocation,
-    GrantRevocation, NodeAttestation, NodeRevocation,
+    BucketMergeRecord, BucketTrust, Grant, GrantRevocation, NodeAttestation, NodeRevocation,
+    TokenConsumption,
 };
 
 /// Discriminator for the recognised sigchain block types. Mirrors the
@@ -32,6 +34,10 @@ pub enum SigchainKind {
     AgentRevocation,
     NodeRevocation,
     GrantRevocation,
+    Grant,
+    BucketMerge,
+    TokenConsumption,
+    BucketTrust,
 }
 
 impl SigchainKind {
@@ -46,6 +52,10 @@ impl SigchainKind {
             Self::AgentRevocation => "agent_rev",
             Self::NodeRevocation => "node_rev",
             Self::GrantRevocation => "grant_revocation",
+            Self::Grant => "grant",
+            Self::BucketMerge => "bucket_merge",
+            Self::TokenConsumption => "token_redeem",
+            Self::BucketTrust => "bucket_trust",
         }
     }
 }
@@ -123,6 +133,24 @@ pub fn detect_sigchain_shape(bytes: &[u8]) -> Option<SigchainKind> {
         if rev.admin_pubkey.iter().any(|&b| b != 0) {
             return Some(SigchainKind::GrantRevocation);
         }
+    }
+    // Grant: issuer + issuing_cluster + audience + scopes + nonce.
+    if serde_ipld_dagcbor::from_slice::<Grant>(bytes).is_ok() {
+        return Some(SigchainKind::Grant);
+    }
+    // BucketMergeRecord: source + canonical + issued_by_pubkey.
+    if let Ok(rec) = serde_ipld_dagcbor::from_slice::<BucketMergeRecord>(bytes) {
+        if rec.source.0 != rec.canonical.0 {
+            return Some(SigchainKind::BucketMerge);
+        }
+    }
+    // TokenConsumption: token_cid + consumer + issued_attestation.
+    if serde_ipld_dagcbor::from_slice::<TokenConsumption>(bytes).is_ok() {
+        return Some(SigchainKind::TokenConsumption);
+    }
+    // BucketTrust: bucket_id + from/to cluster + from_proposal/from_reply.
+    if serde_ipld_dagcbor::from_slice::<BucketTrust>(bytes).is_ok() {
+        return Some(SigchainKind::BucketTrust);
     }
     None
 }

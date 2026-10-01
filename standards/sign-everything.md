@@ -30,7 +30,7 @@ on `retraction_signature_ok` (the envelope must carry a valid node signature).
    record (`BucketMergeRecord`, `Grant`, `NodeAttestation`, …) for bare structs.
    Never emit an unsigned envelope on a path that confers trust/authority/state.
 2. **Verify the signature on ingest, before acting.** The sync classifier
-   (`validate_sigchain_for_sync`) verifies bare-struct records
+   (`memvault_api::admission::SyncGate` → `classify_record`) verifies bare-struct records
    (`verify_signature`) before storing; a watcher/notifier arm that *applies* a
    block (mutates trust, ACL, `RETRACTED`, the alias map) must verify authorship
    first (`verify_envelope_authorship` → `Valid`/`NodeSigned`, or a record's own

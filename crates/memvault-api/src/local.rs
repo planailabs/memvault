@@ -778,14 +778,22 @@ impl LocalClient {
         crate::tokens::token_revoked(&self.keystore, cid)
     }
 
-    /// How many times a join token has been consumed (keystore authoritative).
+    /// How many times a join token has been consumed. The signed
+    /// `TokenConsumption` blocks (`("token_redeem", <token>)`) are the
+    /// cluster-wide record — they sync, so a redemption at another node
+    /// counts here too. The keystore counter is a local cache that also
+    /// covers a redemption whose block hasn't been written yet; the larger
+    /// of the two is the count.
     pub fn token_consumption_count(&self, cid: &[u8]) -> u32 {
         crate::tokens::token_consumed(&self.keystore, cid)
+            .max(crate::admission::token_redemptions(&self.store, cid))
     }
 
-    /// Record one consumption of a join token, returning the new count. Uses
-    /// the keystore's atomic counter (cross-process safe, preserves
-    /// `max_uses`). The `consumer`/`at_ns` audit detail is not retained.
+    /// Record one consumption of a join token in the local cache, returning
+    /// the new cached count. Uses the keystore's atomic counter
+    /// (cross-process safe, so concurrent redemptions on this node can't
+    /// both pass `max_uses`). The durable, syncable record is the signed
+    /// `TokenConsumption` block the redeemer publishes.
     pub fn record_token_consumption(&self, cid: &[u8], _consumer: &[u8], _at_ns: u64) -> u32 {
         self.keystore
             .fetch_add_u32(&crate::tokens::token_used_key(cid), 1)
@@ -1092,7 +1100,7 @@ impl LocalClient {
         // Require an admin-signed NodeAttestation naming this node.
         for cid in self
             .store
-            .query_by_tag("sigchain", "node_att", 0, 1024)
+            .query_by_tag("sigchain", "node_att", 0, usize::MAX)
             .unwrap_or_default()
         {
             let Ok(Some(bytes)) = self.store.get_block(&cid) else {
@@ -1738,34 +1746,7 @@ impl LocalClient {
             role,
         };
 
-        let tags = vec![
-            ("kind".to_string(), "bucket-decl".to_string()),
-            ("bucket".to_string(), bucket_id.to_string()),
-        ];
-        let payload = serde_json::json!({
-            "BucketCreate": decl,
-        });
-        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
-            payload,
-            &tags,
-            Visibility::Internal,
-            now_ns,
-            Some(&bucket_id.0),
-        )?;
-
-        let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.effective_author(),
-            tags,
-            wall_ns: now_ns,
-            causal: vec![],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: Some(bucket_id.0.to_vec()),
-                    ..Default::default()
-        };
-        self.store
-            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
-        self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
+        let cid_bytes = self.write_bucket_decl(&decl, now_ns)?;
 
         if has_cluster {
             let _ = self
@@ -1931,19 +1912,91 @@ impl LocalClient {
         &self.peer_id
     }
 
-    /// Create a bucket with a specific pre-determined ID.
+    /// Write a signed bucket declaration — a creation or an update of
+    /// name/owners/attachment — and make it the bucket's current decl.
     ///
-    /// The envelope is fully deterministic: uses cluster_id as author and
-    /// wall_ns=0 so every node in the cluster produces the same block.
+    /// The decl is a `Signed<{BucketCreate: decl}>` envelope tagged
+    /// `("kind","bucket-decl")` + `("bucket", <id>)`, so a peer indexes it
+    /// from the bytes alone. Which decl is current is decided by
+    /// `memvault_store::bucket_decl` (signature, owner/admin authority,
+    /// `wall_ns`), the same rule a peer applies; a write that rule would
+    /// not accept is refused before anything is stored.
+    pub(crate) fn write_bucket_decl(
+        &self,
+        decl: &memvault_core::BucketDecl,
+        wall_ns: u64,
+    ) -> Result<Vec<u8>> {
+        let tags = vec![
+            ("kind".to_string(), "bucket-decl".to_string()),
+            ("bucket".to_string(), decl.bucket_id.to_string()),
+        ];
+        let mut candidates = self.store.bucket_decl_candidates(&decl.bucket_id.0)?;
+        let current = self.store.get_bucket(&decl.bucket_id.0)?;
+        // An update orders after the decl it replaces even if this node's
+        // clock is behind the writer of that decl.
+        let wall_ns = candidates
+            .iter()
+            .find(|c| Some(c.cid.as_slice()) == current.as_deref())
+            .map(|c| wall_ns.max(c.wall_ns.saturating_add(1)))
+            .unwrap_or(wall_ns);
+        let payload = serde_json::json!({ "BucketCreate": decl });
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            wall_ns,
+            Some(&decl.bucket_id.0),
+        )?;
+        let candidate =
+            memvault_store::bucket_decl::parse_decl(&self.store, &cid_bytes, &envelope_bytes)
+                .ok_or_else(|| ApiError::Other("bucket decl does not verify".into()))?;
+        candidates.push(candidate);
+        let chosen = memvault_store::bucket_decl::choose_decl(
+            &candidates,
+            current.as_deref(),
+            &crate::admission::ClientDeclAuthority(self),
+        );
+        if chosen.as_deref() != Some(cid_bytes.as_slice()) {
+            return Err(ApiError::Forbidden(format!(
+                "not authorised to update bucket {}",
+                decl.bucket_id
+            )));
+        }
+        self.store.ingest_block(
+            &cid_bytes,
+            &envelope_bytes,
+            &memvault_store::IngestMeta {
+                cluster_id: Some(self.cluster_id.clone()),
+                ..Default::default()
+            },
+        )?;
+        self.store.put_bucket(&decl.bucket_id.0, &cid_bytes)?;
+        Ok(cid_bytes)
+    }
+
+    /// The bucket's current declaration, or `NotFound`.
+    fn current_bucket_decl(
+        &self,
+        id: &memvault_core::BucketId,
+    ) -> Result<memvault_core::BucketDecl> {
+        let decl_cid = self
+            .store
+            .get_bucket(&id.0)?
+            .ok_or_else(|| ApiError::NotFound(format!("bucket {id}")))?;
+        let block = self
+            .store
+            .get_block(&decl_cid)?
+            .ok_or_else(|| ApiError::NotFound("bucket decl block".into()))?;
+        Self::parse_bucket_decl(&block)
+            .ok_or_else(|| ApiError::Other("failed to decode bucket decl".into()))
+    }
+
+    /// Create a bucket with a specific pre-determined ID — the per-node
+    /// legacy bucket that `rebuild_store` mints for pre-bucket data.
     ///
-    /// **Sole remaining unsigned-envelope producer.** Called only from
-    /// `rebuild_store` when no legacy bucket exists yet, so we need to
-    /// mint one before any node signing key is necessarily available
-    /// (and the cluster as a whole — not any single node — is the
-    /// nominal author). Every other write path goes through
-    /// `build_signed_envelope`, which now refuses to fall back to an
-    /// unsigned envelope. See `resign_legacy_envelope` in rebuild.rs
-    /// for how legacy data adopted into this bucket is re-signed.
+    /// Signed by the node (owner by default) with `wall_ns = 0`, so
+    /// re-running it on the same node produces the same block. Requires
+    /// the node signing key, like every other write.
     #[allow(clippy::too_many_arguments)]
     pub fn create_bucket_with_id(
         &self,
@@ -1958,6 +2011,8 @@ impl LocalClient {
         use memvault_core::BucketDecl;
 
         let has_cluster = self.cluster_id.iter().any(|&b| b != 0);
+        let owner_node_pubkey =
+            owner_node_pubkey.or_else(|| self.node_verifying_key().map(|k| k.to_bytes()));
         let decl = BucketDecl {
             bucket_id: bucket_id.clone(),
             name: name.to_string(),
@@ -1971,38 +2026,7 @@ impl LocalClient {
             private_to_peer: None,
             role,
         };
-
-        let tags = vec![
-            ("kind".to_string(), "bucket-decl".to_string()),
-            ("bucket".to_string(), bucket_id.to_string()),
-        ];
-        // Deterministic: cluster_id as author, wall_ns=0.
-        let envelope = serde_json::json!({
-            "version": 1,
-            "payload": { "BucketCreate": decl },
-            "author": self.cluster_id,
-            "tags": tags,
-            "wall_ns": 0u64,
-            "bucket_id": bucket_id.0,
-        });
-        let envelope_bytes = serde_ipld_dagcbor::to_vec(&envelope)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&envelope_bytes);
-        let cid_bytes = cid.to_bytes();
-
-        let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.cluster_id.clone(),
-            tags,
-            wall_ns: 0,
-            causal: vec![],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: Some(bucket_id.0.to_vec()),
-            ..Default::default()
-        };
-        self.store
-            .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
-        self.store.put_bucket(&bucket_id.0, &cid_bytes)?;
+        self.write_bucket_decl(&decl, 0)?;
 
         if has_cluster {
             let _ = self.store.bind_bucket(&bucket_id.0, &self.cluster_id);
@@ -2117,7 +2141,11 @@ impl LocalClient {
         let agent = self.agent_identity.get();
         Some(WriteSigner {
             node_signing_key,
-            author: memvault_core::PeerId(self.peer_id.clone()),
+            // The node pubkey itself — the key `Signed::verify` checks the
+            // signature against. (On a daemon this equals `peer_id`; a
+            // client whose `peer_id` differs would otherwise emit envelopes
+            // that verify against nothing.)
+            author: memvault_core::PeerId(node_signing_key.verifying_key().to_bytes().to_vec()),
             agent_signing_key: agent.map(|a| &a.signing_key),
             // Inline attribution CID is sourced from the post-enroll
             // cache; absent until the daemon publishes the
@@ -2930,16 +2958,28 @@ impl LocalClient {
             .unwrap_or_default();
 
         // Try new unified annotation format first, then legacy manifest_update.
-        let mut ann_cids = self.store.query_by_tag("_ann", &target, 0, 10).ok()?;
+        // Uncapped and newest-first: the index lists oldest first, and a
+        // re-extraction must win over the first (possibly failed) one — a
+        // cap would hide every annotation past it.
+        let mut ann_cids = self
+            .store
+            .query_by_tag("_ann", target, 0, usize::MAX)
+            .ok()?;
+        ann_cids.reverse();
         // Also check legacy "attachment:" annotations for backward compat.
-        if let Ok(legacy_ann) = self.store.query_by_tag("_ann", &legacy_target, 0, 10) {
+        if let Ok(mut legacy_ann) = self
+            .store
+            .query_by_tag("_ann", &legacy_target, 0, usize::MAX)
+        {
+            legacy_ann.reverse();
             ann_cids.extend(legacy_ann);
         }
         let legacy_label = hex::encode(manifest_cid);
-        let legacy_cids = self
+        let mut legacy_cids = self
             .store
-            .query_by_tag("manifest_update", &legacy_label, 0, 10)
+            .query_by_tag("manifest_update", &legacy_label, 0, usize::MAX)
             .ok()?;
+        legacy_cids.reverse();
 
         for cid in ann_cids.iter().chain(legacy_cids.iter()) {
             let block_data = self.store.get_block(cid).ok()??;
@@ -3015,7 +3055,12 @@ impl LocalClient {
         ann_type: &str,
     ) -> Option<serde_json::Value> {
         let target = format!("file:{}", hex::encode(manifest_cid));
-        let ann_cids = self.store.query_by_tag("_ann", &target, 0, 50).ok()?;
+        // Uncapped: "newest" is decided over every annotation of the file,
+        // and the index lists oldest first (a cap would drop the newest).
+        let ann_cids = self
+            .store
+            .query_by_tag("_ann", &target, 0, usize::MAX)
+            .ok()?;
         let mut newest: Option<(u64, serde_json::Value)> = None;
         for cid in &ann_cids {
             let Ok(Some(block_data)) = self.store.get_block(cid) else {
@@ -3057,8 +3102,11 @@ impl LocalClient {
     /// Store raw bytes as a chunked content DAG; returns the root CID.
     pub(crate) fn store_blob(&self, bytes: &[u8]) -> Result<Vec<u8>> {
         let (root, blocks) = memvault_attach::chunk_file(bytes)?;
+        // Raw DAG nodes: reached by reference, never indexed — the same
+        // as a synced copy (see `IngestMeta::unindexed`).
         for (cid, data) in &blocks {
-            self.store.put_block(cid, data)?;
+            self.store
+                .ingest_block(cid, data, &memvault_store::IngestMeta::unindexed())?;
         }
         Ok(root)
     }
@@ -4728,6 +4776,9 @@ impl LocalClient {
     fn has_local_author(&self, cids: &[Vec<u8>]) -> bool {
         let local_effective = self.effective_author();
         let local_peer_id = &self.peer_id;
+        // Signed<T> envelopes name the node pubkey as author (equal to
+        // `peer_id` on a daemon).
+        let local_node = self.node_verifying_key().map(|k| k.to_bytes().to_vec());
         let local_agent_att = self.agent_attestation_cid().map(|c| c.to_vec());
         for cid in cids {
             if let Ok(Some(data)) = self.store.get_block(cid) {
@@ -4740,7 +4791,10 @@ impl LocalClient {
                 if let Some(author) = Self::author_from_envelope_bytes(&data) {
                     // Match legacy (author == effective_author at write
                     // time) and Signed<T> node-only writes (author == peer_id).
-                    if author == local_effective || &author == local_peer_id {
+                    if author == local_effective
+                        || &author == local_peer_id
+                        || local_node.as_ref() == Some(&author)
+                    {
                         return true;
                     }
                 }
@@ -4993,7 +5047,20 @@ impl LocalClient {
         vis: &Visibility,
         bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
-        let wall_ns = memvault_core::wall_ns();
+        self.store_op_at(op, tags, vis, bucket, memvault_core::wall_ns())
+    }
+
+    /// [`Self::store_op`] at a caller-chosen `wall_ns` — for repairs that
+    /// must write the same block on every run (same op, tags and time ⇒
+    /// same signed bytes ⇒ same CID). A block already held is left alone.
+    pub(crate) fn store_op_at(
+        &self,
+        op: &Op,
+        tags: &[(String, String)],
+        vis: &Visibility,
+        bucket: Option<&BucketId>,
+        wall_ns: u64,
+    ) -> Result<Vec<u8>> {
         let bucket_id = self.require_bucket(bucket)?;
 
         // The op IS the payload — preserves `payload.<OpKind>` access for
@@ -5004,6 +5071,9 @@ impl LocalClient {
             serde_json::to_value(op).map_err(|e| ApiError::Serialization(e.to_string()))?;
         let (cid_bytes, envelope_bytes) =
             self.build_signed_envelope(payload, tags, vis.clone(), wall_ns, bucket_id.as_deref())?;
+        if self.store.has_block(&cid_bytes)? {
+            return Ok(cid_bytes);
+        }
 
         let meta = EnvelopeMeta {
             author: self.effective_author(),
@@ -5135,37 +5205,13 @@ impl LocalClient {
         let sig = signer.sign(&signing_bytes);
         grant.signature = sig.to_bytes();
 
-        // Store as tagged block
-        let grant_json = serde_ipld_dagcbor::to_vec(&grant)
+        // Store as a sigchain record, indexed from the grant itself
+        // (`("grant", <bucket>)` for `list_bucket_grants`, `sigchain/grant`
+        // so the notifier fires; author = the signing key, time =
+        // not_before) — exactly what a peer derives when it syncs it.
+        let grant_bytes = serde_ipld_dagcbor::to_vec(&grant)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = memvault_core::cid_from_bytes(&grant_json);
-        let cid_bytes = cid.to_bytes();
-
-        let bucket_hex = hex::encode(bucket_id.0);
-        let meta = memvault_store::EnvelopeMeta {
-            author: self.effective_author(),
-            // `("grant", <bucket_hex>)` is what `list_bucket_grants`
-            // queries by; `("kind", "grant")` is the kind index entry.
-            // `("sigchain", "grant")` is what makes the
-            // `install_sigchain_notifier` callback fire — without it the
-            // block lands in the local store but never triggers a
-            // gossipsub head announcement, so peers only learn about
-            // the grant on the next RBSR cycle (or never, if no other
-            // sigchain block is written before the RBSR partner pool
-            // turns over). Sister sigchain helpers tag the same way.
-            tags: vec![
-                ("grant".to_string(), bucket_hex),
-                ("kind".to_string(), "grant".to_string()),
-                ("sigchain".to_string(), "grant".to_string()),
-            ],
-            wall_ns: now_ns,
-            causal: vec![],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: Some(bucket_id.0.to_vec()),
-            ..Default::default()
-        };
-        self.store.insert_envelope(&cid_bytes, &grant_json, &meta)?;
+        let cid_bytes = self.ingest_record(&grant_bytes)?;
 
         tracing::info!(bucket = %bucket_id, cid = %hex::encode(&cid_bytes), "bucket grant issued");
         Ok(cid_bytes)
@@ -5208,21 +5254,11 @@ impl LocalClient {
             ));
         }
 
-        let grant_json = serde_ipld_dagcbor::to_vec(grant)
+        // Indexed from the grant itself, like a locally issued or synced
+        // grant (including the `sigchain/grant` marker).
+        let grant_bytes = serde_ipld_dagcbor::to_vec(grant)
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid_bytes = memvault_core::cid_from_bytes(&grant_json).to_bytes();
-        let meta = memvault_store::EnvelopeMeta {
-            author: self.effective_author(),
-            tags: vec![
-                ("grant".to_string(), hex::encode(bucket_id.0)),
-                ("kind".to_string(), "grant".to_string()),
-            ],
-            wall_ns: memvault_core::wall_ns(),
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: Some(bucket_id.0.to_vec()),
-            ..Default::default()
-        };
-        self.store.insert_envelope(&cid_bytes, &grant_json, &meta)?;
+        let cid_bytes = self.ingest_record(&grant_bytes)?;
         tracing::info!(
             bucket = %bucket_id,
             cid = %hex::encode(&cid_bytes),
@@ -5260,6 +5296,219 @@ impl LocalClient {
 
     // -- Bucket merges (alias overlay) --
 
+    /// Decide a share proposal. The decision is a signed, syncable block
+    /// (`Signed<{ShareDecision: {proposal_cid, reply}}>`, tagged
+    /// `("share_decision", <proposal>)` + `sigchain/share_decision`), and
+    /// the inbox status is derived from the decision blocks — so every node
+    /// of the cluster sees it, not only the one that decided. An approval
+    /// by an admin also issues a `BucketTrust` pointing at the proposal and
+    /// the decision by their real CIDs. Returns the decision block's CID.
+    pub fn share_decide_sync(
+        &self,
+        proposal_cid: &[u8],
+        approve: bool,
+        reason: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let now_ns = memvault_core::wall_ns();
+        let cluster = memvault_core::ClusterId(self.cluster_id_arr()?);
+        let proposal = self
+            .store
+            .get_block(proposal_cid)?
+            .and_then(|b| Self::parse_share_proposal(&b));
+        let admin_key = self.admin_signing_key();
+        // The reply is signed by the deciding authority: an admin key when
+        // held (required for an approval to confer trust), else the node.
+        let signer = match (&admin_key, self.node_signing_key()) {
+            (Some(k), _) => k.clone(),
+            (None, Some(k)) => k.clone(),
+            (None, None) => {
+                return Err(ApiError::Other(
+                    "no admin or node signing key to sign the decision".into(),
+                ));
+            }
+        };
+        let decision = if approve {
+            memvault_auth::ShareDecision::Approve {
+                granted_actions: vec![memvault_auth::Action::Read],
+                not_after_ns: now_ns.saturating_add(7 * 24 * 3600 * 1_000_000_000),
+            }
+        } else {
+            memvault_auth::ShareDecision::Reject {
+                reason: reason.unwrap_or_default().to_string(),
+            }
+        };
+        let reply = memvault_auth::ShareReply {
+            proposal_id: proposal.as_ref().map(|p| p.proposal_id).unwrap_or_default(),
+            from_cluster: cluster.clone(),
+            by_principal: memvault_core::PeerId(signer.verifying_key().to_bytes().to_vec()),
+            decision,
+            decided_at_ns: now_ns,
+            signature: [0u8; 64],
+        }
+        .sign(&signer)
+        .map_err(|e| ApiError::Other(format!("sign share decision: {e}")))?;
+
+        let tags = vec![
+            ("share_decision".to_string(), hex::encode(proposal_cid)),
+            ("sigchain".to_string(), "share_decision".to_string()),
+            ("kind".to_string(), "share-decision".to_string()),
+        ];
+        let payload = serde_json::json!({
+            "ShareDecision": { "proposal_cid": proposal_cid, "reply": reply },
+        });
+        let (decision_cid, envelope_bytes) =
+            self.build_signed_envelope(payload, &tags, Visibility::Internal, now_ns, None)?;
+        self.store.ingest_block(
+            &decision_cid,
+            &envelope_bytes,
+            &memvault_store::IngestMeta {
+                cluster_id: Some(self.cluster_id.clone()),
+                ..Default::default()
+            },
+        )?;
+        self.apply_share_decisions(proposal_cid);
+
+        if let (true, Some(admin_key), Some(proposal)) = (approve, admin_key, proposal) {
+            let from_proposal = memvault_core::parse_cid(proposal_cid)
+                .map_err(|e| ApiError::Other(format!("proposal cid: {e}")))?;
+            let from_reply = memvault_core::parse_cid(&decision_cid)
+                .map_err(|e| ApiError::Other(format!("decision cid: {e}")))?;
+            let trust = memvault_auth::BucketTrust {
+                bucket_id: proposal.from_bucket.clone(),
+                from_cluster: proposal.from_cluster.clone(),
+                to_cluster: cluster,
+                actions: vec![memvault_auth::Action::Read],
+                not_after_ns: now_ns.saturating_add(7 * 24 * 3600 * 1_000_000_000),
+                from_proposal,
+                from_reply,
+                signature: [0u8; 64],
+            }
+            .sign(&admin_key)
+            .map_err(|e| ApiError::Other(format!("sign bucket trust: {e}")))?;
+            let trust_bytes = serde_ipld_dagcbor::to_vec(&trust)
+                .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            let trust_cid = self.ingest_record(&trust_bytes)?;
+            let _ = self.store.record_bucket_trust(
+                &proposal.from_bucket.0,
+                &proposal.from_cluster.0,
+                &self.cluster_id,
+                &trust_cid,
+            );
+            tracing::info!(
+                trust_cid = hex::encode(&trust_cid),
+                "issued BucketTrust for approved proposal"
+            );
+        }
+
+        tracing::info!(
+            proposal = hex::encode(proposal_cid),
+            approve,
+            reason = reason.unwrap_or("-"),
+            "share proposal decided"
+        );
+        Ok(decision_cid)
+    }
+
+    /// A saved-view block: the signed `{ViewCreate: View}` envelope, or a
+    /// legacy bare `View`.
+    fn parse_view_block(block: &[u8]) -> Option<crate::types::View> {
+        if let Some(signed) =
+            memvault_store::deserialize_block_as::<memvault_core::Signed<serde_json::Value>>(block)
+        {
+            return serde_json::from_value(signed.payload.get("ViewCreate")?.clone()).ok();
+        }
+        memvault_store::deserialize_block_as::<crate::types::View>(block)
+    }
+
+    /// A share proposal block: bare or wrapped in a `Signed<T>` envelope.
+    fn parse_share_proposal(block: &[u8]) -> Option<memvault_auth::ShareProposal> {
+        memvault_store::deserialize_block_as::<memvault_auth::ShareProposal>(block).or_else(|| {
+            memvault_store::deserialize_block_as::<
+                memvault_core::Signed<memvault_auth::ShareProposal>,
+            >(block)
+            .map(|s| s.payload)
+        })
+    }
+
+    /// Re-derive the inbox status of `proposal_cid` from its decision
+    /// blocks: the newest (by `decided_at_ns`, then CID) authentic decision
+    /// by an admin of this cluster — or, when no admin decided, by a
+    /// trusted node of it. Returns the applied status (1 approved,
+    /// 2 rejected).
+    pub fn apply_share_decisions(&self, proposal_cid: &[u8]) -> Option<u8> {
+        let cids = self
+            .store
+            .query_by_tag("share_decision", &hex::encode(proposal_cid), 0, usize::MAX)
+            .ok()?;
+        let mut best: Option<(bool, u64, Vec<u8>, u8)> = None;
+        for cid in cids {
+            let Ok(Some(bytes)) = self.store.get_block(&cid) else {
+                continue;
+            };
+            let Some(signed) = memvault_store::deserialize_block_as::<
+                memvault_core::Signed<serde_json::Value>,
+            >(&bytes) else {
+                continue;
+            };
+            // Authenticity: the envelope's node signature.
+            let Some(node) = signed.verify_by_author() else {
+                continue;
+            };
+            let Some(reply) = signed
+                .payload
+                .get("ShareDecision")
+                .and_then(|d| d.get("reply"))
+                .and_then(|r| serde_json::from_value::<memvault_auth::ShareReply>(r.clone()).ok())
+            else {
+                continue;
+            };
+            if reply.from_cluster.0.as_slice() != self.cluster_id.as_slice() {
+                continue;
+            }
+            let Ok(principal) = <[u8; 32]>::try_from(reply.by_principal.0.as_slice()) else {
+                continue;
+            };
+            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&principal) else {
+                continue;
+            };
+            if reply.verify_signature(&vk).is_err() {
+                continue;
+            }
+            // Authority: an admin's decision outranks a node's.
+            let by_admin = self.is_admin_key_valid_at(&principal, reply.decided_at_ns);
+            if !by_admin && !(principal == node && self.is_attesting_node_trusted(&node)) {
+                continue;
+            }
+            let status = match reply.decision {
+                memvault_auth::ShareDecision::Approve { .. } => 1u8,
+                memvault_auth::ShareDecision::Reject { .. } => 2u8,
+            };
+            let better = match &best {
+                None => true,
+                Some((a, w, c, _)) => (by_admin, reply.decided_at_ns, &cid) > (*a, *w, c),
+            };
+            if better {
+                best = Some((by_admin, reply.decided_at_ns, cid, status));
+            }
+        }
+        let (_, decided_at_ns, _, status) = best?;
+        self.store
+            .set_share_inbox_status(proposal_cid, &self.cluster_id, decided_at_ns, status)
+            .ok()?;
+        Some(status)
+    }
+
+    /// Re-derive every proposal's inbox status from its decision blocks.
+    pub fn rebuild_share_inbox(&self) -> usize {
+        self.store
+            .query_unique_labels("share_decision", usize::MAX)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|l| hex::decode(l).ok())
+            .filter(|p| self.apply_share_decisions(p).is_some())
+            .count()
+    }
+
     /// One-time repair for `BucketMergeRecord` blocks that landed in the store
     /// untagged — synced before the `validate_sigchain_for_sync` arm existed, so
     /// they were stored `AsIs` and `reindex_block` couldn't recover tags from
@@ -5269,6 +5518,7 @@ impl LocalClient {
     /// blockstore once; returns the number repaired.
     pub fn reindex_bucket_merges(&self) -> Result<usize> {
         let mut fixed = 0usize;
+        let keys = self.record_keys();
         for (cid, data) in self.store.iter_blocks()? {
             let Some(rec) =
                 memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
@@ -5288,20 +5538,9 @@ impl LocalClient {
             if indexed {
                 continue;
             }
-            let meta = memvault_store::EnvelopeMeta {
-                author: rec.issued_by_pubkey.to_vec(),
-                tags: vec![
-                    ("bucket_merge".to_string(), src_hex),
-                    ("kind".to_string(), "bucket_merge".to_string()),
-                    ("sigchain".to_string(), "bucket_merge".to_string()),
-                ],
-                wall_ns: rec.created_ns,
-                cluster_id: Some(self.cluster_id.clone()),
-                bucket_id: Some(rec.canonical.0.to_vec()),
-                ..Default::default()
-            };
-            self.store.insert_envelope(&cid, &data, &meta)?;
-            fixed += 1;
+            if crate::admission::reindex_any_block(&self.store, &cid, &data, &keys) {
+                fixed += 1;
+            }
         }
         if fixed > 0 {
             self.bump_alias_generation();
@@ -5323,13 +5562,25 @@ impl LocalClient {
         reason: &str,
         authority: Option<([u8; 32], [u8; 64])>,
     ) -> Result<Vec<u8>> {
+        self.publish_retraction_block_at(target_cid, reason, authority, memvault_core::wall_ns())
+    }
+
+    /// [`Self::publish_retraction_block`] dated `wall_ns` — migrations and
+    /// repairs pass a time derived from the target, so re-running them
+    /// writes the same block instead of a new one per run.
+    pub(crate) fn publish_retraction_block_at(
+        &self,
+        target_cid: &[u8],
+        reason: &str,
+        authority: Option<([u8; 32], [u8; 64])>,
+        wall_ns: u64,
+    ) -> Result<Vec<u8>> {
         // Note: callers guard against redundant publishes (bucket_unmerge skips
         // already-retracted records; backfill checks existence). We do NOT skip
         // here on "a retraction exists" — a forged/unauthorised retraction must
         // not block a later *authorised* one for the same target; the alias
         // build honours whichever carries valid authority.
         let target_hex = hex::encode(target_cid);
-        let wall_ns = memvault_core::wall_ns();
         // An optional authority assertion: a signature over `target_cid` by a
         // key authorised for the retraction (for a merge unmerge: the merge's
         // `issued_by_pubkey` or an admin). The alias build verifies it so only
@@ -5349,6 +5600,9 @@ impl LocalClient {
         ];
         let (cid_bytes, envelope_bytes) =
             self.build_signed_envelope(payload, &tags, Visibility::Internal, wall_ns, None)?;
+        if self.store.has_block(&cid_bytes)? {
+            return Ok(cid_bytes);
+        }
         let meta = memvault_store::EnvelopeMeta {
             author: self.effective_author(),
             tags,
@@ -5453,8 +5707,17 @@ impl LocalClient {
             {
                 continue; // already has a retraction block
             }
+            // Dated from the retracted block itself (its envelope/record
+            // time), not the clock, so the backfill is deterministic.
+            let wall_ns = self
+                .store
+                .get_block(&target_cid)
+                .ok()
+                .flatten()
+                .map(|b| crate::admission::block_wall_ns(&self.store, &b))
+                .unwrap_or(0);
             if self
-                .publish_retraction_block(&target_cid, "backfill", None)
+                .publish_retraction_block_at(&target_cid, "backfill", None, wall_ns)
                 .is_ok()
             {
                 published += 1;
@@ -5805,31 +6068,11 @@ impl LocalClient {
 
             let rec_bytes = serde_ipld_dagcbor::to_vec(&rec)
                 .map_err(|e| ApiError::Serialization(e.to_string()))?;
-            let cid_bytes = memvault_core::cid_from_bytes(&rec_bytes).to_bytes();
-            let source_hex = hex::encode(source.0);
-            let meta = memvault_store::EnvelopeMeta {
-                author: self.effective_author(),
-                // `("bucket_merge", <source_hex>)` makes the edge queryable
-                // by source (`canonical_of`) and discoverable via
-                // `query_unique_labels`. `("sigchain", "bucket_merge")` both
-                // fires the notifier (gossip head announce + alias-cache
-                // invalidation on peers) and routes the block into the audit
-                // decode path (§8.1).
-                tags: vec![
-                    ("bucket_merge".to_string(), source_hex),
-                    ("kind".to_string(), "bucket_merge".to_string()),
-                    ("sigchain".to_string(), "bucket_merge".to_string()),
-                ],
-                wall_ns: now_ns,
-                causal: vec![],
-                provenance: vec![],
-                // Home the record on the canonical so it travels with the
-                // bucket it governs.
-                cluster_id: Some(self.cluster_id.clone()),
-                bucket_id: Some(canonical.0.to_vec()),
-                ..Default::default()
-            };
-            self.store.insert_envelope(&cid_bytes, &rec_bytes, &meta)?;
+            // Indexed from the record (`("bucket_merge", <source>)` for
+            // `canonical_of`, `sigchain/bucket_merge` for the notifier and
+            // audit, homed on the canonical; author = issuer, time =
+            // created_ns) — the same entries a peer derives on sync.
+            let cid_bytes = self.ingest_record(&rec_bytes)?;
             tracing::info!(
                 source = %source,
                 canonical = %canonical,
@@ -6198,9 +6441,13 @@ impl MemvaultClient for LocalClient {
         // Chunk file into blocks using memvault-attach
         let (root_cid, blocks) = memvault_attach::chunk_file(data)?;
 
-        // Store all blocks
+        // Store all chunks: raw, unindexed — the same as a synced copy.
         for (block_cid, block_data) in &blocks {
-            self.store.put_block(block_cid, block_data)?;
+            self.store.ingest_block(
+                block_cid,
+                block_data,
+                &memvault_store::IngestMeta::unindexed(),
+            )?;
         }
 
         // Create attachment manifest
@@ -6227,7 +6474,11 @@ impl MemvaultClient for LocalClient {
             .map_err(|e| ApiError::Serialization(e.to_string()))?;
         let manifest_cid = cid_from_bytes(&manifest_bytes);
         let manifest_cid_bytes = manifest_cid.to_bytes();
-        self.store.put_block(&manifest_cid_bytes, &manifest_bytes)?;
+        self.store.ingest_block(
+            &manifest_cid_bytes,
+            &manifest_bytes,
+            &memvault_store::IngestMeta::unindexed(),
+        )?;
 
         // Store envelope metadata for the manifest. Include the `_manifest`
         // reverse-lookup tag (manifest_cid → this envelope) in the *store*
@@ -7254,22 +7505,35 @@ impl MemvaultClient for LocalClient {
     // -- Views --
 
     async fn list_views(&self) -> Result<Vec<crate::types::View>> {
-        let labels = self
+        // Current views: signed `{ViewCreate: View}` envelopes tagged
+        // `("kind","view")`. Legacy views: the bare `View` struct, tagged
+        // `("view", <cid hex>)` (by its writer, and by reindex/sync).
+        let mut cids: Vec<Vec<u8>> = self
+            .store
+            .query_by_tag("kind", "view", 0, usize::MAX)
+            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+        for label in self
             .store
             .query_unique_labels("view", usize::MAX)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
+            .map_err(|e| ApiError::Serialization(e.to_string()))?
+        {
+            if let Ok(cid) = hex::decode(&label) {
+                cids.push(cid);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
         let mut views = Vec::new();
-        for label in &labels {
-            let cid_bytes = hex::decode(label).unwrap_or_default();
+        for cid_bytes in cids {
+            if !seen.insert(cid_bytes.clone()) {
+                continue;
+            }
             // Skip retracted views
             if self.store.is_retracted(&cid_bytes).unwrap_or(false) {
                 continue;
             }
             if let Some(data) = self.store.get_block(&cid_bytes)? {
-                if let Some(mut view) =
-                    memvault_store::deserialize_block_as::<crate::types::View>(&data)
-                {
-                    view.cid = label.clone();
+                if let Some(mut view) = Self::parse_view_block(&data) {
+                    view.cid = hex::encode(&cid_bytes);
                     views.push(view);
                 }
             }
@@ -7278,30 +7542,33 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn create_view(&self, view: crate::types::View) -> Result<()> {
-        // Views are typed side blocks (like attachment manifests,
-        // bucket grants, and BucketTrust): the stored block IS the
-        // View struct, not a Signed<T> envelope wrapping it. They
-        // intentionally bypass build_signed_envelope because their
-        // integrity model is "by-CID lookup of a self-describing
-        // payload" rather than "audit log of authored events". Don't
-        // route this through Signed<T> without coordinated reader
-        // changes in list_views / get_view / delete_view.
-        let view_bytes = serde_ipld_dagcbor::to_vec(&view)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let cid = cid_from_bytes(&view_bytes);
-        let cid_bytes = cid.to_bytes();
-        let cid_hex = hex::encode(&cid_bytes);
-        let meta = EnvelopeMeta {
-            author: self.effective_author(),
-            tags: vec![("view".to_string(), cid_hex)],
-            wall_ns: view.created_ns,
-            causal: vec![],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: None,
-            ..Default::default()
-        };
-        self.store.insert_envelope(&cid_bytes, &view_bytes, &meta)?;
+        // A view is a signed `{ViewCreate: View}` envelope. Its filter tags
+        // live in the payload; the envelope's own tags are `("kind","view")`
+        // + `("view", <name>)`, so the filter never leaks into tag lookups
+        // and a synced or rebuilt copy is listed the same way.
+        let mut view = view;
+        view.cid = String::new();
+        let tags = vec![
+            ("kind".to_string(), "view".to_string()),
+            ("view".to_string(), view.name.clone()),
+        ];
+        let bucket = view.bucket_id.as_ref().map(|b| b.0.to_vec());
+        let payload = serde_json::json!({ "ViewCreate": view });
+        let (cid_bytes, envelope_bytes) = self.build_signed_envelope(
+            payload,
+            &tags,
+            Visibility::Internal,
+            view.created_ns,
+            bucket.as_deref(),
+        )?;
+        self.store.ingest_block(
+            &cid_bytes,
+            &envelope_bytes,
+            &memvault_store::IngestMeta {
+                cluster_id: Some(self.cluster_id.clone()),
+                ..Default::default()
+            },
+        )?;
         tracing::info!(name = %view.name, tag_count = view.tags.len(), "view created");
         Ok(())
     }
@@ -7398,6 +7665,12 @@ impl MemvaultClient for LocalClient {
 
     async fn bucket_rename(&self, id: &memvault_core::BucketId, new_name: &str) -> Result<()> {
         let wall_ns = memvault_core::wall_ns();
+        // The new name lives in a signed decl update (refused unless this
+        // node/agent owns the bucket or is an admin).
+        let mut decl = self.current_bucket_decl(id)?;
+        decl.name = new_name.to_string();
+        self.write_bucket_decl(&decl, wall_ns)?;
+
         let tags = vec![
             ("kind".to_string(), "bucket-rename".to_string()),
             ("bucket".to_string(), id.to_string()),
@@ -7425,36 +7698,6 @@ impl MemvaultClient for LocalClient {
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
-
-        // Update the name in the bucket decl by storing a new decl with the updated name
-        if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
-            if let Some(block) = self.store.get_block(&decl_cid)? {
-                if let Some(mut decl) = Self::parse_bucket_decl(&block) {
-                    decl.name = new_name.to_string();
-                    let new_bytes = serde_ipld_dagcbor::to_vec(&decl)
-                        .map_err(|e| ApiError::Serialization(e.to_string()))?;
-                    let new_cid = memvault_core::cid_from_bytes(&new_bytes);
-                    self.store.insert_envelope(
-                        &new_cid.to_bytes(),
-                        &new_bytes,
-                        &memvault_store::insert::EnvelopeMeta {
-                            author: self.effective_author(),
-                            tags: vec![
-                                ("kind".to_string(), "bucket-decl".to_string()),
-                                ("bucket".to_string(), id.to_string()),
-                            ],
-                            wall_ns: memvault_core::wall_ns(),
-                            causal: vec![decl_cid],
-                            provenance: vec![],
-                            cluster_id: Some(self.cluster_id.clone()),
-                            bucket_id: Some(id.0.to_vec()),
-                            ..Default::default()
-                        },
-                    )?;
-                    self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
-                }
-            }
-        }
 
         tracing::info!(bucket = %id, new_name, "bucket renamed");
         Ok(())
@@ -7554,17 +7797,8 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn bucket_attach(&self, id: &memvault_core::BucketId) -> Result<()> {
-        // Load current decl, update private_to_peer to None, store new decl
-        let decl_cid = self
-            .store
-            .get_bucket(&id.0)?
-            .ok_or_else(|| ApiError::NotFound(format!("bucket {id}")))?;
-        let block = self
-            .store
-            .get_block(&decl_cid)?
-            .ok_or_else(|| ApiError::NotFound("bucket decl block".into()))?;
-        let mut decl = Self::parse_bucket_decl(&block)
-            .ok_or_else(|| ApiError::Other("failed to decode bucket decl".into()))?;
+        // Current decl with private_to_peer cleared, as a signed update.
+        let mut decl = self.current_bucket_decl(id)?;
 
         if decl.private_to_peer.is_none() {
             // Already attached, idempotent
@@ -7572,25 +7806,7 @@ impl MemvaultClient for LocalClient {
         }
 
         decl.private_to_peer = None;
-        let new_bytes = serde_ipld_dagcbor::to_vec(&decl)
-            .map_err(|e| ApiError::Serialization(e.to_string()))?;
-        let new_cid = memvault_core::cid_from_bytes(&new_bytes);
-        let meta = memvault_store::insert::EnvelopeMeta {
-            author: self.effective_author(),
-            tags: vec![
-                ("kind".to_string(), "bucket-decl".to_string()),
-                ("bucket".to_string(), id.to_string()),
-            ],
-            wall_ns: memvault_core::wall_ns(),
-            causal: vec![decl_cid],
-            provenance: vec![],
-            cluster_id: Some(self.cluster_id.clone()),
-            bucket_id: Some(id.0.to_vec()),
-            ..Default::default()
-        };
-        self.store
-            .insert_envelope(&new_cid.to_bytes(), &new_bytes, &meta)?;
-        self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
+        self.write_bucket_decl(&decl, memvault_core::wall_ns())?;
 
         // Also bind to the cluster if not already bound.
         if self.cluster_id.iter().any(|&b| b != 0) {
@@ -7603,6 +7819,16 @@ impl MemvaultClient for LocalClient {
 
     async fn bucket_archive(&self, id: &memvault_core::BucketId, reason: &str) -> Result<()> {
         let now_ns = memvault_core::wall_ns();
+        // The archive marker lives in a signed decl update.
+        let mut decl = self.current_bucket_decl(id)?;
+        decl.name = format!("[ARCHIVED] {}", decl.name);
+        decl.description = Some(format!(
+            "Archived: {}. {}",
+            reason,
+            decl.description.unwrap_or_default()
+        ));
+        self.write_bucket_decl(&decl, now_ns)?;
+
         let tags = vec![
             ("kind".to_string(), "bucket-archive".to_string()),
             ("bucket".to_string(), id.to_string()),
@@ -7630,41 +7856,6 @@ impl MemvaultClient for LocalClient {
         };
         self.store
             .insert_envelope(&cid_bytes, &envelope_bytes, &meta)?;
-
-        // Mark the bucket decl as archived by storing an updated decl
-        if let Some(decl_cid) = self.store.get_bucket(&id.0)? {
-            if let Some(block) = self.store.get_block(&decl_cid)? {
-                if let Some(mut decl) = Self::parse_bucket_decl(&block) {
-                    decl.name = format!("[ARCHIVED] {}", decl.name);
-                    decl.description = Some(format!(
-                        "Archived: {}. {}",
-                        reason,
-                        decl.description.unwrap_or_default()
-                    ));
-                    let new_bytes = serde_ipld_dagcbor::to_vec(&decl)
-                        .map_err(|e| ApiError::Serialization(e.to_string()))?;
-                    let new_cid = memvault_core::cid_from_bytes(&new_bytes);
-                    self.store.insert_envelope(
-                        &new_cid.to_bytes(),
-                        &new_bytes,
-                        &memvault_store::insert::EnvelopeMeta {
-                            author: self.effective_author(),
-                            tags: vec![
-                                ("kind".to_string(), "bucket-decl".to_string()),
-                                ("bucket".to_string(), id.to_string()),
-                            ],
-                            wall_ns: now_ns,
-                            causal: vec![decl_cid],
-                            provenance: vec![],
-                            cluster_id: Some(self.cluster_id.clone()),
-                            bucket_id: Some(id.0.to_vec()),
-                            ..Default::default()
-                        },
-                    )?;
-                    self.store.put_bucket(&id.0, &new_cid.to_bytes())?;
-                }
-            }
-        }
 
         tracing::info!(bucket = %id, reason, "bucket archived");
         Ok(())
@@ -7735,107 +7926,7 @@ impl MemvaultClient for LocalClient {
         approve: bool,
         reason: Option<&str>,
     ) -> Result<()> {
-        let now_ns = memvault_core::wall_ns();
-        let status: u8 = if approve { 1 } else { 2 };
-
-        // Update the inbox entry status
-        self.store
-            .record_share_inbox(proposal_cid, &self.cluster_id, now_ns, status)?;
-
-        // If approved and we have an admin signing key, issue a BucketTrust
-        if approve {
-            if let Some(admin_key) = self.admin_signing_key() {
-                // Load the proposal to get bucket/cluster info
-                if let Some(proposal_block) = self.store.get_block(proposal_cid)? {
-                    if let Ok(proposal) = memvault_store::deserialize_block(&proposal_block)
-                        .ok_or_else(|| ApiError::Other("cannot parse proposal".into()))
-                    {
-                        let from_bucket: Option<Vec<u8>> = proposal
-                            .get("from_bucket")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok());
-                        let from_cluster: Option<Vec<u8>> = proposal
-                            .get("from_cluster")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                        if let (Some(bucket_bytes), Some(cluster_bytes)) =
-                            (from_bucket, from_cluster)
-                        {
-                            // Create and sign a BucketTrust
-                            let proposal_cid_obj = memvault_core::cid_from_bytes(proposal_cid);
-                            let reply_cid = memvault_core::cid_from_bytes(&now_ns.to_be_bytes());
-
-                            let trust = memvault_auth::BucketTrust {
-                                bucket_id: memvault_core::BucketId(
-                                    bucket_bytes.clone().try_into().unwrap_or([0u8; 32]),
-                                ),
-                                from_cluster: memvault_core::ClusterId(
-                                    cluster_bytes.clone().try_into().unwrap_or([0u8; 32]),
-                                ),
-                                to_cluster: memvault_core::ClusterId(
-                                    self.cluster_id.clone().try_into().unwrap_or([0u8; 32]),
-                                ),
-                                actions: vec![memvault_auth::Action::Read],
-                                not_after_ns: now_ns + 7 * 24 * 3600 * 1_000_000_000, // 7 days default
-                                from_proposal: proposal_cid_obj,
-                                from_reply: reply_cid,
-                                signature: [0u8; 64],
-                            };
-
-                            match trust.sign(&admin_key) {
-                                Ok(signed_trust) => {
-                                    let trust_bytes = serde_ipld_dagcbor::to_vec(&signed_trust)
-                                        .unwrap_or_default();
-                                    let trust_cid = memvault_core::cid_from_bytes(&trust_bytes);
-
-                                    // Store the trust in BUCKET_TRUST
-                                    let _ = self.store.record_bucket_trust(
-                                        &bucket_bytes,
-                                        &cluster_bytes,
-                                        &self.cluster_id,
-                                        &trust_cid.to_bytes(),
-                                    );
-
-                                    // Store the trust block itself
-                                    let meta = memvault_store::insert::EnvelopeMeta {
-                                        author: self.effective_author(),
-                                        tags: vec![(
-                                            "kind".to_string(),
-                                            "bucket-trust".to_string(),
-                                        )],
-                                        wall_ns: now_ns,
-                                        causal: vec![proposal_cid.to_vec()],
-                                        provenance: vec![],
-                                        cluster_id: Some(self.cluster_id.clone()),
-                                        bucket_id: Some(bucket_bytes),
-                                        ..Default::default()
-                                    };
-                                    let _ = self.store.insert_envelope(
-                                        &trust_cid.to_bytes(),
-                                        &trust_bytes,
-                                        &meta,
-                                    );
-
-                                    tracing::info!(
-                                        trust_cid = hex::encode(trust_cid.to_bytes()),
-                                        "issued BucketTrust for approved proposal"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!("failed to sign BucketTrust: {e}");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        tracing::info!(
-            proposal = hex::encode(proposal_cid),
-            approve,
-            reason = reason.unwrap_or("-"),
-            "share proposal decided"
-        );
+        LocalClient::share_decide_sync(self, proposal_cid, approve, reason)?;
         Ok(())
     }
 

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub mod audit_index;
 pub mod blockstore;
+pub mod bucket_decl;
 pub mod consumed_tokens;
 pub mod encryption;
 pub mod envelope_view;
@@ -19,6 +20,7 @@ pub mod rotation_state;
 pub mod scope_members;
 pub mod tables;
 
+pub use bucket_decl::{DeclAuthority, DeclCandidate};
 pub use envelope_view::EnvelopeView;
 pub use error::StoreError;
 pub use insert::{EnvelopeMeta, IngestMeta, deserialize_block, deserialize_block_as};

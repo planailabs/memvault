@@ -319,6 +319,65 @@ impl MemvaultStore {
         Ok(())
     }
 
+    /// Set the status of `proposal_cid` in `to_cluster`'s inbox, updating
+    /// its existing row(s); a proposal not in the inbox yet gets a row
+    /// keyed at `wall_ns`. Idempotent.
+    pub fn set_share_inbox_status(
+        &self,
+        proposal_cid: &[u8],
+        to_cluster: &[u8],
+        wall_ns: u64,
+        status: u8,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(SHARE_INBOX)?;
+            let mut end = to_cluster.to_vec();
+            end.push(0xFF);
+            let existing: Vec<Vec<u8>> = table
+                .range(to_cluster..end.as_slice())?
+                .filter_map(|e| e.ok())
+                .map(|(k, _)| k.value().to_vec())
+                .filter(|k| {
+                    k.len() > to_cluster.len() + 8 && &k[to_cluster.len() + 8..] == proposal_cid
+                })
+                .collect();
+            if existing.is_empty() {
+                let mut key = Vec::with_capacity(to_cluster.len() + 8 + proposal_cid.len());
+                key.extend_from_slice(to_cluster);
+                key.extend_from_slice(&wall_ns.to_be_bytes());
+                key.extend_from_slice(proposal_cid);
+                table.insert(key.as_slice(), &[status] as &[u8])?;
+            }
+            for key in existing {
+                table.insert(key.as_slice(), &[status] as &[u8])?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// The inbox status of `proposal_cid` (0 pending, 1 approved,
+    /// 2 rejected), if it is in `to_cluster`'s inbox.
+    pub fn share_inbox_status(
+        &self,
+        proposal_cid: &[u8],
+        to_cluster: &[u8],
+    ) -> Result<Option<u8>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(SHARE_INBOX)?;
+        let mut end = to_cluster.to_vec();
+        end.push(0xFF);
+        for entry in table.range(to_cluster..end.as_slice())? {
+            let (k, v) = entry?;
+            let k = k.value();
+            if k.len() > to_cluster.len() + 8 && &k[to_cluster.len() + 8..] == proposal_cid {
+                return Ok(v.value().first().copied());
+            }
+        }
+        Ok(None)
+    }
+
     /// Record a share proposal in the outbox.
     pub fn record_share_outbox(
         &self,

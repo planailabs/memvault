@@ -122,6 +122,7 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         memvault_store::deserialize_block(data)
             .map(|v| {
                 v.get("payload").is_some()
+                    && !bucketless_by_design(&v)
                     && !v
                         .get("bucket_id")
                         .and_then(|v| v.as_array())
@@ -284,55 +285,28 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         .map_err(|e| ApiError::Other(format!("iter blocks: {e}")))?;
     report.blocks_total = blocks.len();
 
+    // Bare sigchain records (attestations, grants, merges, token
+    // redemptions, …) carry no envelope tags; the admission module derives
+    // their index metadata from the record exactly as it does for a local
+    // write or a synced copy.
+    let record_keys = client.record_keys();
     for (cid, data) in &blocks {
-        if store.reindex_block(cid, data).unwrap_or(false) {
+        if crate::admission::reindex_any_block(store, cid, data, &record_keys) {
             report.envelopes_indexed += 1;
-        } else if let Some(label) = memvault_auth::sigchain_label_for(data) {
-            // Raw CBOR sigchain blocks have no envelope `tags` field, so
-            // `reindex_block` skipped them. Re-emit the `sigchain/<label>`
-            // tag entry directly. Trust the contents: the block was
-            // already in our store (either we minted it locally or it
-            // passed sync's signature gate via `vet_sync_block`), so the
-            // shape is enough.
-            let tags = vec![("sigchain".to_string(), label.to_string())];
-            let meta = memvault_store::EnvelopeMeta {
-                author: client.peer_id().to_vec(),
-                tags,
-                wall_ns: memvault_core::wall_ns(),
-                cluster_id: Some(client.cluster_id().to_vec()),
-                ..Default::default()
-            };
-            if store.insert_envelope(cid, data, &meta).is_ok() {
-                report.envelopes_indexed += 1;
-            }
-        }
-        // Bucket metadata
-        if let Some(val) = memvault_store::deserialize_block(data) {
-            let is_bucket_decl = val
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|tags| {
-                    tags.iter().any(|t| {
-                        if let Some(arr) = t.as_array() {
-                            arr.first().and_then(|v| v.as_str()) == Some("kind")
-                                && arr.get(1).and_then(|v| v.as_str()) == Some("bucket-decl")
-                        } else {
-                            false
-                        }
-                    })
-                })
-                .unwrap_or(false);
-            if is_bucket_decl {
-                if let Some(bucket_id) = val
-                    .get("bucket_id")
-                    .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok())
-                {
-                    let _ = store.put_bucket(&bucket_id, cid);
-                    report.buckets_rebuilt += 1;
-                }
-            }
         }
     }
+
+    // ── Bucket metadata: which decl is current ───────────────────────
+    // Reindexing registered every bucket (first decl seen); the current
+    // decl is decided from all of a bucket's decls, not iteration order.
+    // An update stored by older builds as a bare, unsigned decl can't win
+    // against a signed chain, so re-sign it first where this node may.
+    resign_legacy_current_decls(client);
+    report.buckets_rebuilt = store
+        .resolve_all_bucket_decls(&crate::admission::ClientDeclAuthority(client))
+        .map_err(|e| ApiError::Other(format!("resolve bucket decls: {e}")))?;
+    // The share inbox status is derived from the signed decision blocks.
+    client.rebuild_share_inbox();
 
     // ── Phase 4: Sync VFS tree repair ────────────────────────────────
     //
@@ -374,6 +348,49 @@ pub fn rebuild_store(client: &LocalClient) -> Result<RebuildReport> {
         .map_err(|e| ApiError::Other(format!("set blockstore version: {e}")))?;
 
     Ok(report)
+}
+
+/// Older builds stored bucket renames/attaches/archives as bare, unsigned
+/// `BucketDecl` blocks and pointed `BUCKETS` at them. Such a decl cannot
+/// override a bucket's signed decl chain, so a bucket whose current
+/// pointer is one would fall back to its last signed state. Re-issue the
+/// current decl as a signed update (ordered after the bucket's newest
+/// signed decl, so every node derives the same order) wherever this node
+/// is authorised to; buckets with only unsigned decls are left as they
+/// are. Idempotent: afterwards the current decl is signed.
+fn resign_legacy_current_decls(client: &LocalClient) {
+    let store = client.store();
+    let Ok(buckets) = store.list_buckets() else {
+        return;
+    };
+    for (bid, current) in buckets {
+        let Ok(bid) = <[u8; 32]>::try_from(bid.as_slice()) else {
+            continue;
+        };
+        let Ok(candidates) = store.bucket_decl_candidates(&bid) else {
+            continue;
+        };
+        let Some(cur) = candidates.iter().find(|c| c.cid == current) else {
+            continue;
+        };
+        if !cur.signers.is_empty() {
+            continue;
+        }
+        let Some(newest_signed) = candidates
+            .iter()
+            .filter(|c| !c.signers.is_empty())
+            .map(|c| c.wall_ns)
+            .max()
+        else {
+            continue; // legacy-only bucket: the unsigned pointer stands
+        };
+        if let Err(e) = client.write_bucket_decl(&cur.decl, newest_signed.saturating_add(1)) {
+            tracing::warn!(
+                bucket = %hex::encode(bid),
+                "could not re-sign legacy bucket decl: {e}"
+            );
+        }
+    }
 }
 
 /// Check stored version and rebuild if needed (sync).
@@ -429,206 +446,227 @@ fn repair_vfs_sync(
 ) -> Result<(usize, usize)> {
     use memvault_core::{EdgeId, NodeRef};
     use memvault_doc::Op;
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
 
     let vfs_dir_kind = memvault_core::VFS_DIR_KIND;
     let vfs_child_rel = memvault_core::VFS_CHILD_REL;
 
-    // 1. Collect all VFS dir entities with names. Exhaustive (see standards:
-    //    exhaustive-lookups) — a cap would silently drop dirs and corrupt the
-    //    rebuilt VFS tree.
+    struct Dir {
+        id: [u8; 32],
+        name: String,
+        /// wall_ns of the entity's first block (its creation).
+        created_ns: u64,
+        /// CID of that first block.
+        first_cid: Vec<u8>,
+    }
+
+    // 1. Every VFS dir entity, grouped by bucket (VFS is per bucket: each
+    //    bucket has its own root). Exhaustive (see standards:
+    //    exhaustive-lookups) — a cap would drop dirs, or read an entity's
+    //    oldest blocks and miss its latest name.
     let labels = store
         .query_unique_labels("entity", usize::MAX)
         .map_err(|e| ApiError::Other(format!("query entities: {e}")))?;
-    let mut all_dirs: Vec<([u8; 32], String)> = Vec::new();
+    let mut by_bucket: BTreeMap<Option<[u8; 32]>, Vec<Dir>> = BTreeMap::new();
 
     for label in &labels {
-        let id_bytes = hex::decode(label).unwrap_or_default();
-        if id_bytes.len() != 32 {
+        let Ok(id) = <[u8; 32]>::try_from(hex::decode(label).unwrap_or_default().as_slice()) else {
             continue;
-        }
-        let mut id = [0u8; 32];
-        id.copy_from_slice(&id_bytes);
-
-        // Get the latest block for this entity to read kind + props.
+        };
+        // Oldest first, so a later EntityUpdate's name wins.
         let cids = store
-            .query_by_tag("entity", label, 0, 10)
+            .query_by_tag("entity", label, 0, usize::MAX)
             .unwrap_or_default();
         let mut kind = String::new();
         let mut name = String::new();
-        for cid in cids.iter().rev() {
-            if let Ok(Some(data)) = store.get_block(cid) {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Some(ec) = payload.get("EntityCreate") {
-                            if let Some(k) = ec.get("kind").and_then(|v| v.as_str()) {
-                                kind = k.to_string();
-                            }
-                            if let Some(n) = ec
-                                .get("initial_props")
-                                .and_then(|p| p.get("name"))
-                                .and_then(|v| v.as_str())
-                            {
-                                name = n.to_string();
-                            }
-                        }
-                        if let Some(eu) = payload.get("EntityUpdate") {
-                            if let Some(n) = eu
-                                .get("props")
-                                .and_then(|p| p.get("name"))
-                                .and_then(|v| v.as_str())
-                            {
-                                name = n.to_string();
-                            }
-                        }
-                    }
+        let mut bucket: Option<[u8; 32]> = None;
+        let mut first: Option<(u64, Vec<u8>)> = None;
+        let mut deleted = false;
+        for cid in &cids {
+            let Ok(Some(data)) = store.get_block(cid) else {
+                continue;
+            };
+            let Some(val) = memvault_store::deserialize_block(&data) else {
+                continue;
+            };
+            let Some(payload) = val.get("payload") else {
+                continue;
+            };
+            if payload.get("EntityDelete").is_some() {
+                deleted = true;
+            }
+            if let Some(ec) = payload.get("EntityCreate") {
+                // `{entity: {kind, props}}` (Op::EntityCreate); older blocks
+                // carried `kind`/`initial_props` directly.
+                let ent = ec.get("entity").unwrap_or(ec);
+                if let Some(k) = ent.get("kind").and_then(|v| v.as_str()) {
+                    kind = k.to_string();
                 }
+                if let Some(n) = ent
+                    .get("props")
+                    .or_else(|| ent.get("initial_props"))
+                    .and_then(|p| p.get("name"))
+                    .and_then(|v| v.as_str())
+                {
+                    name = n.to_string();
+                }
+                bucket = val
+                    .get("bucket_id")
+                    .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok());
+                let wall = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
+                first = Some((wall, cid.clone()));
+            }
+            if let Some(n) = payload
+                .get("EntityUpdate")
+                .and_then(|eu| eu.get("props"))
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+            {
+                name = n.to_string();
             }
         }
-        if kind == vfs_dir_kind {
-            all_dirs.push((id, name));
-        }
-    }
-
-    if all_dirs.is_empty() {
-        return Ok((0, 0));
-    }
-
-    // 2. Find root candidates.
-    let mut root_candidates: Vec<[u8; 32]> = all_dirs
-        .iter()
-        .filter(|(_, name)| name == "/")
-        .map(|(id, _)| *id)
-        .collect();
-    root_candidates.sort();
-    let root_bytes = match root_candidates.first() {
-        Some(id) => *id,
-        None => return Ok((0, 0)),
-    };
-    let root_label = hex::encode(root_bytes);
-
-    let mut dupes = 0usize;
-
-    // 3. Retract duplicate roots.
-    for &dup in &root_candidates[1..] {
-        // Retract by creating a retraction block.
-        let dup_label = hex::encode(dup);
-        let dup_cids = store
-            .query_by_tag("entity", &dup_label, 0, 1)
-            .unwrap_or_default();
-        for target_cid in &dup_cids {
-            let _ = store.record_retraction(target_cid, target_cid);
-        }
-        dupes += 1;
-    }
-
-    // 4. Walk edges from root to find reachable dirs.
-    let mut reachable: HashSet<[u8; 32]> = HashSet::new();
-    reachable.insert(root_bytes);
-    let mut stack: Vec<[u8; 32]> = vec![root_bytes];
-
-    while let Some(current) = stack.pop() {
-        let current_label = hex::encode(current);
-        let source_label = format!("entity:{current_label}");
-        let edge_cids = store
-            .query_by_tag("edge_source", &source_label, 0, 1000)
-            .unwrap_or_default();
-        for cid in &edge_cids {
-            if let Ok(Some(data)) = store.get_block(cid) {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Some(edge_add) = payload.get("EdgeAdd") {
-                            if let Some(edge) = edge_add.get("edge") {
-                                let rel =
-                                    edge.get("relation").and_then(|v| v.as_str()).unwrap_or("");
-                                if rel != vfs_child_rel {
-                                    continue;
-                                }
-                                // Extract target entity ID.
-                                if let Some(target) = edge.get("target") {
-                                    if let Some(eid) = target.get("Entity").and_then(|v| {
-                                        serde_json::from_value::<[u8; 32]>(v.clone()).ok()
-                                    }) {
-                                        if reachable.insert(eid) {
-                                            stack.push(eid);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 5. Link orphaned dirs to root.
-    let retracted: HashSet<[u8; 32]> = root_candidates[1..].iter().copied().collect();
-    let mut linked = 0usize;
-    let legacy_bucket = client.find_legacy_bucket().unwrap_or(BucketId([0u8; 32]));
-
-    for (id, name) in &all_dirs {
-        if reachable.contains(id) || retracted.contains(id) {
+        if kind != vfs_dir_kind || deleted {
             continue;
         }
-        let entry_name = if name.is_empty() {
-            hex::encode(id)[..8].to_string()
-        } else {
-            name.clone()
+        let Some((created_ns, first_cid)) = first else {
+            continue;
         };
-
-        // Create EdgeAdd envelope directly.
-        let edge_id = EdgeId::random();
-        let source = NodeRef::Entity(EntityId(root_bytes));
-        let target = NodeRef::Entity(EntityId(*id));
-        let edge = memvault_doc::Edge {
-            id: edge_id.clone(),
-            relation: vfs_child_rel.to_string(),
-            target: target.clone(),
-            weight: None,
-            props: {
-                let mut m = std::collections::BTreeMap::new();
-                m.insert("name".to_string(), serde_json::json!(entry_name));
-                m
-            },
-            provenance: None,
-        };
-        let op = Op::EdgeAdd {
-            source: source.clone(),
-            edge,
-        };
-
-        let wall_ns = memvault_core::wall_ns();
-        let source_label = source.tag_label();
-        let target_label = target.tag_label();
-        let tags = vec![
-            ("edge_source".to_string(), source_label),
-            ("edge_target".to_string(), target_label),
-            ("entity".to_string(), root_label.clone()),
-        ];
-        let envelope = serde_json::json!({
-            "version": 2,
-            "payload": op,
-            "author": client.cluster_id(),
-            "tags": tags,
-            "visibility": memvault_core::Visibility::Internal,
-            "wall_ns": wall_ns,
-            "cluster_id": client.cluster_id(),
-            "bucket_id": legacy_bucket.0,
+        by_bucket.entry(bucket).or_default().push(Dir {
+            id,
+            name,
+            created_ns,
+            first_cid,
         });
-        if let Ok(bytes) = serde_ipld_dagcbor::to_vec(&envelope) {
-            let cid = memvault_core::cid_from_bytes(&bytes);
-            let meta = memvault_store::EnvelopeMeta {
-                author: client.cluster_id().to_vec(),
-                tags,
-                wall_ns,
-                causal: vec![],
-                provenance: vec![],
-                cluster_id: Some(client.cluster_id().to_vec()),
-                bucket_id: Some(legacy_bucket.0.to_vec()),
-                ..Default::default()
+    }
+
+    let legacy_bucket = client.find_legacy_bucket();
+    let mut dupes = 0usize;
+    let mut linked = 0usize;
+
+    for (bucket, dirs) in &by_bucket {
+        // 2. The bucket's root: the sorted-first dir named "/" (the same
+        //    choice `vfs::ensure_root` makes).
+        let mut roots: Vec<&Dir> = dirs.iter().filter(|d| d.name == "/").collect();
+        roots.sort_by_key(|d| d.id);
+        let Some(root) = roots.first() else {
+            continue;
+        };
+
+        // 3. Retract the bucket's duplicate roots with a syncable retraction
+        //    (dated from the duplicate itself, so a re-run is a no-op).
+        for dup in &roots[1..] {
+            let exists = store
+                .query_by_tag("retraction", &hex::encode(&dup.first_cid), 0, 1)
+                .map(|c| !c.is_empty())
+                .unwrap_or(false);
+            if !exists {
+                client.publish_retraction_block_at(
+                    &dup.first_cid,
+                    "vfs: duplicate root",
+                    None,
+                    dup.created_ns,
+                )?;
+            }
+            let _ = store.record_retraction(&dup.first_cid, &dup.first_cid);
+            dupes += 1;
+        }
+
+        // 4. Dirs reachable from the root over vfs child edges. Exhaustive.
+        let mut reachable: HashSet<[u8; 32]> = HashSet::new();
+        reachable.insert(root.id);
+        let mut stack: Vec<[u8; 32]> = vec![root.id];
+        while let Some(current) = stack.pop() {
+            let source_label = format!("entity:{}", hex::encode(current));
+            let edge_cids = store
+                .query_by_tag("edge_source", &source_label, 0, usize::MAX)
+                .unwrap_or_default();
+            for cid in &edge_cids {
+                let Ok(Some(data)) = store.get_block(cid) else {
+                    continue;
+                };
+                let Some(edge) = memvault_store::deserialize_block(&data)
+                    .and_then(|v| v.get("payload")?.get("EdgeAdd")?.get("edge").cloned())
+                else {
+                    continue;
+                };
+                if edge.get("relation").and_then(|v| v.as_str()) != Some(vfs_child_rel) {
+                    continue;
+                }
+                if let Some(eid) = edge
+                    .get("target")
+                    .and_then(|t| t.get("Entity"))
+                    .and_then(|v| serde_json::from_value::<[u8; 32]>(v.clone()).ok())
+                {
+                    if reachable.insert(eid) {
+                        stack.push(eid);
+                    }
+                }
+            }
+        }
+
+        // 5. Link orphaned dirs under the root with a signed EdgeAdd whose
+        //    EdgeId and wall_ns derive from (root, orphan): every rebuild of
+        //    this store writes the same block, and an existing one is kept.
+        let dup_ids: HashSet<[u8; 32]> = roots[1..].iter().map(|d| d.id).collect();
+        let edge_bucket = bucket.map(BucketId).or_else(|| legacy_bucket.clone());
+        for dir in dirs {
+            if reachable.contains(&dir.id) || dup_ids.contains(&dir.id) {
+                continue;
+            }
+            // Only a dir nothing ever linked is an orphan. One that had a
+            // parent and was unlinked (rmdir/mv) stays where its owner put
+            // it; the repair's own edge (same CID every run) counts too.
+            let ever_linked = store
+                .query_by_tag(
+                    "edge_target",
+                    &format!("entity:{}", hex::encode(dir.id)),
+                    0,
+                    1,
+                )
+                .map(|c| !c.is_empty())
+                .unwrap_or(false);
+            if ever_linked {
+                continue;
+            }
+            let entry_name = if dir.name.is_empty() {
+                hex::encode(dir.id)[..8].to_string()
+            } else {
+                dir.name.clone()
             };
-            let _ = store.insert_envelope(&cid.to_bytes(), &bytes, &meta);
+            let mut seed = b"vfs-repair-link:".to_vec();
+            seed.extend_from_slice(&root.id);
+            seed.extend_from_slice(&dir.id);
+            let mut edge_id = [0u8; 32];
+            edge_id.copy_from_slice(&memvault_core::cid_from_bytes(&seed).hash().digest()[..32]);
+            let source = NodeRef::Entity(EntityId(root.id));
+            let target = NodeRef::Entity(EntityId(dir.id));
+            let op = Op::EdgeAdd {
+                source: source.clone(),
+                edge: memvault_doc::Edge {
+                    id: EdgeId(edge_id),
+                    relation: vfs_child_rel.to_string(),
+                    target: target.clone(),
+                    weight: None,
+                    props: std::collections::BTreeMap::from([(
+                        "name".to_string(),
+                        serde_json::json!(entry_name),
+                    )]),
+                    provenance: None,
+                },
+            };
+            let tags = vec![
+                ("edge_source".to_string(), source.tag_label()),
+                ("edge_target".to_string(), target.tag_label()),
+                ("entity".to_string(), hex::encode(root.id)),
+            ];
+            let wall_ns = root.created_ns.max(dir.created_ns).saturating_add(1);
+            client.store_op_at(
+                &op,
+                &tags,
+                &memvault_core::Visibility::Internal,
+                edge_bucket.as_ref(),
+                wall_ns,
+            )?;
             linked += 1;
         }
     }
@@ -710,7 +748,7 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
     }
 
     if is_envelope {
-        if !has_bucket {
+        if !has_bucket && !bucketless_by_design(&val) {
             return Verdict::Rewrite;
         }
         // JSON envelope → rewrite as CBOR.
@@ -729,6 +767,22 @@ fn classify_block(cid: &[u8], data: &[u8]) -> Verdict {
             _ => Verdict::Drop,
         }
     }
+}
+
+/// Envelopes current builds write without a bucket on purpose: cluster
+/// state that belongs to no bucket (retractions, agent relabels, share
+/// decisions) and views spanning all buckets. Adopting them into the
+/// legacy bucket would re-sign them under a new CID on every node that
+/// rebuilds — breaking references to them (a trust's `from_reply`, an
+/// unmerge's retraction) and making each node hold a different block.
+fn bucketless_by_design(val: &serde_json::Value) -> bool {
+    let Some(payload) = val.get("payload") else {
+        return false;
+    };
+    ["ShareDecision", "AgentRename", "ViewCreate"]
+        .iter()
+        .any(|k| payload.get(k).is_some())
+        || payload.get("kind").and_then(|k| k.as_str()) == Some("retraction")
 }
 
 /// Re-sign a legacy / mutated envelope as a `Signed<T>` block using the
