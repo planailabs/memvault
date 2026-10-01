@@ -50,7 +50,6 @@ Rules for any AI agent (Claude Code, Copilot, etc.) working on the memvault crat
 - **All new data must have a bucket.** Write operations (`store_op`, `upload_file`, `bucket_create`) call `resolve_bucket(bucket)` which falls back to the cluster's default bucket when `None` is passed. Never write data without a bucket_id in the envelope metadata.
 - **The envelope JSON must include `bucket_id` and `cluster_id`.** These fields are needed for `reindex_block` to reconstruct the `BY_BUCKET` and `CLUSTER_ORIGIN` indexes after sync. Without them, synced data is invisible to bucket-scoped queries.
 - **Bucket binding is exclusive.** A bucket can only be bound to one cluster. `store.bind_bucket` enforces this — rebinding to a different cluster is an error.
-- **The default bucket cannot be archived.** `bucket_archive` checks this.
 - **VFS is per-bucket.** Each bucket has its own VFS root identified by tags `(vfs, root)` + `(bucket, <hex>)`. There is no global VFS.
 
 ## Testing
