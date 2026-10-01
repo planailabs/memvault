@@ -372,7 +372,8 @@ On glibc, `MALLOC_ARENA_MAX=2` keeps freed memory from piling up in per-thread a
 ```
 ~/.local/share/memvault/
   blocks.redb           # Primary block store + all indexes (incl. cluster ID)
-  text_index.json       # Full-text search index cache (auto-rebuilt if stale)
+  blocks.tantivy/       # Full-text search index (rebuilt when its format changes)
+  blocks.tantivy.version
   identity/             # Node identity: libp2p key + keystore.mvks (admin key, pinned genesis, tokens)
   identity/ui_agent/    # Local agent credential used by the web UI
   agents/<agent-id>/    # Enrolled agent credentials (private_key.pem, attestation, agent.json)
@@ -451,6 +452,6 @@ memctl repair-index
 
 This does a two-phase rebuild:
 1. Clears and rebuilds all store secondary indexes (BY_TAG, BY_AUTHOR, BY_TIME, etc.) from the raw blocks
-2. Rebuilds the full-text search index and saves it to `text_index.json`
+2. Rebuilds the full-text search index (`blocks.tantivy/`)
 
 The text index cache includes a format version. When memvault is updated with index format changes, the cache is automatically discarded and rebuilt on next startup.

@@ -2,6 +2,14 @@
 
 Rules for any AI agent (Claude Code, Copilot, etc.) working on the memvault crates.
 
+## Design
+
+- **Keep [`DESIGN.md`](DESIGN.md) current — same rule as the README.** It
+  describes how the system is built: crates, data model, storage and envelope
+  format, trust chain, sync, API surfaces. When a change alters any of those
+  (a new block type, index table, protocol, crate, auth flow, or a "known
+  gap" getting wired in), update `DESIGN.md` in the *same* change.
+
 ## API & wire standards
 
 - **Honour the standards in [`standards/`](standards/).** They define the
@@ -42,13 +50,13 @@ Rules for any AI agent (Claude Code, Copilot, etc.) working on the memvault crat
 - **All changes must work with legacy data.** Data created before buckets, before envelope v2, and before the current CID scheme must continue to load. Test with `memctl repair-index` on a pre-migration store.
 - **Envelope format changes are additive.** New fields use `#[serde(default)]` so old envelopes deserialize correctly. Old envelopes without `bucket_id` or `cluster_id` are valid — they belong to the default bucket.
 - **`reindex_block` is the source of truth for migration.** It must handle all historical block formats (legacy raw BucketDecl, envelope-wrapped BucketDecl, annotation blocks, attachment envelopes). When adding a new block type, add detection logic to `reindex_block`.
-- **Never modify existing migration files** in `server/migrations/`. Create new ones.
+- **Index changes go through `BLOCKSTORE_VERSION`.** There is no SQL database or migration directory: when derived indexing changes, bump `BLOCKSTORE_VERSION` in `memvault-core` (with a changelog line) so nodes rebuild on startup.
 - **Parse bucket decls with `LocalClient::parse_bucket_decl`** which handles both envelope-wrapped (`payload.BucketCreate`) and legacy raw formats.
 
 ## Bucket scoping
 
-- **All new data must have a bucket.** Write operations (`store_op`, `upload_file`, `bucket_create`) call `resolve_bucket(bucket)` which falls back to the cluster's default bucket when `None` is passed. Never write data without a bucket_id in the envelope metadata.
-- **The envelope JSON must include `bucket_id` and `cluster_id`.** These fields are needed for `reindex_block` to reconstruct the `BY_BUCKET` and `CLUSTER_ORIGIN` indexes after sync. Without them, synced data is invisible to bucket-scoped queries.
+- **All new data must have a bucket.** Write operations (`store_op`, `upload_file`, `bucket_create`) need a concrete bucket (`require_bucket`); the frontends (MCP, HTTP handlers, memctl) default `None` to the caller's agent bucket. Never write data without a bucket_id in the envelope metadata.
+- **The envelope must carry `bucket_id`.** `reindex_block` needs it to reconstruct `BY_BUCKET` after sync; without it, synced data is invisible to bucket-scoped queries. `cluster_id` is not in the envelope: the receiving node stamps `CLUSTER_ORIGIN` at ingest.
 - **Bucket binding is exclusive.** A bucket can only be bound to one cluster. `store.bind_bucket` enforces this — rebinding to a different cluster is an error.
 - **The default bucket cannot be archived.** `bucket_archive` checks this.
 - **VFS is per-bucket.** Each bucket has its own VFS root identified by tags `(vfs, root)` + `(bucket, <hex>)`. There is no global VFS.
