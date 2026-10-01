@@ -52,3 +52,16 @@ Derived caps must not panic. Use `limit.saturating_mul(n)`, never `limit * n`
    *display* a page? Decide → `usize::MAX`. Display → caller-supplied limit.
 2. Never hardcode `500`/`1000`/etc. in an internal helper.
 3. Any `limit * n` becomes `limit.saturating_mul(n)`.
+
+## Filters before limits
+
+A `limit` caps the *filtered* result. Taking the newest N records and then
+filtering them (by kind, bucket, doc) returns fewer than N, or none, once other
+records outnumber the wanted ones — and nothing says so.
+
+`query_audit` still works this way (the time scan takes `limit`, then `op_kind`
+and `doc_id` filter): a caller wanting every upload can't rely on it. The
+Files page lists files from the index instead and uses the audit log only for
+upload times it can find. Fixing it means filtering inside the scan (or an
+index by op kind) without decoding every block whole (see
+[listings-without-bodies.md](listings-without-bodies.md)).

@@ -718,9 +718,11 @@ async fn labels_come_from_the_index() {
     let mut fm = std::collections::BTreeMap::new();
     fm.insert("title".to_string(), serde_json::json!("A long book"));
     let doc = memvault_doc::Document { id: memvault_core::DocId([0u8; 32]), frontmatter: fm, body: "word ".repeat(100_000) };
-    client.put_doc(doc, vec![], Visibility::Internal, Some(&bucket)).await.unwrap();
+    client.put_doc(doc, vec![("kind".into(), "book".into())], Visibility::Internal, Some(&bucket)).await.unwrap();
+    // Listed from the envelope's head (the 100k-word body isn't decoded).
     let docs = client.list_docs(None, 50, Some(&bucket)).await.unwrap();
     let d = docs.iter().find(|d| d.title.as_deref() == Some("A long book")).expect("listed");
+    assert!(d.tags.contains(&("kind".to_string(), "book".to_string())), "with its tags: {:?}", d.tags);
     let label = client.resolve_label(&format!("doc:{}", hex::encode(d.id.0))).await.unwrap();
     assert_eq!(label.as_deref(), Some("A long book"));
     assert_eq!(client.resolve_label("doc:00").await.unwrap(), None, "unknown: none");

@@ -3910,10 +3910,8 @@ impl LocalClient {
         let mut updated_ns = 0u64;
         for cid in &cids {
             if let Ok(Some(data)) = self.store.get_block(cid) {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(w) = val.get("wall_ns").and_then(|v| v.as_u64()) {
-                        updated_ns = updated_ns.max(w);
-                    }
+                if let Some(env) = memvault_store::deserialize_block_as::<EnvWall>(&data) {
+                    updated_ns = updated_ns.max(env.wall_ns);
                 }
             }
         }
@@ -4210,28 +4208,18 @@ impl LocalClient {
             let Ok(Some(data)) = self.store.get_block(cid) else {
                 continue;
             };
-            let Some(val) = memvault_store::deserialize_block(&data) else {
+            let Some(head) = DocHead::read(&data) else {
                 continue;
             };
-            let Some(dc) = val.get("payload").and_then(|p| p.get("DocCreate")) else {
+            let Some(dc) = head.payload.doc_create else {
                 continue;
             };
-            let title = dc
-                .get("frontmatter")
-                .and_then(|fm| fm.get("title"))
-                .and_then(|t| t.as_str())
-                .map(|s| s.to_string());
-            let tags: Vec<(String, String)> = val
-                .get("tags")
-                .and_then(|t| serde_json::from_value(t.clone()).ok())
-                .unwrap_or_default();
-            let wall_ns = val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
             return Some(DocSummary {
                 id: doc_id.clone(),
                 cid: cid.clone(),
-                title,
-                tags,
-                updated_ns: wall_ns,
+                title: dc.title(),
+                tags: envelope_tags(&head.tags),
+                updated_ns: head.wall_ns,
                 attachment_count: 0,
             });
         }
@@ -4301,48 +4289,32 @@ impl LocalClient {
                     continue;
                 }
             }
-            if let Some(data) = self.store.get_block(cid)? {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    if let Some(payload) = val.get("payload") {
-                        if let Some(dc) = payload.get("DocCreate") {
-                            if let Ok(doc_id) =
-                                serde_json::from_value::<DocId>(dc["doc_id"].clone())
-                            {
-                                if seen_docs.insert(doc_id.clone()) {
-                                    let node_id = format!("doc:{}", hex::encode(doc_id.0));
-                                    if !include_retracted {
-                                        let idx = self.index.read().await;
-                                        if idx.is_retracted(&node_id) {
-                                            continue;
-                                        }
-                                        drop(idx);
-                                    }
-                                    let title = dc
-                                        .get("frontmatter")
-                                        .and_then(|fm| fm.get("title"))
-                                        .and_then(|t| t.as_str())
-                                        .map(|s| s.to_string());
-                                    let tags: Vec<(String, String)> = val
-                                        .get("tags")
-                                        .and_then(|t| serde_json::from_value(t.clone()).ok())
-                                        .unwrap_or_default();
-                                    let wall_ns =
-                                        val.get("wall_ns").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                                    summaries.push(DocSummary {
-                                        id: doc_id,
-                                        cid: cid.clone(),
-                                        title,
-                                        tags,
-                                        updated_ns: wall_ns,
-                                        attachment_count: 0,
-                                    });
-                                }
-                            }
-                        }
-                    }
+            let Some(data) = self.store.get_block(cid)? else {
+                continue;
+            };
+            let Some(head) = DocHead::read(&data) else {
+                continue;
+            };
+            let Some(dc) = head.payload.doc_create else {
+                continue;
+            };
+            if !seen_docs.insert(dc.doc_id.clone()) {
+                continue;
+            }
+            if !include_retracted {
+                let node_id = format!("doc:{}", hex::encode(dc.doc_id.0));
+                if self.index.read().await.is_retracted(&node_id) {
+                    continue;
                 }
             }
+            summaries.push(DocSummary {
+                title: dc.title(),
+                id: dc.doc_id,
+                cid: cid.clone(),
+                tags: envelope_tags(&head.tags),
+                updated_ns: head.wall_ns,
+                attachment_count: 0,
+            });
         }
 
         Ok(summaries)
@@ -4571,14 +4543,13 @@ impl LocalClient {
                 .get_block(cid)
                 .ok()
                 .flatten()
-                .and_then(|data| memvault_store::deserialize_block(&data))
-                .and_then(|env| env.get("payload").and_then(|p| p.as_object()).map(|p| p.keys().any(|k| k.ends_with("Create"))))
-                .unwrap_or(false)
+                .and_then(|data| memvault_store::deserialize_block_as::<EnvKind>(&data))
+                .is_some_and(|env| env.payload.keys().any(|k| k.ends_with("Create")))
         });
         for cid in creation.into_iter().chain(cids.first()) {
             if let Ok(Some(data)) = self.store.get_block(cid) {
-                if let Some(env) = memvault_store::deserialize_block(&data) {
-                    if let Some(tags) = env.get("tags") {
+                if let Some(env) = memvault_store::deserialize_block_as::<EnvTags>(&data) {
+                    if let Some(tags) = env.tags.as_ref() {
                         // Skip internal tags (doc/entity ID tags).
                         return envelope_tags(tags)
                             .into_iter()
@@ -7936,6 +7907,66 @@ const GRANT_SIG_CACHE_MAX: usize = 10_000;
 
 /// An envelope's tags: `{"scope", "label"}` objects (how they're written), or
 /// `[scope, label]` pairs.
+/// A document envelope without its body. Listings need only the id,
+/// title, tags and time, and a document can be a whole book: decoding the
+/// full block for each listed document held gigabytes at once.
+#[derive(serde::Deserialize)]
+struct DocHead {
+    #[serde(default)]
+    payload: DocHeadPayload,
+    #[serde(default)]
+    tags: serde_json::Value,
+    #[serde(default)]
+    wall_ns: u64,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct DocHeadPayload {
+    #[serde(rename = "DocCreate")]
+    doc_create: Option<DocCreateHead>,
+}
+
+#[derive(serde::Deserialize)]
+struct DocCreateHead {
+    doc_id: DocId,
+    #[serde(default)]
+    frontmatter: serde_json::Map<String, serde_json::Value>,
+}
+
+impl DocHead {
+    /// DAG-CBOR or legacy JSON; fields not named here (the body) are skipped.
+    fn read(data: &[u8]) -> Option<Self> {
+        memvault_store::deserialize_block_as(data)
+    }
+}
+
+impl DocCreateHead {
+    fn title(&self) -> Option<String> {
+        self.frontmatter.get("title").and_then(|t| t.as_str()).map(String::from)
+    }
+}
+
+/// An envelope's payload variant only (`{"DocCreate": …}` → "DocCreate").
+#[derive(serde::Deserialize)]
+struct EnvKind {
+    #[serde(default)]
+    payload: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
+}
+
+/// An envelope's time only.
+#[derive(serde::Deserialize)]
+struct EnvWall {
+    #[serde(default)]
+    wall_ns: u64,
+}
+
+/// An envelope's tags only.
+#[derive(serde::Deserialize)]
+struct EnvTags {
+    #[serde(default)]
+    tags: Option<serde_json::Value>,
+}
+
 fn envelope_tags(v: &serde_json::Value) -> Vec<(String, String)> {
     v.as_array()
         .into_iter()

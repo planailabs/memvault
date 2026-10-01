@@ -53,3 +53,9 @@ full scan in the first place*.
    safe when stale, reconciled deterministically. Never a source of truth.
 4. Combine with [exhaustive-lookups.md](exhaustive-lookups.md): the
    authoritative reconciliation scan behind the cache is uncapped.
+
+## Indexing is idempotent
+
+Adding a node to the search index replaces what the index held for it (delete
+by `node_id`, then add). A re-index after a sync or repair otherwise leaves a
+second entry: duplicate hits, and the older entry's tags shadowing the new.

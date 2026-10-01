@@ -20,6 +20,9 @@ in the same change if the convention itself evolves.**
 | [blockstore-not-redb.md](blockstore-not-redb.md) | Cluster-scoped state changes must emit a content-addressed block (it's the sync unit); redb side tables are derived indexes, rebuildable from blocks, and never sync. |
 | [block-ingestion.md](block-ingestion.md) | Every block — locally created or peer-synced — enters the store through the single `ingest_block` primitive; admission control (sign locally / `verify_cid`+`vet_sync_block` remotely) is a gate in front of that one path, never a second way to write a block. |
 | [sign-everything.md](sign-everything.md) | Any block that confers trust/authority/access/visibility must be signed, and the ingest path must verify the signature before acting (authority may be deferred; authenticity never). |
+| [listings-without-bodies.md](listings-without-bodies.md) | Listings, summaries and labels decode only the fields they show (partial heads via `deserialize_block_as`, labels from the index), never a node's whole block — a body can be a book. |
+| [bounded-memory.md](bounded-memory.md) | Every in-memory cache and engine buffer has a ceiling; machine-dependent ones are env knobs with floors, listed in the README. |
+| [client-parity.md](client-parity.md) | `LocalClient` and `HttpApiClient` answer the same: every field travels, bodies match their `Content-Type`, UI features are tested over HTTP, and listings are filtered to what the caller may read. |
 
 ## The two rules in one sentence each
 

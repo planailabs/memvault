@@ -16,6 +16,13 @@ Rules for any AI agent (Claude Code, Copilot, etc.) working on the memvault crat
   (with `memvault_api::wire` hex helpers / `*Wire` DTOs) and deserialize it with
   `serde`. Do not hand-build `serde_json::json!({…})` on the server or
   field-pick a `serde_json::Value` on the client.
+- **Don't decode what you don't show; bound what you keep.** Listings,
+  labels and summaries read partial heads or the index, never whole blocks
+  ([listings-without-bodies](standards/listings-without-bodies.md)); every
+  cache and engine buffer has a ceiling
+  ([bounded-memory](standards/bounded-memory.md)).
+- **Local and HTTP clients answer the same.** A UI feature is tested through
+  `HttpApiClient` too ([client-parity](standards/client-parity.md)).
 - **Keep the README current — this is important.** `README.md` documents the
   user-facing surface: MCP tools (names + count), `memctl` command syntax, CLI
   flags, auth flows, web UI pages, node-ref formats, and the storage layout.
