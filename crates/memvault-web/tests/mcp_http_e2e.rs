@@ -688,3 +688,26 @@ async fn uploaded_files_land_at_their_vfs_path_over_http() {
     let resolved = client.vfs_resolve(&bucket, "/papers/r.pdf").await.expect("resolve");
     assert_eq!(resolved.map(|(n, _)| n.tag_label()), Some(node), "the file is at its path");
 }
+
+#[tokio::test]
+async fn buckets_of_others_are_not_listed() {
+    let (client, own) = client_and_bucket().await;
+    // A bucket another agent owns, made directly on the daemon.
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let theirs = local
+        .bucket_create_as(
+            AgentName("someone-else".into()),
+            Some([9u8; 32]),
+            "not-yours",
+            None,
+            Visibility::Internal,
+            memvault_core::classification::Classification::Internal,
+            memvault_doc::BucketRole::Standard,
+        )
+        .await
+        .unwrap();
+    let ids: Vec<BucketId> = client.bucket_list().await.unwrap().into_iter().map(|b| b.id).collect();
+    assert!(ids.contains(&own), "its own bucket is listed");
+    assert!(!ids.contains(&theirs), "another agent's bucket isn't");
+    assert!(client.bucket_get(&theirs).await.map(|b| b.is_none()).unwrap_or(true), "nor can it be opened");
+}

@@ -47,16 +47,19 @@ pub async fn list_buckets(
         );
     // `BucketInfo` carries hex-id wire encoding (see `standards/`), so it is
     // transmitted as-is — no hand-built JSON.
-    let buckets = state
+    let mut buckets = state
         .client
         .bucket_list_filtered(show_merged)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Only the buckets the caller may read (its own, granted ones; all for
+    // admins), the same rule that answers 403 when it opens another.
+    buckets.retain(|b| crate::api::auth::enforce_bucket_action(&auth.claims, &b.id, memvault_auth::Action::Read).is_ok());
     Ok(Json(buckets))
 }
 
 pub async fn get_bucket(
-    _auth: RequireAuth,
+    auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<memvault_api::types::BucketInfo>, StatusCode> {
@@ -65,6 +68,10 @@ pub async fn get_bucket(
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let bucket_id = memvault_core::BucketId(bucket_arr);
+    // A bucket the caller may not read doesn't exist for it.
+    if crate::api::auth::enforce_bucket_action(&auth.claims, &bucket_id, memvault_auth::Action::Read).is_err() {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     match state.client.bucket_get(&bucket_id).await {
         Ok(Some(b)) => Ok(Json(b)),
