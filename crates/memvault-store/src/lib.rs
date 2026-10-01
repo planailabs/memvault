@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub mod audit_index;
 pub mod block_iter;
 pub mod blockstore;
+pub mod bucket_decl;
 pub mod consumed_tokens;
 pub mod encryption;
 pub mod envelope_view;
@@ -21,6 +22,7 @@ pub mod scope_members;
 pub mod tables;
 
 pub use block_iter::Blocks;
+pub use bucket_decl::{DeclAuthority, DeclCandidate};
 pub use envelope_view::EnvelopeView;
 pub use error::StoreError;
 pub use insert::{EnvelopeMeta, IngestMeta, deserialize_block, deserialize_block_as};
@@ -106,8 +108,11 @@ impl MemvaultStore {
             txn.open_table(tables::SCOPE_REGISTRY)?;
             // VFS root derived index
             txn.open_table(tables::VFS_ROOT)?;
+            txn.open_table(tables::PINS)?;
+            txn.open_table(tables::SCRATCH)?;
         }
         txn.commit()?;
+        Self::migrate_legacy_pins(&db)?;
 
         Ok(Self {
             db: std::sync::RwLock::new(Some(db)),
@@ -257,8 +262,9 @@ mod tests {
     #[test]
     fn block_roundtrip() {
         let (_dir, store) = temp_store();
-        let cid = b"cid-001";
         let data = b"hello block";
+        let cid_v = memvault_core::cid_from_bytes(data).to_bytes();
+        let cid = cid_v.as_slice();
 
         assert!(!store.has_block(cid).unwrap());
         store.put_block(cid, data).unwrap();
@@ -271,24 +277,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.redb");
         let store = std::sync::Arc::new(MemvaultStore::open(&path).unwrap());
-        store.put_block(b"cid-001", b"kept").unwrap();
+        let cid = memvault_core::cid_from_bytes(b"kept").to_bytes();
+        store.put_block(&cid, b"kept").unwrap();
         // A static client would keep a clone forever.
         let held = store.clone();
         store.close();
-        assert!(held.get_block(b"cid-001").is_err(), "a closed store refuses work");
+        assert!(held.get_block(&cid).is_err(), "a closed store refuses work");
         // redb's header: magic (9 bytes), then flags; bit 2 = recovery required.
         let flags = std::fs::read(&path).unwrap()[9];
         assert_eq!(flags & 2, 0, "closed cleanly: the next open won't repair");
         drop(held);
         let reopened = MemvaultStore::open(&path).unwrap();
-        assert_eq!(reopened.get_block(b"cid-001").unwrap().unwrap(), b"kept");
+        assert_eq!(reopened.get_block(&cid).unwrap().unwrap(), b"kept");
     }
 
     #[test]
     fn block_delete() {
         let (_dir, store) = temp_store();
-        let cid = b"cid-del";
+        let cid_v = memvault_core::cid_from_bytes(b"data").to_bytes();
+        let cid = cid_v.as_slice();
         store.put_block(cid, b"data").unwrap();
+        assert!(
+            store.put_block(b"cid-del", b"data").is_err(),
+            "non-CID key rejected"
+        );
         assert!(store.delete_block(cid).unwrap());
         assert!(!store.has_block(cid).unwrap());
         assert!(!store.delete_block(cid).unwrap());
@@ -297,7 +309,8 @@ mod tests {
     #[test]
     fn insert_and_query_by_tag() {
         let (_dir, store) = temp_store();
-        let cid = b"cid-tag-1";
+        let cid_v = memvault_core::cid_from_bytes(b"envelope-data").to_bytes();
+        let cid = cid_v.as_slice();
         let meta = EnvelopeMeta {
             author: b"peer-a".to_vec(),
             tags: vec![("system".into(), "log".into())],
@@ -322,7 +335,8 @@ mod tests {
     #[test]
     fn insert_and_query_by_author() {
         let (_dir, store) = temp_store();
-        let cid = b"cid-author-1";
+        let cid_v = memvault_core::cid_from_bytes(b"data").to_bytes();
+        let cid = cid_v.as_slice();
         let author = b"peer-b";
         let meta = EnvelopeMeta {
             author: author.to_vec(),
@@ -346,7 +360,8 @@ mod tests {
         let (_dir, store) = temp_store();
 
         for i in 0..5u64 {
-            let cid = format!("cid-time-{i}");
+            let data = format!("data-{i}");
+            let cid = memvault_core::cid_from_bytes(data.as_bytes()).to_bytes();
             let meta = EnvelopeMeta {
                 author: b"peer".to_vec(),
                 tags: vec![],
@@ -357,9 +372,7 @@ mod tests {
                 bucket_id: None,
                 ..Default::default()
             };
-            store
-                .insert_envelope(cid.as_bytes(), b"data", &meta)
-                .unwrap();
+            store.insert_envelope(&cid, data.as_bytes(), &meta).unwrap();
         }
 
         // Query range [200, 400)
@@ -440,7 +453,8 @@ mod tests {
     fn insert_envelope_with_causal_and_provenance() {
         let (_dir, store) = temp_store();
         let parent_cid = b"parent-cid";
-        let child_cid = b"child-cid";
+        let child_cid_v = memvault_core::cid_from_bytes(b"child-data").to_bytes();
+        let child_cid = child_cid_v.as_slice();
 
         let meta = EnvelopeMeta {
             author: b"peer".to_vec(),
@@ -466,7 +480,8 @@ mod tests {
         let (_dir, store) = temp_store();
 
         for i in 0..10u64 {
-            let cid = format!("cid-limit-{i}");
+            let data = format!("data-{i}");
+            let cid = memvault_core::cid_from_bytes(data.as_bytes()).to_bytes();
             let meta = EnvelopeMeta {
                 author: b"peer".to_vec(),
                 tags: vec![("app".into(), "event".into())],
@@ -477,9 +492,7 @@ mod tests {
                 bucket_id: None,
                 ..Default::default()
             };
-            store
-                .insert_envelope(cid.as_bytes(), b"data", &meta)
-                .unwrap();
+            store.insert_envelope(&cid, data.as_bytes(), &meta).unwrap();
         }
 
         let results = store.query_by_tag("app", "event", 0, 3).unwrap();

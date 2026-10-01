@@ -32,9 +32,11 @@ block**:
 1. **Emit a block, not just a table write.** Prefer a signed envelope via
    `build_signed_envelope` (tags + bucket live in the *signed body*, so
    `reindex_block` recovers them on the receiver and the store notifier fires —
-   no `vet_sync_block` arm needed). A bare signed struct (`BucketMergeRecord`,
-   `Grant`) also works but then needs an explicit `validate_sigchain_for_sync`
-   arm to re-tag it on ingest (it has no body tags).
+   no classifier arm needed). A bare signed struct (`BucketMergeRecord`,
+   `Grant`) also works but then needs an arm in
+   `memvault_api::admission::classify_record` (and a `SigchainKind`) that
+   verifies it and derives its tags/author/time from the record — the same
+   arm serves local writes, sync and rebuild.
 2. **Tag it `("sigchain", <label>)`** if a node must *react* to it on ingest
    (cache invalidation, applying it to a side table). Add a watcher arm
    (`install_sigchain_notifier` → the `<label>` dispatch) that does the local
@@ -49,6 +51,11 @@ block**:
    node-agnostic — derive any timestamps/keys from the record, not the wall
    clock, so every node converges identically). See `derived-indexes.md` for the
    cache-over-the-store framing and `exhaustive-lookups.md` for the scan.
+5. **The converse: BLOCKS holds only blocks.** Every key in BLOCKS is a CID of
+   its value (`put_block`/`ingest_block` refuse anything else). Genuinely
+   node-local state — attachment pins, health probes — gets its own redb
+   table, never a made-up key in BLOCKS, where RBSR would offer it to peers
+   and `rebuild_store` would classify it as content.
 
 ## Smell test
 

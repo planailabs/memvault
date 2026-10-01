@@ -54,24 +54,12 @@ pub fn check_health(store: &MemvaultStore) -> HealthCheck {
 
 fn check_store_accessible(store: &MemvaultStore) -> CheckResult {
     let start = Instant::now();
-    let test_cid = b"__healthcheck_probe__";
-    let test_data = b"ok";
-
-    let result = (|| -> Result<(), String> {
-        store
-            .put_block(test_cid, test_data)
-            .map_err(|e| format!("write failed: {e}"))?;
-        let read = store
-            .get_block(test_cid)
-            .map_err(|e| format!("read failed: {e}"))?;
-        if read.as_deref() != Some(test_data.as_slice()) {
-            return Err("read-back mismatch".to_string());
-        }
-        store
-            .delete_block(test_cid)
-            .map_err(|e| format!("cleanup failed: {e}"))?;
-        Ok(())
-    })();
+    // Probe a scratch table, never BLOCKS: a fake key there is a
+    // non-content-addressed block, and deleting a real CID could remove
+    // someone's data.
+    let result = store
+        .probe_roundtrip()
+        .map_err(|e| format!("store probe failed: {e}"));
 
     let duration_ms = start.elapsed().as_millis() as u64;
 

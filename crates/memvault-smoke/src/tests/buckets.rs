@@ -597,7 +597,9 @@ async fn attach_also_binds_unbound_bucket() {
         peer_id.to_vec(),
         cluster_id.0.to_vec(),
     );
-    post_client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]));
+    // Same node, same node key: bucket decl updates are accepted only from
+    // the bucket's owner (its creating node) or an admin.
+    post_client.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]));
 
     // At this point the bucket is auto-bound but still private.
     let info = post_client.bucket_get(&bucket_id).await.unwrap().unwrap();

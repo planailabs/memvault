@@ -20,7 +20,6 @@ use memvault_auth::{
     AdminGenesis, AdminKeyAdmission, AdminKeyRetirement, AdminKeyState, AgentAttestation,
     AgentRevocation, GrantRevocation, NodeAttestation, NodeRevocation,
 };
-use memvault_store::insert::EnvelopeMeta;
 
 const KIND: &str = "sigchain";
 const LABEL_ADMIN_GENESIS: &str = "admin_genesis";
@@ -42,48 +41,21 @@ const LABEL_RETRACTION: &str = "retraction";
 /// Label for the "token redeemed" audit record (`TokenConsumption`).
 pub const LABEL_TOKEN_REDEEM: &str = "token_redeem";
 
+/// Store a sigchain record this node minted. Its index metadata
+/// (`sigchain/<label>` + lookup tags, signer, the record's own timestamp)
+/// is derived from the record by `crate::admission`, the same derivation a
+/// peer applies when it syncs the record and `rebuild_store` applies on
+/// repair. Idempotent: an existing block is left alone, so republishing
+/// (e.g. `init_ui_agent` on every restart) adds no index entries.
+///
+/// SigchainBlock events fire via the store's index notifier (installed by
+/// `LocalClient::install_sigchain_notifier`), for local writes and synced
+/// blocks alike.
 fn write_block(client: &LocalClient, label: &str, bytes: &[u8]) -> Result<Vec<u8>> {
-    write_block_with_extra_tags(client, label, bytes, Vec::new())
-}
-
-fn write_block_with_extra_tags(
-    client: &LocalClient,
-    label: &str,
-    bytes: &[u8],
-    extra_tags: Vec<(String, String)>,
-) -> Result<Vec<u8>> {
-    let cid = memvault_core::cid_from_bytes(bytes);
-    let cid_bytes = cid.to_bytes();
-
-    // Idempotence: if this exact block (same CID) is already in the
-    // store, don't re-emit the tag index entries. `insert_envelope`
-    // packs the wall_ns into BY_TAG keys, so a duplicate publish
-    // creates a NEW tag entry pointing to the SAME block — scans then
-    // return the block N times. `init_ui_agent` republishes the UI
-    // agent's attestation on every restart; without this gate, the
-    // agent would accumulate one duplicate tag entry per boot.
-    if matches!(client.store().get_block(&cid_bytes), Ok(Some(_))) {
-        return Ok(cid_bytes);
-    }
-
-    let mut tags = vec![(KIND.to_string(), label.to_string())];
-    tags.extend(extra_tags);
-    let meta = EnvelopeMeta {
-        author: client.peer_id().to_vec(),
-        tags,
-        wall_ns: memvault_core::wall_ns(),
-        cluster_id: Some(client.cluster_id().to_vec()),
-        ..Default::default()
-    };
-    // SigchainBlock event publishing happens via the store's index_notifier
-    // (installed by `LocalClient::install_sigchain_notifier`) so local writes
-    // AND blocks arriving via RBSR sync (which use `reindex_block`) both
-    // notify watchers through the same path.
+    debug_assert_eq!(memvault_auth::sigchain_label_for(bytes), Some(label));
     client
-        .store()
-        .insert_envelope(&cid_bytes, bytes, &meta)
-        .map_err(|e| ApiError::Other(format!("write {label}: {e}")))?;
-    Ok(cid_bytes)
+        .ingest_record(bytes)
+        .map_err(|e| ApiError::Other(format!("write {label}: {e}")))
 }
 
 /// Persist an `AdminGenesis` block — the cluster's root-of-trust pubkey.
@@ -243,8 +215,21 @@ pub fn rebuild_admin_key_state(
     client: &LocalClient,
     anchor: &ed25519_dalek::VerifyingKey,
 ) -> Result<()> {
-    let cluster_id = client.cluster_id();
-    let mut state = AdminKeyState::new_with_bootstrap(anchor.to_bytes(), 0);
+    let state = admin_key_state_from_store(client.store(), client.cluster_id(), anchor.to_bytes())?;
+    client.set_admin_key_state(state);
+    Ok(())
+}
+
+/// The admin-key set the admission chain in `store` establishes, anchored
+/// at `anchor` (see [`rebuild_admin_key_state`] for the ordering and
+/// validity rules). Store-only, so the sync gate verifies admin-signed
+/// records against the same key set the client uses.
+pub fn admin_key_state_from_store(
+    store: &memvault_store::MemvaultStore,
+    cluster_id: &[u8],
+    anchor: [u8; 32],
+) -> Result<AdminKeyState> {
+    let mut state = AdminKeyState::new_with_bootstrap(anchor, 0);
 
     enum Event {
         Admit(Box<AdminKeyAdmission>),
@@ -253,7 +238,7 @@ pub fn rebuild_admin_key_state(
 
     let mut events: Vec<(u64, Vec<u8>, Event)> = Vec::new();
 
-    for bytes in load_blocks_by_label(client, LABEL_ADMIN_ADMISSION)? {
+    for bytes in load_store_blocks_by_label(store, LABEL_ADMIN_ADMISSION)? {
         let adm: AdminKeyAdmission = match serde_ipld_dagcbor::from_slice(&bytes) {
             Ok(a) => a,
             Err(e) => {
@@ -276,7 +261,7 @@ pub fn rebuild_admin_key_state(
         events.push((adm.admitted_at_ns, cid, Event::Admit(Box::new(adm))));
     }
 
-    for bytes in load_blocks_by_label(client, LABEL_ADMIN_RETIREMENT)? {
+    for bytes in load_store_blocks_by_label(store, LABEL_ADMIN_RETIREMENT)? {
         let ret: AdminKeyRetirement = match serde_ipld_dagcbor::from_slice(&bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -357,8 +342,7 @@ pub fn rebuild_admin_key_state(
         }
     }
 
-    client.set_admin_key_state(state);
-    Ok(())
+    Ok(state)
 }
 
 /// Persist a node `NodeAttestation` so it survives daemon restart and
@@ -876,6 +860,40 @@ fn apply_sigchain_block(
                 }
             }
         }
+        "share_decision" => {
+            // A share decision (local or synced): re-derive that proposal's
+            // inbox status from all its decision blocks (verifies each).
+            if let Some(proposal) = memvault_store::deserialize_block_as::<
+                memvault_core::Signed<serde_json::Value>,
+            >(&bytes)
+            .and_then(|s| {
+                serde_json::from_value::<Vec<u8>>(
+                    s.payload.get("ShareDecision")?.get("proposal_cid")?.clone(),
+                )
+                .ok()
+            }) {
+                client.apply_share_decisions(&proposal);
+            }
+        }
+        "bucket_trust" => {
+            // Cross-cluster trust issued by an admin of this cluster: apply
+            // it to the BUCKET_TRUST index (derived from these blocks).
+            if let Ok(trust) = serde_ipld_dagcbor::from_slice::<memvault_auth::BucketTrust>(&bytes)
+            {
+                let admin = client
+                    .admin_verifying_keys()
+                    .iter()
+                    .any(|k| trust.verify_signature(k).is_ok());
+                if admin && trust.to_cluster.0.as_slice() == client.cluster_id() {
+                    let _ = client.store().record_bucket_trust(
+                        &trust.bucket_id.0,
+                        &trust.from_cluster.0,
+                        &trust.to_cluster.0,
+                        cid,
+                    );
+                }
+            }
+        }
         // AgentAttestation / EnvelopeAuthorship are looked up on demand by
         // the verifier — no live mutation needed.
         _ => {}
@@ -1107,13 +1125,24 @@ pub fn scan_trusted_attestations(
 }
 
 fn load_blocks_by_label(client: &LocalClient, label: &str) -> Result<Vec<Vec<u8>>> {
-    let cids = client
-        .store()
+    load_store_blocks_by_label(client.store(), label)
+}
+
+/// Every block tagged `("sigchain", label)`, each once. Exhaustive.
+pub(crate) fn load_store_blocks_by_label(
+    store: &memvault_store::MemvaultStore,
+    label: &str,
+) -> Result<Vec<Vec<u8>>> {
+    let cids = store
         .query_by_tag(KIND, label, 0, usize::MAX)
         .map_err(|e| ApiError::Other(format!("query {label}: {e}")))?;
+    let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(cids.len());
     for cid in cids {
-        if let Ok(Some(bytes)) = client.store().get_block(&cid) {
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
+        if let Ok(Some(bytes)) = store.get_block(&cid) {
             out.push(bytes);
         }
     }

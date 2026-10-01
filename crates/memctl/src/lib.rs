@@ -2106,12 +2106,22 @@ mod native {
                     // Drop the now-dangling sigchain index entries and rebuild
                     // the secondary indexes from the remaining blocks.
                     store.clear_secondary_indexes()?;
+                    // Bare records that survive (grants, merges, …) get
+                    // their lookup tags back the same way rebuild and sync
+                    // derive them. No admin keys remain after uncluster, so
+                    // signers that aren't embedded in a record stay unset.
+                    let keys = memvault_api::admission::RecordKeys {
+                        cluster_id: store
+                            .get_local_cluster_id()?
+                            .and_then(|c| <[u8; 32]>::try_from(c.as_slice()).ok())
+                            .unwrap_or([0u8; 32]),
+                        ..Default::default()
+                    };
                     let mut reindexed = 0usize;
                     // One block at a time (never the whole store in memory).
                     for block in store.blocks() {
                         let (cid, data) = block?;
-                        let (cid, data) = (&cid, &data);
-                        if store.reindex_block(cid, data).unwrap_or(false) {
+                        if memvault_api::admission::reindex_any_block(&store, &cid, &data, &keys) {
                             reindexed += 1;
                         }
                     }
@@ -3764,7 +3774,7 @@ mod native {
         let mut admin_pubkeys: HashSet<[u8; 32]> = HashSet::new();
         let mut cluster_id: Option<[u8; 32]> = None;
         for cid in store
-            .query_by_tag("sigchain", "admin_genesis", 0, 100)
+            .query_by_tag("sigchain", "admin_genesis", 0, usize::MAX)
             .unwrap_or_default()
         {
             if let Ok(Some(b)) = store.get_block(&cid) {
@@ -3783,7 +3793,7 @@ mod native {
         // Node attestations → trusted node pubkey set.
         let mut trusted_nodes: HashSet<[u8; 32]> = HashSet::new();
         for cid in store
-            .query_by_tag("sigchain", "node_att", 0, 1000)
+            .query_by_tag("sigchain", "node_att", 0, usize::MAX)
             .unwrap_or_default()
         {
             if let Ok(Some(b)) = store.get_block(&cid) {

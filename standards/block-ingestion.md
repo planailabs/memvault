@@ -52,11 +52,19 @@ silently between nodes.
    - `cluster_id` — never part of a signed envelope, so the **receiving node**
      always stamps its own cluster (drives `CLUSTER_ORIGIN` and live bucket
      binding, for local and synced blocks alike);
-   - `extra_tags` / `author` / `wall_ns` — for **bare-struct sigchain blocks**
-     (`AdminKeyAdmission`, `NodeAttestation`, `Grant`, `BucketMergeRecord`, …),
-     which are *not* envelopes and carry no such fields. The admission gate
-     supplies the synthetic `("sigchain", label)` marker, the signer pubkey, and
-     the ingest time so the sigchain index + watcher see the block.
+   - `extra_tags` / `author` / `wall_ns` / `bucket_id` — for **bare-struct
+     sigchain blocks** (`AdminKeyAdmission`, `NodeAttestation`, `Grant`,
+     `BucketMergeRecord`, `TokenConsumption`, …), which are *not* envelopes and
+     carry no such fields. `memvault_api::admission::classify_record` derives
+     them **from the record**: the `("sigchain", label)` marker plus lookup
+     tags, the signer (embedded, or the key that verified it), the record's
+     own timestamp, its bucket. Never the writer's peer id or the clock — a
+     local write, a synced copy and a rebuild must file the record under the
+     same keys, or RBSR windows never match.
+   - `unindexed` — for raw blocks reached only by reference (file chunks,
+     manifests, blob DAG nodes): stored, no index entry. A block with no
+     metadata of its own and none supplied is stored the same way, so a
+     synced chunk indexes like a local one.
 
    For an ordinary signed envelope every override is absent or equal to the
    bytes, so the layering is a no-op — which is exactly why one path is safe.
@@ -66,10 +74,14 @@ silently between nodes.
    `IngestMeta`:
    - **local writes** sign the envelope (`build_signed_envelope`) and stamp the
      node's own cluster;
-   - **synced blocks** verify content-addressing (`verify_cid`) and run the
-     signature/shape classifier (`vet_sync_block` → `validate_sigchain_for_sync`)
-     to decide `Drop` vs `Ingest(meta)`. A dropped block never reaches ingest;
-     an accepted one is ingested through the same primitive as a local write.
+   - **synced blocks** go through `memvault_api::admission::SyncGate`: skip a
+     block already held, verify content-addressing (`verify_cid`), run the
+     signature/shape classifier (`classify_record` in verify mode, against the
+     pinned admin anchor, the admins its admission chain admits and the
+     attested nodes) to decide drop vs ingest, and afterwards re-derive the
+     state the block affects (a bucket's current decl). A dropped block never
+     reaches ingest; an accepted one is ingested through the same primitive
+     as a local write, with the same `classify_record` metadata.
 
 5. **`reindex_block` is the offline-rebuild sibling, not a parallel path.** It
    shares `ingest_block`'s `extract_meta` + `write_block_indexes` helpers, so a

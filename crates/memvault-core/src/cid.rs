@@ -47,6 +47,18 @@ pub fn cid_string_from_bytes(bytes: &[u8]) -> Result<String> {
     Ok(cid.to_string())
 }
 
+/// Parse raw CID bytes (exactly one CID) into a [`Cid`]. Unlike
+/// [`cid_from_bytes`], which *hashes* its input, this reads the CID the
+/// bytes already are.
+pub fn parse_cid(bytes: &[u8]) -> Result<Cid> {
+    let cid = Cid::read_bytes(std::io::Cursor::new(bytes))
+        .map_err(|e| Error::Cid(format!("cannot parse CID bytes: {e}")))?;
+    if cid.encoded_len() != bytes.len() {
+        return Err(Error::Cid("trailing bytes after CID".into()));
+    }
+    Ok(cid)
+}
+
 /// Raw CID bytes from a canonical CID string.
 pub fn cid_bytes_from_string(s: &str) -> Result<Vec<u8>> {
     Ok(cid_from_string(s)?.to_bytes())
@@ -71,6 +83,14 @@ pub fn cid_bytes_lenient(s: &str) -> Result<Vec<u8>> {
 pub fn verify_cid(cid_bytes: &[u8], data: &[u8]) -> Result<bool> {
     let cid = Cid::read_bytes(std::io::Cursor::new(cid_bytes))
         .map_err(|e| Error::Cid(format!("cannot parse CID: {e}")))?;
+    // The key must be exactly one CID: trailing bytes would let two
+    // different keys alias the same content address.
+    if cid.encoded_len() != cid_bytes.len() {
+        return Err(Error::Cid(format!(
+            "CID has {} trailing byte(s)",
+            cid_bytes.len().saturating_sub(cid.encoded_len())
+        )));
+    }
     let hash_code = cid.hash().code();
     let code = Code::try_from(hash_code)
         .map_err(|_| Error::Cid(format!("unsupported hash algorithm: 0x{hash_code:x}")))?;

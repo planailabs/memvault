@@ -26,6 +26,7 @@ prost = "0.13"
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["serde"] }
 hex = "0.4"
+redb = "2"
 
 [lib]
 name = "memvault_smoke"

@@ -1451,42 +1451,6 @@ fn check_block_access(
     true // Attached bucket, allow.
 }
 
-/// Handle a block exchange response. Two cases:
-/// - Blocks with data → store them locally.
-/// - CID-only entries (from list-heads) → request the ones we're missing.
-///
-/// Also chases references: if a stored block is an attachment envelope
-/// (references manifest_cid) or an AttachmentManifest (references
-/// content_root / chunk CIDs), those dependent CIDs are queued for
-/// fetch. Without this, file data chunks are invisible to RBSR (they
-/// have no BY_TIME entry) and silently diverge between nodes.
-/// Decide how a synced block should be persisted. Sigchain blocks are
-/// detected by their CBOR shape and signature-verified before storage;
-/// invalid attestations / revocations are dropped at sync ingress so
-/// they never pollute trust state. Non-sigchain blocks pass through.
-enum SyncDisposition {
-    /// Drop the block — signature invalid, cluster mismatch, or unknown
-    /// admin. Better to fail closed than to store a forgery.
-    Drop,
-    /// Admit the block through the single `store.ingest_block` path with
-    /// the given [`memvault_store::IngestMeta`]. For ordinary content the
-    /// meta only stamps the receiving node's cluster (the bytes carry
-    /// tags/author/wall_ns themselves). For bare-struct sigchain blocks —
-    /// which aren't envelopes and carry no such fields — the meta also
-    /// supplies the synthetic `("sigchain", label)` marker, signer pubkey
-    /// and ingest time so the receiver's sigchain index + watcher see the
-    /// block.
-    Ingest(memvault_store::IngestMeta),
-}
-
-/// Does this libp2p peer correspond to a node currently attested by
-/// the cluster admin?
-///
-/// Walks the local NodeAttestation blocks (`sigchain/node_att` tag),
-/// verifies each against the pinned admin pubkey, derives the libp2p
-/// PeerId from the attested ed25519 pubkey, and compares. Returns true
-/// on first match. Cheap when the cluster is small; cache later if it
-/// matters.
 /// Verify a Block Access Token fully authorizes `peer`: signature valid under
 /// the cluster admin key, not expired, and bound to the requesting peer. Any
 /// missing piece → deny (fail closed). Without this a peer could forge a token
@@ -1520,337 +1484,47 @@ fn bat_authorizes_peer(
     &grantee == peer
 }
 
+/// Does this libp2p peer correspond to a node attested by a cluster admin
+/// (the pinned anchor or any admin the admission chain admits)?
+/// Exhaustive over the stored NodeAttestations.
 fn peer_is_trusted_node(
     store: &MemvaultStore,
     peer: &libp2p::PeerId,
     join_config: &JoinConfig,
 ) -> bool {
-    let Some(admin_pk) = join_config.pinned_admin_pubkey else {
-        return false;
-    };
-    let Ok(admin_vk) = ed25519_dalek::VerifyingKey::from_bytes(&admin_pk) else {
-        return false;
-    };
-
-    let cids = match store.query_by_tag("sigchain", "node_att", 0, 1024) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    for cid in cids {
-        let Ok(Some(bytes)) = store.get_block(&cid) else {
-            continue;
-        };
-        let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(&bytes)
-        else {
-            continue;
-        };
-        // A valid (admin-signed) node attestation confers block-serving trust;
-        // NodeAttestation carries no role — its existence is the trust.
-        if att.cluster_id.0 != join_config.cluster_id {
-            continue;
-        }
-        if att.verify_signature(&admin_vk).is_err() {
-            continue;
-        }
-        if att.member.0.len() != 32 {
-            continue;
-        }
-        let mut pkbytes = [0u8; 32];
-        pkbytes.copy_from_slice(&att.member.0);
-        let Ok(ed_pk) = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pkbytes) else {
-            continue;
-        };
-        let candidate: libp2p::PeerId = libp2p::identity::PublicKey::from(ed_pk).to_peer_id();
-        if &candidate == peer {
-            return true;
-        }
-    }
-    false
+    let admin_keys = memvault_api::admission::admin_keys_from_store(
+        store,
+        &join_config.cluster_id,
+        join_config.pinned_admin_pubkey,
+    );
+    memvault_api::admission::attested_nodes_from_store(store, &join_config.cluster_id, &admin_keys)
+        .into_iter()
+        .filter_map(|pk| peer_id_from_pubkey(&pk))
+        .any(|candidate| &candidate == peer)
 }
 
-/// Outcome of validating a candidate sigchain block from a sync ingress.
-/// Used internally by [`vet_sync_block`] to compress the per-type
-/// validation arms into a single dispatcher.
-enum SyncSigchainVerdict {
-    /// Bytes don't look like any known sigchain type — caller treats
-    /// the block as a regular envelope and lets the receiver's
-    /// existing indexer handle it.
-    NotSigchain,
-    /// Bytes parsed as a known sigchain type but the signature didn't
-    /// verify (or admin/cluster mismatch). Reason string is logged at
-    /// the call site for debugging.
-    Drop { reason: &'static str },
-    /// Sigchain block validated successfully. Caller wraps `label`
-    /// + `signer_pubkey` into the canonical `AsSigchain` meta.
-    /// `extra_tags` lets a per-type validator add lookup-side tags the
-    /// receiver needs but that aren't transmitted on the wire (e.g.
-    /// `("grant", <bucket_hex>)` so `list_bucket_grants` finds the
-    /// block after sync).
-    Accept {
-        label: &'static str,
-        signer_pubkey: Vec<u8>,
-        extra_tags: Vec<(String, String)>,
-    },
-}
-
-/// Single dispatcher for all sigchain block types arriving via sync.
-/// Each arm: parse → verify signature → return label + signer pubkey,
-/// or Drop with a reason. Centralises the per-type validation that
-/// used to live as four near-duplicate arms inside `vet_sync_block`.
-fn validate_sigchain_for_sync(bytes: &[u8], join_config: &JoinConfig) -> SyncSigchainVerdict {
-    let cluster_id = join_config.cluster_id;
-
-    // AdminKeyAdmission: verify the admitting self-signature + the
-    // incoming POP here. The authoritative "admitting key was a valid
-    // admin at admission time" check is deferred to
-    // `rebuild_admin_key_state` (same deferral pattern as AgentAttestation
-    // trust-of-node) — a block that passes here but fails the chain
-    // validation there simply has no effect on the admin set.
-    if let Ok(adm) = serde_ipld_dagcbor::from_slice::<memvault_auth::AdminKeyAdmission>(bytes) {
-        if adm.cluster_id.0 == cluster_id && adm.new_pubkey.iter().any(|&b| b != 0) {
-            if adm.verify().is_err() {
-                return SyncSigchainVerdict::Drop {
-                    reason: "admin_admission: bad admitting signature or POP",
-                };
-            }
-            return SyncSigchainVerdict::Accept {
-                label: "admin_admission",
-                signer_pubkey: adm.admitting_pubkey.to_vec(),
-                extra_tags: Vec::new(),
-            };
-        }
-    }
-
-    // AdminKeyRetirement: verify the retiring self-signature here; the
-    // "retiring key was a valid admin / no-lockout" checks are deferred
-    // to `rebuild_admin_key_state`.
-    if let Ok(ret) = serde_ipld_dagcbor::from_slice::<memvault_auth::AdminKeyRetirement>(bytes) {
-        if ret.cluster_id.0 == cluster_id && ret.retired_pubkey.iter().any(|&b| b != 0) {
-            if ret.verify_retiring_signature().is_err() {
-                return SyncSigchainVerdict::Drop {
-                    reason: "admin_retirement: bad retiring signature",
-                };
-            }
-            return SyncSigchainVerdict::Accept {
-                label: "admin_retirement",
-                signer_pubkey: ret.retiring_pubkey.to_vec(),
-                extra_tags: Vec::new(),
-            };
-        }
-    }
-
-    // NodeAttestation: admin-signed. Under multi-admin the signer may be
-    // an admitted admin the swarm can't see (it only pins the anchor), and
-    // sync may deliver the attestation before the admission that
-    // authorises its signer. So we fast-path on the anchor signature but
-    // otherwise DEFER: accept the well-formed, cluster-matching block and
-    // let the receiver's `scan_trusted_nodes` (which verifies against the
-    // full, eventually-complete admin set) decide trust. A bogus
-    // attestation that never verifies there simply never enters
-    // node_trust — no auth bypass, same deferral as AgentAttestation.
-    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeAttestation>(bytes) {
-        if att.cluster_id.0 == cluster_id && !att.member.0.is_empty() {
-            return SyncSigchainVerdict::Accept {
-                label: "node_att",
-                signer_pubkey: att.member.0.clone(),
-                extra_tags: Vec::new(),
-            };
-        }
-    }
-
-    // AgentAttestation: node-signed; chain-up-to-admin check happens
-    // later in `scan_trusted_agents`. This INCLUDES the `_ui` agent —
-    // a legitimate `_ui` attestation (signed by an attested cluster node)
-    // MUST propagate so that node's web-UI-authored writes resolve their
-    // authorship cluster-wide (`verify_envelope_authorship` looks the agent
-    // attestation up by CID on the remote node). Orphaned `_ui`
-    // attestations (signed by a never-attested ephemeral node) land here
-    // too, but are inert: they never enter `trusted_agents` (their node is
-    // untrusted), ACL rejects them (`is_attesting_node_trusted`), and
-    // `memctl sigchain --prune-orphans` clears the cruft.
-    if let Ok(att) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentAttestation>(bytes) {
-        if att.verify_signature().is_err() {
-            return SyncSigchainVerdict::Drop {
-                reason: "agent_att: bad node signature",
-            };
-        }
-        return SyncSigchainVerdict::Accept {
-            label: "agent_att",
-            signer_pubkey: att.node_pubkey.to_vec(),
-            extra_tags: Vec::new(),
-        };
-    }
-
-    // AgentRevocation: node-signed; trust-of-node check is deferred.
-    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::AgentRevocation>(bytes) {
-        if rev.verify_signature().is_err() {
-            return SyncSigchainVerdict::Drop {
-                reason: "agent_rev: bad node signature",
-            };
-        }
-        return SyncSigchainVerdict::Accept {
-            label: "agent_rev",
-            signer_pubkey: rev.node_pubkey.to_vec(),
-            extra_tags: Vec::new(),
-        };
-    }
-
-    // NodeRevocation: admin-signed. Verify the self-signature against the
-    // embedded admin_pubkey (cheap garbage filter — the signer set
-    // admin_pubkey and signed it). The authoritative "admin_pubkey is a
-    // known cluster admin" check is deferred to the receiver's
-    // `scan_revocations` (full admin set), so an admitted admin's
-    // revocation is honoured even though the swarm only pins the anchor.
-    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::NodeRevocation>(bytes) {
-        if rev.node_pubkey.iter().any(|&b| b != 0) {
-            if rev.verify_signature().is_err() {
-                return SyncSigchainVerdict::Drop {
-                    reason: "node_rev: bad self-signature",
-                };
-            }
-            return SyncSigchainVerdict::Accept {
-                label: "node_rev",
-                signer_pubkey: rev.admin_pubkey.to_vec(),
-                extra_tags: Vec::new(),
-            };
-        }
-    }
-
-    // GrantRevocation: admin-signed. Verify the self-signature against the
-    // embedded admin_pubkey; defer the "admin_pubkey is a known cluster
-    // admin" check to the receiver's grant-revocation scan/watcher.
-    if let Ok(rev) = serde_ipld_dagcbor::from_slice::<memvault_auth::GrantRevocation>(bytes) {
-        if rev.admin_pubkey.iter().any(|&b| b != 0) {
-            if rev.verify_signature().is_err() {
-                return SyncSigchainVerdict::Drop {
-                    reason: "grant_revocation: bad self-signature",
-                };
-            }
-            return SyncSigchainVerdict::Accept {
-                label: "grant_revocation",
-                signer_pubkey: rev.admin_pubkey.to_vec(),
-                extra_tags: Vec::new(),
-            };
-        }
-    }
-
-    // Grant: admin/owner-agent/node-signed. Verify the self-signature
-    // against the embedded admin_pubkey; defer the "issuer is
-    // authorised for this bucket" check to ACL evaluation
-    // (`acl::check_bucket_access` runs `grant_signature_authentic` +
-    // `grant_issuer_authorized` per-lookup against the receiver's
-    // current admin set / bucket owner). Without this, grant blocks
-    // arriving via sync fell through to `NotSigchain` and were stored
-    // without their `("grant", <bucket_hex>)` lookup tag — so
-    // `list_bucket_grants` returned empty even though the bytes were
-    // in the blockstore. Add that tag through `extra_tags` so the
-    // bucket-scoped lookup matches.
-    if let Ok(grant) = serde_ipld_dagcbor::from_slice::<memvault_auth::Grant>(bytes) {
-        if grant.admin_pubkey.iter().any(|&b| b != 0) {
-            if grant.verify_admin_signature().is_err() {
-                return SyncSigchainVerdict::Drop {
-                    reason: "grant: bad self-signature",
-                };
-            }
-            // Grants must scope exactly one bucket (enforced server-side
-            // by both the issue + submit paths).
-            let extra_tags = match grant.bucket_scopes.as_slice() {
-                [bid] => vec![
-                    ("grant".to_string(), hex::encode(bid.0)),
-                    ("kind".to_string(), "grant".to_string()),
-                ],
-                _ => Vec::new(),
-            };
-            return SyncSigchainVerdict::Accept {
-                label: "grant",
-                signer_pubkey: grant.admin_pubkey.to_vec(),
-                extra_tags,
-            };
-        }
-    }
-
-    // BucketMergeRecord: admin/owner-signed alias edge (source → canonical).
-    // Verify the self-signature against the embedded issuer pubkey; defer the
-    // "issuer is authorised for both buckets" check (the alias build trusts an
-    // authentic record, same as a locally-written one). Without the
-    // `("bucket_merge", <source_hex>)` lookup tag the synced record falls to
-    // NotSigchain and `build_bucket_alias_maps` never sees it — the merge stays
-    // invisible on the peer (canonical_of doesn't resolve, the list union and
-    // `bucket_merges()` are empty). The `"sigchain"/"bucket_merge"` label also
-    // fires the receiver's alias-cache invalidation watcher. (Same class of bug
-    // as the Grant arm above.)
-    if let Ok(rec) = serde_ipld_dagcbor::from_slice::<memvault_auth::BucketMergeRecord>(bytes) {
-        if rec.source.0 != rec.canonical.0 && rec.issued_by_pubkey.iter().any(|&b| b != 0) {
-            if rec.verify_signature().is_err() {
-                return SyncSigchainVerdict::Drop {
-                    reason: "bucket_merge: bad signature",
-                };
-            }
-            return SyncSigchainVerdict::Accept {
-                label: "bucket_merge",
-                signer_pubkey: rec.issued_by_pubkey.to_vec(),
-                extra_tags: vec![
-                    ("bucket_merge".to_string(), hex::encode(rec.source.0)),
-                    ("kind".to_string(), "bucket_merge".to_string()),
-                ],
-            };
-        }
-    }
-
-    SyncSigchainVerdict::NotSigchain
-}
-
-fn vet_sync_block(
-    bytes: &[u8],
+/// The admission gate for blocks a peer sent us (see
+/// `memvault_api::admission::SyncGate`).
+fn sync_gate<'a>(
+    store: &'a MemvaultStore,
     join_config: &JoinConfig,
-    author_peer_pubkey: Option<[u8; 32]>,
-) -> SyncDisposition {
-    match validate_sigchain_for_sync(bytes, join_config) {
-        // Ordinary content envelope: the bytes carry tags/author/wall_ns;
-        // we only stamp the receiving node's cluster.
-        SyncSigchainVerdict::NotSigchain => SyncDisposition::Ingest(memvault_store::IngestMeta {
-            cluster_id: Some(join_config.cluster_id.to_vec()),
-            ..Default::default()
-        }),
-        SyncSigchainVerdict::Drop { reason } => {
-            tracing::warn!(reason, "dropped sync'd sigchain block");
-            SyncDisposition::Drop
-        }
-        SyncSigchainVerdict::Accept {
-            label,
-            signer_pubkey,
-            extra_tags,
-        } => {
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let author = author_peer_pubkey
-                .map(|p| p.to_vec())
-                .unwrap_or(signer_pubkey);
-            let mut extra = vec![("sigchain".to_string(), label.to_string())];
-            extra.extend(extra_tags);
-            // Bare-struct sigchain block: not an envelope, so the synthetic
-            // tags/author/wall_ns are the only metadata the indexer gets.
-            SyncDisposition::Ingest(memvault_store::IngestMeta {
-                cluster_id: Some(join_config.cluster_id.to_vec()),
-                extra_tags: extra,
-                author: Some(author),
-                wall_ns: Some(now_ns),
-                ..Default::default()
-            })
-        }
-    }
+) -> memvault_api::admission::SyncGate<'a> {
+    memvault_api::admission::SyncGate::new(
+        store,
+        join_config.cluster_id,
+        join_config.pinned_admin_pubkey,
+    )
 }
 
-/// Did the gate recognise this block as a sigchain type (vs. ordinary
-/// content)? True when the synthetic `("sigchain", _)` marker was stamped.
-/// The join protocol uses this to insist a bootstrap/attestation block is
-/// genuinely a verified sigchain block before treating it as one.
-fn ingest_is_sigchain(meta: &memvault_store::IngestMeta) -> bool {
-    meta.extra_tags.iter().any(|(s, _)| s == "sigchain")
-}
+/// Handle a block exchange response. Two cases:
+/// - Blocks with data → admit them through the sync gate.
+/// - CID-only entries (from list-heads) → request the ones we're missing.
+///
+/// Also chases references: if a stored block is an attachment envelope
+/// (references manifest_cid) or an AttachmentManifest (references
+/// content_root / chunk CIDs), those dependent CIDs are queued for
+/// fetch. Without this, file data chunks are invisible to RBSR (they
+/// have no BY_TIME entry) and silently diverge between nodes.
 
 fn handle_block_response(
     host: &mut impl MemvaultHost,
@@ -1862,6 +1536,7 @@ fn handle_block_response(
 ) {
     let mut stored = 0usize;
     let mut missing_cids: Vec<Vec<u8>> = Vec::new();
+    let mut admission = sync_gate(store, join_config);
 
     for entry in &response.blocks {
         if !entry.found {
@@ -1873,44 +1548,22 @@ fn handle_block_response(
                 missing_cids.push(entry.cid.clone());
             }
         } else {
-            // Full block: store it.
-            if store.get_block(&entry.cid).ok().flatten().is_some() {
-                continue; // already have it
-            }
-            // Content-addressing integrity: the bytes MUST hash to the
-            // claimed CID. Without this a peer could serve content Y under a
-            // CID X it isn't (substitution / id-reuse) — poisoning the store
-            // so a later lookup of X returns the wrong content, or shadowing
-            // a not-yet-held legitimate block. Use `verify_cid`, which hashes
-            // with the CID's *own* algorithm + verifies the digest — so it
-            // accepts both DAG-CBOR/Blake3 envelopes and raw/SHA2-256
-            // attachment chunks (recomputing via `cid_from_bytes` assumed one
-            // fixed codec+hash and dropped every attachment chunk).
-            if !matches!(memvault_core::verify_cid(&entry.cid, &entry.data), Ok(true)) {
-                tracing::warn!(
-                    cid = %hex::encode(&entry.cid),
-                    "dropping synced block: bytes do not hash to the claimed CID"
-                );
-                continue;
-            }
-            // Admission gate: decide whether this synced block may enter the
-            // store and, for bare-struct sigchain blocks, what synthetic
-            // metadata to stamp (the `("sigchain", label)` marker + signer
-            // pubkey). The result is an `IngestMeta` — every accepted block,
-            // sigchain or content, then enters through the SAME
-            // `store.ingest_block` path local writes use. The receiving
-            // node's cluster is always stamped (the signed envelope carries
-            // no cluster_id), which also binds a synced BucketDecl live.
-            let ingest = match vet_sync_block(&entry.data, join_config, None) {
-                SyncDisposition::Drop => continue,
-                SyncDisposition::Ingest(meta) => meta,
-            };
-            if let Err(e) = store.ingest_block(&entry.cid, &entry.data, &ingest) {
-                tracing::warn!(
-                    cid = %hex::encode(&entry.cid), %e,
-                    "failed to ingest synced block"
-                );
-                continue;
+            // Full block: the gate checks content addressing (bytes hash
+            // to the claimed CID), verifies bare sigchain records against
+            // the cluster's admin/node keys, ingests through the single
+            // `store.ingest_block` path (stamping our cluster), and
+            // re-decides bucket decls the block affects. A block we
+            // already hold is skipped.
+            match admission.admit(&entry.cid, &entry.data) {
+                memvault_api::admission::Admitted::Stored { .. } => {}
+                memvault_api::admission::Admitted::AlreadyHeld => continue,
+                memvault_api::admission::Admitted::Dropped(reason) => {
+                    tracing::warn!(
+                        cid = %hex::encode(&entry.cid), %reason,
+                        "dropping synced block"
+                    );
+                    continue;
+                }
             }
             stored += 1;
             tracing::debug!(cid = %hex::encode(&entry.cid), size = entry.data.len(), "synced block stored");
@@ -2258,7 +1911,11 @@ fn build_join_response(
     if !already_minted {
         // Honour max_uses BEFORE minting so we don't over-issue. Keystore
         // first (where consumption now accrues), then redb.
-        let used = match &join_config.keystore {
+        // The signed TokenConsumption blocks are the cluster-wide count
+        // (they sync, so a redemption at another admin counts here too);
+        // the local counter is a cache that also covers a redemption whose
+        // block is still being written.
+        let cached = match &join_config.keystore {
             Some(ks) => {
                 let k = format!("tokused:{}", hex::encode(&token_cid));
                 if ks.contains(k.as_bytes()) {
@@ -2269,29 +1926,21 @@ fn build_join_response(
             }
             None => store.get_token_consumption_count(&token_cid).unwrap_or(0),
         };
+        let used = cached.max(memvault_api::admission::token_redemptions(
+            store, &token_cid,
+        ));
         if used >= token.max_uses {
             return refuse(JoinRefuseReason::TokenAlreadyConsumed);
         }
     }
 
-    let meta = memvault_store::EnvelopeMeta {
-        author: claimed.to_vec(),
-        tags: vec![("sigchain".to_string(), "node_att".to_string())],
-        wall_ns: now_ns,
-        cluster_id: Some(join_config.cluster_id.to_vec()),
-        ..Default::default()
-    };
-    // insert_envelope is idempotent on the BLOCKS-table key (same CID
-    // overwrites with identical bytes) but adds a fresh BY_TAG entry
-    // every call. Skip the insert entirely on a hit to keep tag
-    // index clean.
-    if !already_minted {
-        if store
-            .insert_envelope(&cid_bytes, &att_bytes, &meta)
-            .is_err()
-        {
-            return refuse(JoinRefuseReason::TokenInvalidSignature);
-        }
+    // Index the attestation from the record itself (signer = this admin,
+    // no wall clock), exactly as a peer receiving it does. Skip on a hit.
+    let mint_keys = minting_keys(store, join_config, admin_sk);
+    if !already_minted
+        && memvault_api::admission::ingest_minted_record(store, &att_bytes, &mint_keys).is_err()
+    {
+        return refuse(JoinRefuseReason::TokenInvalidSignature);
     }
 
     // Record token consumption on first mint only. Keystore (atomic,
@@ -2338,17 +1987,7 @@ fn build_join_response(
             att_cid_obj,
         ) {
             if let Ok(tc_bytes) = serde_ipld_dagcbor::to_vec(&tc) {
-                let tc_cid = memvault_core::cid_from_bytes(&tc_bytes).to_bytes();
-                let tc_meta = memvault_store::EnvelopeMeta {
-                    author: claimed.to_vec(),
-                    tags: vec![("sigchain".to_string(), "token_redeem".to_string())],
-                    wall_ns: now_ns,
-                    cluster_id: Some(join_config.cluster_id.to_vec()),
-                    ..Default::default()
-                };
-                if matches!(store.get_block(&tc_cid), Ok(None)) {
-                    let _ = store.insert_envelope(&tc_cid, &tc_bytes, &tc_meta);
-                }
+                let _ = memvault_api::admission::ingest_minted_record(store, &tc_bytes, &mint_keys);
             }
         }
     }
@@ -2364,7 +2003,7 @@ fn build_join_response(
     // until admin's own NodeAttestation arrives). Bundling avoids the
     // chicken-and-egg without opening up unauthenticated block
     // exchange. Each block is shape-and-signature-verified at the
-    // peer via `vet_sync_block`, so a malicious admin can't inject
+    // peer via the sync gate (`memvault_api::admission`), so a malicious admin can't inject
     // arbitrary blocks here.
     let bootstrap_blocks = gather_bootstrap_blocks(store);
 
@@ -2372,7 +2011,7 @@ fn build_join_response(
     // the request carries a valid proof-of-possession for the admin key it
     // wants admitted. The admission is signed by THIS admin key, published
     // as a sigchain block (so it propagates), and returned to the joiner.
-    let admission_block = mint_join_admission(store, admin_sk, &token, request, now_ns);
+    let admission_block = mint_join_admission(store, admin_sk, &token, request, now_ns, &mint_keys);
 
     JoinResponse {
         version: 1,
@@ -2385,6 +2024,22 @@ fn build_join_response(
     }
 }
 
+/// Keys for indexing records this admin mints: the cluster's admin chain
+/// plus the signing admin's own key.
+fn minting_keys(
+    store: &MemvaultStore,
+    join_config: &JoinConfig,
+    admin_sk: &ed25519_dalek::SigningKey,
+) -> memvault_api::admission::RecordKeys {
+    let gate = sync_gate(store, join_config);
+    let mut keys = gate.keys().clone();
+    let own = admin_sk.verifying_key().to_bytes();
+    if !keys.admin_keys.contains(&own) {
+        keys.admin_keys.push(own);
+    }
+    keys
+}
+
 /// Mint + persist an `AdminKeyAdmission` for a join request, when the
 /// token grants admit-as-admin and the request's POP verifies. Returns
 /// the admission block bytes, or `None` if not requested / not valid.
@@ -2394,6 +2049,7 @@ fn mint_join_admission(
     token: &memvault_auth::JoinToken,
     request: &JoinRequest,
     now_ns: u64,
+    mint_keys: &memvault_api::admission::RecordKeys,
 ) -> Option<Vec<u8>> {
     if !token.admits_as_admin() {
         return None;
@@ -2421,28 +2077,27 @@ fn mint_join_admission(
     )
     .ok()?;
     let bytes = serde_ipld_dagcbor::to_vec(&admission).ok()?;
-    let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
-    let meta = memvault_store::EnvelopeMeta {
-        author: admin_sk.verifying_key().to_bytes().to_vec(),
-        tags: vec![("sigchain".to_string(), "admin_admission".to_string())],
-        wall_ns: now_ns,
-        cluster_id: Some(token.cluster_id.0.to_vec()),
-        ..Default::default()
-    };
-    let _ = store.insert_envelope(&cid, &bytes, &meta);
+    let _ = memvault_api::admission::ingest_minted_record(store, &bytes, mint_keys);
     tracing::info!(new_admin = %hex::encode(new_pk), "admitted admin via /join/1.0");
     Some(bytes)
 }
 
 /// Collect the sigchain blocks a joining peer needs to verify cluster
-/// trust before its first block-exchange round: every NodeAttestation
-/// we hold (so peer learns who else is attested) and every
-/// AdminGenesis block (the cluster's pin material, in case the peer
-/// wants to cross-check). Size is bounded by cluster size + 1.
+/// trust before its first block-exchange round: the AdminGenesis (the
+/// cluster's pin material), the admin admission chain (so attestations
+/// signed by an admitted admin verify), and every NodeAttestation we hold
+/// (so the peer learns who else is attested). Ordered so each block's
+/// signer is known before the block arrives. Exhaustive: a capped bundle
+/// would leave the joiner unable to trust some members.
 fn gather_bootstrap_blocks(store: &MemvaultStore) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    for (kind, label) in &[("sigchain", "node_att"), ("sigchain", "admin_genesis")] {
-        if let Ok(cids) = store.query_by_tag(kind, label, 0, 1024) {
+    for label in [
+        "admin_genesis",
+        "admin_admission",
+        "admin_retirement",
+        "node_att",
+    ] {
+        if let Ok(cids) = store.query_by_tag("sigchain", label, 0, usize::MAX) {
             // Tag entries may repeat the same CID (pre-fix duplicate
             // publishes); dedupe before reading.
             let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
@@ -2502,92 +2157,50 @@ fn handle_join_response(
             admission_block,
             ..
         } => {
-            // If admin admitted our admin key, persist the admission block
-            // (vetted like any synced sigchain block — verifies the
-            // admitting signature + our POP). It also propagates via sync.
-            if let Some(adm) = &admission_block {
-                let adm_cid = memvault_core::cid_from_bytes(adm).to_bytes();
-                match vet_sync_block(adm, join_config, None) {
-                    SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
-                        if let Err(e) = store.ingest_block(&adm_cid, adm, &meta) {
-                            tracing::warn!(%peer, %e, "failed to insert admission block");
-                        } else {
-                            tracing::info!(%peer, "stored admin admission from /join/1.0");
-                        }
-                    }
-                    _ => tracing::warn!(%peer, "join admission block failed vetting"),
-                }
-            }
-            // Bootstrap bundle first: each block (admin's
-            // NodeAttestation, AdminGenesis, etc.) goes through
-            // vet_sync_block for signature verification and proper
-            // tagging. After this, admin's identity is in our
-            // sigchain index — the block-exchange gate on the peer
-            // side won't refuse admin's serve_block_request once we
-            // ask. And from admin's POV, the attestation it just
-            // minted for us is already in admin's local sigchain, so
-            // admin's peer_is_trusted_node(us) returns true.
-            for boot in &bootstrap_blocks {
-                let boot_cid = memvault_core::cid_from_bytes(boot).to_bytes();
-                match vet_sync_block(boot, join_config, None) {
-                    SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
-                        if let Err(e) = store.ingest_block(&boot_cid, boot, &meta) {
-                            tracing::warn!(%peer, %e, "failed to insert bootstrap block");
-                        }
-                    }
-                    SyncDisposition::Drop => {
-                        tracing::warn!(
-                            %peer,
-                            "dropped bootstrap block: signature does not verify"
-                        );
-                    }
-                    SyncDisposition::Ingest(_) => {
-                        tracing::debug!(
-                            %peer,
-                            "ignoring non-sigchain bootstrap block"
-                        );
+            use memvault_api::admission::Admitted;
+            // Every block in the response goes through the sync gate,
+            // restricted to sigchain records: content-address check,
+            // signature verification against the cluster's admin/node keys,
+            // the single ingest path. A block we already hold is skipped
+            // (re-ingesting would add duplicate index entries).
+            let mut gate = sync_gate(store, join_config);
+            let mut admit = |label: &str, bytes: &[u8]| -> bool {
+                let cid = memvault_core::cid_from_bytes(bytes).to_bytes();
+                match gate.admit_record(&cid, bytes) {
+                    Admitted::Stored { .. } | Admitted::AlreadyHeld => true,
+                    Admitted::Dropped(reason) => {
+                        tracing::warn!(%peer, %reason, label, "dropped /join/1.0 block");
+                        false
                     }
                 }
-            }
+            };
 
-            // Now the main attestation_block (peer's own
-            // NodeAttestation). Same shape: vet + tag.
-            //
-            // Route through vet_sync_block so the NodeAttestation is
-            // signature-verified against the pinned admin pubkey AND
-            // tagged `sigchain/node_att`. Going through put_block +
-            // reindex_block here would store untagged bytes — the
-            // receiver's sigchain index would never see the entry and
-            // the watcher would never promote us out of PreGenesis.
-            let cid = memvault_core::cid_from_bytes(&attestation_block);
-            let cid_bytes = cid.to_bytes();
-            match vet_sync_block(&attestation_block, join_config, None) {
-                SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
-                    if let Err(e) = store.ingest_block(&cid_bytes, &attestation_block, &meta) {
-                        tracing::warn!(%peer, %e, "failed to insert join attestation");
-                        return false;
-                    }
-                    tracing::info!(%peer, "received node attestation via /join/1.0");
-                    true
-                }
-                SyncDisposition::Drop => {
-                    tracing::warn!(
-                        %peer,
-                        "dropped /join/1.0 response: attestation does not verify \
-                         against pinned admin pubkey"
-                    );
-                    false
-                }
-                SyncDisposition::Ingest(_) => {
-                    // Shouldn't happen — admin minted a NodeAttestation,
-                    // it has the right shape. Defensive fallback.
-                    tracing::warn!(
-                        %peer,
-                        "join response was not a recognized NodeAttestation; ignoring"
-                    );
-                    false
+            // Bootstrap bundle first (genesis, admin chain, node
+            // attestations — in signer order): afterwards the admin's
+            // identity is in our sigchain index, so the block-exchange gate
+            // won't refuse the admin, and an attestation signed by an
+            // admitted admin verifies.
+            for boot in &bootstrap_blocks {
+                admit("bootstrap", boot);
+            }
+            // If the admin admitted our admin key, persist the admission
+            // (verifies the admitting signature + our POP). It also
+            // propagates via sync.
+            if let Some(adm) = &admission_block {
+                if admit("admission", adm) {
+                    tracing::info!(%peer, "stored admin admission from /join/1.0");
                 }
             }
+            // Our own NodeAttestation: verified against the cluster's admin
+            // keys and tagged `sigchain/node_att`, so the trust index sees
+            // it and the watcher promotes us out of PreGenesis.
+            let ok = memvault_auth::detect_sigchain_shape(&attestation_block)
+                == Some(memvault_auth::SigchainKind::NodeAttestation)
+                && admit("attestation", &attestation_block);
+            if ok {
+                tracing::info!(%peer, "received node attestation via /join/1.0");
+            }
+            ok
         }
         JoinResult::Refuse { reason, .. } => {
             tracing::debug!(%peer, ?reason, "join refused");
@@ -2600,37 +2213,37 @@ fn handle_join_response(
 mod sync_classify_tests {
     use super::*;
 
-    /// A synced BucketMergeRecord must be classified as a sigchain block and
+    /// A synced BucketMergeRecord must be admitted as a sigchain block and
     /// re-tagged with `("bucket_merge", <source_hex>)` — otherwise it lands
-    /// untagged on the peer and the merge stays invisible (regression guard for
-    /// the missing `validate_sigchain_for_sync` arm).
+    /// untagged on the peer and the merge stays invisible.
     #[test]
     fn synced_bucket_merge_record_is_tagged_sigchain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemvaultStore::open(dir.path().join("db.redb")).unwrap();
         let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
         let source = memvault_core::BucketId([1u8; 32]);
         let canonical = memvault_core::BucketId([2u8; 32]);
         let rec = memvault_auth::sign_bucket_merge(&key, source.clone(), canonical, 42).unwrap();
         let bytes = serde_ipld_dagcbor::to_vec(&rec).unwrap();
+        let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
 
-        match vet_sync_block(&bytes, &JoinConfig::default(), None) {
-            SyncDisposition::Ingest(meta) if ingest_is_sigchain(&meta) => {
-                assert!(
-                    meta.extra_tags
-                        .iter()
-                        .any(|(s, l)| s == "sigchain" && l == "bucket_merge"),
-                    "missing sigchain/bucket_merge tag: {:?}",
-                    meta.extra_tags
-                );
-                assert!(
-                    meta.extra_tags
-                        .iter()
-                        .any(|(s, l)| s == "bucket_merge" && *l == hex::encode(source.0)),
-                    "missing bucket_merge lookup tag: {:?}",
-                    meta.extra_tags
-                );
-            }
-            _ => panic!("synced BucketMergeRecord was not classified as a sigchain ingest"),
-        }
+        let mut gate = sync_gate(&store, &JoinConfig::default());
+        assert!(matches!(
+            gate.admit(&cid, &bytes),
+            memvault_api::admission::Admitted::Stored { .. }
+        ));
+        assert_eq!(
+            store
+                .query_by_tag("sigchain", "bucket_merge", 0, 10)
+                .unwrap(),
+            vec![cid.clone()]
+        );
+        assert_eq!(
+            store
+                .query_by_tag("bucket_merge", &hex::encode(source.0), 0, 10)
+                .unwrap(),
+            vec![cid]
+        );
     }
 
     /// A page_render annotation's blob roots (page images, overflow text
