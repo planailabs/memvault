@@ -748,4 +748,9 @@ async fn audit_names_files_and_hides_other_buckets() {
     let files: Vec<Vec<u8>> = client.audit(q).await.unwrap().into_iter().filter_map(|r| r.attachment_cid).collect();
     assert!(files.contains(&mine), "an upload's record names its file (the UI's Files page lists from it)");
     assert!(!files.contains(&other), "another agent's bucket stays out of the audit log");
+    // The UI's Files page names files from their manifests, over HTTP in jwt mode.
+    let m = client.get_file_manifest(&mine).await.unwrap().expect("a manifest");
+    let m = memvault_store::deserialize_block(&m).expect("readable");
+    assert_eq!(m["filename"], "mine.txt");
+    assert_eq!(m["content_size"], 8);
 }

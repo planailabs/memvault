@@ -173,12 +173,12 @@ pub async fn file_manifest(
         .map_err(|_| ApiError::bad_request("Invalid CID"))?;
     crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
 
+    // The block is DAG-CBOR; the answer is JSON (it was the raw block,
+    // labelled JSON, which HTTP clients couldn't read).
     match state.client.get_file_manifest(&cid).await? {
-        Some(data) => Ok((
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            Bytes::from(data),
-        )),
+        Some(data) => memvault_store::deserialize_block(&data)
+            .map(axum::Json)
+            .ok_or_else(|| ApiError::internal("unreadable manifest block")),
         None => Err(ApiError::not_found("Manifest not found")),
     }
 }

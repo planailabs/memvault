@@ -46,17 +46,15 @@ async fn list_files(
 ) -> Result<Vec<FileRow>, ServerFnError> {
     let client = crate::ui::state::client()?;
 
-    // Authoritative scoped file set: the (view, bucket, retracted) triplet is
-    // resolved server-side by `list_scoped` (which combines view ∩ bucket ∩
-    // retraction — the per-bucket inferred-bucket filter the old per-page logic
-    // got wrong). We then enrich + time-order via the audit log below.
+    // Every file in scope comes from the index (`list_scoped` combines
+    // view ∩ bucket ∩ retraction).
     let scope = crate::ui::state::query_scope(
         view,
         bucket_hex.into_iter().collect(),
         show_retracted,
         Some(memvault_core::NodeKind::File),
     );
-    let scoped_files: std::collections::HashSet<String> = client
+    let scoped: std::collections::BTreeSet<String> = client
         .list_scoped(&scope, 5000)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
@@ -69,70 +67,58 @@ async fn list_files(
         })
         .collect();
 
-    use memvault_query::AuditQuery;
-
-    // Query audit log for AttachFile operations to discover files (gives us
-    // wall_ns + manifest metadata), filtered to the scoped set.
-    let query = AuditQuery {
+    // Upload times from the audit log. It only reaches the newest
+    // operations (its limit applies before the op filter), so an older
+    // file shows no time rather than going missing.
+    let query = memvault_query::AuditQuery {
         op_kind: Some(memvault_query::OpKind::AttachFile),
         limit: Some(5000),
         ..Default::default()
     };
-    let records = client
-        .audit(query)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let mut files = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for record in records {
-        let manifest_cid = match &record.attachment_cid {
-            Some(cid) => cid.clone(),
-            None => continue,
-        };
-        let cid_hex = hex::encode(&manifest_cid);
-        if !scoped_files.contains(&cid_hex) {
-            continue;
-        }
-        if !seen.insert(cid_hex.clone()) {
-            continue;
-        }
-        // Read manifest block (always exists after repair-index). The
-        // block is DAG-CBOR, not JSON — use the canonical helper so
-        // filename/mime_type/content_size come through instead of
-        // collapsing to defaults ("unnamed" / octet-stream / 0).
-        let (filename, mime_type, size) = match client.get_file_manifest(&manifest_cid).await {
-            Ok(Some(bytes)) => {
-                let m: serde_json::Value =
-                    memvault_store::deserialize_block(&bytes).unwrap_or_default();
-                (
-                    m.get("filename")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unnamed")
-                        .to_string(),
-                    m.get("mime_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("application/octet-stream")
-                        .to_string(),
-                    m.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0),
-                )
+    let mut uploaded = std::collections::HashMap::new();
+    match client.audit(query).await {
+        Ok(records) => {
+            for r in records {
+                if let Some(cid) = r.attachment_cid {
+                    uploaded.entry(hex::encode(cid)).or_insert(r.wall_ns);
+                }
             }
-            _ => (
-                "unnamed".to_string(),
-                "application/octet-stream".to_string(),
-                0,
-            ),
-        };
-
-        files.push(FileRow {
-            cid: cid_hex,
-            filename,
-            mime_type,
-            size,
-            wall_ns: record.wall_ns,
-        });
+        }
+        Err(e) => tracing::warn!(error = %e, "files: no upload times from the audit log"),
     }
 
+    // Manifests (name, type, size), a few at a time.
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
+    let mut tasks = tokio::task::JoinSet::new();
+    for cid_hex in scoped {
+        let (client, limit) = (client.clone(), limit.clone());
+        let wall_ns = uploaded.get(&cid_hex).copied().unwrap_or(0);
+        tasks.spawn(async move {
+            let _permit = limit.acquire_owned().await;
+            let manifest = match hex::decode(&cid_hex) {
+                Ok(cid) => client.get_file_manifest(&cid).await.ok().flatten(),
+                Err(_) => None,
+            };
+            // DAG-CBOR locally, JSON over HTTP: deserialize_block reads both.
+            let m: serde_json::Value = manifest
+                .as_deref()
+                .and_then(memvault_store::deserialize_block)
+                .unwrap_or_default();
+            FileRow {
+                filename: m.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
+                mime_type: m
+                    .get("mime_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("application/octet-stream")
+                    .to_string(),
+                size: m.get("content_size").and_then(|v| v.as_u64()).unwrap_or(0),
+                cid: cid_hex,
+                wall_ns,
+            }
+        });
+    }
+    let mut files: Vec<FileRow> = tasks.join_all().await;
+    files.sort_by(|a, b| b.wall_ns.cmp(&a.wall_ns));
     Ok(files)
 }
 
