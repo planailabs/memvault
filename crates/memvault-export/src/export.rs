@@ -150,19 +150,17 @@ async fn export_file(
     stats: &mut ExportStats,
 ) -> Result<()> {
     // Try to read the manifest to get filename/mime_type
-    let (filename, _mime) = match client.get_file_manifest(manifest_cid).await? {
-        Some(manifest_json) => {
-            let manifest: serde_json::Value = serde_json::from_slice(&manifest_json)?;
-            let fname = manifest["filename"]
-                .as_str()
-                .map(String::from)
-                .or_else(|| filename_hint.map(String::from));
-            let mime = manifest["mime_type"]
-                .as_str()
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            (fname, mime)
-        }
+    // The manifest is a dag-cbor block locally (JSON over HTTP): decoded,
+    // not parsed as JSON.
+    let manifest = client
+        .get_file_manifest(manifest_cid)
+        .await?
+        .and_then(|b| memvault_api::types::FileManifestInfo::from_block(&b));
+    let (filename, _mime) = match manifest {
+        Some(m) => (
+            m.filename.or_else(|| filename_hint.map(String::from)),
+            m.mime_type,
+        ),
         None => (
             filename_hint.map(String::from),
             "application/octet-stream".to_string(),
@@ -291,16 +289,12 @@ pub async fn export_single_file(
     client: &dyn MemvaultClient,
     manifest_cid: &[u8],
 ) -> Result<(String, Vec<u8>)> {
-    let (filename, _mime) = match client.get_file_manifest(manifest_cid).await? {
-        Some(manifest_json) => {
-            let manifest: serde_json::Value = serde_json::from_slice(&manifest_json)?;
-            let fname = manifest["filename"].as_str().map(String::from);
-            let mime = manifest["mime_type"]
-                .as_str()
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            (fname, mime)
-        }
+    let manifest = client
+        .get_file_manifest(manifest_cid)
+        .await?
+        .and_then(|b| memvault_api::types::FileManifestInfo::from_block(&b));
+    let (filename, _mime) = match manifest {
+        Some(m) => (m.filename, m.mime_type),
         None => (None, "application/octet-stream".to_string()),
     };
 

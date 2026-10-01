@@ -9,6 +9,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use memvault_api::MemvaultClient;
 use memvault_api::docs::{create_doc, parse_tags, parse_visibility};
 use memvault_api::files::{detect_mime, upload_file};
+use memvault_api::wire::{AuditRecordWire, CidWire};
 use memvault_core::{BucketId, DocId, EdgeId, EntityId, NodeRef, Visibility};
 use memvault_doc::{Edge, Entity};
 use memvault_query::AuditQuery;
@@ -57,7 +58,30 @@ fn ensure_entity_label(id: &str) -> String {
 /// Render CID bytes as the canonical CID string for tool output (hex fallback
 /// for any non-CID bytes). See `standards/api-wire-conventions.md` §1b.
 fn cid_out(bytes: &[u8]) -> String {
-    memvault_core::cid_string_from_bytes(bytes).unwrap_or_else(|_| hex::encode(bytes))
+    memvault_api::wire::cid_string(bytes)
+}
+
+/// A tool answer: the value's one wire shape (standards/wire-dtos.md).
+fn to_json<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_else(|e| format!("error: {e}"))
+}
+
+/// An audit `op_kind` filter: its snake_case serde form (`doc_create`), or
+/// the CamelCase name (`DocCreate`) older callers sent.
+fn parse_op_kind(k: &str) -> memvault_query::OpKind {
+    let mut snake = String::with_capacity(k.len() + 4);
+    for (i, c) in k.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        } else {
+            snake.push(c);
+        }
+    }
+    serde_json::from_value(serde_json::Value::String(snake))
+        .unwrap_or_else(|_| memvault_query::OpKind::Other(k.to_string()))
 }
 
 #[derive(Clone)]
@@ -331,17 +355,12 @@ impl MemvaultServer {
             Err(e) => return format!("error: {e}"),
         };
         match self.client.history_of(&id).await {
-            Ok(records) => serde_json::json!(
-                records
+            Ok(records) => to_json(
+                &records
                     .iter()
-                    .map(|r| serde_json::json!({
-                        "cid": cid_out(&r.cid),
-                        "op_kind": format!("{:?}", r.op_kind),
-                        "wall_ns": r.wall_ns,
-                    }))
-                    .collect::<Vec<_>>()
-            )
-            .to_string(),
+                    .map(AuditRecordWire::from)
+                    .collect::<Vec<_>>(),
+            ),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -508,10 +527,11 @@ impl MemvaultServer {
             Ok(b) => b,
             Err(e) => return format!("error: invalid hex: {e}"),
         };
+        // Manifests are dag-cbor blocks (JSON over HTTP): decoded, not parsed.
         match self.client.get_file_manifest(&cid).await {
-            Ok(Some(bytes)) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(v) => v.to_string(),
-                Err(e) => format!("error: corrupt manifest json: {e}"),
+            Ok(Some(bytes)) => match memvault_api::types::FileManifestInfo::from_block(&bytes) {
+                Some(info) => to_json(&info),
+                None => "error: unreadable manifest block".to_string(),
             },
             Ok(None) => format!("error: manifest not found for cid {}", params.manifest_cid),
             Err(e) => format!("error: {e}"),
@@ -574,19 +594,7 @@ impl MemvaultServer {
             Err(e) => return format!("error: {e}"),
         };
         match self.client.get_entity(&id).await {
-            Ok(Some(e)) => serde_json::json!({
-                "id": hex::encode(e.id.0),
-                "kind": e.kind,
-                "props": e.props,
-                "edges": e.edges_out.iter().map(|edge| serde_json::json!({
-                    "edge_id": hex::encode(edge.id.0),
-                    "relation": edge.relation,
-                    "target": edge.target.tag_label(),
-                    "weight": edge.weight,
-                    "props": edge.props,
-                })).collect::<Vec<_>>(),
-            })
-            .to_string(),
+            Ok(Some(e)) => to_json(&memvault_api::wire::EntityWire::with_edges(&e)),
             Ok(None) => format!("error: entity not found: {}", params.id),
             Err(e) => format!("error: {e}"),
         }
@@ -844,19 +852,7 @@ impl MemvaultServer {
             )
             .await
         {
-            Ok(hits) => serde_json::json!(
-                hits.iter()
-                    .map(|h| serde_json::json!({
-                        "node": h.node.tag_label(),
-                        "depth": h.depth,
-                        "path": h.path.iter().map(|(eid, rel)| serde_json::json!({
-                            "edge_id": hex::encode(eid.0),
-                            "relation": rel,
-                        })).collect::<Vec<_>>(),
-                    }))
-                    .collect::<Vec<_>>()
-            )
-            .to_string(),
+            Ok(hits) => to_json(&hits),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -1304,20 +1300,7 @@ impl MemvaultServer {
         let mut all = Vec::new();
         for bid in &buckets {
             match self.client.bucket_grants_list(bid).await {
-                Ok(grants) => {
-                    for g in grants {
-                        all.push(serde_json::json!({
-                            "cid": cid_out(&g.cid),
-                            "bucket_id": hex::encode(g.bucket_id.0),
-                            "issuer": hex::encode(&g.issuer.0),
-                            "issuing_cluster": hex::encode(g.issuing_cluster.0),
-                            "audience": g.audience,
-                            "actions": g.actions,
-                            "not_before_ns": g.not_before_ns,
-                            "not_after_ns": g.not_after_ns,
-                        }));
-                    }
-                }
+                Ok(grants) => all.extend(grants),
                 Err(e) => return format!("error: {e}"),
             }
         }
@@ -1328,12 +1311,12 @@ impl MemvaultServer {
 
     #[tool(
         name = "memvault_share_inbox",
-        description = "List cross-cluster share proposals received by this cluster. Returns hex CIDs; call memvault_share_decide for proposal contents."
+        description = "List cross-cluster share proposals received by this cluster. Returns proposal CIDs; call memvault_share_decide for proposal contents."
     )]
     async fn share_inbox(&self, Parameters(_params): Parameters<ShareInboxParams>) -> String {
         match self.client.share_inbox().await {
             Ok(cids) => serde_json::json!({
-                "proposals": cids.iter().map(hex::encode).collect::<Vec<_>>(),
+                "proposals": cids.into_iter().map(CidWire).collect::<Vec<_>>(),
             })
             .to_string(),
             Err(e) => format!("error: {e}"),
@@ -1342,12 +1325,12 @@ impl MemvaultServer {
 
     #[tool(
         name = "memvault_share_outbox",
-        description = "List cross-cluster share proposals sent by this cluster. Returns hex CIDs."
+        description = "List cross-cluster share proposals sent by this cluster. Returns proposal CIDs."
     )]
     async fn share_outbox(&self, Parameters(_params): Parameters<ShareOutboxParams>) -> String {
         match self.client.share_outbox().await {
             Ok(cids) => serde_json::json!({
-                "proposals": cids.iter().map(hex::encode).collect::<Vec<_>>(),
+                "proposals": cids.into_iter().map(CidWire).collect::<Vec<_>>(),
             })
             .to_string(),
             Err(e) => format!("error: {e}"),
@@ -1361,24 +1344,15 @@ impl MemvaultServer {
     async fn share_decide(&self, Parameters(params): Parameters<ShareDecideParams>) -> String {
         let cid = match memvault_core::cid_bytes_lenient(&params.proposal_cid) {
             Ok(c) => c,
-            Err(e) => return format!("error: invalid hex cid: {e}"),
+            Err(e) => return format!("error: invalid cid: {e}"),
         };
 
+        // `ShareProposalInfo` carries its wire encoding (CID strings, hex ids,
+        // the admin's peer id in base58).
         let preview = match self.client.share_get_proposal(&cid).await {
-            Ok(Some(p)) => serde_json::json!({
-                "cid": cid_out(&p.cid),
-                "proposal_id": hex::encode(p.proposal_id),
-                "from_cluster": hex::encode(p.from_cluster.0),
-                "from_bucket": hex::encode(p.from_bucket.0),
-                "from_admin": hex::encode(&p.from_admin.0),
-                "to_cluster": hex::encode(p.to_cluster.0),
-                "to_recipient": p.to_recipient,
-                "proposed_actions": p.proposed_actions,
-                "purpose": p.purpose,
-                "not_after_ns": p.not_after_ns,
-            }),
+            Ok(Some(p)) => serde_json::to_value(&p).unwrap_or_default(),
             Ok(None) => serde_json::json!({
-                "cid": params.proposal_cid,
+                "cid": cid_out(&cid),
                 "note": "proposal contents not available locally",
             }),
             Err(e) => return format!("error: {e}"),
@@ -1414,7 +1388,7 @@ impl MemvaultServer {
 
     #[tool(
         name = "memvault_audit",
-        description = "Query audit log. Optionally filter by op_kind (DocCreate, EntityCreate, AttachFile, EdgeAdd, Retract)."
+        description = "Query audit log. Optionally filter by op_kind (doc_create, doc_edit, entity_create, attach_file, edge_add, retract, …)."
     )]
     async fn audit(&self, Parameters(params): Parameters<AuditParams>) -> String {
         // The agent's bucket unless one is named (it ignored `bucket`).
@@ -1424,32 +1398,17 @@ impl MemvaultServer {
         };
         let query = AuditQuery {
             bucket: Some(bucket),
-            op_kind: params.op_kind.as_deref().map(|k| match k {
-                "DocCreate" => memvault_query::OpKind::DocCreate,
-                "DocEdit" => memvault_query::OpKind::DocEdit,
-                "AttachFile" => memvault_query::OpKind::AttachFile,
-                "EntityCreate" => memvault_query::OpKind::EntityCreate,
-                "EdgeAdd" => memvault_query::OpKind::EdgeAdd,
-                "Retract" => memvault_query::OpKind::Retract,
-                other => memvault_query::OpKind::Other(other.to_string()),
-            }),
+            op_kind: params.op_kind.as_deref().map(parse_op_kind),
             limit: Some(params.limit.unwrap_or(50)),
             ..Default::default()
         };
         match self.client.audit(query).await {
-            Ok(records) => serde_json::json!(
-                records
+            Ok(records) => to_json(
+                &records
                     .iter()
-                    .map(|r| serde_json::json!({
-                        "cid": cid_out(&r.cid),
-                        "op_kind": format!("{:?}", r.op_kind),
-                        "author": hex::encode(&r.author),
-                        "wall_ns": r.wall_ns,
-                        "tags": r.tags,
-                    }))
-                    .collect::<Vec<_>>()
-            )
-            .to_string(),
+                    .map(AuditRecordWire::from)
+                    .collect::<Vec<_>>(),
+            ),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -1461,16 +1420,9 @@ impl MemvaultServer {
         description = "Get node status (block count, doc count, peer count, uptime)."
     )]
     async fn status(&self) -> String {
+        // `NodeStatus` carries its wire encoding (peer id base58, cluster hex).
         match self.client.status().await {
-            Ok(s) => serde_json::json!({
-                "peer_id": hex::encode(&s.peer_id),
-                "cluster_id": hex::encode(&s.cluster_id),
-                "block_count": s.block_count,
-                "doc_count": s.doc_count,
-                "peer_count": s.peer_count,
-                "uptime_secs": s.uptime_secs,
-            })
-            .to_string(),
+            Ok(s) => to_json(&s),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -2087,15 +2039,21 @@ mod tool_tests {
             "upload cid must be a CID string: {up}"
         );
 
-        // file_info parses the manifest block as JSON, but manifests are
-        // stored as dag-cbor — a real shape mismatch (see the wire-standards
-        // work). Here we only require the tool path to execute.
+        // The manifest is a dag-cbor block: file_info decodes it (it used to
+        // parse it as JSON and fail).
         let info = srv
             .file_info(Parameters(t::FileInfoParams {
                 manifest_cid: cid.clone(),
             }))
             .await;
-        assert!(!info.is_empty(), "file_info produced no output");
+        let m: memvault_api::types::FileManifestInfo =
+            serde_json::from_str(&info).unwrap_or_else(|e| panic!("{e}: {info}"));
+        assert_eq!(
+            m.filename.as_deref(),
+            path.file_name().and_then(|n| n.to_str())
+        );
+        assert_eq!(m.mime_type, "text/plain");
+        assert_eq!(m.content_size, b"hello upload world".len() as u64);
         assert_ok(
             &srv.read_range(Parameters(t::ReadRangeParams {
                 manifest_cid: cid.clone(),
@@ -2134,10 +2092,13 @@ mod tool_tests {
         let a_hex = a.rsplit(':').next().unwrap().to_string();
         let b_hex = b.rsplit(':').next().unwrap().to_string();
 
-        assert_ok(
-            &srv.get_entity(Parameters(t::GetEntityParams { id: a_hex.clone() }))
-                .await,
-        );
+        // The entity travels as `EntityWire`, as over REST.
+        let got = srv
+            .get_entity(Parameters(t::GetEntityParams { id: a_hex.clone() }))
+            .await;
+        let e: memvault_api::wire::EntityWire =
+            serde_json::from_str(&got).unwrap_or_else(|e| panic!("{e}: {got}"));
+        assert_eq!(e.node_id, a);
         assert_ok(
             &srv.list_entities(Parameters(t::ListEntitiesParams {
                 limit: Some(50),
@@ -2164,14 +2125,17 @@ mod tool_tests {
             }))
             .await,
         );
-        assert_ok(
-            &srv.traverse(Parameters(t::TraverseParams {
+        // Traversal hits travel as `TraversalHit`, as over REST.
+        let hits = srv
+            .traverse(Parameters(t::TraverseParams {
                 from: a.clone(),
                 relation: None,
                 max_depth: Some(2),
             }))
-            .await,
-        );
+            .await;
+        let hits: Vec<memvault_api::TraversalHit> =
+            serde_json::from_str(&hits).unwrap_or_else(|e| panic!("{e}: {hits}"));
+        assert!(hits.iter().any(|h| h.node.tag_label() == b), "{hits:?}");
         let link = srv
             .link(Parameters(t::LinkParams {
                 source: a.clone(),

@@ -203,7 +203,7 @@ Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent m
 
 **Views** (`memvault_view_*`): `list`, `create`, `update`, `delete` — saved tag filters.
 
-**Cross-cluster shares** (`memvault_share_*`): `inbox`, `outbox`, `decide` — review and approve/reject federation proposals (two-step: preview with `confirm: false`, then commit).
+**Cross-cluster shares** (`memvault_share_*`): `inbox`, `outbox` (proposal CIDs), `decide` — review and approve/reject federation proposals (two-step: preview with `confirm: false`, then commit).
 
 **Export, status & audit:**
 
@@ -212,7 +212,7 @@ Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent m
 | `memvault_export` | Export a single node to a temp file |
 | `memvault_export_vault` | Export the whole vault (or a filtered subset) to a directory or tar |
 | `memvault_status` | Block count, doc count, peer count, uptime |
-| `memvault_audit` | Query one bucket's audit log (`bucket`, else the agent's), optionally by op kind |
+| `memvault_audit` | Query one bucket's audit log (`bucket`, else the agent's), optionally by op kind (`doc_create`, `entity_create`, `attach_file`, …) |
 
 ### Adding to Claude Code
 

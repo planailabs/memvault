@@ -631,12 +631,12 @@ mod native {
         Outbox,
         /// Approve a share proposal
         Approve {
-            /// Hex-encoded proposal CID
+            /// Proposal CID (as `share inbox` prints it; legacy hex accepted)
             cid: String,
         },
         /// Reject a share proposal
         Reject {
-            /// Hex-encoded proposal CID
+            /// Proposal CID (as `share inbox` prints it; legacy hex accepted)
             cid: String,
             /// Reason for rejection
             #[arg(short, long)]
@@ -2244,7 +2244,7 @@ mod native {
                     println!("No pending share proposals.");
                 }
                 for cid in proposals {
-                    println!("{}", hex::encode(&cid));
+                    println!("{}", memvault_api::wire::cid_string(&cid));
                 }
             }
             Commands::Share(ShareCommands::Outbox) => {
@@ -2254,17 +2254,17 @@ mod native {
                     println!("No outbound share proposals.");
                 }
                 for cid in proposals {
-                    println!("{}", hex::encode(&cid));
+                    println!("{}", memvault_api::wire::cid_string(&cid));
                 }
             }
             Commands::Share(ShareCommands::Approve { cid }) => {
-                let cid_bytes = hex::decode(&cid)?;
+                let cid_bytes = memvault_core::cid_bytes_lenient(&cid)?;
                 let client = connect().connect().await?;
                 client.share_decide(&cid_bytes, true, None).await?;
                 println!("Share proposal approved.");
             }
             Commands::Share(ShareCommands::Reject { cid, reason }) => {
-                let cid_bytes = hex::decode(&cid)?;
+                let cid_bytes = memvault_core::cid_bytes_lenient(&cid)?;
                 let client = connect().connect().await?;
                 client
                     .share_decide(&cid_bytes, false, Some(&reason))
