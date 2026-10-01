@@ -119,44 +119,13 @@ async fn resolve_node(
             return (label, link);
         }
     }
-    // Fall back to fetching the actual object for its name.
-    if let Some(node_ref) = memvault_core::NodeRef::from_tag_label(node_tag) {
-        let label = match &node_ref {
-            memvault_core::NodeRef::Doc(did) => {
-                client.get_doc(did).await.ok().flatten().and_then(|d| {
-                    d.frontmatter
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-            }
-            memvault_core::NodeRef::Entity(eid) => {
-                client.get_entity(eid).await.ok().flatten().and_then(|e| {
-                    e.props
-                        .get("name")
-                        .or_else(|| e.props.get("title"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-            }
-            memvault_core::NodeRef::Attachment(cid) => client
-                .get_file_manifest(cid)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|v| {
-                    v.get("filename")
-                        .and_then(|f| f.as_str())
-                        .map(|s| s.to_string())
-                }),
-        };
-        if let Some(name) = label {
-            let link = audit_link_from_tag(node_tag, &name);
-            return (name, link);
-        }
-    }
-    let display = short_id(node_tag);
+    // Not in the index (retracted, not yet indexed): show the short id. The
+    // node itself is never loaded for a label — a document would be
+    // decoded whole, per audit row.
+    let display = match node_tag.split_once(':') {
+        Some((prefix, _)) => format!("{prefix}:{}", short_id(node_tag)),
+        None => short_id(node_tag),
+    };
     let link = audit_link_from_tag(node_tag, &display);
     (display, link)
 }

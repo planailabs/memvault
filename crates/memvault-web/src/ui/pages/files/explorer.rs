@@ -67,9 +67,10 @@ async fn list_files(
         })
         .collect();
 
-    // Upload times from the audit log. It only reaches the newest
-    // operations (its limit applies before the op filter), so an older
-    // file shows no time rather than going missing.
+    // Upload times from the audit log: the newest 5000 uploads (the op
+    // filter applies before the limit). A file beyond them, or uploaded
+    // before the log recorded uploads, shows no time rather than going
+    // missing.
     let query = memvault_query::AuditQuery {
         op_kind: Some(memvault_query::OpKind::AttachFile),
         limit: Some(5000),

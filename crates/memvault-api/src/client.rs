@@ -315,6 +315,35 @@ pub trait MemvaultClient: Send + Sync {
         self.list_entities(limit, bucket).await
     }
 
+    /// The entities a user-facing listing shows (graph, MCP list tool): the
+    /// reserved kinds (skill, vfs:dir) are left out *before* `limit` applies,
+    /// so a bucket full of VFS directories still lists `limit` entities.
+    /// The default pages through `list_entities_ex` with a growing window
+    /// (the HTTP client); `LocalClient` filters inside its scan.
+    async fn list_visible_entities(
+        &self,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<Entity>> {
+        let mut fetch = limit.saturating_mul(2).max(1);
+        loop {
+            let rows = self
+                .list_entities_ex(fetch, bucket, include_retracted)
+                .await?;
+            let exhausted = rows.len() < fetch;
+            let visible: Vec<Entity> = rows
+                .into_iter()
+                .filter(|e| !memvault_core::is_reserved_entity_kind(&e.kind))
+                .take(limit)
+                .collect();
+            if visible.len() >= limit || exhausted || fetch == usize::MAX {
+                return Ok(visible);
+            }
+            fetch = fetch.saturating_mul(4);
+        }
+    }
+
     // -- Scoped reads (the (view, buckets, retracted) triplet) --
     //
     // These supersede the per-method `bucket` parameter + `*_ex` flag with a

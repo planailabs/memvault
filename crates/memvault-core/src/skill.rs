@@ -46,5 +46,9 @@ pub const SKILL_TRIGGER_PROP: &str = "trigger";
 /// the graph view hides them, so their invariants (aggregate edges, bundle
 /// structure) can't be bypassed.
 pub fn is_reserved_entity_kind(kind: &str) -> bool {
-    kind == SKILL_KIND || kind == crate::vfs::VFS_DIR_KIND
+    RESERVED_ENTITY_KINDS.contains(&kind)
 }
+
+/// The reserved, managed entity kinds (see [`is_reserved_entity_kind`]), for
+/// listings that leave them out inside the query.
+pub const RESERVED_ENTITY_KINDS: &[&str] = &[SKILL_KIND, crate::vfs::VFS_DIR_KIND];

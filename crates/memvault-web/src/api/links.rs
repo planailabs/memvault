@@ -130,6 +130,9 @@ pub struct ListNodesQuery {
     pub limit: Option<usize>,
     /// Optional bucket id (hex) to scope the listing (standards/bucket-scoping.md).
     pub bucket: Option<String>,
+    /// Leave out the reserved entity kinds (skill, vfs:dir) before `limit`.
+    #[serde(default)]
+    pub exclude_reserved: bool,
 }
 
 /// GET /api/v1/nodes/:node_id — get any node by type:hex ID.
@@ -216,16 +219,14 @@ pub async fn list_nodes(
         let arr: [u8; 32] = bytes.try_into().ok()?;
         Some(memvault_core::BucketId(arr))
     });
-    let items = state
-        .client
-        .list_scoped(
-            &memvault_core::QueryScope::all()
-                .with_view(params.view.clone())
-                .with_bucket(bucket)
-                .with_include_retracted(include_retracted),
-            limit,
-        )
-        .await?;
+    let mut scope = memvault_core::QueryScope::all()
+        .with_view(params.view.clone())
+        .with_bucket(bucket)
+        .with_include_retracted(include_retracted);
+    if params.exclude_reserved {
+        scope = scope.without_reserved();
+    }
+    let items = state.client.list_scoped(&scope, limit).await?;
     let items = crate::api::auth::filter_readable(&auth.claims, items, |n| n.node_id.clone())?;
     Ok(Json(serde_json::json!({
         "count": items.len(),

@@ -19,8 +19,10 @@ graph explorer did the same with `get_doc_scoped`, only to label nodes.
 ## The rule
 
 - **Read heads, not blocks.** Deserialize into a struct that names only the
-  fields you need (`DocHead`, `EnvKind`, `EnvTags`, `EnvWall` in
-  `memvault-api/src/local.rs`) with `memvault_store::deserialize_block_as`.
+  fields you need (`DocHead`, `EnvKind`, `EnvTags`, `EnvWall`,
+  `EnvAttribution` in `memvault-api/src/local.rs`; `AuditHead` for audit
+  rows; `OpNameHead` for the link-alias index) with
+  `memvault_store::deserialize_block_as`.
   serde skips the unnamed fields (the body) without allocating them, for both
   DAG-CBOR and legacy JSON blocks.
 - **Labels come from the index.** A node's title is `resolve_label` (HTTP:

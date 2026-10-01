@@ -54,106 +54,224 @@ impl AliasIndex {
     /// Scan the store and populate the alias index from:
     /// - Document `frontmatter.title` and `frontmatter.aliases`
     /// - Entity `props.aliases` and `props.name`
+    ///
+    /// Every op is read as an [`OpNameHead`]: only the naming fields are
+    /// decoded, never a document body or patch (a vault of books would
+    /// otherwise be decoded whole on every `put_doc`).
     pub fn build(store: &MemvaultStore) -> Self {
         let mut index = AliasIndex::new();
 
-        // Documents — walk every unique `doc` tag, fold its ops, read
-        // frontmatter from the resulting Document snapshot.
+        // Documents — fold the naming fields of each doc's ops in order.
         if let Ok(labels) = store.query_unique_labels("doc", usize::MAX) {
             for label in labels {
-                let bytes = match hex::decode(&label) {
-                    Ok(b) if b.len() == 32 => b,
-                    _ => continue,
+                let Some(arr) = decode_32(&label) else {
+                    continue;
                 };
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                let doc_id = DocId(arr);
-
-                let cids = match store.query_by_tag("doc", &label, 0, usize::MAX) {
-                    Ok(c) => c,
-                    _ => continue,
+                let Ok(cids) = store.query_by_tag("doc", &label, 0, usize::MAX) else {
+                    continue;
                 };
-                let mut ops: Vec<Op> = Vec::new();
-                for cid in &cids {
-                    let Ok(Some(data)) = store.get_block(cid) else {
-                        continue;
-                    };
-                    let Some(val) = memvault_store::deserialize_block(&data) else {
-                        continue;
-                    };
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
-                            ops.push(op);
-                        }
-                    }
-                }
-                if let Ok(doc) = memvault_doc::apply::apply_doc_ops(&ops) {
-                    let node = NodeRef::Doc(doc_id.clone());
-                    if let Some(title) = doc.frontmatter.get("title").and_then(|v| v.as_str()) {
-                        index.insert(title, node.clone());
-                    }
-                    if let Some(arr) = doc.frontmatter.get("aliases").and_then(|v| v.as_array()) {
-                        for a in arr {
-                            if let Some(s) = a.as_str() {
-                                index.insert(s, node.clone());
-                            }
-                        }
-                    }
-                }
+                let Some(names) = fold_doc_names(store, &cids) else {
+                    continue;
+                };
+                names.insert_into(&mut index, &NodeRef::Doc(DocId(arr)));
             }
         }
 
-        // Entities — fold their ops, scan props for aliases.
+        // Entities — fold the naming props of each entity's ops in order.
         if let Ok(labels) = store.query_unique_labels("entity", usize::MAX) {
             for label in labels {
-                let bytes = match hex::decode(&label) {
-                    Ok(b) if b.len() == 32 => b,
-                    _ => continue,
+                let Some(arr) = decode_32(&label) else {
+                    continue;
                 };
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
                 let entity_id = EntityId(arr);
-
-                let cids = match store.query_by_tag("entity", &label, 0, usize::MAX) {
-                    Ok(c) => c,
-                    _ => continue,
-                };
-                let mut ops: Vec<Op> = Vec::new();
-                for cid in &cids {
-                    let Ok(Some(data)) = store.get_block(cid) else {
-                        continue;
-                    };
-                    let Some(val) = memvault_store::deserialize_block(&data) else {
-                        continue;
-                    };
-                    if let Some(payload) = val.get("payload") {
-                        if let Ok(op) = serde_json::from_value::<Op>(payload.clone()) {
-                            ops.push(op);
-                        }
-                    }
-                }
-                let Ok(state) = memvault_doc::apply::apply_graph_ops(&ops) else {
+                let Ok(cids) = store.query_by_tag("entity", &label, 0, usize::MAX) else {
                     continue;
                 };
-                let Some(entity) = state.entities.get(&entity_id) else {
+                let Some(names) = fold_entity_names(store, &entity_id, &cids) else {
                     continue;
                 };
-                let node = NodeRef::Entity(entity_id.clone());
-                if let Some(name) = entity.props.get("name").and_then(|v| v.as_str()) {
-                    index.insert(name, node.clone());
-                }
-                if let Some(arr) = entity.props.get("aliases").and_then(|v| v.as_array()) {
-                    for a in arr {
-                        if let Some(s) = a.as_str() {
-                            index.insert(s, node.clone());
-                        }
-                    }
-                }
+                names.insert_into(&mut index, &NodeRef::Entity(entity_id));
             }
         }
 
         index
     }
+}
+
+/// The naming fields of a node: `title`/`name` and `aliases`.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+struct NameFields {
+    #[serde(default)]
+    title: Option<serde_json::Value>,
+    #[serde(default)]
+    name: Option<serde_json::Value>,
+    #[serde(default)]
+    aliases: Option<serde_json::Value>,
+}
+
+impl NameFields {
+    /// Apply one `key = value` update (a `DocSetMeta`/`DocRemoveMeta`);
+    /// other keys are ignored.
+    fn set(&mut self, key: &str, value: Option<serde_json::Value>) {
+        match key {
+            "title" => self.title = value,
+            "name" => self.name = value,
+            "aliases" => self.aliases = value,
+            _ => {}
+        }
+    }
+
+    /// Merge an `EntityUpdate`'s props (keys it carries replace ours).
+    fn merge(&mut self, update: NameFields) {
+        if update.title.is_some() {
+            self.title = update.title;
+        }
+        if update.name.is_some() {
+            self.name = update.name;
+        }
+        if update.aliases.is_some() {
+            self.aliases = update.aliases;
+        }
+    }
+
+    /// Documents are named by `title`, entities by `name`; both by `aliases`.
+    fn insert_into(&self, index: &mut AliasIndex, node: &NodeRef) {
+        let primary = match node {
+            NodeRef::Entity(_) => &self.name,
+            _ => &self.title,
+        };
+        if let Some(s) = primary.as_ref().and_then(|v| v.as_str()) {
+            index.insert(s, node.clone());
+        }
+        if let Some(arr) = self.aliases.as_ref().and_then(|v| v.as_array()) {
+            for a in arr {
+                if let Some(s) = a.as_str() {
+                    index.insert(s, node.clone());
+                }
+            }
+        }
+    }
+}
+
+/// An op envelope, decoded only as far as naming goes. The payload is an
+/// externally-tagged `Op` (`{"DocCreate": {..}}`); variants and fields not
+/// named here (bodies, patches, edges) are skipped, not allocated.
+#[derive(Default, serde::Deserialize)]
+struct OpNameHead {
+    #[serde(default)]
+    payload: OpNamePayload,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct OpNamePayload {
+    #[serde(rename = "DocCreate")]
+    doc_create: Option<DocCreateNames>,
+    #[serde(rename = "DocEdit")]
+    doc_edit: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "DocSetMeta")]
+    doc_set_meta: Option<MetaKeyValue>,
+    #[serde(rename = "DocRemoveMeta")]
+    doc_remove_meta: Option<MetaKeyValue>,
+    #[serde(rename = "EntityCreate")]
+    entity_create: Option<EntityCreateNames>,
+    #[serde(rename = "EntityUpdate")]
+    entity_update: Option<EntityUpdateNames>,
+    #[serde(rename = "EntityDelete")]
+    entity_delete: Option<EntityDeleteHead>,
+}
+
+#[derive(serde::Deserialize)]
+struct DocCreateNames {
+    #[serde(default)]
+    frontmatter: NameFields,
+}
+
+#[derive(serde::Deserialize)]
+struct MetaKeyValue {
+    key: String,
+    #[serde(default)]
+    value: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct EntityCreateNames {
+    entity: EntityNames,
+}
+
+#[derive(serde::Deserialize)]
+struct EntityNames {
+    id: EntityId,
+    #[serde(default)]
+    props: NameFields,
+}
+
+#[derive(serde::Deserialize)]
+struct EntityUpdateNames {
+    entity_id: EntityId,
+    #[serde(default)]
+    props: NameFields,
+}
+
+#[derive(serde::Deserialize)]
+struct EntityDeleteHead {
+    entity_id: EntityId,
+}
+
+fn read_op_head(store: &MemvaultStore, cid: &[u8]) -> Option<OpNamePayload> {
+    let data = store.get_block(cid).ok()??;
+    memvault_store::deserialize_block_as::<OpNameHead>(&data).map(|h| h.payload)
+}
+
+/// A document's naming fields after its ops, with `apply_doc_ops`'
+/// semantics: `DocCreate` resets; a meta or edit op before any create makes
+/// the document unreadable (`None`).
+fn fold_doc_names(store: &MemvaultStore, cids: &[Vec<u8>]) -> Option<NameFields> {
+    let mut names: Option<NameFields> = None;
+    for cid in cids {
+        let Some(op) = read_op_head(store, cid) else {
+            continue;
+        };
+        if let Some(create) = op.doc_create {
+            names = Some(create.frontmatter);
+        } else if op.doc_edit.is_some() {
+            names.as_ref()?;
+        } else if let Some(meta) = op.doc_set_meta {
+            names.as_mut()?.set(&meta.key, meta.value);
+        } else if let Some(meta) = op.doc_remove_meta {
+            names.as_mut()?.set(&meta.key, None);
+        }
+    }
+    names
+}
+
+/// An entity's naming props after its ops, with `apply_graph_ops`'
+/// semantics for this entity: create replaces, update merges (an update
+/// before any create makes the entity unreadable), delete removes.
+fn fold_entity_names(
+    store: &MemvaultStore,
+    entity_id: &EntityId,
+    cids: &[Vec<u8>],
+) -> Option<NameFields> {
+    let mut names: Option<NameFields> = None;
+    for cid in cids {
+        let Some(op) = read_op_head(store, cid) else {
+            continue;
+        };
+        if let Some(create) = op.entity_create {
+            if create.entity.id == *entity_id {
+                names = Some(create.entity.props);
+            }
+        } else if let Some(update) = op.entity_update {
+            if update.entity_id == *entity_id {
+                names.as_mut()?.merge(update.props);
+            }
+        } else if let Some(delete) = op.entity_delete {
+            if delete.entity_id == *entity_id {
+                names = None;
+            }
+        }
+    }
+    names
 }
 
 /// Resolve an `ExtractedLink` URI to a graph-ready `ResolvedLink`. Returns

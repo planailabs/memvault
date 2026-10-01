@@ -178,6 +178,72 @@ async fn alias_resolves_when_target_has_alias_in_frontmatter() {
     );
 }
 
+/// The body-link target `[[name]]` of a fresh document, if it resolved.
+async fn resolved_body_target(node: &TestNode, body: &str) -> Option<NodeRef> {
+    let source_doc = Document::new(DocId::random(), body.into(), Default::default());
+    node.client
+        .put_doc(source_doc.clone(), vec![], Visibility::Internal, None)
+        .await
+        .unwrap();
+    let source = NodeRef::Doc(source_doc.id.clone());
+    let edges = node.client.edges_of(&source).await.unwrap();
+    edges
+        .iter()
+        .find(|(s, e)| {
+            *s == source
+                && link_provenance(e).as_deref() == Some("body_markdown")
+                && e.props.get("pending_alias").is_none()
+        })
+        .map(|(_, e)| e.target.clone())
+}
+
+/// The alias index reads only naming fields (frontmatter `aliases`, entity
+/// `name`/`aliases`), never bodies — each of those must still resolve.
+#[tokio::test]
+async fn alias_resolves_from_frontmatter_aliases_and_entity_names() {
+    let node = TestNode::new();
+
+    let mut fm = BTreeMap::new();
+    fm.insert("title".to_string(), serde_json::json!("Robert Tables"));
+    fm.insert("aliases".to_string(), serde_json::json!(["Bobby"]));
+    let target_doc = Document::new(DocId::random(), "x".repeat(100_000), fm);
+    node.client
+        .put_doc(target_doc.clone(), vec![], Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    let mut props = BTreeMap::new();
+    props.insert("name".to_string(), serde_json::json!("Carol"));
+    props.insert("aliases".to_string(), serde_json::json!(["Caz"]));
+    let entity = memvault_doc::Entity {
+        id: memvault_core::EntityId::random(),
+        kind: "person".to_string(),
+        props,
+        edges_out: vec![],
+    };
+    let entity_id = node
+        .client
+        .add_entity(entity, Visibility::Internal, None)
+        .await
+        .unwrap();
+
+    let doc = NodeRef::Doc(target_doc.id.clone());
+    let ent = NodeRef::Entity(entity_id);
+    assert_eq!(
+        resolved_body_target(&node, "see [[Robert Tables]]").await,
+        Some(doc.clone())
+    );
+    assert_eq!(
+        resolved_body_target(&node, "see [[bobby]]").await,
+        Some(doc)
+    );
+    assert_eq!(
+        resolved_body_target(&node, "see [[Carol]]").await,
+        Some(ent.clone())
+    );
+    assert_eq!(resolved_body_target(&node, "see [[Caz]]").await, Some(ent));
+}
+
 #[tokio::test]
 async fn relation_demoted_when_outside_allowlist() {
     let node = TestNode::new();

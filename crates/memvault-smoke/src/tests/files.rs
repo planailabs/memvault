@@ -4,6 +4,45 @@ use memvault_api::MemvaultClient;
 
 use crate::harness::TestNode;
 
+/// A pinned file is listed by `list_pinned` (it looked for files under a tag
+/// no upload carries, capped at 1000, so the list was always empty).
+#[tokio::test]
+async fn pinned_file_is_listed() {
+    let node = TestNode::new();
+    let cid = node
+        .client
+        .upload_file(
+            b"keep me",
+            Some("keep.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            None,
+        )
+        .await
+        .unwrap();
+    let other = node
+        .client
+        .upload_file(
+            b"not pinned",
+            Some("other.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            None,
+        )
+        .await
+        .unwrap();
+    node.client.pin_file(&cid).await.unwrap();
+
+    let pinned = node.client.list_pinned().await.unwrap();
+    assert!(
+        pinned.iter().any(|(c, _)| *c == cid),
+        "list_pinned missed the pinned file: {pinned:?}"
+    );
+    assert!(!pinned.iter().any(|(c, _)| *c == other));
+}
+
 #[tokio::test]
 async fn upload_and_read_file() {
     let node = TestNode::new();

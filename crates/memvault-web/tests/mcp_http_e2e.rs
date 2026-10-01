@@ -1016,3 +1016,57 @@ async fn docs_of_others_are_not_listed() {
         "another agent's document isn't listed"
     );
 }
+
+/// The graph's listings leave out VFS directories (a reserved kind) *before*
+/// the limit, over HTTP too: a bucket with more directories than `limit`
+/// still lists its one real entity.
+#[tokio::test]
+async fn graph_listings_leave_out_reserved_kinds_before_the_limit() {
+    let (client, _agent_bucket) = client_and_bucket().await;
+    let bucket = fresh_bucket(&client, "reserved-kinds-test").await;
+    client
+        .vfs_mkdir(&bucket, "/a/b/c")
+        .await
+        .expect("mkdir creates several vfs:dir entities");
+    let mut props = std::collections::BTreeMap::new();
+    props.insert("name".to_string(), serde_json::json!("only-person"));
+    let person = client
+        .add_entity(
+            Entity {
+                id: memvault_core::EntityId::random(),
+                kind: "person".to_string(),
+                props,
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .expect("add_entity");
+
+    let visible = client
+        .list_visible_entities(1, Some(&bucket), false)
+        .await
+        .expect("list_visible_entities");
+    assert_eq!(
+        visible.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+        vec![person.clone()]
+    );
+
+    let rows = client
+        .list_scoped(
+            &memvault_core::QueryScope::all()
+                .with_bucket(Some(bucket.clone()))
+                .without_reserved(),
+            100,
+        )
+        .await
+        .expect("list_scoped");
+    let person_id = format!("entity:{}", hex::encode(person.0));
+    assert!(rows.iter().any(|r| r.node_id == person_id), "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|r| r.node_type != "entity" || r.node_id == person_id),
+        "only the person entity is listed, no vfs:dir: {rows:?}"
+    );
+}

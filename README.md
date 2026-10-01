@@ -362,7 +362,8 @@ The daemon keeps its memory bounded:
 
 - `MEMVAULT_CACHE_MB` (default 256): the blockstore's page cache (redb's own default is 1 GiB).
 - `MEMVAULT_INDEX_WRITER_MB` (default 50, at least 15): the search index's indexing buffer (one indexing thread).
-- Grant-signature verdicts are cached up to 10 000 entries.
+- `MEMVAULT_EXTRACT_JOBS` (default 2, at least 1): background extraction jobs (transcription, OCR, page renders) running at once; each holds its whole file in memory, the others wait without reading theirs.
+- Grant-signature verdicts are cached up to 10 000 entries; OIDC sign-ins in progress up to 1024 (oldest dropped first); queued block requests up to 256 per peer.
 - The web UI's graph reads labels from the index instead of loading whole documents.
 
 On glibc, `MALLOC_ARENA_MAX=2` keeps freed memory from piling up in per-thread arenas after a burst.

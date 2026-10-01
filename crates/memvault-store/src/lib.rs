@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod audit_index;
+pub mod block_iter;
 pub mod blockstore;
 pub mod consumed_tokens;
 pub mod encryption;
@@ -19,6 +20,7 @@ pub mod rotation_state;
 pub mod scope_members;
 pub mod tables;
 
+pub use block_iter::Blocks;
 pub use envelope_view::EnvelopeView;
 pub use error::StoreError;
 pub use insert::{EnvelopeMeta, IngestMeta, deserialize_block, deserialize_block_as};

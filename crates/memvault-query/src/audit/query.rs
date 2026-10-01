@@ -79,7 +79,13 @@ pub struct AuditQuery {
     pub limit: Option<usize>,
 }
 
-/// Query the audit log.
+/// Query the audit log, newest first.
+///
+/// The filters (`doc_id`, `op_kind`, `author`, time range) are applied while
+/// the index is walked, so `limit` caps the *matching* records: asking for
+/// every upload finds them however many other operations are newer. Each
+/// visited block is read as an [`AuditHead`] (envelope attribution and the
+/// payload's variant and ids), never decoded whole.
 pub fn query_audit(
     store: &MemvaultStore,
     query: &AuditQuery,
@@ -87,78 +93,85 @@ pub fn query_audit(
     let after = query.after_ns.unwrap_or(0);
     let before = query.before_ns.unwrap_or(u64::MAX);
     let limit = query.limit.unwrap_or(100);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
 
     // Sigchain blocks (admin-signed membership/security events: genesis,
     // node/agent attestations, revocations, admin admissions, token
     // redemptions) are NOT generic Signed<T> envelopes — their content has no
-    // `payload`/`tags`/`wall_ns`, so the parser below would classify every one
-    // as Other("unknown"). Decode them by type here (keyed by CID, with the
-    // index timestamp), SKIP them in the time/author scan, and merge the typed
-    // records in afterwards.
-    let sigchain_records = sigchain_records(store, after)?;
-    let sigchain_cids: std::collections::HashSet<Vec<u8>> =
-        sigchain_records.keys().cloned().collect();
-
-    let cids = if let Some(author) = &query.author {
-        store.query_by_author(author, after, limit)?
-    } else {
-        // Newest first so recent operations show up even when there are
-        // many older annotations/edges that would fill the limit.
-        store.query_by_time_desc(after, before, limit)?
-    };
+    // `payload`/`tags`/`wall_ns`, so the envelope parser would classify every
+    // one as Other("unknown"). Every sigchain CID is known from the tag index
+    // (no decoding) so the envelope scan skips them all; the typed records
+    // are decoded separately and merged in afterwards.
+    let sigchain = sigchain_index(store, after)?;
+    let sigchain_cids: std::collections::HashSet<&[u8]> =
+        sigchain.iter().map(|(_, _, cid)| cid.as_slice()).collect();
 
     let mut records = Vec::new();
-    for cid in cids {
-        if sigchain_cids.contains(&cid) {
-            continue;
+    let mut failure = None;
+    let mut visit = |_ts: u64, cid: &[u8]| -> bool {
+        if sigchain_cids.contains(cid) {
+            return true;
         }
-        if let Some(data) = store.get_block(&cid)? {
-            // Use deserialize_block — handles both raw-JSON envelopes
-            // (legacy) and DAG-CBOR Signed<T> envelopes (post-Phase 1).
-            // The previous direct `serde_json::from_slice` only matched
-            // JSON-stored bytes, silently dropping every CBOR envelope.
-            if let Some(val) = memvault_store::deserialize_block(&data) {
-                let record = parse_audit_record(&cid, &val);
-                if let Some(ref filter_doc) = query.doc_id {
-                    if record.doc_id.as_ref() != Some(filter_doc) {
-                        continue;
+        match store.get_block(cid) {
+            Ok(Some(data)) => {
+                if let Some(record) = parse_audit_block(cid, &data) {
+                    if envelope_matches(query, &record) {
+                        records.push(record);
                     }
                 }
-                if let Some(ref filter_kind) = query.op_kind {
-                    if &record.op_kind != filter_kind {
-                        continue;
-                    }
-                }
-                records.push(record);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                failure = Some(e);
+                return false;
             }
         }
+        records.len() < limit
+    };
+    if let Some(author) = &query.author {
+        store.scan_author_desc(author, after, before, &mut visit)?;
+    } else if let Some(doc_id) = &query.doc_id {
+        // A document's ops are tagged with its id: walk that tag, not the
+        // whole log.
+        let label = hex::encode(doc_id.0);
+        store.scan_tag_desc("doc", &label, after, before, &mut visit)?;
+    } else {
+        store.scan_time_desc(after, before, &mut visit)?;
+    }
+    if let Some(e) = failure {
+        return Err(e.into());
     }
 
-    // Merge in the typed sigchain records, honouring the op_kind / author /
-    // time filters (doc_id never matches these). Then sort newest-first and
-    // cap to limit so the merged set stays consistent with the scan ordering.
+    // Merge in the typed sigchain records (doc_id never matches these), then
+    // sort newest-first and cap to limit so the merged set stays consistent
+    // with the scan ordering.
     if query.doc_id.is_none() {
-        for (_cid, rec) in sigchain_records {
-            if rec.wall_ns < after || rec.wall_ns > before {
-                continue;
-            }
-            if let Some(filter_kind) = &query.op_kind {
-                if &rec.op_kind != filter_kind {
-                    continue;
-                }
-            }
-            if let Some(filter_author) = &query.author {
-                if &rec.author != filter_author {
-                    continue;
-                }
-            }
-            records.push(rec);
-        }
+        records.extend(sigchain_records(
+            store, &sigchain, query, after, before, limit,
+        )?);
     }
     records.sort_by(|a, b| b.wall_ns.cmp(&a.wall_ns));
     records.truncate(limit);
 
     Ok(records)
+}
+
+/// The scan-side filters an envelope record must pass (the author filter is
+/// the author index itself).
+fn envelope_matches(query: &AuditQuery, record: &AuditRecord) -> bool {
+    if let Some(filter_doc) = &query.doc_id {
+        if record.doc_id.as_ref() != Some(filter_doc) {
+            return false;
+        }
+    }
+    if let Some(filter_kind) = &query.op_kind {
+        if &record.op_kind != filter_kind {
+            return false;
+        }
+    }
+    true
 }
 
 /// The admin-signed sigchain block labels (under tag scope `sigchain`) that
@@ -177,27 +190,90 @@ const SIGCHAIN_LABELS: &[&str] = &[
     "token_redeem",
 ];
 
-/// Decode the cluster sigchain blocks into audit rows keyed by block CID.
-/// These blocks carry no envelope-style `wall_ns`, so the index timestamp
-/// (from the tag key) is used for ordering. Best-effort: a block that fails
-/// to decode is simply skipped (it won't appear, rather than as "unknown").
-fn sigchain_records(
+/// Whether a sigchain block under `label` can produce an `op_kind` record.
+fn sigchain_label_has_kind(label: &str, op_kind: &OpKind) -> bool {
+    match label {
+        "token_redeem" => *op_kind == OpKind::TokenRedeem,
+        "node_att" => *op_kind == OpKind::NodeAttest,
+        "agent_att" => *op_kind == OpKind::AgentEnroll,
+        "admin_genesis" => *op_kind == OpKind::ClusterGenesis,
+        "agent_rev" => *op_kind == OpKind::AgentRevoke,
+        "node_rev" => *op_kind == OpKind::NodeRevoke,
+        "admin_admission" => *op_kind == OpKind::AdminAdmit,
+        "admin_retirement" => *op_kind == OpKind::AdminRetire,
+        "grant_revocation" => *op_kind == OpKind::GrantRevoke,
+        "bucket_merge" => matches!(op_kind, OpKind::BucketMerge | OpKind::BucketUnmerge),
+        _ => false,
+    }
+}
+
+/// Every sigchain block since `after` as `(label, index ts, cid)`, newest
+/// first. Index only: nothing is decoded, and nothing is capped (the set
+/// decides which blocks the envelope scan skips).
+fn sigchain_index(
     store: &MemvaultStore,
     after: u64,
-) -> Result<std::collections::HashMap<Vec<u8>, AuditRecord>, QueryError> {
-    let mut out = std::collections::HashMap::new();
+) -> Result<Vec<(&'static str, u64, Vec<u8>)>, QueryError> {
+    let mut out = Vec::new();
     for &label in SIGCHAIN_LABELS {
         let entries = store
-            .query_by_tag_with_ts("sigchain", label, after, 1000)
+            .query_by_tag_with_ts("sigchain", label, after, usize::MAX)
             .unwrap_or_default();
-        for (ts, cid) in entries {
-            let Some(data) = store.get_block(&cid)? else {
+        out.extend(entries.into_iter().map(|(ts, cid)| (label, ts, cid)));
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(out)
+}
+
+/// Decode the sigchain blocks that match `query` into audit rows, newest
+/// first, stopping once `limit` have matched. These blocks carry no
+/// envelope-style `wall_ns`, so the index timestamp orders them — except a
+/// merge record, whose own `created_ns` is authoritative; merge records are
+/// therefore always decoded (they are rare). Best-effort: a block that fails
+/// to decode is skipped (it won't appear, rather than as "unknown").
+fn sigchain_records(
+    store: &MemvaultStore,
+    index: &[(&'static str, u64, Vec<u8>)],
+    query: &AuditQuery,
+    after: u64,
+    before: u64,
+    limit: usize,
+) -> Result<Vec<AuditRecord>, QueryError> {
+    let mut out = Vec::new();
+    let mut matched_by_ts = 0usize;
+    for (label, ts, cid) in index {
+        let by_created = *label == "bucket_merge";
+        if !by_created && (matched_by_ts >= limit || *ts < after || *ts > before) {
+            continue;
+        }
+        if let Some(filter_kind) = &query.op_kind {
+            if !sigchain_label_has_kind(label, filter_kind) {
                 continue;
-            };
-            if let Some(rec) = sigchain_record(store, label, cid, ts, &data) {
-                out.insert(rec.cid.clone(), rec);
             }
         }
+        let Some(data) = store.get_block(cid)? else {
+            continue;
+        };
+        let Some(rec) = sigchain_record(store, label, cid.clone(), *ts, &data) else {
+            continue;
+        };
+        if rec.wall_ns < after || rec.wall_ns > before {
+            continue;
+        }
+        if let Some(filter_kind) = &query.op_kind {
+            if &rec.op_kind != filter_kind {
+                continue;
+            }
+        }
+        if let Some(filter_author) = &query.author {
+            if &rec.author != filter_author {
+                continue;
+            }
+        }
+        if !by_created {
+            matched_by_ts += 1;
+        }
+        out.push(rec);
     }
     Ok(out)
 }
@@ -309,6 +385,223 @@ fn sigchain_record(
         _ => None,
     }
 }
+
+/// Build the audit row for one envelope block from its head alone (see
+/// [`AuditHead`]): `None` when the bytes are not an object.
+pub fn parse_audit_block(cid: &[u8], data: &[u8]) -> Option<AuditRecord> {
+    let head: AuditHead = memvault_store::deserialize_block_as(data)?;
+    Some(parse_audit_record(cid, &head.into_value()))
+}
+
+/// The envelope fields an audit row shows, at the top level (legacy
+/// raw-JSON and Signed<T> attribution) and inside `payload` (Signed<T>
+/// kind-specific fields). Everything else — document bodies, patches,
+/// extracted text, signatures — is skipped while decoding, not allocated.
+#[derive(Default, Deserialize)]
+struct AuditHead {
+    #[serde(default)]
+    author: Option<serde_json::Value>,
+    #[serde(default)]
+    agent_attestation: Option<serde_json::Value>,
+    #[serde(default)]
+    wall_ns: Option<serde_json::Value>,
+    #[serde(default)]
+    tags: Option<serde_json::Value>,
+    #[serde(default)]
+    kind: Option<serde_json::Value>,
+    #[serde(default, rename = "type")]
+    ann_type: Option<serde_json::Value>,
+    #[serde(default)]
+    manifest_cid: Option<serde_json::Value>,
+    #[serde(default)]
+    payload: PayloadHead,
+}
+
+/// Field names [`parse_audit_record`] reads through `EnvelopeView`, which
+/// falls back from the top level into `payload`.
+const AUDIT_FIELDS: &[&str] = &[
+    "author",
+    "agent_attestation",
+    "wall_ns",
+    "tags",
+    "kind",
+    "type",
+    "manifest_cid",
+];
+
+/// The `Op` variants [`parse_audit_record`] recognises inside `payload`.
+const AUDIT_VARIANTS: &[&str] = &[
+    "DocCreate",
+    "DocEdit",
+    "AttachFile",
+    "DetachFile",
+    "EntityCreate",
+    "EntityUpdate",
+    "EntityDelete",
+    "EdgeAdd",
+    "EdgeRemove",
+    "BucketCreate",
+    "BucketRename",
+    "AgentRename",
+    "BucketAttach",
+    "BucketArchive",
+    "BucketBind",
+];
+
+impl AuditHead {
+    /// The head as the (small) `Value` [`parse_audit_record`] reads.
+    fn into_value(self) -> serde_json::Value {
+        let mut top = serde_json::Map::new();
+        let fields = [
+            ("author", self.author),
+            ("agent_attestation", self.agent_attestation),
+            ("wall_ns", self.wall_ns),
+            ("tags", self.tags),
+            ("kind", self.kind),
+            ("type", self.ann_type),
+            ("manifest_cid", self.manifest_cid),
+        ];
+        for (name, value) in fields {
+            if let Some(v) = value {
+                top.insert(name.to_string(), v);
+            }
+        }
+        if let Some(payload) = self.payload.0 {
+            top.insert("payload".to_string(), serde_json::Value::Object(payload));
+        }
+        serde_json::Value::Object(top)
+    }
+}
+
+/// `payload`, reduced to the audit fields and, per recognised `Op` variant,
+/// its ids. A payload that isn't a map is ignored.
+#[derive(Default)]
+struct PayloadHead(Option<serde_json::Map<String, serde_json::Value>>);
+
+/// One `Op` variant's ids: `doc_id`, `entity_id`, `entity.id`.
+#[derive(Default)]
+struct VariantIds(serde_json::Map<String, serde_json::Value>);
+
+/// An entity's `id` only.
+#[derive(Default)]
+struct EntityIdOnly(Option<serde_json::Value>);
+
+/// Implements `Deserialize` for a map-reading head type that reads maps with
+/// `$visit_map` and skips any other value (yielding `Default`).
+macro_rules! lenient_map_head {
+    ($ty:ty, $what:expr, |$map:ident| $visit_map:block) => {
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct V;
+                impl<'de> serde::de::Visitor<'de> for V {
+                    type Value = $ty;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str($what)
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut $map: A,
+                    ) -> Result<$ty, A::Error> {
+                        $visit_map
+                    }
+                    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                        self,
+                        mut seq: A,
+                    ) -> Result<$ty, A::Error> {
+                        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_some<D2: serde::Deserializer<'de>>(
+                        self,
+                        d: D2,
+                    ) -> Result<$ty, D2::Error> {
+                        <$ty>::deserialize(d)
+                    }
+                    fn visit_none<E>(self) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_unit<E>(self) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_bool<E>(self, _: bool) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_i64<E>(self, _: i64) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_u64<E>(self, _: u64) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_i128<E>(self, _: i128) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_u128<E>(self, _: u128) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_f64<E>(self, _: f64) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_str<E>(self, _: &str) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                    fn visit_bytes<E>(self, _: &[u8]) -> Result<$ty, E> {
+                        Ok(<$ty>::default())
+                    }
+                }
+                d.deserialize_any(V)
+            }
+        }
+    };
+}
+
+lenient_map_head!(PayloadHead, "an envelope payload", |map| {
+    let mut out = serde_json::Map::new();
+    while let Some(key) = map.next_key::<String>()? {
+        if AUDIT_VARIANTS.contains(&key.as_str()) {
+            let ids: VariantIds = map.next_value()?;
+            out.insert(key, serde_json::Value::Object(ids.0));
+        } else if AUDIT_FIELDS.contains(&key.as_str()) {
+            let v: serde_json::Value = map.next_value()?;
+            out.insert(key, v);
+        } else {
+            map.next_value::<serde::de::IgnoredAny>()?;
+        }
+    }
+    Ok(PayloadHead(Some(out)))
+});
+
+lenient_map_head!(VariantIds, "an op variant", |map| {
+    let mut out = serde_json::Map::new();
+    while let Some(key) = map.next_key::<String>()? {
+        match key.as_str() {
+            "doc_id" | "entity_id" => {
+                let v: serde_json::Value = map.next_value()?;
+                out.insert(key, v);
+            }
+            "entity" => {
+                if let EntityIdOnly(Some(id)) = map.next_value()? {
+                    out.insert(key, serde_json::json!({ "id": id }));
+                }
+            }
+            _ => {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+    }
+    Ok(VariantIds(out))
+});
+
+lenient_map_head!(EntityIdOnly, "an entity", |map| {
+    let mut id = None;
+    while let Some(key) = map.next_key::<String>()? {
+        if key == "id" {
+            id = Some(map.next_value::<serde_json::Value>()?);
+        } else {
+            map.next_value::<serde::de::IgnoredAny>()?;
+        }
+    }
+    Ok(EntityIdOnly(id))
+});
 
 pub fn parse_audit_record(cid: &[u8], val: &serde_json::Value) -> AuditRecord {
     let view = memvault_store::EnvelopeView::from_value(val.clone());
