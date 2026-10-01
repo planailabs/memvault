@@ -8,9 +8,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use memvault_api::MemvaultClient;
+use memvault_core::BucketRole;
 use memvault_core::tags::Tag;
 use memvault_core::*;
-use memvault_core::BucketRole;
 use memvault_doc::{Document, Entity, Op, TextPatch};
 use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;

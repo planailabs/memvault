@@ -38,7 +38,18 @@ pub async fn create_doc<C: MemvaultClient + ?Sized>(
     vfs_path: Option<&str>,
     bucket: Option<&BucketId>,
 ) -> Result<CreateDocResult> {
-    create_doc_with_id(client, DocId::random(), body, title, frontmatter, tags, vis, vfs_path, bucket).await
+    create_doc_with_id(
+        client,
+        DocId::random(),
+        body,
+        title,
+        frontmatter,
+        tags,
+        vis,
+        vfs_path,
+        bucket,
+    )
+    .await
 }
 
 /// [`create_doc`] with the id chosen by the caller, so the id a client

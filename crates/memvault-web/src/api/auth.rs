@@ -78,7 +78,8 @@ pub async fn get_session_token(
     jar: CookieJar,
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     mut parts: Parts,
-) -> Result<(CookieJar, axum::Json<serde_json::Value>), (StatusCode, axum::Json<serde_json::Value>)> {
+) -> Result<(CookieJar, axum::Json<serde_json::Value>), (StatusCode, axum::Json<serde_json::Value>)>
+{
     use crate::ui::state::{UiAuth, ui_auth};
     let fail = |code: StatusCode, msg: &str, extra: serde_json::Value| {
         let mut body = serde_json::json!({ "error": msg });
@@ -89,10 +90,22 @@ pub async fn get_session_token(
     };
     let (token, agent_id) = match ui_auth() {
         UiAuth::Open => {
-            let identity = crate::ui::state::ui_agent_identity().ok_or_else(|| fail(StatusCode::SERVICE_UNAVAILABLE, "the UI agent isn't ready", serde_json::Value::Null))?;
+            let identity = crate::ui::state::ui_agent_identity().ok_or_else(|| {
+                fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the UI agent isn't ready",
+                    serde_json::Value::Null,
+                )
+            })?;
             let token = identity
                 .issue_jwt("read write admin", SESSION_TTL_SECS as u64)
-                .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "issuing a token failed", serde_json::Value::Null))?;
+                .map_err(|_| {
+                    fail(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "issuing a token failed",
+                        serde_json::Value::Null,
+                    )
+                })?;
             (token, identity.agent_id.0.clone())
         }
         // The proxy in front of memvault delivers the agent's JWT with
@@ -105,14 +118,25 @@ pub async fn get_session_token(
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .map(String::from)
                 .ok_or_else(|| fail(StatusCode::UNAUTHORIZED, "MEMVAULT_UI_AUTH=jwt: the proxy in front of memvault must send the agent's JWT in the Authorization header", serde_json::Value::Null))?;
-            let claims = verify_bearer(&mut parts, &state).await.map_err(|e| fail(StatusCode::UNAUTHORIZED, &e.0, serde_json::Value::Null))?;
+            let claims = verify_bearer(&mut parts, &state)
+                .await
+                .map_err(|e| fail(StatusCode::UNAUTHORIZED, &e.0, serde_json::Value::Null))?;
             (token, claims.iss)
         }
         // Signed in with the provider (the session cookie holds the
         // agent JWT the sign-in issued), or not yet.
         UiAuth::Oidc => match verify_bearer(&mut parts, &state).await {
-            Ok(claims) => (extract_token(&parts.headers).unwrap_or_default(), claims.iss),
-            Err(_) => return Err(fail(StatusCode::UNAUTHORIZED, "sign in first", serde_json::json!({ "login": "/auth/oidc/login" }))),
+            Ok(claims) => (
+                extract_token(&parts.headers).unwrap_or_default(),
+                claims.iss,
+            ),
+            Err(_) => {
+                return Err(fail(
+                    StatusCode::UNAUTHORIZED,
+                    "sign in first",
+                    serde_json::json!({ "login": "/auth/oidc/login" }),
+                ));
+            }
         },
     };
     // Don't expose state in the response — keep it minimal.

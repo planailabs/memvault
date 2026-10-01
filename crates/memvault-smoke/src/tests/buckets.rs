@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use memvault_api::{EventBus, LocalClient, MemvaultClient};
+use memvault_core::BucketRole;
 use memvault_core::classification::Classification;
 use memvault_core::{BucketId, ClusterId, DocId, Visibility};
-use memvault_core::BucketRole;
-use memvault_doc::{Document};
+use memvault_doc::Document;
 use memvault_query::QuotaManager;
 use memvault_store::MemvaultStore;
 use tokio::sync::RwLock;

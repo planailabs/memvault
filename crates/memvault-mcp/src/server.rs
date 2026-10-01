@@ -233,7 +233,11 @@ impl MemvaultServer {
         if params.bucket.is_some() {
             return "error: search can't be limited to a bucket yet; leave bucket out".to_string();
         }
-        let tag = match params.tag_filter.as_deref().filter(|t| !t.trim().is_empty()) {
+        let tag = match params
+            .tag_filter
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+        {
             None => None,
             Some(t) => match memvault_api::docs::parse_tag_filter(t) {
                 Some(t) => Some(t),
@@ -243,7 +247,11 @@ impl MemvaultServer {
         // ponytail: the index doesn't filter by tag, so fetch more and keep
         // the tagged hits; a rare tag among many matches can fall outside
         // the first 20 × limit. Push the filter into the index if that bites.
-        let fetch = if tag.is_some() { (limit * 20).max(200) } else { limit };
+        let fetch = if tag.is_some() {
+            (limit * 20).max(200)
+        } else {
+            limit
+        };
         let hits = match self.client.search(&params.query, fetch).await {
             Ok(hits) => hits,
             Err(e) => return format!("error: {e}"),
@@ -256,7 +264,11 @@ impl MemvaultServer {
                     if kept.len() == limit {
                         break;
                     }
-                    match self.client.get_tags(&format!("doc:{}", hex::encode(h.doc_id.0))).await {
+                    match self
+                        .client
+                        .get_tags(&format!("doc:{}", hex::encode(h.doc_id.0)))
+                        .await
+                    {
                         Ok(tags) if tags.contains(tag) => kept.push(h),
                         Ok(_) => {}
                         Err(e) => return format!("error: {e}"),
@@ -1855,7 +1867,10 @@ mod tool_tests {
     async fn search_keeps_to_the_tag_filter() {
         let srv = test_server().await;
         let mut ids = vec![];
-        for (title, tags) in [("Tagged", vec!["kind:library".to_string()]), ("Untagged", vec![])] {
+        for (title, tags) in [
+            ("Tagged", vec!["kind:library".to_string()]),
+            ("Untagged", vec![]),
+        ] {
             let put = srv
                 .put(Parameters(crate::types::PutParams {
                     text: "the wombat burrow survey".to_string(),
@@ -1880,7 +1895,10 @@ mod tool_tests {
         let all = search(None).await;
         assert!(all.contains(&ids[0]) && all.contains(&ids[1]), "{all}");
         let tagged = search(Some("kind:library")).await;
-        assert!(tagged.contains(&ids[0]) && !tagged.contains(&ids[1]), "{tagged}");
+        assert!(
+            tagged.contains(&ids[0]) && !tagged.contains(&ids[1]),
+            "{tagged}"
+        );
         assert!(search(Some("nocolon")).await.starts_with("error:"));
     }
 
@@ -2408,7 +2426,9 @@ mod tool_tests {
             }))
             .await;
         assert_ok(&link);
-        let edges = srv.edges(Parameters(crate::types::EdgesOfParams { node: doc })).await;
+        let edges = srv
+            .edges(Parameters(crate::types::EdgesOfParams { node: doc }))
+            .await;
         assert!(edges.contains(&ent), "{edges}");
     }
 
@@ -2446,11 +2466,23 @@ mod tool_tests {
             assert_ok(&up);
             let file = jget(&up, "node_id");
             let link = srv
-                .link(Parameters(crate::types::LinkParams { source: doc.clone(), target: file, relation: "original".into(), weight: None, props: Default::default(), bucket: None }))
+                .link(Parameters(crate::types::LinkParams {
+                    source: doc.clone(),
+                    target: file,
+                    relation: "original".into(),
+                    weight: None,
+                    props: Default::default(),
+                    bucket: None,
+                }))
                 .await;
             assert_ok(&link);
             let search = |tag: Option<&str>| {
-                srv.search(Parameters(crate::types::SearchParams { query: format!("capybara{i}"), limit: Some(10), tag_filter: tag.map(String::from), bucket: None }))
+                srv.search(Parameters(crate::types::SearchParams {
+                    query: format!("capybara{i}"),
+                    limit: Some(10),
+                    tag_filter: tag.map(String::from),
+                    bucket: None,
+                }))
             };
             let id = doc.trim_start_matches("doc:").to_string();
             let mut all = String::new();
@@ -2488,7 +2520,12 @@ mod tool_tests {
         assert_ok(&up);
         assert!(!up.contains("vfs_error"), "{up}");
         let node = jget(&up, "node_id");
-        let r = srv.vfs_resolve(Parameters(crate::types::VfsResolveParams { path: "/papers/2026/report.pdf".into(), bucket: None })).await;
+        let r = srv
+            .vfs_resolve(Parameters(crate::types::VfsResolveParams {
+                path: "/papers/2026/report.pdf".into(),
+                bucket: None,
+            }))
+            .await;
         assert_eq!(jget(&r, "node_id"), node, "{r}");
         let _ = std::fs::remove_dir_all(dir);
     }

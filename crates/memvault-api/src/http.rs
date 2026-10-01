@@ -129,7 +129,10 @@ impl HttpApiClient {
     pub fn with_token(base_url: &str, token: &str) -> std::result::Result<Self, anyhow::Error> {
         let mut client = AuthClient::new(None)?;
         client.fixed = Some(token.to_string());
-        Ok(Self { client, base_url: base_url.trim_end_matches('/').to_string() })
+        Ok(Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -1072,11 +1075,21 @@ impl MemvaultClient for HttpApiClient {
         Ok(members)
     }
     async fn resolve_label(&self, node_id: &str) -> Result<Option<String>> {
-        let resp = self.client.get(self.url(&format!("/labels/{}", urlencoded(node_id)))).send().await.map_err(map_reqwest)?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/labels/{}", urlencoded(node_id))))
+            .send()
+            .await
+            .map_err(map_reqwest)?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let v: serde_json::Value = resp.error_for_status().map_err(map_reqwest)?.json().await.map_err(map_reqwest)?;
+        let v: serde_json::Value = resp
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
         Ok(v.get("label").and_then(|l| l.as_str()).map(String::from))
     }
 

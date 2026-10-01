@@ -4,8 +4,8 @@ use memvault_auth::Action;
 use memvault_core::{AgentName, BucketId, ClusterId, DocId, EdgeId, EntityId, NodeRef};
 use serde::{Deserialize, Serialize};
 
-use memvault_core::BucketDecl;
 use crate::graph::{Edge, Entity};
+use memvault_core::BucketDecl;
 
 /// CRDT operation — the unit of change.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -105,7 +105,11 @@ async fn list_files(
                 .and_then(memvault_store::deserialize_block)
                 .unwrap_or_default();
             FileRow {
-                filename: m.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
+                filename: m
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unnamed")
+                    .to_string(),
                 mime_type: m
                     .get("mime_type")
                     .and_then(|v| v.as_str())

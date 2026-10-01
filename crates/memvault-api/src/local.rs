@@ -3452,7 +3452,9 @@ impl LocalClient {
                 .get("title")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let tags = self.current_tags(node_id).unwrap_or_else(|| self.extract_creation_tags("doc", hex_id));
+            let tags = self
+                .current_tags(node_id)
+                .unwrap_or_else(|| self.extract_creation_tags("doc", hex_id));
             let bucket_hex = self
                 .index_bucket_for_node("doc", hex_id)
                 .or_else(|| self.inferred_doc_bucket(&id))
@@ -3467,7 +3469,9 @@ impl LocalClient {
         } else if let Some(hex_id) = node_id.strip_prefix("entity:") {
             let id = EntityId(decode32(hex_id)?);
             let entity = self.get_entity_sync(&id, true).ok().flatten()?;
-            let tags = self.current_tags(node_id).unwrap_or_else(|| self.extract_creation_tags("entity", hex_id));
+            let tags = self
+                .current_tags(node_id)
+                .unwrap_or_else(|| self.extract_creation_tags("entity", hex_id));
             let bucket_hex = self
                 .index_bucket_for_node("entity", hex_id)
                 .or_else(|| self.inferred_entity_bucket(&id))
@@ -3498,7 +3502,9 @@ impl LocalClient {
                     .str_field("mime_type")
                     .unwrap_or("application/octet-stream")
                     .to_string();
-                let tags: Vec<(String, String)> = self.current_tags(node_id).unwrap_or_else(|| view.field("tags").map(envelope_tags).unwrap_or_default());
+                let tags: Vec<(String, String)> = self
+                    .current_tags(node_id)
+                    .unwrap_or_else(|| view.field("tags").map(envelope_tags).unwrap_or_default());
                 let bucket_hex = view
                     .get_as::<Vec<u8>>("bucket_id")
                     .or_else(|| self.bucket_for_cid(cid))
@@ -4553,7 +4559,12 @@ impl LocalClient {
                         // Skip internal tags (doc/entity ID tags).
                         return envelope_tags(tags)
                             .into_iter()
-                            .filter(|(scope, _)| !matches!(scope.as_str(), "doc" | "entity" | "edge_source" | "edge_target"))
+                            .filter(|(scope, _)| {
+                                !matches!(
+                                    scope.as_str(),
+                                    "doc" | "entity" | "edge_source" | "edge_target"
+                                )
+                            })
                             .collect();
                     }
                 }
@@ -7942,7 +7953,10 @@ impl DocHead {
 
 impl DocCreateHead {
     fn title(&self) -> Option<String> {
-        self.frontmatter.get("title").and_then(|t| t.as_str()).map(String::from)
+        self.frontmatter
+            .get("title")
+            .and_then(|t| t.as_str())
+            .map(String::from)
     }
 }
 
@@ -7972,8 +7986,14 @@ fn envelope_tags(v: &serde_json::Value) -> Vec<(String, String)> {
         .into_iter()
         .flatten()
         .filter_map(|t| match t {
-            serde_json::Value::Object(o) => Some((o.get("scope")?.as_str()?.to_string(), o.get("label")?.as_str()?.to_string())),
-            serde_json::Value::Array(a) => Some((a.first()?.as_str()?.to_string(), a.get(1)?.as_str()?.to_string())),
+            serde_json::Value::Object(o) => Some((
+                o.get("scope")?.as_str()?.to_string(),
+                o.get("label")?.as_str()?.to_string(),
+            )),
+            serde_json::Value::Array(a) => Some((
+                a.first()?.as_str()?.to_string(),
+                a.get(1)?.as_str()?.to_string(),
+            )),
             _ => None,
         })
         .collect()

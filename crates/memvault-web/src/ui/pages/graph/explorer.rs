@@ -214,11 +214,21 @@ async fn list_graph_nodes(
             // documents (library books) or manifests just for a label made
             // the graph slow and the daemon's memory balloon.
             memvault_core::NodeRef::Doc(_) => {
-                let title = client.resolve_label(extra_id).await.ok().flatten().unwrap_or_else(|| "Untitled".to_string());
+                let title = client
+                    .resolve_label(extra_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "Untitled".to_string());
                 ("doc".to_string(), "doc".to_string(), title)
             }
             memvault_core::NodeRef::Attachment(_) => {
-                let name = client.resolve_label(extra_id).await.ok().flatten().unwrap_or_else(|| "Unnamed file".to_string());
+                let name = client
+                    .resolve_label(extra_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "Unnamed file".to_string());
                 ("file".to_string(), "file".to_string(), name)
             }
             memvault_core::NodeRef::Entity(eid) => {

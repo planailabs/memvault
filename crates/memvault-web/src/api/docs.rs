@@ -92,7 +92,8 @@ pub async fn list_docs(
     // No bucket named: the caller's agent bucket, like writes
     // (standards/bucket-scoping.md) — never every bucket. Admins, who have
     // no agent bucket, keep the cross-bucket listing (an aggregation).
-    let admin = crate::api::auth::caller_role(&state, &auth.claims) == Some(memvault_auth::AgentRole::Admin);
+    let admin = crate::api::auth::caller_role(&state, &auth.claims)
+        == Some(memvault_auth::AgentRole::Admin);
     let bucket_id = match bucket_id {
         Some(b) => Some(b),
         None if admin => None,

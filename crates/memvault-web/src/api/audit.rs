@@ -48,7 +48,9 @@ fn node_of(r: &AuditRecordResponse) -> String {
     } else if let Some(e) = &r.entity_id {
         format!("entity:{e}")
     } else if let Some(a) = &r.attachment_cid {
-        memvault_core::cid_bytes_lenient(a).map(|b| format!("file:{}", hex::encode(b))).unwrap_or_default()
+        memvault_core::cid_bytes_lenient(a)
+            .map(|b| format!("file:{}", hex::encode(b)))
+            .unwrap_or_default()
     } else {
         String::new()
     }

@@ -31,7 +31,10 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum_extra::extract::CookieJar;
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
-use openidconnect::{AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse};
+use openidconnect::{
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+};
 use serde::Deserialize;
 
 /// How long a sign-in may take between leaving and coming back.
@@ -60,10 +63,19 @@ impl OidcConfig {
     }
 
     /// From any source of variables (tests).
-    pub fn from_vars(get: impl Fn(&str) -> Option<String>, agents_dir: &std::path::Path) -> Result<Self, String> {
-        let var = |k: &str| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    pub fn from_vars(
+        get: impl Fn(&str) -> Option<String>,
+        agents_dir: &std::path::Path,
+    ) -> Result<Self, String> {
+        let var = |k: &str| {
+            get(k)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
         let need = |k: &str| var(k).ok_or_else(|| format!("MEMVAULT_UI_AUTH=oidc needs {k}"));
-        let dir = var("MEMVAULT_OIDC_AGENTS_DIR").map(PathBuf::from).unwrap_or_else(|| agents_dir.to_path_buf());
+        let dir = var("MEMVAULT_OIDC_AGENTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| agents_dir.to_path_buf());
         Ok(OidcConfig {
             issuer: need("MEMVAULT_OIDC_ISSUER")?,
             client_id: need("MEMVAULT_OIDC_CLIENT_ID")?,
@@ -75,7 +87,10 @@ impl OidcConfig {
                 .filter(|s| !s.is_empty() && *s != "openid")
                 .map(String::from)
                 .collect(),
-            allowed: list(&var("MEMVAULT_OIDC_ALLOWED").unwrap_or_default()).into_iter().map(|a| a.to_lowercase()).collect(),
+            allowed: list(&var("MEMVAULT_OIDC_ALLOWED").unwrap_or_default())
+                .into_iter()
+                .map(|a| a.to_lowercase())
+                .collect(),
             agents: agents(&var("MEMVAULT_OIDC_AGENTS").unwrap_or_default(), &dir)?,
         })
     }
@@ -83,7 +98,14 @@ impl OidcConfig {
     /// May this address sign in?
     pub fn allows(&self, email: &str) -> bool {
         let email = email.to_lowercase();
-        self.allowed.is_empty() || self.allowed.iter().any(|a| if a.starts_with('@') { email.ends_with(a.as_str()) } else { *a == email })
+        self.allowed.is_empty()
+            || self.allowed.iter().any(|a| {
+                if a.starts_with('@') {
+                    email.ends_with(a.as_str())
+                } else {
+                    *a == email
+                }
+            })
     }
 
     /// The local agent an address acts as, if it's mapped.
@@ -93,15 +115,24 @@ impl OidcConfig {
 }
 
 fn list(v: &str) -> Vec<String> {
-    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    v.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn agents(v: &str, dir: &std::path::Path) -> Result<HashMap<String, PathBuf>, String> {
     let mut out = HashMap::new();
     for pair in list(v) {
-        let (email, agent) = pair.split_once('=').ok_or_else(|| format!("MEMVAULT_OIDC_AGENTS: {pair:?} isn't address=agent"))?;
+        let (email, agent) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("MEMVAULT_OIDC_AGENTS: {pair:?} isn't address=agent"))?;
         let agent = agent.trim();
-        let path = if agent.contains('/') { PathBuf::from(agent) } else { dir.join(agent) };
+        let path = if agent.contains('/') {
+            PathBuf::from(agent)
+        } else {
+            dir.join(agent)
+        };
         out.insert(email.trim().to_lowercase(), path);
     }
     Ok(out)
@@ -123,16 +154,35 @@ static OIDC: OnceLock<Arc<Oidc>> = OnceLock::new();
 /// Discovers the provider and enables the sign-in routes. Call once at start.
 pub async fn init(cfg: OidcConfig) -> Result<(), String> {
     // Redirects are refused: the provider's endpoints answer directly (SSRF guard).
-    let http = openidconnect::reqwest::ClientBuilder::new().redirect(openidconnect::reqwest::redirect::Policy::none()).build().map_err(|e| e.to_string())?;
-    let issuer = IssuerUrl::new(cfg.issuer.clone()).map_err(|e| format!("MEMVAULT_OIDC_ISSUER: {e}"))?;
-    let redirect = RedirectUrl::new(cfg.redirect_url.clone()).map_err(|e| format!("MEMVAULT_OIDC_REDIRECT_URL: {e}"))?;
-    let meta = CoreProviderMetadata::discover_async(issuer, &http).await.map_err(|e| format!("discovering {}: {e}", cfg.issuer))?;
-    let _ = OIDC.set(Arc::new(Oidc { cfg, meta, redirect, http, pending: Mutex::default() }));
+    let http = openidconnect::reqwest::ClientBuilder::new()
+        .redirect(openidconnect::reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let issuer =
+        IssuerUrl::new(cfg.issuer.clone()).map_err(|e| format!("MEMVAULT_OIDC_ISSUER: {e}"))?;
+    let redirect = RedirectUrl::new(cfg.redirect_url.clone())
+        .map_err(|e| format!("MEMVAULT_OIDC_REDIRECT_URL: {e}"))?;
+    let meta = CoreProviderMetadata::discover_async(issuer, &http)
+        .await
+        .map_err(|e| format!("discovering {}: {e}", cfg.issuer))?;
+    let _ = OIDC.set(Arc::new(Oidc {
+        cfg,
+        meta,
+        redirect,
+        http,
+        pending: Mutex::default(),
+    }));
     Ok(())
 }
 
 fn oidc() -> Result<Arc<Oidc>, Response> {
-    OIDC.get().cloned().ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "OIDC sign-in isn't configured").into_response())
+    OIDC.get().cloned().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OIDC sign-in isn't configured",
+        )
+            .into_response()
+    })
 }
 
 /// `/auth/oidc/login`: off to the provider.
@@ -141,10 +191,19 @@ async fn login() -> Response {
         Ok(o) => o,
         Err(r) => return r,
     };
-    let client = CoreClient::from_provider_metadata(o.meta.clone(), ClientId::new(o.cfg.client_id.clone()), Some(ClientSecret::new(o.cfg.client_secret.clone()))).set_redirect_uri(o.redirect.clone());
+    let client = CoreClient::from_provider_metadata(
+        o.meta.clone(),
+        ClientId::new(o.cfg.client_id.clone()),
+        Some(ClientSecret::new(o.cfg.client_secret.clone())),
+    )
+    .set_redirect_uri(o.redirect.clone());
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let (url, csrf, nonce) = client
-        .authorize_url(CoreAuthenticationFlow::AuthorizationCode, CsrfToken::new_random, Nonce::new_random)
+        .authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            CsrfToken::new_random,
+            Nonce::new_random,
+        )
         .add_scopes(o.cfg.scopes.iter().map(|s| Scope::new(s.clone())))
         .set_pkce_challenge(challenge)
         .url();
@@ -177,25 +236,45 @@ async fn callback(jar: CookieJar, Query(q): Query<Callback>) -> Response {
     if let Some(e) = q.error {
         return denied(format!("the provider said: {e}"));
     }
-    let (Some(code), Some(state)) = (q.code, q.state) else { return denied("no code from the provider".into()) };
-    let Some((verifier, nonce, _)) = o.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&state) else {
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        return denied("no code from the provider".into());
+    };
+    let Some((verifier, nonce, _)) = o
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&state)
+    else {
         return denied("unknown or expired sign-in (start again)".into());
     };
-    let client = CoreClient::from_provider_metadata(o.meta.clone(), ClientId::new(o.cfg.client_id.clone()), Some(ClientSecret::new(o.cfg.client_secret.clone()))).set_redirect_uri(o.redirect.clone());
+    let client = CoreClient::from_provider_metadata(
+        o.meta.clone(),
+        ClientId::new(o.cfg.client_id.clone()),
+        Some(ClientSecret::new(o.cfg.client_secret.clone())),
+    )
+    .set_redirect_uri(o.redirect.clone());
     let exchange = match client.exchange_code(AuthorizationCode::new(code)) {
         Ok(x) => x,
         Err(e) => return denied(format!("the provider has no token endpoint: {e}")),
     };
-    let tokens = match exchange.set_pkce_verifier(verifier).request_async(&o.http).await {
+    let tokens = match exchange
+        .set_pkce_verifier(verifier)
+        .request_async(&o.http)
+        .await
+    {
         Ok(t) => t,
         Err(e) => return denied(format!("exchanging the code: {e}")),
     };
-    let Some(id_token) = tokens.id_token() else { return denied("the provider sent no ID token".into()) };
+    let Some(id_token) = tokens.id_token() else {
+        return denied("the provider sent no ID token".into());
+    };
     let claims = match id_token.claims(&client.id_token_verifier(), &nonce) {
         Ok(c) => c,
         Err(e) => return denied(format!("the ID token: {e}")),
     };
-    let Some(email) = claims.email().map(|e| e.as_str().to_string()) else { return denied("the provider shared no email address".into()) };
+    let Some(email) = claims.email().map(|e| e.as_str().to_string()) else {
+        return denied("the provider shared no email address".into());
+    };
     if claims.email_verified() == Some(false) {
         return denied(format!("{email} isn't verified with the provider"));
     }
@@ -204,27 +283,47 @@ async fn callback(jar: CookieJar, Query(q): Query<Callback>) -> Response {
     }
     let token = match o.cfg.agent_for(&email) {
         // A mapped address acts as that local agent.
-        Some(dir) => match memvault_api::agent_identity::AgentIdentity::load(dir).and_then(|id| id.issue_jwt("read write", SESSION_TTL)) {
+        Some(dir) => match memvault_api::agent_identity::AgentIdentity::load(dir)
+            .and_then(|id| id.issue_jwt("read write", SESSION_TTL))
+        {
             Ok(t) => t,
             Err(e) => return denied(format!("{email}'s agent ({}): {e}", dir.display())),
         },
-        None => match crate::ui::state::ui_agent_identity().map(|id| id.issue_jwt("read write admin", SESSION_TTL)) {
+        None => match crate::ui::state::ui_agent_identity()
+            .map(|id| id.issue_jwt("read write admin", SESSION_TTL))
+        {
             Some(Ok(t)) => t,
-            _ => return (StatusCode::SERVICE_UNAVAILABLE, "the UI agent isn't ready").into_response(),
+            _ => {
+                return (StatusCode::SERVICE_UNAVAILABLE, "the UI agent isn't ready")
+                    .into_response();
+            }
         },
     };
     tracing::info!(%email, agent = o.cfg.agent_for(&email).map(|d| d.display().to_string()).unwrap_or_else(|| "_ui".into()), "signed in to the web UI");
-    (jar.add(crate::api::auth::session_cookie(token)), Redirect::to("/")).into_response()
+    (
+        jar.add(crate::api::auth::session_cookie(token)),
+        Redirect::to("/"),
+    )
+        .into_response()
 }
 
 /// `/auth/oidc/logout`: forget the session.
 async fn logout(jar: CookieJar) -> Response {
-    (jar.remove(axum_extra::extract::cookie::Cookie::from(crate::api::auth::SESSION_COOKIE)), Redirect::to("/")).into_response()
+    (
+        jar.remove(axum_extra::extract::cookie::Cookie::from(
+            crate::api::auth::SESSION_COOKIE,
+        )),
+        Redirect::to("/"),
+    )
+        .into_response()
 }
 
 /// The sign-in routes.
 pub fn routes() -> Router {
-    Router::new().route("/auth/oidc/login", get(login)).route("/auth/oidc/callback", get(callback)).route("/auth/oidc/logout", get(logout))
+    Router::new()
+        .route("/auth/oidc/login", get(login))
+        .route("/auth/oidc/callback", get(callback))
+        .route("/auth/oidc/logout", get(logout))
 }
 
 #[cfg(test)]
@@ -236,23 +335,54 @@ mod tests {
             ("MEMVAULT_OIDC_ISSUER", "https://id.example.org"),
             ("MEMVAULT_OIDC_CLIENT_ID", "mv"),
             ("MEMVAULT_OIDC_CLIENT_SECRET", "s"),
-            ("MEMVAULT_OIDC_REDIRECT_URL", "http://127.0.0.1:8411/auth/oidc/callback"),
+            (
+                "MEMVAULT_OIDC_REDIRECT_URL",
+                "http://127.0.0.1:8411/auth/oidc/callback",
+            ),
         ]);
         vars.extend(extra.iter().copied());
-        OidcConfig::from_vars(|k| vars.get(k).map(|v| v.to_string()), std::path::Path::new("/data/agents"))
+        OidcConfig::from_vars(
+            |k| vars.get(k).map(|v| v.to_string()),
+            std::path::Path::new("/data/agents"),
+        )
     }
 
     #[test]
     fn who_may_sign_in_and_as_whom() {
-        let c = cfg(&[("MEMVAULT_OIDC_ALLOWED", "Ann@Example.org, @lab.org"), ("MEMVAULT_OIDC_AGENTS", "ann@example.org=team-a, bob@lab.org=/srv/ids/bob")]).unwrap();
+        let c = cfg(&[
+            ("MEMVAULT_OIDC_ALLOWED", "Ann@Example.org, @lab.org"),
+            (
+                "MEMVAULT_OIDC_AGENTS",
+                "ann@example.org=team-a, bob@lab.org=/srv/ids/bob",
+            ),
+        ])
+        .unwrap();
         assert!(c.allows("ann@example.org") && c.allows("anyone@lab.org"));
         assert!(!c.allows("eve@example.org") && !c.allows("eve@notlab.org"));
-        assert_eq!(c.agent_for("ANN@example.org"), Some(&PathBuf::from("/data/agents/team-a")));
-        assert_eq!(c.agent_for("bob@lab.org"), Some(&PathBuf::from("/srv/ids/bob")));
-        assert_eq!(c.agent_for("carol@lab.org"), None, "unmapped: the _ui agent");
-        assert!(cfg(&[]).unwrap().allows("anyone@anywhere.org"), "no list: anyone");
+        assert_eq!(
+            c.agent_for("ANN@example.org"),
+            Some(&PathBuf::from("/data/agents/team-a"))
+        );
+        assert_eq!(
+            c.agent_for("bob@lab.org"),
+            Some(&PathBuf::from("/srv/ids/bob"))
+        );
+        assert_eq!(
+            c.agent_for("carol@lab.org"),
+            None,
+            "unmapped: the _ui agent"
+        );
+        assert!(
+            cfg(&[]).unwrap().allows("anyone@anywhere.org"),
+            "no list: anyone"
+        );
         assert_eq!(cfg(&[]).unwrap().scopes, ["email", "profile"]);
-        assert_eq!(cfg(&[("MEMVAULT_OIDC_SCOPES", "openid email,groups offline_access")]).unwrap().scopes, ["email", "groups", "offline_access"]);
+        assert_eq!(
+            cfg(&[("MEMVAULT_OIDC_SCOPES", "openid email,groups offline_access")])
+                .unwrap()
+                .scopes,
+            ["email", "groups", "offline_access"]
+        );
         assert!(cfg(&[("MEMVAULT_OIDC_AGENTS", "nonsense")]).is_err());
         let missing = OidcConfig::from_vars(|_| None, std::path::Path::new("/x")).unwrap_err();
         assert!(missing.contains("MEMVAULT_OIDC_ISSUER"), "{missing}");

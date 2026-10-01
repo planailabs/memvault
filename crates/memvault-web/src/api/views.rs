@@ -77,7 +77,9 @@ pub async fn get_label(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Read)?;
     let label = state.client.resolve_label(&node_id).await?;
-    Ok(Json(serde_json::json!({ "node_id": node_id, "label": label })))
+    Ok(Json(
+        serde_json::json!({ "node_id": node_id, "label": label }),
+    ))
 }
 
 // ── Views ──────────────────────────────────────────────────────────

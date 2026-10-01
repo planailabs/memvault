@@ -44,7 +44,12 @@ pub struct MemvaultStore {
 
 /// The page cache for the blockstore: `MEMVAULT_CACHE_MB` (default 256).
 fn cache_bytes() -> usize {
-    std::env::var("MEMVAULT_CACHE_MB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(256).max(16) << 20
+    std::env::var("MEMVAULT_CACHE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(256)
+        .max(16)
+        << 20
 }
 
 impl MemvaultStore {
@@ -52,7 +57,9 @@ impl MemvaultStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         // redb's page cache defaults to 1 GiB; keep it modest unless asked.
-        let db = redb::Builder::new().set_cache_size(cache_bytes()).create(&path)?;
+        let db = redb::Builder::new()
+            .set_cache_size(cache_bytes())
+            .create(&path)?;
 
         // Ensure all tables exist by opening them in a write transaction.
         let txn = db.begin_write()?;

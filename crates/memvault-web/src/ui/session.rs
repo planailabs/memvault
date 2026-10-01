@@ -123,7 +123,9 @@ async fn fetch_session() -> Result<SessionInfo, String> {
         if resp.status() == 401 {
             if let Ok(p) = resp.json() {
                 if let Ok(body) = JsFuture::from(p).await {
-                    let login = js_sys::Reflect::get(&body, &"login".into()).ok().and_then(|v| v.as_string());
+                    let login = js_sys::Reflect::get(&body, &"login".into())
+                        .ok()
+                        .and_then(|v| v.as_string());
                     if let Some(login) = login {
                         let _ = window.location().set_href(&login);
                         return Err("signing in".into());

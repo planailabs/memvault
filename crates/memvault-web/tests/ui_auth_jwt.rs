@@ -158,14 +158,29 @@ async fn the_ui_signs_in_with_the_proxys_jwt() {
     let none = http.get(&url).send().await.unwrap();
     assert_eq!(none.status(), 401, "no proxy, no session");
     assert!(none.text().await.unwrap().contains("Authorization"));
-    let bad = http.get(&url).bearer_auth("not-a-jwt").send().await.unwrap();
+    let bad = http
+        .get(&url)
+        .bearer_auth("not-a-jwt")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(bad.status(), 401);
     let jwt = s.identity.issue_jwt("read write", 300).unwrap();
     let ok = http.get(&url).bearer_auth(&jwt).send().await.unwrap();
     assert_eq!(ok.status(), 200);
-    assert!(ok.headers().get_all("set-cookie").iter().any(|c| c.to_str().unwrap().starts_with("memvault_session=")), "the session cookie");
+    assert!(
+        ok.headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|c| c.to_str().unwrap().starts_with("memvault_session=")),
+        "the session cookie"
+    );
     let body: serde_json::Value = ok.json().await.unwrap();
-    assert_eq!((body["token"].as_str(), body["agent_id"].as_str()), (Some(jwt.as_str()), Some(AGENT_ID)), "{body}");
+    assert_eq!(
+        (body["token"].as_str(), body["agent_id"].as_str()),
+        (Some(jwt.as_str()), Some(AGENT_ID)),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -176,5 +191,8 @@ async fn a_client_with_someone_elses_token_acts_as_them() {
     let hits = c.search("anything", 5).await;
     assert!(hits.is_ok(), "the agent may search: {hits:?}");
     let nobody = HttpApiClient::with_token(&s.base_url, "not-a-jwt").unwrap();
-    assert!(nobody.search("anything", 5).await.is_err(), "the API refuses a bad token");
+    assert!(
+        nobody.search("anything", 5).await.is_err(),
+        "the API refuses a bad token"
+    );
 }

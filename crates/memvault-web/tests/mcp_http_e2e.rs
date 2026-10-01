@@ -223,10 +223,21 @@ async fn vfs_mkdir_resolve_ls_tree_round_trip() {
 
     // A path that doesn't exist is "not found" (404), not a server error.
     for err in [
-        client.vfs_ls(&bucket, "/nowhere", true).await.expect_err("ls of a missing path").to_string(),
-        client.vfs_tree(&bucket, "/nowhere", 3).await.expect_err("tree of a missing path").to_string(),
+        client
+            .vfs_ls(&bucket, "/nowhere", true)
+            .await
+            .expect_err("ls of a missing path")
+            .to_string(),
+        client
+            .vfs_tree(&bucket, "/nowhere", 3)
+            .await
+            .expect_err("tree of a missing path")
+            .to_string(),
     ] {
-        assert!(err.contains("404") || err.to_lowercase().contains("not found"), "{err}");
+        assert!(
+            err.contains("404") || err.to_lowercase().contains("not found"),
+            "{err}"
+        );
         assert!(!err.contains("500"), "{err}");
     }
 }
@@ -636,24 +647,76 @@ async fn links_from_documents() {
     let (client, bucket) = client_and_bucket().await;
     let mut fm = std::collections::BTreeMap::new();
     fm.insert("title".to_string(), serde_json::json!("Converted text"));
-    let doc = memvault_doc::Document { id: memvault_core::DocId([0u8; 32]), frontmatter: fm, body: "the wombat measurements".to_string() };
-    client.put_doc(doc, vec![], Visibility::Internal, Some(&bucket)).await.expect("put_doc");
-    let doc_id = client.search("wombat", 10).await.expect("search").first().expect("the doc is indexed").doc_id.clone();
+    let doc = memvault_doc::Document {
+        id: memvault_core::DocId([0u8; 32]),
+        frontmatter: fm,
+        body: "the wombat measurements".to_string(),
+    };
+    client
+        .put_doc(doc, vec![], Visibility::Internal, Some(&bucket))
+        .await
+        .expect("put_doc");
+    let doc_id = client
+        .search("wombat", 10)
+        .await
+        .expect("search")
+        .first()
+        .expect("the doc is indexed")
+        .doc_id
+        .clone();
     let doc_ref = NodeRef::Doc(doc_id);
 
-    let cid = client.upload_file(b"original bytes", Some("orig.txt"), "text/plain", vec![], "internal", Some(&bucket)).await.expect("upload_file");
-    let file_ref = NodeRef::from_tag_label(&format!("file:{}", hex::encode(&cid))).expect("a file node");
+    let cid = client
+        .upload_file(
+            b"original bytes",
+            Some("orig.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&bucket),
+        )
+        .await
+        .expect("upload_file");
+    let file_ref =
+        NodeRef::from_tag_label(&format!("file:{}", hex::encode(&cid))).expect("a file node");
     let entity = client
-        .add_entity(Entity { id: memvault_core::EntityId::random(), kind: "note".into(), props: Default::default(), edges_out: vec![] }, Visibility::Internal, Some(&bucket))
+        .add_entity(
+            Entity {
+                id: memvault_core::EntityId::random(),
+                kind: "note".into(),
+                props: Default::default(),
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&bucket),
+        )
         .await
         .expect("add_entity");
 
-    for (target, relation) in [(file_ref.clone(), "original"), (NodeRef::Entity(entity), "about")] {
-        let edge = memvault_doc::Edge { id: memvault_core::EdgeId::random(), relation: relation.into(), target: target.clone(), weight: None, props: Default::default(), provenance: None };
-        client.add_link(&doc_ref, edge, Visibility::Internal).await.unwrap_or_else(|e| panic!("doc -> {relation}: {e}"));
+    for (target, relation) in [
+        (file_ref.clone(), "original"),
+        (NodeRef::Entity(entity), "about"),
+    ] {
+        let edge = memvault_doc::Edge {
+            id: memvault_core::EdgeId::random(),
+            relation: relation.into(),
+            target: target.clone(),
+            weight: None,
+            props: Default::default(),
+            provenance: None,
+        };
+        client
+            .add_link(&doc_ref, edge, Visibility::Internal)
+            .await
+            .unwrap_or_else(|e| panic!("doc -> {relation}: {e}"));
     }
     let edges = client.edges_of(&doc_ref).await.expect("edges_of");
-    assert!(edges.iter().any(|(s, e)| *s == doc_ref && e.target == file_ref && e.relation == "original"), "{edges:?}");
+    assert!(
+        edges
+            .iter()
+            .any(|(s, e)| *s == doc_ref && e.target == file_ref && e.relation == "original"),
+        "{edges:?}"
+    );
 }
 
 #[tokio::test]
@@ -662,31 +725,91 @@ async fn created_docs_keep_the_clients_id() {
     // the stored one over HTTP too; it used to be a random id the server
     // never saw, so links from it failed.
     let (client, bucket) = client_and_bucket().await;
-    let made = memvault_api::docs::create_doc(&client, "the quokka appendix", Some("Quokka"), None, vec![], Visibility::Internal, None, Some(&bucket))
+    let made = memvault_api::docs::create_doc(
+        &client,
+        "the quokka appendix",
+        Some("Quokka"),
+        None,
+        vec![],
+        Visibility::Internal,
+        None,
+        Some(&bucket),
+    )
+    .await
+    .expect("create_doc");
+    let got = client
+        .get_doc(&made.doc_id)
         .await
-        .expect("create_doc");
-    let got = client.get_doc(&made.doc_id).await.expect("get_doc").expect("the returned id is the stored one");
+        .expect("get_doc")
+        .expect("the returned id is the stored one");
     assert!(got.body.contains("quokka"));
     let entity = client
-        .add_entity(Entity { id: memvault_core::EntityId::random(), kind: "note".into(), props: Default::default(), edges_out: vec![] }, Visibility::Internal, Some(&bucket))
+        .add_entity(
+            Entity {
+                id: memvault_core::EntityId::random(),
+                kind: "note".into(),
+                props: Default::default(),
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&bucket),
+        )
         .await
         .expect("add_entity");
-    let edge = memvault_doc::Edge { id: memvault_core::EdgeId::random(), relation: "about".into(), target: NodeRef::Entity(entity), weight: None, props: Default::default(), provenance: None };
-    client.add_link(&NodeRef::Doc(made.doc_id.clone()), edge, Visibility::Internal).await.expect("a link from the new doc");
+    let edge = memvault_doc::Edge {
+        id: memvault_core::EdgeId::random(),
+        relation: "about".into(),
+        target: NodeRef::Entity(entity),
+        weight: None,
+        props: Default::default(),
+        provenance: None,
+    };
+    client
+        .add_link(
+            &NodeRef::Doc(made.doc_id.clone()),
+            edge,
+            Visibility::Internal,
+        )
+        .await
+        .expect("a link from the new doc");
     // A client can't take an existing document's id.
-    let again = memvault_doc::Document { id: made.doc_id.clone(), frontmatter: Default::default(), body: "overwrite?".into() };
-    let err = client.put_doc(again, vec![], Visibility::Internal, Some(&bucket)).await.expect_err("taken id").to_string();
+    let again = memvault_doc::Document {
+        id: made.doc_id.clone(),
+        frontmatter: Default::default(),
+        body: "overwrite?".into(),
+    };
+    let err = client
+        .put_doc(again, vec![], Visibility::Internal, Some(&bucket))
+        .await
+        .expect_err("taken id")
+        .to_string();
     assert!(err.contains("409"), "{err}");
 }
 
 #[tokio::test]
 async fn uploaded_files_land_at_their_vfs_path_over_http() {
     let (client, bucket) = client_and_bucket().await;
-    let (_cid, node) = memvault_api::files::upload_file(&client, b"%PDF-1.4 tiny", Some("r.pdf"), "application/pdf", vec![], "internal", Some("/papers/r.pdf"), Some(&bucket))
+    let (_cid, node) = memvault_api::files::upload_file(
+        &client,
+        b"%PDF-1.4 tiny",
+        Some("r.pdf"),
+        "application/pdf",
+        vec![],
+        "internal",
+        Some("/papers/r.pdf"),
+        Some(&bucket),
+    )
+    .await
+    .expect("upload_file");
+    let resolved = client
+        .vfs_resolve(&bucket, "/papers/r.pdf")
         .await
-        .expect("upload_file");
-    let resolved = client.vfs_resolve(&bucket, "/papers/r.pdf").await.expect("resolve");
-    assert_eq!(resolved.map(|(n, _)| n.tag_label()), Some(node), "the file is at its path");
+        .expect("resolve");
+    assert_eq!(
+        resolved.map(|(n, _)| n.tag_label()),
+        Some(node),
+        "the file is at its path"
+    );
 }
 
 #[tokio::test]
@@ -706,10 +829,23 @@ async fn buckets_of_others_are_not_listed() {
         )
         .await
         .unwrap();
-    let ids: Vec<BucketId> = client.bucket_list().await.unwrap().into_iter().map(|b| b.id).collect();
+    let ids: Vec<BucketId> = client
+        .bucket_list()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
     assert!(ids.contains(&own), "its own bucket is listed");
     assert!(!ids.contains(&theirs), "another agent's bucket isn't");
-    assert!(client.bucket_get(&theirs).await.map(|b| b.is_none()).unwrap_or(true), "nor can it be opened");
+    assert!(
+        client
+            .bucket_get(&theirs)
+            .await
+            .map(|b| b.is_none())
+            .unwrap_or(true),
+        "nor can it be opened"
+    );
 }
 
 #[tokio::test]
@@ -717,21 +853,57 @@ async fn labels_come_from_the_index() {
     let (client, bucket) = client_and_bucket().await;
     let mut fm = std::collections::BTreeMap::new();
     fm.insert("title".to_string(), serde_json::json!("A long book"));
-    let doc = memvault_doc::Document { id: memvault_core::DocId([0u8; 32]), frontmatter: fm, body: "word ".repeat(100_000) };
-    client.put_doc(doc, vec![("kind".into(), "book".into())], Visibility::Internal, Some(&bucket)).await.unwrap();
+    let doc = memvault_doc::Document {
+        id: memvault_core::DocId([0u8; 32]),
+        frontmatter: fm,
+        body: "word ".repeat(100_000),
+    };
+    client
+        .put_doc(
+            doc,
+            vec![("kind".into(), "book".into())],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
     // Listed from the envelope's head (the 100k-word body isn't decoded).
     let docs = client.list_docs(None, 50, Some(&bucket)).await.unwrap();
-    let d = docs.iter().find(|d| d.title.as_deref() == Some("A long book")).expect("listed");
-    assert!(d.tags.contains(&("kind".to_string(), "book".to_string())), "with its tags: {:?}", d.tags);
-    let label = client.resolve_label(&format!("doc:{}", hex::encode(d.id.0))).await.unwrap();
+    let d = docs
+        .iter()
+        .find(|d| d.title.as_deref() == Some("A long book"))
+        .expect("listed");
+    assert!(
+        d.tags.contains(&("kind".to_string(), "book".to_string())),
+        "with its tags: {:?}",
+        d.tags
+    );
+    let label = client
+        .resolve_label(&format!("doc:{}", hex::encode(d.id.0)))
+        .await
+        .unwrap();
     assert_eq!(label.as_deref(), Some("A long book"));
-    assert_eq!(client.resolve_label("doc:00").await.unwrap(), None, "unknown: none");
+    assert_eq!(
+        client.resolve_label("doc:00").await.unwrap(),
+        None,
+        "unknown: none"
+    );
 }
 
 #[tokio::test]
 async fn audit_names_files_and_hides_other_buckets() {
     let (client, bucket) = client_and_bucket().await;
-    let mine = client.upload_file(b"audit me", Some("mine.txt"), "text/plain", vec![], "internal", Some(&bucket)).await.unwrap();
+    let mine = client
+        .upload_file(
+            b"audit me",
+            Some("mine.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
     let local = memvault_web::ui::state::local_client().unwrap();
     let theirs = local
         .bucket_create_as(
@@ -745,13 +917,43 @@ async fn audit_names_files_and_hides_other_buckets() {
         )
         .await
         .unwrap();
-    let other = local.upload_file(b"not yours", Some("theirs.txt"), "text/plain", vec![], "internal", Some(&theirs)).await.unwrap();
-    let q = memvault_query::AuditQuery { op_kind: Some(memvault_query::OpKind::AttachFile), limit: Some(5000), ..Default::default() };
-    let files: Vec<Vec<u8>> = client.audit(q).await.unwrap().into_iter().filter_map(|r| r.attachment_cid).collect();
-    assert!(files.contains(&mine), "an upload's record names its file (the UI's Files page lists from it)");
-    assert!(!files.contains(&other), "another agent's bucket stays out of the audit log");
+    let other = local
+        .upload_file(
+            b"not yours",
+            Some("theirs.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&theirs),
+        )
+        .await
+        .unwrap();
+    let q = memvault_query::AuditQuery {
+        op_kind: Some(memvault_query::OpKind::AttachFile),
+        limit: Some(5000),
+        ..Default::default()
+    };
+    let files: Vec<Vec<u8>> = client
+        .audit(q)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.attachment_cid)
+        .collect();
+    assert!(
+        files.contains(&mine),
+        "an upload's record names its file (the UI's Files page lists from it)"
+    );
+    assert!(
+        !files.contains(&other),
+        "another agent's bucket stays out of the audit log"
+    );
     // The UI's Files page names files from their manifests, over HTTP in jwt mode.
-    let m = client.get_file_manifest(&mine).await.unwrap().expect("a manifest");
+    let m = client
+        .get_file_manifest(&mine)
+        .await
+        .unwrap()
+        .expect("a manifest");
     let m = memvault_store::deserialize_block(&m).expect("readable");
     assert_eq!(m["filename"], "mine.txt");
     assert_eq!(m["content_size"], 8);
@@ -776,12 +978,41 @@ async fn docs_of_others_are_not_listed() {
     let titled = |t: &str| {
         let mut fm = std::collections::BTreeMap::new();
         fm.insert("title".to_string(), serde_json::json!(t));
-        memvault_doc::Document { id: memvault_core::DocId([0u8; 32]), frontmatter: fm, body: "text".into() }
+        memvault_doc::Document {
+            id: memvault_core::DocId([0u8; 32]),
+            frontmatter: fm,
+            body: "text".into(),
+        }
     };
-    client.put_doc(titled("mine, listed"), vec![], Visibility::Internal, Some(&bucket)).await.unwrap();
-    local.put_doc(titled("theirs, hidden"), vec![], Visibility::Internal, Some(&theirs)).await.unwrap();
+    client
+        .put_doc(
+            titled("mine, listed"),
+            vec![],
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    local
+        .put_doc(
+            titled("theirs, hidden"),
+            vec![],
+            Visibility::Internal,
+            Some(&theirs),
+        )
+        .await
+        .unwrap();
     // No bucket named: the caller's agent bucket (standards/bucket-scoping.md).
-    let titles: Vec<String> = client.list_docs(None, 500, None).await.unwrap().into_iter().filter_map(|d| d.title).collect();
+    let titles: Vec<String> = client
+        .list_docs(None, 500, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|d| d.title)
+        .collect();
     assert!(titles.iter().any(|t| t == "mine, listed"), "{titles:?}");
-    assert!(!titles.iter().any(|t| t == "theirs, hidden"), "another agent's document isn't listed");
+    assert!(
+        !titles.iter().any(|t| t == "theirs, hidden"),
+        "another agent's document isn't listed"
+    );
 }

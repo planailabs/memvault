@@ -45,12 +45,14 @@ mod inner {
 
     /// The UI's sign-in mode, from `MEMVAULT_UI_AUTH` (read once).
     pub fn ui_auth() -> UiAuth {
-        *UI_AUTH.get_or_init(|| match std::env::var("MEMVAULT_UI_AUTH").as_deref().map(str::trim) {
-            Ok("jwt") => UiAuth::Jwt,
-            Ok("oidc") => UiAuth::Oidc,
-            Ok("open") | Ok("") | Err(_) => UiAuth::Open,
-            Ok(other) => panic!("MEMVAULT_UI_AUTH={other:?}: use open, jwt or oidc"),
-        })
+        *UI_AUTH.get_or_init(
+            || match std::env::var("MEMVAULT_UI_AUTH").as_deref().map(str::trim) {
+                Ok("jwt") => UiAuth::Jwt,
+                Ok("oidc") => UiAuth::Oidc,
+                Ok("open") | Ok("") | Err(_) => UiAuth::Open,
+                Ok(other) => panic!("MEMVAULT_UI_AUTH={other:?}: use open, jwt or oidc"),
+            },
+        )
     }
 
     /// Sets the mode explicitly (tests, embedders); the first call wins.
@@ -70,11 +72,20 @@ mod inner {
     pub fn request_token() -> Option<String> {
         let ctx = dioxus::fullstack::FullstackContext::current()?;
         let parts = ctx.parts_mut();
-        if let Some(t) = parts.headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) {
+        if let Some(t) = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+        {
             return Some(t.to_string());
         }
         let cookies = parts.headers.get("cookie")?.to_str().ok()?;
-        cookies.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == "memvault_session").map(|(_, v)| v.to_string())
+        cookies
+            .split(';')
+            .filter_map(|c| c.trim().split_once('='))
+            .find(|(k, _)| *k == "memvault_session")
+            .map(|(_, v)| v.to_string())
     }
 
     /// The client the UI works with: in `open` mode the daemon's own (full
@@ -83,17 +94,24 @@ mod inner {
         if ui_auth() == UiAuth::Open {
             return full_client();
         }
-        let token = request_token().ok_or_else(|| dioxus::prelude::ServerFnError::new("not signed in"))?;
-        let url = SELF_URL.get().ok_or_else(|| dioxus::prelude::ServerFnError::new("the daemon's own URL isn't set"))?;
-        let c = memvault_api::HttpApiClient::with_token(url, &token).map_err(|e| dioxus::prelude::ServerFnError::new(e.to_string()))?;
+        let token =
+            request_token().ok_or_else(|| dioxus::prelude::ServerFnError::new("not signed in"))?;
+        let url = SELF_URL
+            .get()
+            .ok_or_else(|| dioxus::prelude::ServerFnError::new("the daemon's own URL isn't set"))?;
+        let c = memvault_api::HttpApiClient::with_token(url, &token)
+            .map_err(|e| dioxus::prelude::ServerFnError::new(e.to_string()))?;
         Ok(Arc::new(c))
     }
 
     /// The daemon's local client for UI pages that need its own rights
     /// (trust, bucket administration): only in `open` mode.
-    pub fn ui_local_client() -> Result<Arc<memvault_api::LocalClient>, dioxus::prelude::ServerFnError> {
+    pub fn ui_local_client()
+    -> Result<Arc<memvault_api::LocalClient>, dioxus::prelude::ServerFnError> {
         if ui_auth() != UiAuth::Open {
-            return Err(dioxus::prelude::ServerFnError::new("this page needs the daemon's own rights; it's only available with MEMVAULT_UI_AUTH=open"));
+            return Err(dioxus::prelude::ServerFnError::new(
+                "this page needs the daemon's own rights; it's only available with MEMVAULT_UI_AUTH=open",
+            ));
         }
         local_client()
     }
