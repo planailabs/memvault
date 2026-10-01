@@ -804,16 +804,16 @@ impl MemvaultServer {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
+        // Managed kinds (skill, vfs:dir) are left out before the limit — use
+        // the skill/VFS tools for those.
         match self
             .client
-            .list_entities(params.limit.unwrap_or(50), Some(&bucket))
+            .list_visible_entities(params.limit.unwrap_or(50), Some(&bucket), false)
             .await
         {
             Ok(entities) => serde_json::json!(
                 entities
                     .iter()
-                    // Hide managed kinds (skill, vfs:dir) — use the skill/VFS tools.
-                    .filter(|e| !memvault_core::is_reserved_entity_kind(&e.kind))
                     .map(|e| serde_json::json!({
                         "id": hex::encode(e.id.0),
                         "kind": e.kind,

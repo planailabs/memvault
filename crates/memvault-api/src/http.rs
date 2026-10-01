@@ -108,6 +108,82 @@ pub struct HttpApiClient {
 }
 
 impl HttpApiClient {
+    /// `GET /nodes`: the listing behind `list_all` and `list_scoped`.
+    /// `exclude_reserved` leaves out the reserved entity kinds on the
+    /// server, before the limit.
+    #[allow(clippy::type_complexity)]
+    async fn fetch_nodes(
+        &self,
+        view_name: Option<&str>,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        exclude_reserved: bool,
+    ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
+        let mut url = format!("{}?limit={limit}", self.url("/nodes"));
+        if exclude_reserved {
+            url.push_str("&exclude_reserved=true");
+        }
+        if let Some(b) = bucket {
+            url.push_str(&format!("&bucket={}", hex::encode(b.0)));
+        }
+        if let Some(v) = view_name {
+            url.push_str(&format!("&view={}", urlencoded(v)));
+        }
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest)?
+            .error_for_status()
+            .map_err(map_reqwest)?
+            .json()
+            .await
+            .map_err(map_reqwest)?;
+        // The /nodes handler returns `{count, nodes: [...]}` (not a bare
+        // array). Fall back to a bare array for any older / alternate
+        // handler shape so this works against both.
+        let nodes_array = resp
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .or_else(|| resp.as_array());
+        let nodes = nodes_array
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let node_id = v["node_id"].as_str()?.to_string();
+                        // /nodes handler emits `node_type`; older shape used
+                        // `type`. Accept either.
+                        let node_type = v
+                            .get("node_type")
+                            .and_then(|x| x.as_str())
+                            .or_else(|| v.get("type").and_then(|x| x.as_str()))
+                            .unwrap_or("")
+                            .to_string();
+                        let label = v["label"].as_str().unwrap_or("").to_string();
+                        let tags: Vec<(String, String)> = v
+                            .get("tags")
+                            .and_then(|t| t.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|t| {
+                                        let a = t.as_array()?;
+                                        Some((
+                                            a.first()?.as_str()?.to_string(),
+                                            a.get(1)?.as_str()?.to_string(),
+                                        ))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some((node_id, node_type, label, tags))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(nodes)
+    }
+
     /// Construct an HTTP client that authenticates with JWTs issued from the
     /// given agent identity. Pass `None` for an unauthenticated client (will
     /// only succeed against endpoints that don't require auth).
@@ -988,66 +1064,31 @@ impl MemvaultClient for HttpApiClient {
         limit: usize,
         bucket: Option<&BucketId>,
     ) -> Result<Vec<(String, String, String, Vec<(String, String)>)>> {
-        let mut url = format!("{}?limit={limit}", self.url("/nodes"));
-        if let Some(b) = bucket {
-            url.push_str(&format!("&bucket={}", hex::encode(b.0)));
-        }
-        if let Some(v) = view_name {
-            url.push_str(&format!("&view={}", urlencoded(v)));
-        }
-        let resp: serde_json::Value = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(map_reqwest)?
-            .error_for_status()
-            .map_err(map_reqwest)?
-            .json()
-            .await
-            .map_err(map_reqwest)?;
-        // The /nodes handler returns `{count, nodes: [...]}` (not a bare
-        // array). Fall back to a bare array for any older / alternate
-        // handler shape so this works against both.
-        let nodes_array = resp
-            .get("nodes")
-            .and_then(|v| v.as_array())
-            .or_else(|| resp.as_array());
-        let nodes = nodes_array
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        let node_id = v["node_id"].as_str()?.to_string();
-                        // /nodes handler emits `node_type`; older shape used
-                        // `type`. Accept either.
-                        let node_type = v
-                            .get("node_type")
-                            .and_then(|x| x.as_str())
-                            .or_else(|| v.get("type").and_then(|x| x.as_str()))
-                            .unwrap_or("")
-                            .to_string();
-                        let label = v["label"].as_str().unwrap_or("").to_string();
-                        let tags: Vec<(String, String)> = v
-                            .get("tags")
-                            .and_then(|t| t.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|t| {
-                                        let a = t.as_array()?;
-                                        Some((
-                                            a.first()?.as_str()?.to_string(),
-                                            a.get(1)?.as_str()?.to_string(),
-                                        ))
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        Some((node_id, node_type, label, tags))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(nodes)
+        self.fetch_nodes(view_name, limit, bucket, false).await
+    }
+
+    async fn list_scoped(
+        &self,
+        scope: &memvault_core::QueryScope,
+        limit: usize,
+    ) -> Result<Vec<crate::types::NodeSummary>> {
+        let bucket = scope.buckets.explicit().and_then(|v| v.first());
+        let rows = self
+            .fetch_nodes(scope.view.as_deref(), limit, bucket, scope.exclude_reserved)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(node_id, node_type, label, tags)| crate::types::NodeSummary {
+                    node_id,
+                    node_type,
+                    label,
+                    tags,
+                    retracted: false,
+                    detail: None,
+                },
+            )
+            .collect())
     }
 
     async fn view_members(&self, view_name: &str) -> Result<Vec<String>> {

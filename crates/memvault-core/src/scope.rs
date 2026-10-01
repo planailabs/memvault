@@ -189,6 +189,9 @@ pub struct QueryScope {
     pub entity_kind: Option<String>,
     /// How much per-node detail a scoped listing returns.
     pub detail: DetailLevel,
+    /// Leave out the reserved, managed entity kinds (skill, vfs:dir) — in
+    /// the query, before the limit. For user-facing listings (the graph).
+    pub exclude_reserved: bool,
 }
 
 impl QueryScope {
@@ -244,6 +247,12 @@ impl QueryScope {
     /// Builder: set the detail level.
     pub fn with_detail(mut self, detail: DetailLevel) -> Self {
         self.detail = detail;
+        self
+    }
+
+    /// Builder: leave out the reserved entity kinds (see `exclude_reserved`).
+    pub fn without_reserved(mut self) -> Self {
+        self.exclude_reserved = true;
         self
     }
 }

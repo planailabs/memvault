@@ -428,14 +428,49 @@ impl TantivyIndex {
         retraction: RetractionMode,
         limit: usize,
     ) -> Result<Vec<TantivyHit>, QueryError> {
+        self.search_scoped_typed(
+            query_text,
+            bucket_ids,
+            view_tags,
+            None,
+            entity_kind,
+            retraction,
+            limit,
+        )
+    }
+
+    /// [`Self::search_scoped`], optionally narrowed to one `node_type`
+    /// ("doc" / "entity" / "file") in the index — so `limit` counts hits of
+    /// that type, not hits of every type filtered afterwards.
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_scoped_typed(
+        &self,
+        query_text: &str,
+        bucket_ids: &[&str],
+        view_tags: &[(String, String)],
+        node_type: Option<&str>,
+        entity_kind: Option<&str>,
+        retraction: RetractionMode,
+        limit: usize,
+    ) -> Result<Vec<TantivyHit>, QueryError> {
         use tantivy::Term;
         use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery};
         use tantivy::schema::IndexRecordOption;
 
         let searcher = self.reader.searcher();
 
-        // ── Filter clauses (all MUST): bucket set, view tags, retraction ──
+        // ── Filter clauses (all MUST): bucket set, view tags, node type,
+        // retraction ──
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        if let Some(t) = node_type {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.f_node_type, t),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
 
         if !bucket_ids.is_empty() {
             let subs: Vec<(Occur, Box<dyn Query>)> = bucket_ids
@@ -541,7 +576,10 @@ impl TantivyIndex {
         let query = BooleanQuery::new(clauses);
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(limit))
+            .search(
+                &query,
+                &TopDocs::with_limit(limit.min(self.num_docs() as usize + 1).max(1)),
+            )
             .map_err(|e| QueryError::Other(format!("search: {e}")))?;
 
         let mut hits = Vec::new();
@@ -781,18 +819,48 @@ impl TantivyIndex {
     /// Collect stored fields for all docs matching the given filter clauses
     /// (joined with AND); empty clauses ⇒ all docs.
     fn collect_rows(&self, clauses: &[String], limit: usize) -> Vec<StoredFields> {
+        self.collect_rows_excluding(clauses, &[], limit)
+    }
+
+    /// [`Self::collect_rows`], leaving out entities whose kind is one of
+    /// `exclude_entity_kinds` in the query itself (so `limit` counts the
+    /// rows that remain).
+    fn collect_rows_excluding(
+        &self,
+        clauses: &[String],
+        exclude_entity_kinds: &[&str],
+        limit: usize,
+    ) -> Vec<StoredFields> {
+        use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, TermQuery};
+        use tantivy::schema::IndexRecordOption;
         let searcher = self.reader.searcher();
         let want = if limit == 0 { usize::MAX } else { limit };
         let collector = TopDocs::with_limit(want.min(self.num_docs() as usize + 1).max(1));
-        let results = if clauses.is_empty() {
-            searcher.search(&tantivy::query::AllQuery, &collector)
+        let base: Box<dyn Query> = if clauses.is_empty() {
+            Box::new(AllQuery)
         } else {
             let qp = QueryParser::for_index(&self.index, vec![self.f_body, self.f_label]);
             match qp.parse_query(&clauses.join(" AND ")) {
-                Ok(q) => searcher.search(&q, &collector),
+                Ok(q) => q,
                 Err(_) => return Vec::new(),
             }
         };
+        let query: Box<dyn Query> = if exclude_entity_kinds.is_empty() {
+            base
+        } else {
+            let mut subs: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, base)];
+            for kind in exclude_entity_kinds {
+                subs.push((
+                    Occur::MustNot,
+                    Box::new(TermQuery::new(
+                        tantivy::Term::from_field_text(self.f_entity_kind, kind),
+                        IndexRecordOption::Basic,
+                    )),
+                ));
+            }
+            Box::new(BooleanQuery::new(subs))
+        };
+        let results = searcher.search(&query, &collector);
         let Ok(top) = results else {
             return Vec::new();
         };
@@ -852,8 +920,22 @@ impl TantivyIndex {
         mode: RetractionMode,
         limit: usize,
     ) -> Vec<(String, String, String, Vec<(String, String)>, bool)> {
+        self.list_all_mode_excluding(view_tags, entity_kind, &[], mode, limit)
+    }
+
+    /// [`Self::list_all_mode`], leaving out entities of the
+    /// `exclude_entity_kinds` in the query (before `limit`).
+    #[allow(clippy::type_complexity)]
+    pub fn list_all_mode_excluding(
+        &self,
+        view_tags: Option<&[(String, String)]>,
+        entity_kind: Option<&str>,
+        exclude_entity_kinds: &[&str],
+        mode: RetractionMode,
+        limit: usize,
+    ) -> Vec<(String, String, String, Vec<(String, String)>, bool)> {
         let clauses = Self::mode_clauses(view_tags.unwrap_or(&[]), entity_kind, mode);
-        self.collect_rows(&clauses, limit)
+        self.collect_rows_excluding(&clauses, exclude_entity_kinds, limit)
             .into_iter()
             .map(|f| {
                 let tags = f.tags.iter().filter_map(|t| split_tag(t)).collect();
@@ -871,13 +953,27 @@ impl TantivyIndex {
         mode: RetractionMode,
         limit: usize,
     ) -> Vec<crate::index::search::UnifiedHit> {
-        let hits = match self.search_scoped(query, &[], &[], entity_kind, mode, limit) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!("tantivy search failed for {query:?}: {e}");
-                Vec::new()
-            }
-        };
+        self.search_unified_typed(query, None, entity_kind, mode, limit)
+    }
+
+    /// [`Self::search_unified_mode`] narrowed to one `node_type` in the
+    /// index (`None` = every type).
+    pub fn search_unified_typed(
+        &self,
+        query: &str,
+        node_type: Option<&str>,
+        entity_kind: Option<&str>,
+        mode: RetractionMode,
+        limit: usize,
+    ) -> Vec<crate::index::search::UnifiedHit> {
+        let hits =
+            match self.search_scoped_typed(query, &[], &[], node_type, entity_kind, mode, limit) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!("tantivy search failed for {query:?}: {e}");
+                    Vec::new()
+                }
+            };
         // Build match-centered snippets + context excerpts from the full body
         // (like the pre-Tantivy TextIndex did), instead of a flat body prefix.
         let query_lower = query.to_lowercase();

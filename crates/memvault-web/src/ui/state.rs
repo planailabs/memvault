@@ -250,6 +250,7 @@ mod inner {
             // Default to lean summaries; callers needing per-node detail
             // (mtime, attachment count, …) opt in via `.with_detail(Full)`.
             detail: memvault_core::DetailLevel::Summary,
+            exclude_reserved: false,
         }
     }
 }

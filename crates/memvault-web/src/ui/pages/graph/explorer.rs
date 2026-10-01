@@ -91,11 +91,14 @@ async fn list_graph_nodes(
 
     // If a view is active, get all nodes matching the view.
     if let Some(ref view_name) = view {
+        // Reserved/managed entities (vfs:dir, skill) are left out by the
+        // query itself, before the limit.
         let items = client
             .list_scoped(
                 &memvault_core::QueryScope::all()
                     .with_view(Some(view_name.to_string()))
-                    .with_include_retracted(show_retracted),
+                    .with_include_retracted(show_retracted)
+                    .without_reserved(),
                 200,
             )
             .await
@@ -105,25 +108,6 @@ async fn list_graph_nodes(
             let id = &item.node_id;
             let node_type = &item.node_type;
             let label = &item.label;
-            // Skip reserved/managed entities (vfs:dir, skill) from graph view.
-            if node_type == "entity" {
-                if let Some(memvault_core::NodeRef::Entity(eid)) =
-                    memvault_core::NodeRef::from_tag_label(id)
-                {
-                    if let Ok(Some(e)) = client
-                        .get_entity_scoped(
-                            &eid,
-                            &memvault_core::QueryScope::all()
-                                .with_include_retracted(show_retracted),
-                        )
-                        .await
-                    {
-                        if memvault_core::is_reserved_entity_kind(&e.kind) {
-                            continue;
-                        }
-                    }
-                }
-            }
             let mut edges = Vec::new();
             if let Some(node_ref) = memvault_core::NodeRef::from_tag_label(id) {
                 if let Ok(edge_list) = client.edges_of(&node_ref).await {
@@ -152,15 +136,14 @@ async fn list_graph_nodes(
         return Ok(nodes);
     }
 
-    // Load entities
+    // Load entities (reserved kinds left out before the limit).
     let entities = client
-        .list_entities_ex(200, bucket_id.as_ref(), show_retracted)
+        .list_visible_entities(200, bucket_id.as_ref(), show_retracted)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut nodes: Vec<NodeSummary> = entities
         .into_iter()
-        .filter(|entity| !memvault_core::is_reserved_entity_kind(&entity.kind))
         .map(|entity| {
             let id = format!("entity:{}", hex::encode(entity.id.0));
             let label = display_label(
@@ -301,22 +284,17 @@ pub(crate) async fn get_node_detail(
                 ("entity".to_string(), "Unknown".to_string(), BTreeMap::new())
             }
         }
-        memvault_core::NodeRef::Doc(id) => {
-            let label = if let Ok(Some(doc)) = client
-                .get_doc_scoped(
-                    id,
+        memvault_core::NodeRef::Doc(_) => {
+            // The title from the index; the sidebar shows no body.
+            let label = client
+                .resolve_label_scoped(
+                    &node_id,
                     &memvault_core::QueryScope::all().with_include_retracted(show_retracted),
                 )
                 .await
-            {
-                doc.frontmatter
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Untitled")
-                    .to_string()
-            } else {
-                "Document".to_string()
-            };
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "Document".to_string());
             ("document".to_string(), label, BTreeMap::new())
         }
         memvault_core::NodeRef::Attachment(_) => {
@@ -352,29 +330,23 @@ pub(crate) async fn get_node_detail(
                         ("entity".to_string(), "entity".to_string(), label)
                     }
                 }
-                memvault_core::NodeRef::Doc(did) => {
+                // Titles and file names come from the index, never from the
+                // document (its whole body) or the manifest block.
+                memvault_core::NodeRef::Doc(_) => {
                     let title = client
-                        .get_doc_scoped(did, &scope)
+                        .resolve_label_scoped(&other_node, &scope)
                         .await
                         .ok()
-                        .flatten()
-                        .and_then(|d| {
-                            d.frontmatter
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                        });
+                        .flatten();
                     let label = display_label(title.as_deref(), None, "document", &other_node);
                     ("doc".to_string(), "document".to_string(), label)
                 }
-                memvault_core::NodeRef::Attachment(cid) => {
+                memvault_core::NodeRef::Attachment(_) => {
                     let name = client
-                        .get_file_manifest(cid)
+                        .resolve_label_scoped(&other_node, &scope)
                         .await
                         .ok()
-                        .flatten()
-                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                        .and_then(|v| v.get("filename").and_then(|f| f.as_str()).map(String::from));
+                        .flatten();
                     let label = display_label(name.as_deref(), None, "file", &other_node);
                     ("file".to_string(), "file".to_string(), label)
                 }

@@ -2478,12 +2478,11 @@ impl LocalClient {
                 }
             }
 
-            // Index attachments
-            let blocks = self
-                .store
-                .iter_blocks()
-                .map_err(|e| ApiError::Serialization(e.to_string()))?;
-            for (cid, data) in &blocks {
+            // Index attachments. The blockstore is walked one block at a
+            // time (twice: here and for annotations below), never collected.
+            for block in self.store.blocks() {
+                let (cid, data) = block.map_err(|e| ApiError::Serialization(e.to_string()))?;
+                let (cid, data) = (&cid, &data);
                 if let Some(view) = memvault_store::EnvelopeView::parse(data) {
                     if view.str_field("kind") == Some("attachment") {
                         // Best-effort bucket: envelope body → BY_BUCKET map
@@ -2524,7 +2523,9 @@ impl LocalClient {
             }
 
             // Replay tag updates and retractions
-            for (_, data) in &blocks {
+            for block in self.store.blocks() {
+                let (_, data) = block.map_err(|e| ApiError::Serialization(e.to_string()))?;
+                let data = &data;
                 if let Some(view) = memvault_store::EnvelopeView::parse(data) {
                     let val = view.raw();
                     let kind = view.str_field("kind");
@@ -3723,13 +3724,13 @@ impl LocalClient {
 
         // O(bucket) fast path: an explicit, non-empty bucket set enumerates the
         // per-bucket member-sets instead of scanning every index row and
-        // re-deriving each node's bucket. Gated on `entity_kind` being unset —
+        // re-deriving each node's bucket. Gated on `entity_kind` being unset (and on `exclude_reserved`) —
         // the member-sets aren't partitioned by fine-grained entity kind, so a
         // kind-filtered query keeps the index-scan path (which pushes the kind
         // clause into Tantivy). The `Accessible` (None) case also scans, since
         // it spans all buckets and never narrows by membership.
         if let Some(set) = &eff {
-            if !set.is_empty() && scope.entity_kind.is_none() {
+            if !set.is_empty() && scope.entity_kind.is_none() && !scope.exclude_reserved {
                 return self.scoped_list_members(scope, set, limit).await;
             }
         }
@@ -3865,11 +3866,17 @@ impl LocalClient {
         } else {
             limit.saturating_mul(4).max(limit)
         };
+        let excluded: &[&str] = if scope.exclude_reserved {
+            memvault_core::RESERVED_ENTITY_KINDS
+        } else {
+            &[]
+        };
         let rows = {
             let idx = self.index.read().await;
-            idx.list_all_mode(
+            idx.list_all_mode_excluding(
                 view_tags.as_deref(),
                 scope.entity_kind.as_deref(),
+                excluded,
                 scope.retraction,
                 fetch,
             )
@@ -4079,6 +4086,7 @@ impl LocalClient {
             entity_kind: scope.entity_kind.clone(),
             // Counting never needs per-node detail.
             detail: memvault_core::DetailLevel::Summary,
+            exclude_reserved: scope.exclude_reserved,
         };
         let rows = self.scoped_list(&counting, usize::MAX).await?;
         let mut c = crate::types::ScopeCount::default();
@@ -4244,57 +4252,52 @@ impl LocalClient {
     ) -> Result<Vec<DocSummary>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
-        // Exhaustive membership universe: the set we test labels against must
-        // cover every block in the bucket, or a recent doc/entity (whose CIDs
-        // fall outside a capped window) is silently dropped from the listing.
-        // The RESULT is still capped at `limit` below (pagination). See
-        // standards: exhaustive-lookups.
-        let scan_cap = usize::MAX;
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
-            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
-            Some(bucket_cids.into_iter().collect())
-        } else {
-            let all = self.accessible_bucket_cids(scan_cap)?;
-            if all.is_empty() { None } else { Some(all) }
-        };
+        // Membership is a point lookup per CID in the scope's bucket indexes
+        // (exact, uncapped, nothing collected). The candidates are every CID
+        // of the tag / of each doc, walked until `limit` documents pass the
+        // filters — the filters come before the limit. See standards:
+        // exhaustive-lookups.
+        let scope_buckets = self.listing_buckets(bucket);
 
-        let cids = if let Some((ref scope, ref label)) = tag_filter {
-            self.store.query_by_tag(scope, label, 0, limit * 5)?
-        } else {
-            // Scan all doc labels when bucket-scoped: a global cap would drop
-            // docs of any bucket outside the global first-N (same flaw as
-            // list_entities_ex). The result is capped at `limit` below.
-            let label_cap = if bucket_cid_set.is_some() {
-                usize::MAX
+        let candidates: Box<dyn Iterator<Item = (u64, Vec<u8>)> + Send + '_> =
+            if let Some((ref scope, ref label)) = tag_filter {
+                Box::new(
+                    self.store
+                        .query_by_tag_with_ts(scope, label, 0, usize::MAX)?
+                        .into_iter(),
+                )
             } else {
-                limit * 5
-            };
-            self.store
-                .query_unique_labels("doc", label_cap)?
-                .into_iter()
-                .flat_map(|label| {
+                // Scan all doc labels when bucket-scoped: a global cap would
+                // drop docs of any bucket outside the global first-N (same
+                // flaw as list_entities_ex). The result is capped at `limit`
+                // below.
+                let label_cap = if scope_buckets.is_some() {
+                    usize::MAX
+                } else {
+                    limit.saturating_mul(5)
+                };
+                let labels = self.store.query_unique_labels("doc", label_cap)?;
+                Box::new(labels.into_iter().flat_map(move |label| {
                     self.store
                         // Exhaustive membership: any of this doc's CIDs may be
                         // the bucket-matching one (see standards).
-                        .query_by_tag("doc", &label, 0, usize::MAX)
+                        .query_by_tag_with_ts("doc", &label, 0, usize::MAX)
                         .unwrap_or_default()
-                })
-                .collect()
-        };
+                }))
+            };
 
         let mut summaries = Vec::new();
         let mut seen_docs: std::collections::HashSet<DocId> = std::collections::HashSet::new();
 
-        for cid in &cids {
+        for (ts, cid) in candidates {
             if summaries.len() >= limit {
                 break;
             }
-            // Skip CIDs not in the active bucket (when filtered).
-            if let Some(ref bset) = bucket_cid_set {
-                if !bset.contains(cid) {
-                    continue;
-                }
+            // Skip CIDs not in the scope's buckets.
+            if !self.cid_in_buckets(scope_buckets.as_deref(), ts, &cid) {
+                continue;
             }
+            let cid = &cid;
             let Some(data) = self.store.get_block(cid)? else {
                 continue;
             };
@@ -4329,34 +4332,29 @@ impl LocalClient {
     /// Authoritative scan-based entity listing (pre-member-set behavior).
     /// Retained as the fallback for cross-bucket queries and as the source of
     /// truth the member-set is validated against.
+    ///
+    /// `keep`, when set, is applied before the limit (e.g. to leave out the
+    /// reserved kinds a user-facing listing doesn't show).
     async fn list_entities_scan(
         &self,
         limit: usize,
         bucket: Option<&BucketId>,
         include_retracted: bool,
+        keep: Option<fn(&Entity) -> bool>,
     ) -> Result<Vec<Entity>> {
         // Explicit bucket → scope to that bucket.
         // None → scope to all accessible buckets (or unscoped pre-genesis).
-        // Exhaustive membership universe: the set we test labels against must
-        // cover every block in the bucket, or a recent doc/entity (whose CIDs
-        // fall outside a capped window) is silently dropped from the listing.
-        // The RESULT is still capped at `limit` below (pagination). See
-        // standards: exhaustive-lookups.
-        let scan_cap = usize::MAX;
-        let bucket_cid_set: Option<std::collections::HashSet<Vec<u8>>> = if let Some(bid) = bucket {
-            let bucket_cids = self.store.query_by_bucket(&bid.0, 0, scan_cap)?;
-            Some(bucket_cids.into_iter().collect())
-        } else {
-            let all = self.accessible_bucket_cids(scan_cap)?;
-            if all.is_empty() { None } else { Some(all) }
-        };
+        // Membership is a point lookup per CID in the scope's bucket indexes
+        // (exact, uncapped, nothing collected); the RESULT is still capped at
+        // `limit` below (pagination). See standards: exhaustive-lookups.
+        let scope_buckets = self.listing_buckets(bucket);
 
         // When scoped to a bucket, the global `limit` cap on labels would
         // wrongly drop entities (including the per-bucket VFS root, which
         // breaks `ensure_root` → mkdir/resolve) of any bucket whose entities
         // fall outside the global first-`limit`. Scan all entity labels and
         // cap the *filtered* result at `limit` instead.
-        let label_cap = if bucket_cid_set.is_some() {
+        let label_cap = if scope_buckets.is_some() || keep.is_some() {
             usize::MAX
         } else {
             limit
@@ -4368,13 +4366,16 @@ impl LocalClient {
                 break;
             }
             // When bucket-filtered, check if any of this entity's CIDs are in the bucket.
-            if let Some(ref bset) = bucket_cid_set {
+            if scope_buckets.is_some() {
                 let entity_cids = self
                     .store
                     // Exhaustive membership (see standards: exhaustive-lookups).
-                    .query_by_tag("entity", &label, 0, usize::MAX)
+                    .query_by_tag_with_ts("entity", &label, 0, usize::MAX)
                     .unwrap_or_default();
-                if !entity_cids.iter().any(|c| bset.contains(c)) {
+                if !entity_cids
+                    .iter()
+                    .any(|(ts, c)| self.cid_in_buckets(scope_buckets.as_deref(), *ts, c))
+                {
                     continue;
                 }
             }
@@ -4386,10 +4387,108 @@ impl LocalClient {
             arr.copy_from_slice(&id_bytes);
             let entity_id = EntityId(arr);
             if let Ok(Some(entity)) = self.get_entity_async(&entity_id, include_retracted).await {
-                entities.push(entity);
+                if keep.is_none_or(|keep| keep(&entity)) {
+                    entities.push(entity);
+                }
             }
         }
         Ok(entities)
+    }
+
+    /// Entity listing behind `list_entities_ex` / `list_visible_entities`.
+    /// `keep`, when set, filters before `limit` applies.
+    async fn list_entities_where(
+        &self,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+        keep: Option<fn(&Entity) -> bool>,
+    ) -> Result<Vec<Entity>> {
+        // Bucket-scoped listing: enumerate the per-bucket member-set (O(bucket))
+        // instead of scanning every entity label in the cluster. See the
+        // per-bucket-member-index plan / standards/derived-indexes.md.
+        if let Some(bid) = bucket {
+            // Read-your-syncs: drain pending reindex so maintenance has folded
+            // synced/seeded nodes into the registered set before we read it.
+            self.flush_index().await;
+            // Read-time merge union: the canonical's member-set plus those of the
+            // sources merged into it (each bucket keeps its own set). Mirrors
+            // `effective_bucket_set` so a listing scoped to a canonical surfaces
+            // merged-source entities (graph view + MCP list tools rely on this).
+            let mut buckets = vec![bid.clone()];
+            buckets.extend(self.bucket_merge_members(&bid.0).into_iter().map(BucketId));
+            let mut seen = std::collections::HashSet::new();
+            let mut entities = Vec::new();
+            'outer: for b in &buckets {
+                self.ensure_bucket_partition(b).await?;
+                let bsid = memvault_core::bucket_scope_id(b);
+                let members = self
+                    .store
+                    .scope_members(&bsid, true, include_retracted, 0)?;
+                for (node_id, _wall) in &members {
+                    if entities.len() >= limit {
+                        break 'outer;
+                    }
+                    let Some(hex_id) = node_id.strip_prefix("entity:") else {
+                        continue;
+                    };
+                    let Some(arr) = hex::decode(hex_id)
+                        .ok()
+                        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(arr) {
+                        continue;
+                    }
+                    if let Ok(Some(entity)) = self
+                        .get_entity_async(&EntityId(arr), include_retracted)
+                        .await
+                    {
+                        if keep.is_none_or(|keep| keep(&entity)) {
+                            entities.push(entity);
+                        }
+                    }
+                }
+            }
+            #[cfg(debug_assertions)]
+            for b in &buckets {
+                self.debug_assert_bucket_parity(b, include_retracted, "entity:")
+                    .await;
+            }
+            return Ok(entities);
+        }
+        self.list_entities_scan(limit, bucket, include_retracted, keep)
+            .await
+    }
+
+    /// The buckets a listing is scoped to: the one asked for, else every
+    /// bucket of this node; `None` before genesis (no buckets, no scoping).
+    fn listing_buckets(&self, bucket: Option<&BucketId>) -> Option<Vec<Vec<u8>>> {
+        match bucket {
+            Some(bid) => Some(vec![bid.0.to_vec()]),
+            None => {
+                let all: Vec<Vec<u8>> = self
+                    .store
+                    .list_buckets()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
+                (!all.is_empty()).then_some(all)
+            }
+        }
+    }
+
+    /// Whether `cid` (indexed at `wall_ns`) is in one of `buckets`; `None`
+    /// scopes nothing out. Point lookups in the bucket index, no scan.
+    fn cid_in_buckets(&self, buckets: Option<&[Vec<u8>]>, wall_ns: u64, cid: &[u8]) -> bool {
+        match buckets {
+            None => true,
+            Some(bs) => bs
+                .iter()
+                .any(|b| self.store.bucket_contains(b, wall_ns, cid).unwrap_or(false)),
+        }
     }
 
     /// Debug-only invariant: every node the authoritative bucket scan returns
@@ -4422,7 +4521,7 @@ impl LocalClient {
                 .map(|s| format!("doc:{}", hex::encode(s.id.0)))
                 .collect(),
             "entity:" => self
-                .list_entities_scan(usize::MAX, Some(bucket), include_retracted)
+                .list_entities_scan(usize::MAX, Some(bucket), include_retracted, None)
                 .await
                 .unwrap_or_default()
                 .into_iter()
@@ -4615,23 +4714,6 @@ impl LocalClient {
         None
     }
 
-    /// Collect all CIDs across all accessible buckets (for cross-bucket search).
-    /// Currently returns all cluster-bound buckets — grant-based filtering
-    /// can be layered on top when per-credential ACLs are enforced.
-    fn accessible_bucket_cids(
-        &self,
-        per_bucket_limit: usize,
-    ) -> Result<std::collections::HashSet<Vec<u8>>> {
-        let buckets = self.store.list_buckets().unwrap_or_default();
-        let mut all_cids = std::collections::HashSet::new();
-        for (bucket_id, _) in &buckets {
-            if let Ok(cids) = self.store.query_by_bucket(bucket_id, 0, per_bucket_limit) {
-                all_cids.extend(cids);
-            }
-        }
-        Ok(all_cids)
-    }
-
     /// Parse a BucketDecl from a block: handles both the new envelope format
     /// (payload.BucketCreate) and the legacy raw BucketDecl JSON.
     pub fn parse_bucket_decl_static(block: &[u8]) -> Option<memvault_core::BucketDecl> {
@@ -4647,37 +4729,19 @@ impl LocalClient {
         }
     }
 
+    /// Top-level `bucket_id` of an envelope (head only, never the payload).
     fn bucket_id_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
-        let val: serde_json::Value = memvault_store::deserialize_block(data)?;
-        val.get("bucket_id")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        EnvAttribution::read(data)?.bucket_id()
     }
 
-    /// Top-level `agent_attestation` CID from an envelope, if present.
-    /// Returns `None` for legacy envelopes (pre-Signed<T> v3) and for
-    /// system writes that weren't agent-attributed.
-    fn agent_attestation_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
-        let val: serde_json::Value = memvault_store::deserialize_block(data)?;
-        val.get("agent_attestation")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-    }
-
-    fn author_from_envelope_bytes(data: &[u8]) -> Option<Vec<u8>> {
-        let val: serde_json::Value = memvault_store::deserialize_block(data)?;
-        val.get("author")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-    }
-
+    /// The bucket of the newest block in `cids` (oldest first, as the tag
+    /// index returns them) that names one. Reads envelope heads only, from
+    /// the newest block down, and stops at the first hit.
     fn latest_bucket_from_cids(&self, cids: &[Vec<u8>]) -> Option<Vec<u8>> {
-        let mut bucket_id = None;
-        for cid in cids {
-            if let Ok(Some(data)) = self.store.get_block(cid) {
-                if let Some(found) = Self::bucket_id_from_envelope_bytes(&data) {
-                    bucket_id = Some(found);
-                }
-            }
-        }
-        bucket_id
+        cids.iter().rev().find_map(|cid| {
+            let data = self.store.get_block(cid).ok()??;
+            Self::bucket_id_from_envelope_bytes(&data)
+        })
     }
 
     fn bucket_for_cid(&self, cid: &[u8]) -> Option<Vec<u8>> {
@@ -4729,24 +4793,29 @@ impl LocalClient {
         let local_effective = self.effective_author();
         let local_peer_id = &self.peer_id;
         let local_agent_att = self.agent_attestation_cid().map(|c| c.to_vec());
-        for cid in cids {
-            if let Ok(Some(data)) = self.store.get_block(cid) {
-                // Signed<T> v3: agent attribution lives in `agent_attestation`.
-                if let Some(att) = Self::agent_attestation_from_envelope_bytes(&data) {
-                    if local_agent_att.as_ref() == Some(&att) {
-                        return true;
-                    }
-                }
-                if let Some(author) = Self::author_from_envelope_bytes(&data) {
-                    // Match legacy (author == effective_author at write
-                    // time) and Signed<T> node-only writes (author == peer_id).
-                    if author == local_effective || &author == local_peer_id {
-                        return true;
-                    }
+        // Envelope heads only (author, attestation), newest first; the
+        // first local block answers.
+        cids.iter().rev().any(|cid| {
+            let Some(head) = self
+                .store
+                .get_block(cid)
+                .ok()
+                .flatten()
+                .and_then(|data| EnvAttribution::read(&data))
+            else {
+                return false;
+            };
+            // Signed<T> v3: agent attribution lives in `agent_attestation`.
+            if let Some(att) = head.agent_attestation() {
+                if local_agent_att.as_ref() == Some(&att) {
+                    return true;
                 }
             }
-        }
-        false
+            // Match legacy (author == effective_author at write time) and
+            // Signed<T> node-only writes (author == peer_id).
+            head.author()
+                .is_some_and(|author| author == local_effective || &author == local_peer_id)
+        })
     }
 
     /// Returns true if at least one block for this entity was authored locally.
@@ -5269,7 +5338,8 @@ impl LocalClient {
     /// blockstore once; returns the number repaired.
     pub fn reindex_bucket_merges(&self) -> Result<usize> {
         let mut fixed = 0usize;
-        for (cid, data) in self.store.iter_blocks()? {
+        for block in self.store.blocks() {
+            let (cid, data) = block?;
             let Some(rec) =
                 memvault_store::deserialize_block_as::<memvault_auth::BucketMergeRecord>(&data)
             else {
@@ -6531,12 +6601,22 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn list_pinned(&self) -> Result<Vec<(Vec<u8>, String)>> {
-        // We need to scan known attachment CIDs. For now, query by the "attachment" tag.
-        // This is a simplified implementation.
-        let cids = self
-            .store
-            .query_by_tag("attachment", "", 0, 1000)
-            .unwrap_or_default();
+        // Every known file: the manifest CIDs named by the `_manifest`
+        // reverse-lookup tag (every upload, and legacy files after
+        // reindex) and by the legacy `attachment` tag. Exhaustive — a
+        // pin outside a capped window would silently go missing (see
+        // standards/exhaustive-lookups.md); each pin check is one lookup.
+        let mut cids: Vec<Vec<u8>> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for scope in ["_manifest", "attachment"] {
+            for label in self.store.query_unique_labels(scope, usize::MAX)? {
+                if let Ok(cid) = hex::decode(&label) {
+                    if seen.insert(cid.clone()) {
+                        cids.push(cid);
+                    }
+                }
+            }
+        }
         let pinned = memvault_attach::pin::list_pinned(&self.store, &cids)?;
         let result = pinned
             .into_iter()
@@ -6686,8 +6766,9 @@ impl MemvaultClient for LocalClient {
         let mut records = Vec::new();
         for cid in &cids {
             if let Some(data) = self.store.get_block(cid)? {
-                if let Some(val) = memvault_store::deserialize_block(&data) {
-                    records.push(memvault_query::parse_audit_record(cid, &val));
+                // Heads only: an audit row never shows the payload's body.
+                if let Some(record) = memvault_query::parse_audit_block(cid, &data) {
+                    records.push(record);
                 }
             }
         }
@@ -6704,60 +6785,23 @@ impl MemvaultClient for LocalClient {
         bucket: Option<&BucketId>,
         include_retracted: bool,
     ) -> Result<Vec<Entity>> {
-        // Bucket-scoped listing: enumerate the per-bucket member-set (O(bucket))
-        // instead of scanning every entity label in the cluster. See the
-        // per-bucket-member-index plan / standards/derived-indexes.md.
-        if let Some(bid) = bucket {
-            // Read-your-syncs: drain pending reindex so maintenance has folded
-            // synced/seeded nodes into the registered set before we read it.
-            self.flush_index().await;
-            // Read-time merge union: the canonical's member-set plus those of the
-            // sources merged into it (each bucket keeps its own set). Mirrors
-            // `effective_bucket_set` so a listing scoped to a canonical surfaces
-            // merged-source entities (graph view + MCP list tools rely on this).
-            let mut buckets = vec![bid.clone()];
-            buckets.extend(self.bucket_merge_members(&bid.0).into_iter().map(BucketId));
-            let mut seen = std::collections::HashSet::new();
-            let mut entities = Vec::new();
-            'outer: for b in &buckets {
-                self.ensure_bucket_partition(b).await?;
-                let bsid = memvault_core::bucket_scope_id(b);
-                let members = self
-                    .store
-                    .scope_members(&bsid, true, include_retracted, 0)?;
-                for (node_id, _wall) in &members {
-                    if entities.len() >= limit {
-                        break 'outer;
-                    }
-                    let Some(hex_id) = node_id.strip_prefix("entity:") else {
-                        continue;
-                    };
-                    let Some(arr) = hex::decode(hex_id)
-                        .ok()
-                        .and_then(|b| <[u8; 32]>::try_from(b).ok())
-                    else {
-                        continue;
-                    };
-                    if !seen.insert(arr) {
-                        continue;
-                    }
-                    if let Ok(Some(entity)) = self
-                        .get_entity_async(&EntityId(arr), include_retracted)
-                        .await
-                    {
-                        entities.push(entity);
-                    }
-                }
-            }
-            #[cfg(debug_assertions)]
-            for b in &buckets {
-                self.debug_assert_bucket_parity(b, include_retracted, "entity:")
-                    .await;
-            }
-            return Ok(entities);
-        }
-        self.list_entities_scan(limit, bucket, include_retracted)
+        self.list_entities_where(limit, bucket, include_retracted, None)
             .await
+    }
+
+    async fn list_visible_entities(
+        &self,
+        limit: usize,
+        bucket: Option<&BucketId>,
+        include_retracted: bool,
+    ) -> Result<Vec<Entity>> {
+        self.list_entities_where(
+            limit,
+            bucket,
+            include_retracted,
+            Some(|e: &Entity| !memvault_core::is_reserved_entity_kind(&e.kind)),
+        )
+        .await
     }
 
     // -- Links (cross-type edges) --
@@ -6903,48 +6947,70 @@ impl MemvaultClient for LocalClient {
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         self.flush_index().await;
-        let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
-        let hits: Vec<SearchHit> = idx
-            .search_unified_mode(query, None, mode, limit * 2)
+        // Only documents in a bucket of this node (pre-genesis: no buckets,
+        // no filter). Membership is exact — a point lookup per doc op in
+        // each bucket's index, no capped CID set.
+        let buckets: Vec<Vec<u8>> = self
+            .store
+            .list_buckets()
+            .unwrap_or_default()
             .into_iter()
-            .filter(|h| h.node_type == "doc")
-            .filter_map(|h| {
-                let hex_str = h.node_id.strip_prefix("doc:")?;
-                let bytes = hex::decode(hex_str).ok()?;
-                if bytes.len() != 32 {
-                    return None;
+            .map(|(id, _)| id)
+            .collect();
+        let in_a_bucket = |doc_id: &DocId| {
+            if buckets.is_empty() {
+                return true;
+            }
+            let (_, label) = Self::doc_tag(doc_id);
+            self.store
+                .query_by_tag_with_ts("doc", &label, 0, usize::MAX)
+                .unwrap_or_default()
+                .iter()
+                .any(|(ts, cid)| {
+                    buckets
+                        .iter()
+                        .any(|b| self.store.bucket_contains(b, *ts, cid).unwrap_or(false))
+                })
+        };
+
+        // The doc-type filter is in the index query; the bucket filter is
+        // applied while the window grows, so `limit` counts passing hits.
+        let mut fetch = limit.saturating_mul(2).max(1);
+        loop {
+            let raw = {
+                let idx = self.index.read().await;
+                idx.search_unified_typed(query, Some("doc"), None, mode, fetch)
+            };
+            let exhausted = raw.len() < fetch;
+            let mut hits = Vec::new();
+            for h in raw {
+                let Some(arr) = h
+                    .node_id
+                    .strip_prefix("doc:")
+                    .and_then(|hex_str| hex::decode(hex_str).ok())
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                else {
+                    continue;
+                };
+                let doc_id = DocId(arr);
+                if !in_a_bucket(&doc_id) {
+                    continue;
                 }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Some(SearchHit {
-                    doc_id: DocId(arr),
+                hits.push(SearchHit {
+                    doc_id,
                     score: h.score,
                     snippet: h.snippet,
-                })
-            })
-            .collect();
-        drop(idx);
-
-        // Post-filter: only return hits from accessible buckets.
-        let accessible = self.accessible_bucket_cids(limit * 20)?;
-        if accessible.is_empty() {
-            // Pre-genesis or no buckets — return unfiltered.
-            return Ok(hits.into_iter().take(limit).collect());
+                });
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+            if hits.len() >= limit || exhausted || fetch == usize::MAX {
+                return Ok(hits);
+            }
+            fetch = fetch.saturating_mul(4);
         }
-        Ok(hits
-            .into_iter()
-            .filter(|h| {
-                let (_, label) = Self::doc_tag(&h.doc_id);
-                self.store
-                    // Exhaustive membership (see standards: exhaustive-lookups).
-                    .query_by_tag("doc", &label, 0, usize::MAX)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|c| accessible.contains(c))
-            })
-            .take(limit)
-            .collect())
     }
 
     async fn search_unified(
@@ -6955,7 +7021,7 @@ impl MemvaultClient for LocalClient {
         self.flush_index().await;
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
-        let hits = idx.search_unified_mode(query, None, mode, limit * 2);
+        let hits = idx.search_unified_mode(query, None, mode, limit.saturating_mul(2));
         drop(idx);
 
         // The index only holds this node's own bucketed content (populate keys
@@ -7047,7 +7113,7 @@ impl MemvaultClient for LocalClient {
         let fetch = if bucket.is_some() {
             usize::MAX
         } else {
-            limit * 2
+            limit.saturating_mul(2)
         };
         let idx = self.index.read().await;
         let mode = RetractionMode::ActiveOnly;
@@ -7846,11 +7912,8 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn status(&self) -> Result<NodeStatus> {
-        let block_count = self
-            .store
-            .iter_blocks()
-            .map(|b| b.len() as u64)
-            .unwrap_or(0);
+        // The table length: counting must not load every block.
+        let block_count = self.store.block_count().unwrap_or(0);
         let doc_count = self
             .store
             .query_unique_labels("doc", usize::MAX)
@@ -7972,6 +8035,44 @@ struct EnvKind {
 struct EnvWall {
     #[serde(default)]
     wall_ns: u64,
+}
+
+/// An envelope's top-level attribution only: `bucket_id`, `author`,
+/// `agent_attestation`. Each is kept as a small `Value` and converted on
+/// use, so an odd shape in one field doesn't hide the others.
+#[derive(serde::Deserialize)]
+struct EnvAttribution {
+    #[serde(default)]
+    bucket_id: Option<serde_json::Value>,
+    #[serde(default)]
+    author: Option<serde_json::Value>,
+    #[serde(default)]
+    agent_attestation: Option<serde_json::Value>,
+}
+
+impl EnvAttribution {
+    /// DAG-CBOR or legacy JSON; the payload and signatures are skipped.
+    fn read(data: &[u8]) -> Option<Self> {
+        memvault_store::deserialize_block_as(data)
+    }
+
+    fn bytes(v: &Option<serde_json::Value>) -> Option<Vec<u8>> {
+        serde_json::from_value(v.clone()?).ok()
+    }
+
+    fn bucket_id(&self) -> Option<Vec<u8>> {
+        Self::bytes(&self.bucket_id)
+    }
+
+    fn author(&self) -> Option<Vec<u8>> {
+        Self::bytes(&self.author)
+    }
+
+    /// `None` for legacy envelopes (pre-Signed<T> v3) and for system
+    /// writes that weren't agent-attributed.
+    fn agent_attestation(&self) -> Option<Vec<u8>> {
+        Self::bytes(&self.agent_attestation)
+    }
 }
 
 /// An envelope's tags only.
