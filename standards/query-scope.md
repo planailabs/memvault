@@ -45,8 +45,17 @@ read path, thread a `QueryScope`; don't add another positional-arg query method.
 
 ## Migration status
 
-`list_scoped`/`search_scoped`/`get_doc_scoped`/`get_entity_scoped` already take
-`QueryScope` and the server search/list/get handlers build one. The remaining
-convenience methods (`list_docs`/`search`/`list_entities`) still take
-`(limit, bucket)` and internally route to the scoped path; they stay as shims
-for back-compat. New surfaces should take `QueryScope` directly.
+`list_scoped`/`search_scoped`/`count_scoped`/`get_doc_scoped`/
+`get_entity_scoped`/`resolve_label_scoped` take `QueryScope`, and
+`HttpApiClient` overrides every one of them: the scope travels as query
+parameters (`memvault_api::rest::ScopeParams`) to `GET /nodes`,
+`/nodes/count`, `/search`, `/docs/{id}`, `/entities/{id}` and `/labels/{id}`,
+whose handlers rebuild it with `api::auth::scope_from_params` — every bucket
+named checked (404 if unreadable), the caller's agent bucket when a listing
+names none, the retraction mode clamped by `retraction_for` (active only
+unless the caller may see retracted nodes). The convenience methods
+(`list_docs`/`search`/`list_entities`/`get_doc`/`resolve_label`) still take
+`(limit, bucket)` or no scope and route to the scoped path (over HTTP:
+active only, as locally); `list_docs_ex`/`list_entities_ex` send
+`include_retracted`, honoured only for callers who may see retracted nodes.
+New surfaces should take `QueryScope` directly.

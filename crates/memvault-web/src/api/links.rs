@@ -1,44 +1,21 @@
 //! Cross-type link endpoints — create, list, and remove edges between any node types.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use memvault_api::rest::{
+    CreateLinkRequest, EdgeCreated, LimitParams, NodeBucket, NodeWire, ReasonParams, ScopeParams,
+};
+use memvault_api::wire::{EntityWire, LinkWire};
 use memvault_core::{EdgeId, NodeRef};
 use memvault_doc::Edge;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::AppState;
 use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
-
-#[derive(Deserialize)]
-pub struct CreateLinkRequest {
-    /// Source node as "entity:<hex>", "doc:<hex>", or "attachment:<hex>".
-    pub source: String,
-    /// Target node — same format as source.
-    pub target: String,
-    /// Relation type (e.g. "references", "evidence_for", "related_to").
-    pub relation: String,
-    /// Optional edge weight (0.0–1.0).
-    pub weight: Option<f32>,
-    /// Optional edge properties.
-    #[serde(default)]
-    pub props: BTreeMap<String, serde_json::Value>,
-    /// Visibility level.
-    pub visibility: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct LinkResponse {
-    pub edge_id: String,
-    pub source: String,
-    pub target: String,
-    pub relation: String,
-    pub weight: Option<f32>,
-    pub props: BTreeMap<String, serde_json::Value>,
-}
 
 #[derive(Deserialize)]
 pub struct LinksQuery {
@@ -57,7 +34,7 @@ pub async fn create_link(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateLinkRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<(StatusCode, Json<EdgeCreated>), ApiError> {
     let source = NodeRef::from_tag_label(&req.source).ok_or_else(|| {
         ApiError::bad_request(
             "Invalid source: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
@@ -88,10 +65,7 @@ pub async fn create_link(
 
     let edge_id = state.client.add_link(&source, edge, vis).await?;
     tracing::info!(source = %req.source, target = %req.target, relation = %relation, "API: link created");
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "edge_id": hex::encode(edge_id.0) })),
-    ))
+    Ok((StatusCode::CREATED, Json(EdgeCreated { edge_id })))
 }
 
 /// GET /api/v1/links?node=entity:<hex> — list all edges touching a node.
@@ -99,7 +73,7 @@ pub async fn list_links(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<LinksQuery>,
-) -> Result<Json<Vec<LinkResponse>>, ApiError> {
+) -> Result<Json<Vec<LinkWire>>, ApiError> {
     let node = NodeRef::from_tag_label(&params.node).ok_or_else(|| {
         ApiError::bad_request(
             "Invalid node: expected 'entity:<hex>', 'doc:<hex>', or 'attachment:<hex>'",
@@ -112,41 +86,24 @@ pub async fn list_links(
     // Only edges whose other end the caller may read: an incoming edge from
     // another agent's node named that node.
     let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
-    let results: Vec<LinkResponse> = edges
-        .into_iter()
+    let results: Vec<LinkWire> = edges
+        .iter()
         .filter(|(source, edge)| {
             readable.node(&source.tag_label()) && readable.node(&edge.target.tag_label())
         })
-        .map(|(source, edge)| LinkResponse {
-            edge_id: hex::encode(edge.id.0),
-            source: source.tag_label(),
-            target: edge.target.tag_label(),
-            relation: edge.relation,
-            weight: edge.weight,
-            props: edge.props,
-        })
+        .map(|(source, edge)| LinkWire::new(source, edge))
         .collect();
 
     Ok(Json(results))
 }
 
-#[derive(Deserialize)]
-pub struct ListNodesQuery {
-    pub view: Option<String>,
-    pub limit: Option<usize>,
-    /// Optional bucket id (hex) to scope the listing (standards/bucket-scoping.md).
-    pub bucket: Option<String>,
-    /// Leave out the reserved entity kinds (skill, vfs:dir) before `limit`.
-    #[serde(default)]
-    pub exclude_reserved: bool,
-}
-
-/// GET /api/v1/nodes/:node_id — get any node by type:hex ID.
+/// GET /api/v1/nodes/:node_id — get any node by type:hex ID, tagged by
+/// `node_type` ([`NodeWire`]).
 pub async fn get_node(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<NodeWire>, ApiError> {
     tracing::debug!(node_id = %node_id, "API: get node");
     let node_ref = NodeRef::from_tag_label(&node_id).ok_or_else(|| {
         ApiError::bad_request(
@@ -154,82 +111,83 @@ pub async fn get_node(
         )
     })?;
     crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Read)?;
-    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    let scope = memvault_core::QueryScope::all().with_retraction(crate::api::auth::retraction_for(
+        &state,
+        &auth.claims,
+        None,
+    ));
+    let tags = state.client.get_tags(&node_id).await?;
 
     match node_ref {
         NodeRef::Entity(eid) => {
             let entity = state
                 .client
-                .get_entity_scoped(
-                    &eid,
-                    &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
-                )
+                .get_entity_scoped(&eid, &scope)
                 .await?
                 .ok_or_else(|| ApiError::not_found("Entity not found"))?;
-            Ok(Json(serde_json::json!({
-                "node_id": node_id,
-                "node_type": "entity",
-                "kind": entity.kind,
-                "props": entity.props,
-                "edges": entity.edges_out.iter().map(|e| serde_json::json!({
-                    "edge_id": hex::encode(e.id.0),
-                    "relation": e.relation,
-                    "target": e.target.tag_label(),
-                    "weight": e.weight,
-                })).collect::<Vec<_>>(),
-                "tags": state.client.get_tags(&node_id).await.unwrap_or_default(),
-            })))
+            Ok(Json(NodeWire::Entity {
+                entity: EntityWire::with_edges(&entity),
+                tags,
+            }))
         }
         NodeRef::Doc(did) => {
             let doc = state
                 .client
-                .get_doc_scoped(
-                    &did,
-                    &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
-                )
+                .get_doc_scoped(&did, &scope)
                 .await?
                 .ok_or_else(|| ApiError::not_found("Document not found"))?;
-            Ok(Json(serde_json::json!({
-                "node_id": node_id,
-                "node_type": "doc",
-                "title": doc.frontmatter.get("title").and_then(|v| v.as_str()),
-                "body": doc.body,
-                "frontmatter": doc.frontmatter,
-                "tags": state.client.get_tags(&node_id).await.unwrap_or_default(),
+            Ok(Json(NodeWire::Doc(memvault_api::rest::DocWire {
+                node_id,
+                cid: None,
+                body: doc.body,
+                frontmatter: doc.frontmatter,
+                tags,
             })))
         }
         NodeRef::Attachment(cid) => {
-            let manifest = state.client.get_file_manifest(&cid).await?;
-            Ok(Json(serde_json::json!({
-                "node_id": node_id,
-                "node_type": "file",
-                "manifest": manifest.map(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).flatten(),
-                "tags": state.client.get_tags(&node_id).await.unwrap_or_default(),
-            })))
+            // The manifest block is dag-cbor: decoded, not parsed as JSON.
+            let manifest = state
+                .client
+                .get_file_manifest(&cid)
+                .await?
+                .and_then(|b| memvault_api::types::FileManifestInfo::from_block(&b));
+            Ok(Json(NodeWire::File {
+                node_id,
+                manifest,
+                tags,
+            }))
         }
     }
 }
 
-/// GET /api/v1/nodes — list all nodes, optionally filtered by view.
+/// GET /api/v1/nodes/:node_id/bucket — the bucket a node lives in.
+pub async fn node_bucket(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<String>,
+) -> Result<Json<NodeBucket>, ApiError> {
+    let node = NodeRef::from_tag_label(&node_id)
+        .ok_or_else(|| ApiError::bad_request("Invalid node ID — expected 'type:hex'"))?;
+    crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Read)?;
+    Ok(Json(NodeBucket {
+        bucket_id: state.client.node_bucket(&node).await?,
+    }))
+}
+
+/// GET /api/v1/nodes — the nodes in a scope ([`ScopeParams`]: bucket, view,
+/// kind, …; the caller's agent bucket when none is named), as
+/// `NodeSummary`s.
 pub async fn list_nodes(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<ListNodesQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let limit = params.limit.unwrap_or(100);
-    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    Query(params): Query<ScopeParams>,
+    Query(limit): Query<LimitParams>,
+) -> Result<Json<Vec<memvault_api::NodeSummary>>, ApiError> {
+    let limit = limit.limit.unwrap_or(100);
     // One bucket (standards/bucket-scoping.md): the named one, else the
     // caller's agent bucket; admins keep the cross-bucket listing, read-
     // filtered before the limit.
-    let named = crate::api::auth::parse_bucket_param(params.bucket.as_deref())?;
-    let bucket = crate::api::auth::read_bucket(&state, &auth.claims, named).await?;
-    let mut scope = memvault_core::QueryScope::all()
-        .with_view(params.view.clone())
-        .with_bucket(bucket)
-        .with_include_retracted(include_retracted);
-    if params.exclude_reserved {
-        scope = scope.without_reserved();
-    }
+    let scope = crate::api::auth::scope_from_params(&state, &auth.claims, &params, true).await?;
     let mut readable = crate::api::auth::Readable::new(&auth.claims)?;
     let items = crate::api::auth::fetch_kept(
         limit,
@@ -240,30 +198,32 @@ pub async fn list_nodes(
         |n: &memvault_api::NodeSummary| readable.node(&n.node_id),
     )
     .await?;
-    Ok(Json(serde_json::json!({
-        "count": items.len(),
-        "nodes": items.iter().map(|n| serde_json::json!({
-            "node_id": n.node_id,
-            "node_type": n.node_type,
-            "label": n.label,
-            "tags": n.tags,
-        })).collect::<Vec<_>>(),
-    })))
+    Ok(Json(items))
 }
 
-/// DELETE /api/v1/nodes/:node_id — retract (soft-delete) any node.
+/// GET /api/v1/nodes/count — active/retracted counts for a scope (the same
+/// [`ScopeParams`] as `GET /nodes`).
+pub async fn count_nodes(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ScopeParams>,
+) -> Result<Json<memvault_api::ScopeCount>, ApiError> {
+    let scope = crate::api::auth::scope_from_params(&state, &auth.claims, &params, true).await?;
+    Ok(Json(state.client.count_scoped(&scope).await?))
+}
+
+/// DELETE /api/v1/nodes/:node_id?reason= — retract (soft-delete) any node.
 pub async fn retract_node(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(node_id): Path<String>,
-) -> Result<axum::http::StatusCode, ApiError> {
+    Query(params): Query<ReasonParams>,
+) -> Result<StatusCode, ApiError> {
     crate::api::auth::enforce_node_action(&auth.claims, &node_id, memvault_auth::Action::Write)?;
-    state
-        .client
-        .retract_node(&node_id, "retracted via API")
-        .await?;
+    let reason = params.reason.as_deref().unwrap_or("retracted via API");
+    state.client.retract_node(&node_id, reason).await?;
     tracing::info!(node_id = %node_id, "API: node retracted");
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// DELETE /api/v1/links/:edge_id?source=entity:<hex> — remove an edge by ID.
@@ -273,7 +233,7 @@ pub async fn delete_link(
     State(state): State<Arc<AppState>>,
     Path(edge_id_str): Path<String>,
     Query(params): Query<DeleteLinkQuery>,
-) -> Result<axum::http::StatusCode, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let bytes = hex::decode(&edge_id_str).map_err(|_| ApiError::bad_request("Invalid edge ID"))?;
     if bytes.len() != 32 {
         return Err(ApiError::bad_request("Edge ID must be 32 bytes"));
@@ -295,5 +255,5 @@ pub async fn delete_link(
 
     state.client.remove_link_from(&source, &edge_id).await?;
 
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT)
 }

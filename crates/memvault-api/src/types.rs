@@ -71,10 +71,15 @@ impl ScopeCount {
 }
 
 /// A hit from a graph traversal.
+///
+/// Wire shape (`GET /traverse`, MCP `memvault_traverse`): `node` is the
+/// `"type:hex"` label, `path` is `[{edge_id: hex, relation}, …]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraversalHit {
+    #[serde(with = "crate::wire::node_label")]
     pub node: NodeRef,
     pub depth: usize,
+    #[serde(with = "crate::wire::edge_path")]
     pub path: Vec<(EdgeId, String)>,
 }
 
@@ -182,14 +187,18 @@ pub struct View {
     pub name: String,
     /// Required tags — items must have ALL of these to appear in this view.
     pub tags: Vec<(String, String)>,
+    /// Set by the writer (a request body may leave it out).
+    #[serde(default)]
     pub created_ns: u64,
-    /// Block CID (hex). Set after storage, empty on input.
+    /// Block CID (canonical CID string). Set after storage, empty on input.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cid: String,
     /// When set, the view only returns items in this bucket.
     /// None = fan out across all accessible buckets (legacy behavior).
     /// Added in B4. Old views deserialize with None via #[serde(default)].
-    #[serde(default)]
+    /// Hex on the wire and in new view blocks; older blocks hold the byte
+    /// form, which still decodes.
+    #[serde(default, with = "crate::wire::hex_id_lenient_opt")]
     pub bucket_id: Option<BucketId>,
 }
 
@@ -272,7 +281,9 @@ pub struct GrantInfo {
     /// Issuing cluster.
     #[serde(with = "crate::wire::hex_id")]
     pub issuing_cluster: ClusterId,
-    /// Who the grant is addressed to.
+    /// Who the grant is addressed to (a `kind`-tagged object, see
+    /// [`crate::wire::GrantAudienceWire`]).
+    #[serde(with = "crate::wire::grant_audience")]
     pub audience: memvault_auth::GrantAudience,
     /// Granted actions.
     pub actions: Vec<memvault_auth::Action>,
@@ -303,6 +314,80 @@ pub struct ShareProposalInfo {
 }
 
 // ─── Extraction / media pipeline ──────────────────────────────────────────────
+
+/// A file's manifest as the API shows it (`GET /files/{cid}/manifest`, the
+/// file branch of `GET /nodes/{id}`, MCP `memvault_file_info`): the fields a
+/// reader shows, CIDs as CID strings. Decoded from the stored block — a
+/// dag-cbor `AttachmentManifest`, or for a legacy file the attachment
+/// envelope `get_file_manifest` falls back to — never sent as raw block bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileManifestInfo {
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default = "default_mime")]
+    pub mime_type: String,
+    #[serde(default, alias = "size")]
+    pub content_size: u64,
+    /// Root block of the content.
+    #[serde(default, with = "crate::wire::cid_str_opt")]
+    pub content_root: Option<Vec<u8>>,
+    #[serde(default, with = "crate::wire::hex_array32_opt")]
+    pub sha256: Option<[u8; 32]>,
+    #[serde(default)]
+    pub width_height: Option<(u32, u32)>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// The extracted-text envelope, once extraction ran.
+    #[serde(default, with = "crate::wire::cid_str_opt")]
+    pub extracted_text: Option<Vec<u8>>,
+}
+
+fn default_mime() -> String {
+    "application/octet-stream".to_string()
+}
+
+impl FileManifestInfo {
+    /// Decode a manifest block: the dag-cbor `AttachmentManifest`, a legacy
+    /// JSON one, or a legacy attachment envelope (the file fields at its top
+    /// level, or in its signed payload).
+    pub fn from_block(block: &[u8]) -> Option<Self> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            filename: Option<String>,
+            #[serde(default)]
+            mime_type: Option<String>,
+            #[serde(default, alias = "size")]
+            content_size: Option<u64>,
+            #[serde(default)]
+            content_root: Option<Vec<u8>>,
+            #[serde(default)]
+            sha256: Option<[u8; 32]>,
+            #[serde(default)]
+            width_height: Option<(u32, u32)>,
+            #[serde(default)]
+            duration_ms: Option<u64>,
+            #[serde(default)]
+            extracted_text: Option<Vec<u8>>,
+        }
+        let value = memvault_store::deserialize_block(block)?;
+        let fields = value
+            .get("payload")
+            .filter(|p| p.is_object())
+            .unwrap_or(&value);
+        let raw: Raw = serde_json::from_value(fields.clone()).ok()?;
+        Some(Self {
+            filename: raw.filename,
+            mime_type: raw.mime_type.unwrap_or_else(default_mime),
+            content_size: raw.content_size.unwrap_or(0),
+            content_root: raw.content_root,
+            sha256: raw.sha256,
+            width_height: raw.width_height,
+            duration_ms: raw.duration_ms,
+            extracted_text: raw.extracted_text,
+        })
+    }
+}
 
 /// Status of a background extraction op for a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

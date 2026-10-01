@@ -14,6 +14,7 @@ pub mod links;
 pub mod media;
 pub mod ops;
 pub mod search;
+pub mod share;
 pub mod skills;
 pub mod vfs;
 pub mod views;
@@ -37,10 +38,13 @@ pub fn routes(state: Arc<AppState>) -> Router {
         // ── Nodes (unified) ────────────────────────────────────────
         // The primary API for all node types. Uses type:hex IDs everywhere.
         .route("/nodes", get(links::list_nodes))
+        // Static `count` before `{node_id}` (a node label is never "count").
+        .route("/nodes/count", get(links::count_nodes))
         .route(
             "/nodes/{node_id}",
             get(links::get_node).delete(links::retract_node),
         )
+        .route("/nodes/{node_id}/bucket", get(links::node_bucket))
         // ── Links (cross-type edges) ───────────��───────────────────
         .route("/links", post(links::create_link).get(links::list_links))
         .route("/links/{edge_id}", delete(links::delete_link))
@@ -100,6 +104,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/entities/{id}",
             get(graph::get_entity).delete(graph::delete_entity),
         )
+        .route("/entities/{id}/history", get(graph::entity_history))
         // ── Files ────────────────────────────────────────────────────
         .route("/files", post(files::upload_file))
         .route("/files/{cid}", get(files::download_file))
@@ -171,7 +176,13 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/buckets/{id}/issue-grant", post(buckets::issue_grant))
         .route("/grants/{cid}/revoke", post(buckets::revoke_grant))
         .route("/buckets/{id}/attach", post(buckets::attach_bucket))
+        .route("/buckets/{id}/bind", post(buckets::bind_bucket))
         .route("/buckets/{id}/archive", post(buckets::archive_bucket))
+        // ── Share proposals (cluster admin) ──────────────────────
+        .route("/share/inbox", get(share::inbox))
+        .route("/share/outbox", get(share::outbox))
+        .route("/share/proposals/{cid}", get(share::proposal))
+        .route("/share/proposals/{cid}/decide", post(share::decide))
         // ── Auth (session token for web UI) ───────────────────────
         .route("/auth/session-token", get(auth::get_session_token))
         // ── Agent enrollment (token-authenticated; no Bearer needed).

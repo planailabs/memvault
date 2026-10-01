@@ -42,8 +42,10 @@ proposal CIDs, rotation IDs. These are stored as `Vec<u8>` (the CID bytes).
   bare hex of the CID bytes. Use `memvault_api::wire::cid_str` /
   `cid_str_opt`.
 - **`PeerId`** is a libp2p peer id, i.e. a multihash of the node pubkey; its
-  canonical string is base58btc (`12D3Koo…`). **FIX**: it is currently
-  hex-encoded on a few admin endpoints; migrate to the peer-id string.
+  canonical string is base58btc (`12D3Koo…`) — `wire::peer_b58` /
+  `wire::b58_bytes` (`NodeStatus.peer_id`, `GrantInfo.issuer`,
+  `ShareProposalInfo.from_admin`, a `peer` grant audience), on REST and MCP
+  alike.
 - **Migration via accept-both / emit-canonical.** Flipping a CID surface from
   hex to the canonical string is non-breaking when the server *accepts* both
   (`memvault_core::cid_bytes_lenient`) while *emitting* the canonical CID
@@ -52,11 +54,18 @@ proposal CIDs, rotation IDs. These are stored as `Vec<u8>` (the CID bytes).
   - **Done:** the file/manifest HTTP surface — `GET /files/{cid}`,
     `/files/{cid}/manifest|pin|extracted-text`, `GET /pins`, the upload
     response `cid`, and the `HttpApiClient` file methods.
-  - **Remaining:** the MCP tool cid I/O (`*Params.manifest_cid` decode and the
-    tool output `cid` fields still hex), the doc `cid` in `put`/`edit`/`retract`
-    and `doc_history`/`audit` outputs, and the `NodeRef::Attachment` `file:`
-    label (`tag_label`/`from_tag_label` still hex). `/docs/{id}` and
-    `GetParams.cid` are a `DocId` (opaque) — they stay hex (§1a), not a CID.
+  - **Done:** the doc `cid` of `POST /docs`, `PUT /docs/{id}` and
+    `DELETE /docs/{id}` (`rest::DocWire` / `rest::CidReceipt`); audit and
+    history records (`wire::AuditRecordWire`); grant, revocation, admin-key
+    admission/retirement, token and share-proposal CIDs (in bodies and
+    paths); the SSE event data; the MCP tool cid inputs and outputs.
+  - **Remaining:** the `NodeRef::Attachment` `file:` label
+    (`tag_label`/`from_tag_label` still hex — a re-index migration, see
+    [wire-dtos.md](wire-dtos.md)). `/docs/{id}` and `GetParams.cid` are a
+    `DocId` (opaque) — they stay hex (§1a), not a CID; `DELETE /docs/{id}`
+    also takes a block CID there.
+  - `wire::cid_string` / `cid_str` emit the CID string and fall back to hex
+    for bytes that are not exactly one CID; every CID input accepts both.
 
 ### 1c. Tags
 
@@ -65,23 +74,24 @@ proposal CIDs, rotation IDs. These are stored as `Vec<u8>` (the CID bytes).
 ### Consistency rules
 
 - A "create" or "get" of a *node* returns its `"type:hex"` label in a field
-  named `node_id`. (e.g. `graph_add`, `vfs_*`.)
-- A "create"/"get" of a *non-node resource* returns its bare-hex id in a field
-  named after the resource: `cid`, `bucket_id`, `edge_id`, `doc_id`.
-- **FIX**: `POST /files` currently returns the manifest under `cid` as a
-  `file:<hex>` label while `GET /files/{cid}` expects bare hex — clients must
-  strip the prefix. New code: return the bare-hex manifest CID as `cid` and the
-  label as `node_id`.
-- **FIX**: `file_info` parses the manifest block as JSON, but manifests are
-  dag-cbor. Manifest endpoints must return a decoded wire DTO, not the raw
-  block bytes.
+  named `node_id` (`rest::NodeCreated`: `POST /entities`, `/skills`,
+  `/vfs/mkdir`; `rest::DocWire` for `POST /docs`; `EntityWire.node_id`).
+- A "create"/"get" of a *non-node resource* returns its id in a field named
+  after the resource: `cid`, `bucket_id`, `edge_id`, `grant_cid`, … (bare
+  hex for opaque ids, a CID string for CIDs).
+- `POST /files` returns the manifest CID string as `cid` and the
+  `file:<hex>` label as `node_id` (`rest::FileUploaded`); the multipart body
+  takes an optional `meta` part (JSON `rest::UploadMeta`: tags, visibility).
+- Manifest endpoints (`GET /files/{cid}/manifest`, the file branch of
+  `GET /nodes/{id}`, MCP `memvault_file_info`) return the decoded
+  `types::FileManifestInfo`, never the raw dag-cbor block.
 
 ## 2. Response envelopes
 
-- **List**: a bare JSON array `[ <item>, … ]`. (Not `{items: […]}`.)
-  - **FIX**: `GET /nodes` returns `{count, nodes: […]}` and
-    `GET /views/{name}/members` returns `{view, count, members: […]}`. Prefer a
-    bare array; if a count is genuinely needed, document the wrapper here first.
+- **List**: a bare JSON array `[ <item>, … ]`. (Not `{items: […]}`.) This
+  holds for `GET /nodes`, `/views/{name}/members`, `/tags/{node}`, `/vfs`,
+  `/vfs/find`, `/buckets/merges`, `/pins`, `/share/inbox|outbox`. A count is
+  its own endpoint (`GET /nodes/count` → `ScopeCount`).
 - **Get one**: the item object, or `404` if absent.
 - **Create**: `201` with the created resource's wire shape (or at minimum its
   id field per §1).
@@ -94,9 +104,15 @@ proposal CIDs, rotation IDs. These are stored as `Vec<u8>` (the CID bytes).
 
 - The VFS and most graph/doc operations are **per-bucket**. Endpoints accept an
   optional `bucket` query/body parameter (bare hex). When omitted, the server
-  resolves the caller's agent bucket (auth claims), or — for list/search —
-  fans out across accessible buckets.
+  resolves the caller's agent bucket (auth claims); admins, who have none,
+  list and search across buckets.
 - A bucket parameter is always bare hex (§1), never a label.
+- The scoped reads (`GET /nodes`, `/nodes/count`, `/search`, `/docs/{id}`,
+  `/entities/{id}`, `/labels/{id}`) take a `QueryScope` as query parameters
+  (`rest::ScopeParams`: `bucket` — comma-separated hex —, `view`, `kind`
+  `doc|file|entity`, `entity_kind`, `retraction` `active|include|only`,
+  `detail` `summary|full`, `exclude_reserved`). See
+  [query-scope.md](query-scope.md).
 
 ## 4. Auth
 

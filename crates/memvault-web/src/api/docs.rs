@@ -1,72 +1,27 @@
 //! Document CRUD endpoints.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use memvault_core::DocId;
+use axum::http::StatusCode;
+use memvault_api::rest::{
+    CidReceipt, CreateDocRequest, DocWire, ListDocsParams, ReasonParams, ScopeParams,
+};
+use memvault_api::wire::AuditRecordWire;
+use memvault_core::{DocId, NodeRef};
 use memvault_doc::TextPatch;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::AppState;
 use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
 
-#[derive(Deserialize)]
-pub struct ListDocsQuery {
-    pub tag_ns: Option<String>,
-    pub tag_val: Option<String>,
-    pub limit: Option<usize>,
-    pub bucket: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct CreateDocRequest {
-    pub body: String,
-    pub frontmatter: Option<BTreeMap<String, serde_json::Value>>,
-    #[serde(default)]
-    pub tags: Vec<(String, String)>,
-    pub visibility: Option<String>,
-    /// Optional VFS path to place the new document at.
-    #[serde(default)]
-    pub vfs_path: Option<String>,
-    /// Optional bucket ID (hex) to scope this document to.
-    #[serde(default)]
-    pub bucket: Option<String>,
-    /// Optional document id (hex, 32 bytes) chosen by the client, so the id
-    /// it returns to its callers is the stored one. Refused if taken.
-    #[serde(default)]
-    pub id: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct DocResponse {
-    pub id: String,
-    pub cid: String,
-    pub body: String,
-    pub frontmatter: BTreeMap<String, serde_json::Value>,
-    pub tags: Vec<(String, String)>,
-    pub updated_ns: u64,
-}
-
-#[derive(Deserialize)]
-pub struct UpdateDocRequest {
-    pub ops: Vec<TextOpRequest>,
-}
-
-#[derive(Deserialize)]
-pub struct TextOpRequest {
-    pub retain: Option<usize>,
-    pub insert: Option<String>,
-    pub delete: Option<usize>,
-}
-
 /// GET /api/v1/docs
 pub async fn list_docs(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<ListDocsQuery>,
+    Query(params): Query<ListDocsParams>,
 ) -> Result<Json<Vec<memvault_api::DocSummary>>, ApiError> {
     let tag_filter = match (params.tag_ns, params.tag_val) {
         (Some(ns), Some(val)) => Some((ns, val)),
@@ -74,7 +29,10 @@ pub async fn list_docs(
     };
     let limit = params.limit.unwrap_or(100);
 
-    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    // Retracted documents only for callers who may see them; for those, on
+    // request (by default, included).
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims)
+        && params.include_retracted.unwrap_or(true);
     // No bucket named: the caller's agent bucket, like writes
     // (standards/bucket-scoping.md) — never every bucket. Admins keep the
     // cross-bucket listing (an aggregation).
@@ -90,12 +48,12 @@ pub async fn list_docs(
     Ok(Json(docs))
 }
 
-/// POST /api/v1/docs
+/// POST /api/v1/docs — 201 with the stored document (`node_id`, `cid`).
 pub async fn create_doc(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateDocRequest>,
-) -> Result<(axum::http::StatusCode, Json<DocResponse>), ApiError> {
+) -> Result<(StatusCode, Json<DocWire>), ApiError> {
     let vis = parse_visibility_str(req.visibility.as_deref());
 
     // No bucket named: the caller's agent bucket — what memctl's local
@@ -130,93 +88,128 @@ pub async fn create_doc(
     .await?;
     tracing::info!(doc_id = %result.node_id, "API: doc created");
 
-    let resp = DocResponse {
-        id: result.node_id,
-        cid: hex::encode(&result.cid),
-        body: req.body,
-        frontmatter: result.frontmatter,
-        tags: req.tags,
-        updated_ns: 0,
-    };
-
-    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+    Ok((
+        StatusCode::CREATED,
+        Json(DocWire {
+            node_id: result.node_id,
+            cid: Some(result.cid),
+            body: req.body,
+            frontmatter: result.frontmatter,
+            tags: req.tags,
+        }),
+    ))
 }
 
-/// GET /api/v1/docs/:id
+/// GET /api/v1/docs/:id — the document, in the scope asked for
+/// ([`ScopeParams`]; retracted only for callers who may see it).
 pub async fn get_doc(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<DocResponse>, ApiError> {
+    Query(scope): Query<ScopeParams>,
+) -> Result<Json<DocWire>, ApiError> {
     let doc_id = parse_doc_id(&id)?;
     crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Read)?;
-
-    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    let scope = crate::api::auth::scope_from_params(&state, &auth.claims, &scope, false).await?;
     let doc = state
         .client
-        .get_doc_scoped(
-            &doc_id,
-            &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
-        )
+        .get_doc_scoped(&doc_id, &scope)
         .await?
         .ok_or_else(|| ApiError::not_found("Document not found"))?;
-
-    let resp = DocResponse {
-        id: format!("doc:{}", hex::encode(doc.id.0)),
-        cid: String::new(),
+    let node_id = NodeRef::Doc(doc.id.clone()).tag_label();
+    let tags = state.client.get_tags(&node_id).await?;
+    Ok(Json(DocWire {
+        node_id,
+        cid: None,
         body: doc.body,
         frontmatter: doc.frontmatter,
-        tags: vec![],
-        updated_ns: 0,
-    };
-
-    Ok(Json(resp))
+        tags,
+    }))
 }
 
-/// PUT /api/v1/docs/:id
+/// The body of `PUT /docs/{id}`: a [`TextPatch`] (`{"ops": [{"Retain": 5},
+/// {"Insert": "x"}, …]}`), or the older `{"ops": [{"retain": 5}, …]}` form.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum UpdateDocRequest {
+    Patch(TextPatch),
+    Legacy { ops: Vec<LegacyTextOp> },
+}
+
+#[derive(Deserialize)]
+pub struct LegacyTextOp {
+    pub retain: Option<usize>,
+    pub insert: Option<String>,
+    pub delete: Option<usize>,
+}
+
+impl UpdateDocRequest {
+    fn into_patch(self) -> Result<TextPatch, ApiError> {
+        use memvault_doc::TextOp;
+        match self {
+            Self::Patch(p) => Ok(p),
+            Self::Legacy { ops } => ops
+                .into_iter()
+                .map(|op| match (op.retain, op.insert, op.delete) {
+                    (Some(n), None, None) => Ok(TextOp::Retain(n)),
+                    (None, Some(s), None) => Ok(TextOp::Insert(s)),
+                    (None, None, Some(n)) => Ok(TextOp::Delete(n)),
+                    _ => Err(ApiError::bad_request(
+                        "each op needs exactly one of retain, insert, delete",
+                    )),
+                })
+                .collect::<Result<_, _>>()
+                .map(|ops| TextPatch { ops }),
+        }
+    }
+}
+
+/// PUT /api/v1/docs/:id — apply a patch; the new envelope's CID.
 pub async fn update_doc(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateDocRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<CidReceipt>, ApiError> {
     let doc_id = parse_doc_id(&id)?;
     crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
-
-    let ops: Vec<memvault_doc::TextOp> = req
-        .ops
-        .into_iter()
-        .map(|op| {
-            if let Some(n) = op.retain {
-                memvault_doc::TextOp::Retain(n)
-            } else if let Some(s) = op.insert {
-                memvault_doc::TextOp::Insert(s)
-            } else if let Some(n) = op.delete {
-                memvault_doc::TextOp::Delete(n)
-            } else {
-                memvault_doc::TextOp::Retain(0)
-            }
-        })
-        .collect();
-
-    let patch = TextPatch { ops };
-    let cid = state.client.edit_doc(&doc_id, patch).await?;
-
-    Ok(Json(serde_json::json!({ "cid": hex::encode(&cid) })))
+    let cid = state.client.edit_doc(&doc_id, req.into_patch()?).await?;
+    Ok(Json(CidReceipt { cid }))
 }
 
-/// DELETE /api/v1/docs/:id
+/// DELETE /api/v1/docs/:id?reason= — retract a document (by its id, hex) or
+/// a block (by its CID); the retraction record's CID.
 pub async fn delete_doc(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let doc_id = parse_doc_id(&id)?;
-    crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
-    let cid_bytes = doc_id.0.to_vec();
-    let cid = state.client.retract(&cid_bytes, "deleted via API").await?;
-    tracing::info!(id = %id, "API: doc deleted");
-    Ok(Json(serde_json::json!({ "cid": hex::encode(&cid) })))
+    Query(params): Query<ReasonParams>,
+) -> Result<Json<CidReceipt>, ApiError> {
+    let target = match parse_doc_id(&id) {
+        Ok(doc_id) => {
+            crate::api::auth::enforce_doc_action(
+                &auth.claims,
+                &doc_id,
+                memvault_auth::Action::Write,
+            )?;
+            doc_id.0.to_vec()
+        }
+        Err(_) => {
+            let cid = memvault_core::cid_bytes_lenient(&id)
+                .map_err(|_| ApiError::bad_request("expected a document id or a CID"))?;
+            // `doc:<hex>` resolves an envelope CID to its bucket too.
+            crate::api::auth::enforce_node_action(
+                &auth.claims,
+                &format!("doc:{}", hex::encode(&cid)),
+                memvault_auth::Action::Write,
+            )?;
+            cid
+        }
+    };
+    let reason = params.reason.as_deref().unwrap_or("deleted via API");
+    let cid = state.client.retract(&target, reason).await?;
+    tracing::info!(id = %id, "API: doc retracted");
+    Ok(Json(CidReceipt { cid }))
 }
 
 /// GET /api/v1/docs/:id/history
@@ -224,32 +217,20 @@ pub async fn doc_history(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+) -> Result<Json<Vec<AuditRecordWire>>, ApiError> {
     let doc_id = parse_doc_id(&id)?;
     crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Read)?;
     let records = state.client.history_of(&doc_id).await?;
-
-    let results: Vec<serde_json::Value> = records
-        .into_iter()
-        .map(|r| {
-            // cid + agent_attestation are CIDs → canonical CID string (standards/).
-            let mut row = serde_json::json!({
-                "cid": memvault_core::cid_string_from_bytes(&r.cid)
-                    .unwrap_or_else(|_| hex::encode(&r.cid)),
-                "op_kind": r.op_kind,
-                "wall_ns": r.wall_ns,
-                "author": hex::encode(&r.author),
-            });
-            if let Some(cid) = r.agent_attestation.as_ref() {
-                row["agent_attestation"] = serde_json::Value::String(
-                    memvault_core::cid_string_from_bytes(cid).unwrap_or_else(|_| hex::encode(cid)),
-                );
-            }
-            row
-        })
-        .collect();
-
-    Ok(Json(results))
+    Ok(Json(
+        records
+            .iter()
+            .map(|r| {
+                let mut w = AuditRecordWire::from(r);
+                w.doc_id.get_or_insert_with(|| doc_id.clone());
+                w
+            })
+            .collect(),
+    ))
 }
 
 /// Parse a document ID from either "doc:<hex>" or raw "<hex>" format.

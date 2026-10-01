@@ -3,32 +3,15 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
+use memvault_api::rest::{
+    AdminKeyAdmitted, AdminKeyRetired, IssueTokenRequest, ReasonParams, TokenIssued,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::api::auth::RequireAdmin;
 use crate::error::ApiError;
-
-#[derive(Deserialize)]
-pub struct IssueTokenRequest {
-    /// Agent role for an agent-enrolment token (agenthost/auditor/service/admin).
-    /// Exactly one of `agent_role` or `node_role` must be set.
-    #[serde(default)]
-    pub agent_role: Option<String>,
-    /// Node role for a node-join token (node/admin). `admin` also permits
-    /// admin-key admission at join.
-    #[serde(default)]
-    pub node_role: Option<String>,
-    pub ttl_secs: u64,
-    pub max_uses: u32,
-    pub label: Option<String>,
-    /// Optional dialable multiaddr(s) of the issuing node to embed in the
-    /// token, so a joiner can connect directly instead of waiting to
-    /// discover the issuer's peer id. Each must be a valid multiaddr.
-    #[serde(default)]
-    pub issuer_addrs: Vec<String>,
-}
 
 /// GET /api/v1/admin/status
 pub async fn status(
@@ -51,12 +34,14 @@ pub async fn peers(
     })))
 }
 
-/// POST /api/v1/admin/tokens
+/// POST /api/v1/admin/tokens — 201 with the token. Exactly one of
+/// `agent_role` (agenthost/auditor/service/admin) or `node_role`
+/// (node/admin) is set.
 pub async fn issue_token(
     _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Json(req): Json<IssueTokenRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<(axum::http::StatusCode, Json<TokenIssued>), ApiError> {
     let role = parse_token_role(req.agent_role.as_deref(), req.node_role.as_deref())?;
     // Sanity-check the addrs (multiaddrs always start with '/'); the joiner
     // does the authoritative parse and skips anything unparseable.
@@ -77,10 +62,7 @@ pub async fn issue_token(
             req.issuer_addrs,
         )
         .await?;
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "token": token })),
-    ))
+    Ok((axum::http::StatusCode::CREATED, Json(TokenIssued { token })))
 }
 
 /// GET /api/v1/admin/tokens
@@ -93,14 +75,18 @@ pub async fn list_tokens(
     Ok(Json(tokens))
 }
 
-/// DELETE /api/v1/admin/tokens/:cid
+/// DELETE /api/v1/admin/tokens/:cid?reason= — the token's CID string (or
+/// legacy hex).
 pub async fn revoke_token(
     _auth: RequireAdmin,
     State(state): State<Arc<AppState>>,
-    Path(cid_hex): Path<String>,
+    Path(cid): Path<String>,
+    Query(params): Query<ReasonParams>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let cid = hex::decode(&cid_hex).map_err(|_| ApiError::bad_request("Invalid CID hex"))?;
-    state.client.revoke_token(&cid, "revoked via API").await?;
+    let cid =
+        memvault_core::cid_bytes_lenient(&cid).map_err(|_| ApiError::bad_request("Invalid CID"))?;
+    let reason = params.reason.as_deref().unwrap_or("revoked via API");
+    state.client.revoke_token(&cid, reason).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -191,7 +177,7 @@ pub async fn admit_admin_key(
     _auth: RequireAdmin,
     State(_state): State<Arc<AppState>>,
     Json(req): Json<AdmitAdminRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<(axum::http::StatusCode, Json<AdminKeyAdmitted>), ApiError> {
     let client = crate::ui::state::local_client()
         .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
     let new_pk = parse_hex32(&req.new_pubkey, "new_pubkey")?;
@@ -206,7 +192,7 @@ pub async fn admit_admin_key(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "admission_cid": hex::encode(cid) })),
+        Json(AdminKeyAdmitted { admission_cid: cid }),
     ))
 }
 
@@ -215,7 +201,7 @@ pub async fn retire_admin_key(
     _auth: RequireAdmin,
     State(_state): State<Arc<AppState>>,
     Json(req): Json<RetireAdminRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<AdminKeyRetired>, ApiError> {
     let client = crate::ui::state::local_client()
         .map_err(|e| ApiError::internal(format!("local client unavailable: {e}")))?;
     let pk = parse_hex32(&req.pubkey, "pubkey")?;
@@ -224,9 +210,9 @@ pub async fn retire_admin_key(
         .retire_admin_key(pk, reason)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    Ok(Json(
-        serde_json::json!({ "retirement_cid": hex::encode(cid) }),
-    ))
+    Ok(Json(AdminKeyRetired {
+        retirement_cid: cid,
+    }))
 }
 
 /// GET /api/v1/admin/keys — list admin keys and validity windows.

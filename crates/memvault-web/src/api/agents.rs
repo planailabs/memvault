@@ -11,16 +11,11 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use memvault_api::rest::AgentLabelRequest;
 
 use crate::AppState;
 use crate::api::auth::RequireAuth;
-
-#[derive(Debug, Deserialize)]
-pub struct RenameAgentRequest {
-    /// New display label. Display-only — does not affect access control.
-    pub label: String,
-}
+use crate::error::ApiError;
 
 /// `PATCH /agents/{pubkey}` — set an agent's display label.
 ///
@@ -31,19 +26,22 @@ pub async fn rename_agent(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(pubkey_hex): Path<String>,
-    Json(req): Json<RenameAgentRequest>,
-) -> Result<StatusCode, StatusCode> {
+    Json(req): Json<AgentLabelRequest>,
+) -> Result<StatusCode, ApiError> {
     let target: [u8; 32] = hex::decode(&pubkey_hex)
         .ok()
         .and_then(|b| b.try_into().ok())
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .ok_or_else(|| ApiError::bad_request("expected a 32-byte hex agent pubkey"))?;
 
     // Authorisation: the agent renaming itself, or a cluster Admin.
     let is_self = auth.claims.sub.eq_ignore_ascii_case(&pubkey_hex);
     let is_admin = crate::api::auth::caller_role(&state, &auth.claims)
         == Some(memvault_auth::AgentRole::Admin);
     if !is_self && !is_admin {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "only the agent itself or an admin may relabel it".into(),
+        });
     }
 
     state
@@ -54,8 +52,8 @@ pub async fn rename_agent(
             // The caller is authorised, but this node isn't the agent's
             // attesting node, so the relabel can't take effect here.
             // 409: right request, wrong node.
-            memvault_api::ApiError::Forbidden(_) => StatusCode::CONFLICT,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+            memvault_api::ApiError::Forbidden(m) => ApiError::conflict(m),
+            other => ApiError::from(other),
         })?;
     Ok(StatusCode::NO_CONTENT)
 }

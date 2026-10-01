@@ -744,7 +744,7 @@ async fn test_create_and_list_docs() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(doc["body"], "Hello, world!");
-    assert!(!doc["id"].as_str().unwrap().is_empty());
+    assert!(!doc["node_id"].as_str().unwrap().is_empty());
 
     // List docs
     let resp = app
@@ -794,9 +794,9 @@ async fn test_skill_publish_and_list_routes() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        v["id"].as_str().unwrap().starts_with("entity:"),
+        v["node_id"].as_str().unwrap().starts_with("entity:"),
         "publish returns an entity id, got {:?}",
-        v["id"]
+        v["node_id"]
     );
 
     // List skills: route exists and is authorized (200 with a JSON array).
@@ -900,7 +900,7 @@ async fn test_get_doc() {
         .unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let doc_id = created["id"].as_str().unwrap();
+    let doc_id = created["node_id"].as_str().unwrap();
 
     // Get doc by ID
     let resp = app

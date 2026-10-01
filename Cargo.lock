@@ -5970,6 +5970,7 @@ dependencies = [
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
+ "serde_urlencoded",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

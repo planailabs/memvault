@@ -136,12 +136,22 @@ async fn view_filter_tags_are_not_indexed_and_views_sync() {
 #[tokio::test]
 async fn legacy_view_blocks_still_load() {
     let node = TestNode::new();
-    let legacy = View {
+    // A view as older builds wrote it: the bare struct, its bucket id in the
+    // byte-newtype form (a sequence of 32 numbers, before `View.bucket_id`
+    // went hex).
+    #[derive(serde::Serialize)]
+    struct OldView {
+        name: String,
+        tags: Vec<(String, String)>,
+        created_ns: u64,
+        bucket_id: Option<memvault_core::BucketId>,
+    }
+    let bucket = memvault_core::BucketId([0x5a; 32]);
+    let legacy = OldView {
         name: "old-view".into(),
         tags: vec![("project".into(), "x".into())],
         created_ns: 12345,
-        cid: String::new(),
-        bucket_id: None,
+        bucket_id: Some(bucket.clone()),
     };
     let bytes = serde_ipld_dagcbor::to_vec(&legacy).unwrap();
     let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
@@ -152,7 +162,9 @@ async fn legacy_view_blocks_still_load() {
     let check = |views: Vec<View>| {
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].name, "old-view");
-        assert_eq!(views[0].cid, hex::encode(&cid));
+        assert_eq!(views[0].bucket_id, Some(bucket.clone()));
+        // The view's CID is a CID string (standards/api-wire-conventions.md).
+        assert_eq!(views[0].cid, memvault_api::wire::cid_string(&cid));
     };
     check(node.client.list_views().await.unwrap());
     assert!(

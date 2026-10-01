@@ -10,23 +10,17 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use memvault_api::rest::{
+    EdgeCreated, LinkResourceRequest, NodeCreated, PublishSkillRequest, ReasonParams, RenameRequest,
+};
 use memvault_core::{EntityId, NodeRef};
 use serde::Deserialize;
 
 use crate::AppState;
 use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
-use memvault_api::{SkillBundle, SkillInfo, SkillSpec};
-
-#[derive(Deserialize)]
-pub struct PublishSkillRequest {
-    #[serde(flatten)]
-    pub spec: SkillSpec,
-    #[serde(default)]
-    pub visibility: Option<String>,
-    #[serde(default)]
-    pub bucket: Option<String>,
-}
+use memvault_api::{SkillBundle, SkillInfo};
 
 #[derive(Deserialize)]
 pub struct ListSkillsQuery {
@@ -34,40 +28,17 @@ pub struct ListSkillsQuery {
     pub bucket: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct RenameSkillRequest {
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-pub struct DeleteSkillQuery {
-    pub reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct LinkResourceRequest {
-    /// Target node — "doc:<hex>", "file:<hex>", or "entity:<hex>".
-    pub node: String,
-    pub relation: String,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub executable: bool,
-    #[serde(default)]
-    pub visibility: Option<String>,
-}
-
 fn parse_skill_id(input: &str) -> Result<EntityId, ApiError> {
     EntityId::from_hex(input)
         .map_err(|_| ApiError::bad_request("Invalid skill ID — expected hex or entity:<hex>"))
 }
 
-/// POST /api/v1/skills — publish a new skill.
+/// POST /api/v1/skills — publish a new skill; 201 with its `node_id`.
 pub async fn publish_skill(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<PublishSkillRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<(StatusCode, Json<NodeCreated>), ApiError> {
     let vis = super::docs::parse_visibility_str(req.visibility.as_deref());
     // No bucket named: the caller's agent bucket, like `POST /docs`.
     let named = crate::api::auth::parse_bucket_param(req.bucket.as_deref())?;
@@ -76,10 +47,11 @@ pub async fn publish_skill(
         .client
         .skill_publish(req.spec, vis, Some(&bucket))
         .await?;
-    let node_id = format!("entity:{}", hex::encode(id.0));
     Ok((
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "id": node_id })),
+        StatusCode::CREATED,
+        Json(NodeCreated {
+            node_id: NodeRef::Entity(id).tag_label(),
+        }),
     ))
 }
 
@@ -128,12 +100,12 @@ pub async fn rename_skill(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(req): Json<RenameSkillRequest>,
-) -> Result<axum::http::StatusCode, ApiError> {
+    Json(req): Json<RenameRequest>,
+) -> Result<StatusCode, ApiError> {
     let skill_id = parse_skill_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &skill_id, memvault_auth::Action::Write)?;
     state.client.skill_rename(&skill_id, &req.name).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// DELETE /api/v1/skills/:id — retract a skill.
@@ -141,13 +113,13 @@ pub async fn delete_skill(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(params): Query<DeleteSkillQuery>,
-) -> Result<axum::http::StatusCode, ApiError> {
+    Query(params): Query<ReasonParams>,
+) -> Result<StatusCode, ApiError> {
     let skill_id = parse_skill_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &skill_id, memvault_auth::Action::Write)?;
     let reason = params.reason.as_deref().unwrap_or("deleted via API");
     state.client.skill_delete(&skill_id, reason).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /api/v1/skills/:id/resources — link a node to the skill.
@@ -156,7 +128,7 @@ pub async fn link_resource(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(req): Json<LinkResourceRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<(StatusCode, Json<EdgeCreated>), ApiError> {
     let skill_id = parse_skill_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &skill_id, memvault_auth::Action::Write)?;
     let target = NodeRef::from_tag_label(&req.node)
@@ -175,10 +147,7 @@ pub async fn link_resource(
             vis,
         )
         .await?;
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "edge_id": hex::encode(edge_id.0) })),
-    ))
+    Ok((StatusCode::CREATED, Json(EdgeCreated { edge_id })))
 }
 
 /// DELETE /api/v1/skills/:id/resources/:edge_id — unlink a node.
@@ -186,7 +155,7 @@ pub async fn unlink_resource(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path((id, edge_id)): Path<(String, String)>,
-) -> Result<axum::http::StatusCode, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let skill_id = parse_skill_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &skill_id, memvault_auth::Action::Write)?;
     let edge_bytes = hex::decode(&edge_id)
@@ -198,5 +167,5 @@ pub async fn unlink_resource(
         .client
         .skill_unlink_resource(&skill_id, &memvault_core::EdgeId(arr))
         .await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT)
 }

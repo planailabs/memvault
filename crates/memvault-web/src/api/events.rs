@@ -59,31 +59,91 @@ fn visible(
     }
 }
 
+/// The data of an SSE event (its name is the event type): node references as
+/// `"type:hex"` labels, the bucket id hex, CIDs CID strings
+/// (standards/api-wire-conventions.md §1).
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum EventData {
+    /// `doc_created`, `doc_updated`.
+    Doc {
+        node_id: String,
+        #[serde(with = "memvault_api::wire::cid_str")]
+        cid: Vec<u8>,
+    },
+    /// `file_attached`.
+    FileAttached { node_id: String, name: String },
+    /// `entity_created`.
+    Entity { node_id: String },
+    /// `retracted`.
+    Retracted {
+        #[serde(with = "memvault_api::wire::cid_str")]
+        cid: Vec<u8>,
+    },
+    /// `token_consumed`.
+    TokenConsumed {
+        #[serde(with = "memvault_api::wire::cid_str")]
+        token_cid: Vec<u8>,
+    },
+    /// `bucket_created`.
+    BucketCreated {
+        #[serde(with = "memvault_api::wire::hex_id")]
+        bucket_id: memvault_core::BucketId,
+        #[serde(with = "memvault_api::wire::cid_str")]
+        cid: Vec<u8>,
+    },
+    /// `sigchain_block`.
+    SigchainBlock {
+        label: String,
+        #[serde(with = "memvault_api::wire::cid_str")]
+        cid: Vec<u8>,
+    },
+}
+
 fn event_to_sse(event: MemvaultEvent) -> Event {
-    match event {
-        MemvaultEvent::DocCreated { doc_id, cid } => Event::default()
-            .event("doc_created")
-            .data(serde_json::json!({"node_id": format!("doc:{}", hex::encode(doc_id.0)), "cid": hex::encode(&cid)}).to_string()),
-        MemvaultEvent::DocUpdated { doc_id, cid } => Event::default()
-            .event("doc_updated")
-            .data(serde_json::json!({"node_id": format!("doc:{}", hex::encode(doc_id.0)), "cid": hex::encode(&cid)}).to_string()),
-        MemvaultEvent::FileAttached { doc_id, name } => Event::default()
-            .event("file_attached")
-            .data(serde_json::json!({"node_id": format!("doc:{}", hex::encode(doc_id.0)), "name": name}).to_string()),
-        MemvaultEvent::EntityCreated { entity_id } => Event::default()
-            .event("entity_created")
-            .data(serde_json::json!({"node_id": format!("entity:{}", hex::encode(entity_id.0))}).to_string()),
-        MemvaultEvent::Retracted { cid } => Event::default()
-            .event("retracted")
-            .data(serde_json::json!({"cid": hex::encode(&cid)}).to_string()),
-        MemvaultEvent::TokenConsumed { token_cid } => Event::default()
-            .event("token_consumed")
-            .data(serde_json::json!({"token_cid": hex::encode(&token_cid)}).to_string()),
-        MemvaultEvent::BucketCreated { bucket_id, cid } => Event::default()
-            .event("bucket_created")
-            .data(serde_json::json!({"bucket_id": bucket_id.to_string(), "cid": hex::encode(&cid)}).to_string()),
-        MemvaultEvent::SigchainBlock { label, cid } => Event::default()
-            .event("sigchain_block")
-            .data(serde_json::json!({"label": label, "cid": hex::encode(&cid)}).to_string()),
-    }
+    use memvault_core::NodeRef;
+    let (name, data) = match event {
+        MemvaultEvent::DocCreated { doc_id, cid } => (
+            "doc_created",
+            EventData::Doc {
+                node_id: NodeRef::Doc(doc_id).tag_label(),
+                cid,
+            },
+        ),
+        MemvaultEvent::DocUpdated { doc_id, cid } => (
+            "doc_updated",
+            EventData::Doc {
+                node_id: NodeRef::Doc(doc_id).tag_label(),
+                cid,
+            },
+        ),
+        MemvaultEvent::FileAttached { doc_id, name } => (
+            "file_attached",
+            EventData::FileAttached {
+                node_id: NodeRef::Doc(doc_id).tag_label(),
+                name,
+            },
+        ),
+        MemvaultEvent::EntityCreated { entity_id } => (
+            "entity_created",
+            EventData::Entity {
+                node_id: NodeRef::Entity(entity_id).tag_label(),
+            },
+        ),
+        MemvaultEvent::Retracted { cid } => ("retracted", EventData::Retracted { cid }),
+        MemvaultEvent::TokenConsumed { token_cid } => {
+            ("token_consumed", EventData::TokenConsumed { token_cid })
+        }
+        MemvaultEvent::BucketCreated { bucket_id, cid } => (
+            "bucket_created",
+            EventData::BucketCreated { bucket_id, cid },
+        ),
+        MemvaultEvent::SigchainBlock { label, cid } => {
+            ("sigchain_block", EventData::SigchainBlock { label, cid })
+        }
+    };
+    Event::default()
+        .event(name)
+        .json_data(data)
+        .unwrap_or_else(|_| Event::default().event(name))
 }

@@ -8,9 +8,13 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use memvault_api::vfs as vfs_ops;
+use axum::http::StatusCode;
+use memvault_api::rest::{
+    EdgeCreated, NodeCreated, VfsLinkRequest, VfsMkdirRequest, VfsMvRequest, VfsResolved, VfsTree,
+};
+use memvault_api::vfs::{self as vfs_ops, VfsEntry};
 use memvault_core::{BucketId, NodeRef};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::AppState;
 use crate::api::auth::{RequireAuth, RequireWrite};
@@ -28,26 +32,6 @@ pub struct VfsQuery {
 #[derive(Deserialize)]
 pub struct VfsResolveQuery {
     pub path: String,
-    pub bucket: String,
-}
-
-#[derive(Deserialize)]
-pub struct VfsMkdirRequest {
-    pub path: String,
-    pub bucket: String,
-}
-
-#[derive(Deserialize)]
-pub struct VfsLinkRequest {
-    pub path: String,
-    pub target: String,
-    pub bucket: String,
-}
-
-#[derive(Deserialize)]
-pub struct VfsMvRequest {
-    pub from: String,
-    pub to: String,
     pub bucket: String,
 }
 
@@ -70,14 +54,6 @@ pub struct VfsFindQuery {
     pub bucket: String,
 }
 
-#[derive(Serialize)]
-pub struct VfsEntry {
-    pub name: String,
-    pub node_id: String,
-    pub node_type: String,
-    pub edge_id: String,
-}
-
 fn parse_bucket(hex: &str) -> Result<BucketId, ApiError> {
     BucketId::from_hex(hex).map_err(|_| ApiError::bad_request("invalid bucket hex"))
 }
@@ -89,25 +65,13 @@ pub async fn vfs_ls(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<Vec<VfsEntry>>, ApiError> {
     let bucket = parse_bucket(&params.bucket)?;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
     let recursive = params.recursive.unwrap_or(false);
     // A missing path is a 404 (NotFound), not a server error.
     let entries = vfs_ops::ls(state.client.as_ref(), &bucket, &params.path, recursive).await?;
-    let out: Vec<VfsEntry> = entries
-        .into_iter()
-        .map(|e| VfsEntry {
-            name: e.name,
-            node_id: e.node_id,
-            node_type: e.node_type,
-            edge_id: e.edge_id,
-        })
-        .collect();
-    Ok(Json(serde_json::json!({
-        "path": params.path,
-        "entries": out,
-    })))
+    Ok(Json(entries))
 }
 
 /// GET /api/v1/vfs/resolve?bucket=<hex>&path=/foo/bar
@@ -115,7 +79,7 @@ pub async fn vfs_resolve(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsResolveQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<VfsResolved>, ApiError> {
     let bucket = parse_bucket(&params.bucket)?;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
     match vfs_ops::resolve_path(state.client.as_ref(), &bucket, &params.path)
@@ -123,46 +87,46 @@ pub async fn vfs_resolve(
         .map_err(|e| ApiError::internal(e.to_string()))?
     {
         Some((node, edge_id)) => {
-            let nt = vfs_ops::resolve_node_type(state.client.as_ref(), &node).await;
-            Ok(Json(serde_json::json!({
-                "path": params.path,
-                "node_id": node.tag_label(),
-                "node_type": nt,
-                "edge_id": edge_id.map(|e| hex::encode(e.0)),
-            })))
+            let node_type = vfs_ops::resolve_node_type(state.client.as_ref(), &node).await;
+            Ok(Json(VfsResolved {
+                path: params.path,
+                node_id: node.tag_label(),
+                node_type,
+                edge_id,
+            }))
         }
         None => Err(ApiError::not_found("path not found")),
     }
 }
 
-/// POST /api/v1/vfs/mkdir  body: { path, bucket }
+/// POST /api/v1/vfs/mkdir  body: { path, bucket } — 201 with the leaf
+/// directory's `node_id`.
 pub async fn vfs_mkdir(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsMkdirRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
-    let bucket = parse_bucket(&req.bucket)?;
+) -> Result<(StatusCode, Json<NodeCreated>), ApiError> {
+    let bucket = req.bucket;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Write)?;
     let id = vfs_ops::mkdir(state.client.as_ref(), &bucket, &req.path)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok((
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({
-            "path": req.path,
-            "entity_id": format!("entity:{}", hex::encode(id.0)),
-            "status": "created",
-        })),
+        StatusCode::CREATED,
+        Json(NodeCreated {
+            node_id: NodeRef::Entity(id).tag_label(),
+        }),
     ))
 }
 
-/// POST /api/v1/vfs/link  body: { path, target, bucket }
+/// POST /api/v1/vfs/link  body: { path, target, bucket } — 201 with the
+/// `edge_id`.
 pub async fn vfs_link(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsLinkRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
-    let bucket = parse_bucket(&req.bucket)?;
+) -> Result<(StatusCode, Json<EdgeCreated>), ApiError> {
+    let bucket = req.bucket;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Write)?;
     let target = NodeRef::from_tag_label(&req.target).ok_or_else(|| {
         ApiError::bad_request("invalid target — expected entity:<hex>, doc:<hex>, or file:<hex>")
@@ -173,15 +137,7 @@ pub async fn vfs_link(
     let edge_id = vfs_ops::link_at_path(state.client.as_ref(), &bucket, &req.path, &target)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({
-            "path": req.path,
-            "target": req.target,
-            "edge_id": hex::encode(edge_id.0),
-            "status": "linked",
-        })),
-    ))
+    Ok((StatusCode::CREATED, Json(EdgeCreated { edge_id })))
 }
 
 /// DELETE /api/v1/vfs?bucket=<hex>&path=/projects/old.md
@@ -189,13 +145,13 @@ pub async fn vfs_unlink(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsUnlinkQuery>,
-) -> Result<axum::http::StatusCode, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let bucket = parse_bucket(&params.bucket)?;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Write)?;
     vfs_ops::unlink_path(state.client.as_ref(), &bucket, &params.path)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /api/v1/vfs/tree?bucket=<hex>&path=/&max_depth=10
@@ -203,14 +159,15 @@ pub async fn vfs_tree(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsTreeQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<VfsTree>, ApiError> {
     let bucket = parse_bucket(&params.bucket)?;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
     let max_depth = params.max_depth.unwrap_or(10);
     let tree = vfs_ops::tree(state.client.as_ref(), &bucket, &params.path, max_depth).await?;
-    Ok(Json(
-        serde_json::json!({ "path": params.path, "tree": tree }),
-    ))
+    Ok(Json(VfsTree {
+        path: params.path,
+        tree,
+    }))
 }
 
 /// GET /api/v1/vfs/find?bucket=<hex>&target=entity:<hex>
@@ -218,7 +175,7 @@ pub async fn vfs_find(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<VfsFindQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<Vec<String>>, ApiError> {
     let bucket = parse_bucket(&params.bucket)?;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Read)?;
     let target = NodeRef::from_tag_label(&params.target)
@@ -226,25 +183,19 @@ pub async fn vfs_find(
     let paths = vfs_ops::find_paths(state.client.as_ref(), &bucket, &target)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(Json(
-        serde_json::json!({ "target": params.target, "paths": paths }),
-    ))
+    Ok(Json(paths))
 }
 
-/// POST /api/v1/vfs/mv  body: { from, to, bucket }
+/// POST /api/v1/vfs/mv  body: { from, to, bucket } — 204.
 pub async fn vfs_mv(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<VfsMvRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let bucket = parse_bucket(&req.bucket)?;
+) -> Result<StatusCode, ApiError> {
+    let bucket = req.bucket;
     crate::api::auth::enforce_bucket_action(&auth.claims, &bucket, memvault_auth::Action::Write)?;
     vfs_ops::mv_path(state.client.as_ref(), &bucket, &req.from, &req.to)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "from": req.from,
-        "to": req.to,
-        "status": "moved",
-    })))
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -1196,7 +1196,7 @@ async fn writes_without_a_bucket_land_in_the_agent_bucket() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 201);
-    let id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+    let id = resp.json::<serde_json::Value>().await.unwrap()["node_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1560,4 +1560,665 @@ async fn malformed_bucket_params_are_rejected() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400, "POST /files");
+}
+
+// ── Client parity: the methods the UI uses, over HTTP ────────────────
+
+/// GET a JSON body with the test agent's token.
+async fn get_json(path: &str) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = raw(reqwest::Method::GET, path).await.send().await.unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// No JSON array of numbers (a raw `[u8; N]`) anywhere in `v`.
+fn assert_no_byte_arrays(v: &serde_json::Value, what: &str) {
+    match v {
+        serde_json::Value::Array(a) => {
+            assert!(
+                a.len() < 16 || !a.iter().all(|x| x.is_u64()),
+                "{what}: a raw byte array on the wire: {v}"
+            );
+            a.iter().for_each(|x| assert_no_byte_arrays(x, what));
+        }
+        serde_json::Value::Object(o) => o.values().for_each(|x| assert_no_byte_arrays(x, what)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn edit_doc_over_http_applies_the_patch() {
+    let (client, own) = client_and_bucket().await;
+    let id = put(&client, "Editable", "hello world", &own).await;
+    let cid = client
+        .edit_doc(
+            &id,
+            memvault_doc::TextPatch {
+                ops: vec![
+                    memvault_doc::TextOp::Retain(5),
+                    memvault_doc::TextOp::Insert(",".into()),
+                    memvault_doc::TextOp::Retain(6),
+                ],
+            },
+        )
+        .await
+        .expect("edit_doc over HTTP");
+    assert!(!cid.is_empty(), "edit_doc returns the new envelope's cid");
+    let got = client.get_doc(&id).await.unwrap().expect("doc");
+    assert_eq!(got.body, "hello, world");
+    let history = client.history_of(&id).await.unwrap();
+    let kinds: Vec<_> = history.iter().map(|r| r.op_kind.clone()).collect();
+    assert!(
+        kinds.contains(&memvault_query::OpKind::DocEdit),
+        "{kinds:?}"
+    );
+    assert!(history.iter().all(|r| r.doc_id.as_ref() == Some(&id)));
+    assert!(
+        history.iter().any(|r| r.cid == cid),
+        "the edit's cid is listed"
+    );
+}
+
+#[tokio::test]
+async fn entity_history_over_http() {
+    let (client, own) = client_and_bucket().await;
+    let e = client
+        .add_entity(entity("historic"), Visibility::Internal, Some(&own))
+        .await
+        .unwrap();
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let want = local.entity_history(&e).await.unwrap();
+    assert!(!want.is_empty());
+    let got = client.entity_history(&e).await.unwrap();
+    assert_eq!(
+        got.iter()
+            .map(|r| (r.cid.clone(), r.op_kind.clone()))
+            .collect::<Vec<_>>(),
+        want.iter()
+            .map(|r| (r.cid.clone(), r.op_kind.clone()))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[tokio::test]
+async fn uploads_keep_their_tags() {
+    let (client, own) = client_and_bucket().await;
+    let cid = client
+        .upload_file(
+            b"tagged upload",
+            Some("tagged.txt"),
+            "text/plain",
+            vec![("topic".into(), "otters".into())],
+            "internal",
+            Some(&own),
+        )
+        .await
+        .unwrap();
+    let tags = client
+        .get_tags(&format!("file:{}", hex::encode(&cid)))
+        .await
+        .unwrap();
+    assert!(
+        tags.contains(&("topic".to_string(), "otters".to_string())),
+        "{tags:?}"
+    );
+}
+
+#[tokio::test]
+async fn retractions_return_their_record_and_keep_the_reason() {
+    let (client, own) = client_and_bucket().await;
+    let id = put(&client, "Retract me", "soon gone", &own).await;
+    let rec = client
+        .retract(&id.0, "a reason worth keeping")
+        .await
+        .expect("retract");
+    assert!(!rec.is_empty(), "retract returns the retraction's cid");
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let block = local.store().get_block(&rec).unwrap().expect("the record");
+    let v = memvault_store::deserialize_block(&block).expect("readable");
+    assert!(v.to_string().contains("a reason worth keeping"), "{v}");
+
+    let e = client
+        .add_entity(entity("short-lived"), Visibility::Internal, Some(&own))
+        .await
+        .unwrap();
+    let label = format!("entity:{}", hex::encode(e.0));
+    client
+        .retract_node(&label, "node reason kept")
+        .await
+        .expect("retract_node");
+    // The retraction is an annotation on the node.
+    let found = local
+        .store()
+        .query_by_tag("_ann", &label, 0, usize::MAX)
+        .unwrap()
+        .iter()
+        .filter_map(|c| local.store().get_block(c).ok().flatten())
+        .filter_map(|b| memvault_store::deserialize_block(&b))
+        .any(|v| v.to_string().contains("node reason kept"));
+    assert!(found, "the node retraction keeps its reason");
+}
+
+#[tokio::test]
+async fn tokens_issue_list_and_revoke_over_http() {
+    let (client, _own) = client_and_bucket().await;
+    let token = client
+        .issue_token_ex(
+            memvault_auth::TokenRole::Agent(AgentRole::Service),
+            600,
+            1,
+            Some("e2e-token".into()),
+            vec![],
+        )
+        .await
+        .expect("issue_token over HTTP");
+    assert!(!token.is_empty());
+    let listed = client.list_tokens().await.expect("list_tokens");
+    let t = listed
+        .iter()
+        .find(|t| t.label.as_deref() == Some("e2e-token"))
+        .expect("the issued token is listed");
+    client
+        .revoke_token(&t.cid, "e2e revoke")
+        .await
+        .expect("revoke_token over HTTP");
+    let after = client.list_tokens().await.unwrap();
+    assert!(
+        after.iter().any(|x| x.cid == t.cid && x.revoked),
+        "revoked: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn bucket_lifecycle_over_http() {
+    let (client, _own) = client_and_bucket().await;
+    let a = fresh_bucket(&client, "life-a").await;
+    let b = fresh_bucket(&client, "life-b").await;
+    client.bucket_rename(&a, "life-a-renamed").await.unwrap();
+    assert_eq!(
+        client.bucket_get(&a).await.unwrap().unwrap().name,
+        "life-a-renamed"
+    );
+    client.bucket_attach(&a).await.expect("attach");
+    client
+        .bucket_bind(&a, &ClusterId([0x11u8; 32]))
+        .await
+        .expect("bind over HTTP");
+    client.bucket_merge(&[b.clone()], &a).await.expect("merge");
+    assert!(
+        client
+            .bucket_merges()
+            .await
+            .unwrap()
+            .contains(&(b.clone(), a.clone()))
+    );
+    client.bucket_unmerge(&b, &a).await.expect("unmerge");
+    assert!(
+        !client
+            .bucket_merges()
+            .await
+            .unwrap()
+            .contains(&(b.clone(), a.clone()))
+    );
+    client
+        .bucket_archive(&b, "done with it")
+        .await
+        .expect("archive");
+}
+
+#[tokio::test]
+async fn skills_crud_over_http() {
+    let (client, own) = client_and_bucket().await;
+    let s = client
+        .skill_publish(
+            memvault_api::SkillSpec {
+                name: "crud-skill".into(),
+                description: Some("d".into()),
+                trigger: None,
+                instruction_body: Some("do the thing".into()),
+            },
+            Visibility::Internal,
+            Some(&own),
+        )
+        .await
+        .unwrap();
+    client.skill_rename(&s, "crud-skill-2").await.unwrap();
+    let doc = NodeRef::Doc(put(&client, "resource", "r", &own).await);
+    let edge = client
+        .skill_link_resource(
+            &s,
+            &doc,
+            memvault_core::SKILL_RESOURCE_REL,
+            Some("r.md"),
+            false,
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+    let bundle = client.skill_get(&s).await.unwrap().expect("bundle");
+    assert_eq!(bundle.info.name, "crud-skill-2");
+    assert!(bundle.resources.iter().any(|r| r.edge_id == edge));
+    assert_eq!(bundle.instructions.len(), 1);
+    client.skill_unlink_resource(&s, &edge).await.unwrap();
+    client.skill_delete(&s, "bye").await.unwrap();
+    assert!(
+        !client
+            .skill_list(usize::MAX, Some(&own))
+            .await
+            .unwrap()
+            .iter()
+            .any(|i| i.id == s && !i.retracted)
+    );
+}
+
+#[tokio::test]
+async fn update_view_over_http() {
+    let (client, _own) = client_and_bucket().await;
+    let name = format!("upd-view-{}", std::process::id());
+    let mut view = memvault_api::View {
+        name: name.clone(),
+        tags: vec![("kind".into(), "a".into())],
+        created_ns: 0,
+        cid: String::new(),
+        bucket_id: None,
+    };
+    client.create_view(view.clone()).await.unwrap();
+    view.tags = vec![("kind".into(), "b".into())];
+    client.update_view(view).await.unwrap();
+    let got = client.get_view(&name).await.unwrap().expect("view");
+    assert_eq!(got.tags, vec![("kind".to_string(), "b".to_string())]);
+}
+
+/// The scoped reads answer over HTTP what they answer locally.
+#[tokio::test]
+async fn scoped_reads_match_the_local_client() {
+    use memvault_core::{DetailLevel, NodeKind, QueryScope};
+    let (client, _own) = client_and_bucket().await;
+    let bucket = fresh_bucket(&client, "parity").await;
+    let other = fresh_bucket(&client, "parity-other").await;
+    let local = memvault_web::ui::state::local_client().unwrap();
+    let word = format!("parityword{}", std::process::id());
+    let doc = put(&client, &format!("{word} doc"), &word, &bucket).await;
+    let mut props = std::collections::BTreeMap::new();
+    props.insert(
+        "name".to_string(),
+        serde_json::json!(format!("{word} entity")),
+    );
+    let ent = client
+        .add_entity(
+            Entity {
+                id: memvault_core::EntityId::random(),
+                kind: "person".into(),
+                props,
+                edges_out: vec![],
+            },
+            Visibility::Internal,
+            Some(&bucket),
+        )
+        .await
+        .unwrap();
+    let gone = put(&client, "gone", &word, &bucket).await;
+    client
+        .retract_node(
+            &format!("doc:{}", hex::encode(gone.0)),
+            "retracted for parity",
+        )
+        .await
+        .unwrap();
+
+    let in_bucket = QueryScope::all().with_bucket(Some(bucket.clone()));
+    for scope in [
+        in_bucket.clone(),
+        in_bucket.clone().with_kind(Some(NodeKind::Document)),
+        in_bucket.clone().with_kind(Some(NodeKind::GraphEntity)),
+        in_bucket.clone().with_detail(DetailLevel::Full),
+    ] {
+        let sorted = |mut v: Vec<memvault_api::NodeSummary>| {
+            v.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+            serde_json::to_value(v).unwrap()
+        };
+        let want = sorted(local.list_scoped(&scope, 100).await.unwrap());
+        let got = sorted(client.list_scoped(&scope, 100).await.unwrap());
+        assert_eq!(got, want, "list_scoped {scope:?}");
+        assert_eq!(
+            client.count_scoped(&scope).await.unwrap(),
+            local.count_scoped(&scope).await.unwrap(),
+            "count_scoped {scope:?}"
+        );
+    }
+    // Searches of every kind, in the bucket named.
+    let mut hits = vec![];
+    for _ in 0..50 {
+        hits = client.search_scoped(&in_bucket, &word, 20).await.unwrap();
+        if hits.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let ids = |h: &[memvault_query::UnifiedHit]| {
+        let mut v: Vec<String> = h.iter().map(|h| h.node_id.clone()).collect();
+        v.sort();
+        v
+    };
+    let want = local.search_scoped(&in_bucket, &word, 20).await.unwrap();
+    assert_eq!(ids(&hits), ids(&want));
+    assert!(hits.iter().any(|h| h.node_type == "entity"), "{hits:?}");
+    let entities_only = in_bucket.clone().with_kind(Some(NodeKind::GraphEntity));
+    let got = client
+        .search_scoped(&entities_only, &word, 20)
+        .await
+        .unwrap();
+    assert!(
+        !got.is_empty() && got.iter().all(|h| h.node_type == "entity"),
+        "{got:?}"
+    );
+    assert!(
+        client
+            .search_scoped(
+                &QueryScope::all().with_bucket(Some(other.clone())),
+                &word,
+                20
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "another bucket's search finds nothing"
+    );
+
+    // By-id reads honour the scope's bucket.
+    let elsewhere = QueryScope::all().with_bucket(Some(other.clone()));
+    assert!(
+        client
+            .get_doc_scoped(&doc, &in_bucket)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        client
+            .get_doc_scoped(&doc, &elsewhere)
+            .await
+            .unwrap()
+            .is_some(),
+        local
+            .get_doc_scoped(&doc, &elsewhere)
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    let label = format!("doc:{}", hex::encode(doc.0));
+    assert_eq!(
+        client
+            .resolve_label_scoped(&label, &elsewhere)
+            .await
+            .unwrap(),
+        local
+            .resolve_label_scoped(&label, &elsewhere)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        client
+            .node_bucket(&NodeRef::Entity(ent.clone()))
+            .await
+            .unwrap(),
+        Some(bucket.clone())
+    );
+
+    // Retracted rows stay hidden from a caller who may not see them, even
+    // when asked for.
+    let retracted = in_bucket
+        .clone()
+        .with_retraction(memvault_core::RetractionMode::IncludeRetracted);
+    let rows = client.list_scoped(&retracted, 100).await.unwrap();
+    assert!(!rows.iter().any(|r| r.retracted), "{rows:?}");
+    let docs = client
+        .list_docs_ex(None, 100, Some(&bucket), true)
+        .await
+        .unwrap();
+    assert!(!docs.iter().any(|d| d.id == gone));
+    let ents = client
+        .list_entities_ex(100, Some(&bucket), false)
+        .await
+        .unwrap();
+    assert!(ents.iter().any(|e| e.id == ent));
+}
+
+/// Responses follow standards/api-wire-conventions.md: bare arrays, node
+/// labels in `node_id`, 201/204, hex ids and CID strings — never byte arrays.
+#[tokio::test]
+async fn responses_follow_the_wire_conventions() {
+    let (client, own) = client_and_bucket().await;
+    let own_hex = hex::encode(own.0);
+    // The VFS part in a bucket of its own (tests share the agent bucket and
+    // would race on its VFS root).
+    let vfs_hex = hex::encode(fresh_bucket(&client, "wire-vfs").await.0);
+
+    // Creates: 201 and the label in `node_id`.
+    let resp = raw(reqwest::Method::POST, "/entities")
+        .await
+        .json(&serde_json::json!({ "kind": "note" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let ent = resp.json::<serde_json::Value>().await.unwrap()["node_id"]
+        .as_str()
+        .expect("node_id")
+        .to_string();
+    let resp = raw(reqwest::Method::POST, "/docs")
+        .await
+        .json(&serde_json::json!({ "body": "conventions" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let doc = body["node_id"].as_str().expect("node_id").to_string();
+    assert!(doc.starts_with("doc:"));
+    let cid = body["cid"].as_str().unwrap();
+    assert!(memvault_core::cid_bytes_from_string(cid).is_ok(), "{cid}");
+    let resp = raw(reqwest::Method::POST, "/skills")
+        .await
+        .json(&serde_json::json!({ "name": "wire-skill" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    assert!(resp.json::<serde_json::Value>().await.unwrap()["node_id"].is_string());
+    let resp = raw(reqwest::Method::POST, "/vfs/mkdir")
+        .await
+        .json(&serde_json::json!({ "path": "/wire/dir", "bucket": vfs_hex }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    assert!(resp.json::<serde_json::Value>().await.unwrap()["node_id"].is_string());
+    let resp = raw(reqwest::Method::POST, "/buckets")
+        .await
+        .json(&serde_json::json!({ "name": "wire-bucket" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    assert!(resp.json::<serde_json::Value>().await.unwrap()["bucket_id"].is_string());
+
+    // Lists: bare arrays.
+    for path in [
+        format!("/nodes?bucket={own_hex}"),
+        format!("/tags/{ent}"),
+        format!("/vfs?bucket={vfs_hex}&path=/wire"),
+        format!("/vfs/find?bucket={vfs_hex}&target={ent}"),
+        "/views/no-such-view/members".to_string(),
+        "/buckets/merges".to_string(),
+    ] {
+        let (status, body) = get_json(&path).await;
+        assert_eq!(status, 200, "GET {path}");
+        assert!(body.is_array(), "GET {path}: {body}");
+    }
+
+    // Mutations without a body: 204.
+    let resp = raw(reqwest::Method::PUT, &format!("/tags/{ent}"))
+        .await
+        .json(&serde_json::json!({ "tags": [["k", "v"]] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "PUT /tags");
+    let resp = raw(reqwest::Method::DELETE, &format!("/tags/{ent}"))
+        .await
+        .json(&serde_json::json!({ "tags": [["k", "v"]] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "DELETE /tags");
+    let resp = raw(reqwest::Method::POST, "/vfs/mv")
+        .await
+        .json(&serde_json::json!({ "from": "/wire/dir", "to": "/wire/moved", "bucket": vfs_hex }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "POST /vfs/mv");
+    let resp = raw(
+        reqwest::Method::DELETE,
+        &format!("/entities/{}", ent.trim_start_matches("entity:")),
+    )
+    .await
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 204, "DELETE /entities");
+
+    // Errors carry the ApiError body.
+    let resp = raw(reqwest::Method::GET, "/buckets/zz")
+        .await
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.expect("an ApiError body");
+    assert!(body.get("error").is_some(), "{body}");
+
+    // A file node's manifest decodes (it was always null) with CID strings.
+    let file = client
+        .upload_file(
+            b"node manifest",
+            Some("nm.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            Some(&own),
+        )
+        .await
+        .unwrap();
+    let (status, body) = get_json(&format!("/nodes/file:{}", hex::encode(&file))).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["manifest"]["filename"], "nm.txt", "{body}");
+    assert_no_byte_arrays(&body, "GET /nodes/{file}");
+    let (_, body) = get_json(&format!("/files/{}/manifest", hex::encode(&file))).await;
+    assert_no_byte_arrays(&body, "GET /files/{cid}/manifest");
+
+    // Grants: a tagged audience with string ids.
+    client
+        .bucket_grant(
+            &own,
+            memvault_auth::GrantAudience::Role(AgentRole::Auditor),
+            vec![memvault_auth::Action::Read],
+            600,
+        )
+        .await
+        .expect("bucket_grant");
+    let (_, body) = get_json(&format!("/buckets/{own_hex}/grants")).await;
+    assert_no_byte_arrays(&body, "GET /buckets/{id}/grants");
+    assert!(
+        body.as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["audience"]["kind"] == "role" && g["audience"]["role"] == "auditor"),
+        "{body}"
+    );
+    let grants = client.bucket_grants_list(&own).await.unwrap();
+    assert!(grants.iter().any(|g| matches!(
+        g.audience,
+        memvault_auth::GrantAudience::Role(AgentRole::Auditor)
+    )));
+
+    // Views carry a hex bucket id.
+    let name = format!("bucketed-view-{}", std::process::id());
+    client
+        .create_view(memvault_api::View {
+            name: name.clone(),
+            tags: vec![],
+            created_ns: 0,
+            cid: String::new(),
+            bucket_id: Some(own.clone()),
+        })
+        .await
+        .unwrap();
+    let (_, body) = get_json("/views").await;
+    assert_no_byte_arrays(&body, "GET /views");
+
+    // Traversal: the step shape the MCP tool emits too.
+    let a = client
+        .add_entity(entity("ta"), Visibility::Internal, Some(&own))
+        .await
+        .unwrap();
+    let b = client
+        .add_entity(entity("tb"), Visibility::Internal, Some(&own))
+        .await
+        .unwrap();
+    client
+        .add_link(
+            &NodeRef::Entity(a.clone()),
+            edge("to", NodeRef::Entity(b)),
+            Visibility::Internal,
+        )
+        .await
+        .unwrap();
+    let (_, body) = get_json(&format!("/traverse?from=entity:{}", hex::encode(a.0))).await;
+    let step = &body[0]["path"][0];
+    assert!(
+        step["edge_id"].is_string() && step["relation"] == "to",
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn share_lists_answer_over_http() {
+    let (client, _own) = client_and_bucket().await;
+    client.share_inbox().await.expect("share_inbox over HTTP");
+    client.share_outbox().await.expect("share_outbox over HTTP");
+}
+
+#[tokio::test]
+async fn events_carry_hex_bucket_ids_and_cid_strings() {
+    let (client, _own) = client_and_bucket().await;
+    let mut resp = raw(reqwest::Method::GET, "/events")
+        .await
+        .send()
+        .await
+        .unwrap();
+    let mine = fresh_bucket(&client, "evented").await;
+    let cid = memvault_core::cid_from_bytes(b"event").to_bytes();
+    server()
+        .await
+        .event_bus
+        .publish(memvault_api::MemvaultEvent::BucketCreated {
+            bucket_id: mine.clone(),
+            cid: cid.clone(),
+        });
+    let mut seen = String::new();
+    let want = hex::encode(mine.0);
+    while !seen.contains(&want) {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), resp.chunk())
+            .await
+            .expect("the bucket event arrives")
+            .unwrap()
+            .expect("stream open");
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(
+        seen.contains(&memvault_core::cid_string_from_bytes(&cid).unwrap()),
+        "{seen}"
+    );
 }

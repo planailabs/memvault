@@ -36,7 +36,7 @@ pub struct BucketInfo {
 }
 ```
 
-Two cases:
+Three cases:
 
 1. **API return types** (`memvault-api/src/types.rs`: `BucketInfo`,
    `DocSummary`, `GrantInfo`, `NodeStatus`, `RotationInfo`, `TokenStatus`,
@@ -46,11 +46,22 @@ Two cases:
    `Json(bucket_info)`, client decodes `Vec<BucketInfo>`. No DTO, no
    hand-parsing.
 
-2. **Block types** (`Entity`, `Edge`, `Document`, `NodeRef`). Their `serde` is
-   frozen, so use a thin wire DTO in `memvault-api/src/wire.rs`
-   (`EntityWire`, `EdgeWire`, …) with `From<&Domain>` / `into_domain()`
-   conversions. Server returns `Json(EntityWire::from(&e))`; client decodes
-   `EntityWire` and calls `.into_domain()`.
+2. **Block types** (`Entity`, `Edge`, `Document`, `NodeRef`, `AuditRecord`,
+   `GrantAudience`). Their `serde` is frozen, so use a thin wire DTO in
+   `memvault-api/src/wire.rs` (`EntityWire`, `LinkWire`, `AuditRecordWire`,
+   `GrantAudienceWire`) with conversions both ways. Server returns
+   `Json(EntityWire::with_edges(&e))`; client decodes `EntityWire` and calls
+   `.into_entity()`. A domain type that is also stored in blocks (`View`)
+   uses a lenient helper (`hex_id_lenient_opt`) that still reads the old
+   byte form.
+
+3. **Bodies with no domain type** (create/receipt answers, request bodies,
+   query parameters) live in `memvault-api/src/rest.rs` — `NodeCreated`,
+   `EdgeCreated`, `CidReceipt`, `DocWire`, `CreateDocRequest`,
+   `ScopeParams`, … — and both the axum handler and `HttpApiClient` use the
+   same type. The MCP tools serialize the same types (`TraversalHit`,
+   `EntityWire`, `AuditRecordWire`, `FileManifestInfo`, `NodeStatus`,
+   `GrantInfo`, `ShareProposalInfo`).
 
 `NodeRef` already has its canonical string form (`tag_label` /
 `from_tag_label`); wire DTOs use `String` fields for node references and
@@ -59,8 +70,9 @@ convert via those.
 ## Adding a new endpoint (checklist)
 
 1. Is there a domain type for the payload? If yes, **reuse its wire shape** —
-   either it's already serde-clean (e.g. `View`) or it carries `hex_*`
-   annotations / has a `*Wire` DTO. Do not invent a new per-endpoint struct.
+   either it's already serde-clean or it carries `hex_*` annotations / has a
+   `*Wire` DTO. Do not invent a new per-endpoint struct; a body with no
+   domain type goes in `memvault_api::rest`, shared by server and client.
 2. Server handler: `Ok(Json(value))` for the typed shape; `201`/`204` per
    [api-wire-conventions.md](api-wire-conventions.md) §2.
 3. Client method: `resp.json::<T>()` — no `serde_json::Value`, no `json!`.
@@ -76,11 +88,17 @@ The shared helpers live in `memvault-api/src/wire.rs`. Each migration deletes
 the corresponding server-side `json!` builder and/or client-side hand-parser.
 
 **Migrated (transmit the type directly; ids hex, CIDs as CID strings):**
-`BucketInfo`, `DocSummary`, `NodeStatus`, `RotationInfo`, `GrantInfo`,
-`ShareProposalInfo`, `AuditRecord` (cid/agent_attestation), and the file/
-manifest CID surface (`GET /files/{cid}`, manifest/pin/extracted-text, `/pins`,
-upload response) via accept-both/emit-canonical. The MCP tool surface accepts
-and emits CID strings on its cid inputs/outputs.
+`BucketInfo`, `DocSummary`, `NodeSummary`, `ScopeCount`, `NodeStatus`,
+`RotationInfo`, `GrantInfo` (with a `kind`-tagged audience), `ShareProposalInfo`,
+`View` (hex `bucket_id`, CID-string `cid`), `TraversalHit` (label + `[{edge_id,
+relation}]` path), `AuditRecord` (as `AuditRecordWire`, one shape for `/audit`,
+`/docs/{id}/history`, `/entities/{id}/history` and the MCP tools),
+`FileManifestInfo`, the graph DTOs, every create/receipt body (`rest`), and the
+file/manifest CID surface via accept-both/emit-canonical. The client's
+hand-parsers (`parse_audit_record`, `/nodes`, `/traverse`, `/search`, tags,
+VFS, pins, labels, merges, bucket create) are gone: every `HttpApiClient`
+method decodes a shared type. The MCP tool surface accepts and emits CID
+strings on its cid inputs/outputs.
 
 **Consciously deferred (rationale, not oversight):**
 - **`NodeRef::Attachment` `file:` label — must NOT be flipped without a
@@ -93,11 +111,11 @@ and emits CID strings on its cid inputs/outputs.
   tweak — left as hex deliberately. Entity/Doc labels are unaffected (still hex
   of their opaque ids). The standalone file/manifest CID surface is already
   canonical and accept-both.
-- **`add_entity`** — extracts a single id via `NodeRef::from_tag_label` (not
-  struct field-picking); idiomatic, left as-is. `list_entities`, `edges_of`,
-  and `get_entity` now decode the shared `wire::EntityWire` / `wire::LinkWire`
-  DTOs (and `get_entity` now populates `edges_out`, which the old `/nodes`
-  hand-parse dropped).
+- **`add_entity`** decodes `rest::NodeCreated` and reads the entity id from
+  its label (`NodeRef::from_tag_label`). `list_entities`, `edges_of`, and
+  `get_entity` decode the shared `wire::EntityWire` / `wire::LinkWire` DTOs
+  (and `get_entity` populates `edges_out`, which the old `/nodes` hand-parse
+  dropped).
 
 **Resolved follow-ups** (previously deferred):
 - `PeerId` → base58btc (`wire::peer_b58` / `wire::b58_bytes`, backed by

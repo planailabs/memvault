@@ -7,6 +7,8 @@ use axum::body::Bytes;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
+use memvault_api::rest::{ExtractedText, FileUploaded, PinInfo, UploadMeta};
+use memvault_api::types::FileManifestInfo;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -27,7 +29,7 @@ pub async fn upload_doc_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<(StatusCode, Json<FileUploaded>), ApiError> {
     let doc_id = super::docs::parse_doc_id(&id)?;
     crate::api::auth::enforce_doc_action(&auth.claims, &doc_id, memvault_auth::Action::Write)?;
     // The file goes where its document is (the agent bucket for a document
@@ -66,10 +68,11 @@ pub async fn upload_doc_file(
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            "cid": format!("file:{}", hex::encode(&cid)),
-            "name": name,
-        })),
+        Json(FileUploaded {
+            node_id: format!("file:{}", hex::encode(&cid)),
+            cid,
+            name,
+        }),
     ))
 }
 
@@ -95,27 +98,47 @@ pub struct UploadQuery {
     pub bucket: Option<String>,
 }
 
+/// The multipart body takes the file in a part with a file name (`file`) and
+/// optionally a `meta` part: JSON [`UploadMeta`] with the tags and
+/// visibility to store it with (default: none, `internal`).
 pub async fn upload_file(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Query(query): Query<UploadQuery>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let field = multipart
+) -> Result<(StatusCode, Json<FileUploaded>), ApiError> {
+    let mut meta = UploadMeta::default();
+    let mut file = None;
+    while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| ApiError::bad_request(format!("Multipart error: {e}")))?
-        .ok_or_else(|| ApiError::bad_request("No file field in multipart body"))?;
-
-    let name = field.file_name().unwrap_or("unnamed").to_string();
-    let content_type = field
-        .content_type()
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let data = field
-        .bytes()
-        .await
-        .map_err(|e| ApiError::bad_request(format!("Failed to read file: {e}")))?;
+    {
+        if field.name() == Some("meta") {
+            let text = field
+                .text()
+                .await
+                .map_err(|e| ApiError::bad_request(format!("Failed to read meta: {e}")))?;
+            meta = serde_json::from_str(&text)
+                .map_err(|e| ApiError::bad_request(format!("Invalid meta: {e}")))?;
+            continue;
+        }
+        if file.is_some() {
+            continue;
+        }
+        let name = field.file_name().unwrap_or("unnamed").to_string();
+        let content_type = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::bad_request(format!("Failed to read file: {e}")))?;
+        file = Some((name, content_type, data));
+    }
+    let (name, content_type, data) =
+        file.ok_or_else(|| ApiError::bad_request("No file field in multipart body"))?;
 
     // No bucket named: the caller's agent bucket, like `POST /docs`.
     let named = crate::api::auth::parse_bucket_param(query.bucket.as_deref())?;
@@ -125,24 +148,23 @@ pub async fn upload_file(
         &data,
         Some(&name),
         &content_type,
-        vec![],
-        "internal",
+        meta.tags,
+        meta.visibility.as_deref().unwrap_or("internal"),
         query.vfs_path.as_deref(),
         Some(&bucket_id),
     )
     .await?;
     tracing::info!(filename = %name, size = data.len(), "API: file uploaded");
 
+    // `cid` is the canonical manifest CID string; `node_id` is the
+    // "file:<hex>" node label (see standards/ §1).
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            // `cid` is the canonical manifest CID string; `node_id` is the
-            // "file:<hex>" node label (see standards/ §1).
-            "cid": memvault_core::cid_string_from_bytes(&manifest_cid)
-                .unwrap_or_else(|_| hex::encode(&manifest_cid)),
-            "node_id": node_id,
-            "name": name,
-        })),
+        Json(FileUploaded {
+            cid: manifest_cid,
+            node_id,
+            name,
+        }),
     ))
 }
 
@@ -176,11 +198,11 @@ pub async fn file_manifest(
         .map_err(|_| ApiError::bad_request("Invalid CID"))?;
     crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
 
-    // The block is DAG-CBOR; the answer is JSON (it was the raw block,
-    // labelled JSON, which HTTP clients couldn't read).
+    // The block is DAG-CBOR; the answer is its `FileManifestInfo` (CIDs as
+    // CID strings, never the raw block or its byte arrays).
     match state.client.get_file_manifest(&cid).await? {
-        Some(data) => memvault_store::deserialize_block(&data)
-            .map(axum::Json)
+        Some(data) => FileManifestInfo::from_block(&data)
+            .map(Json)
             .ok_or_else(|| ApiError::internal("unreadable manifest block")),
         None => Err(ApiError::not_found("Manifest not found")),
     }
@@ -219,13 +241,13 @@ pub async fn extracted_text(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(cid_hex): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ExtractedText>, ApiError> {
     // Canonical form is the CID string; legacy bare hex is still accepted.
     let cid = memvault_core::cid_bytes_lenient(&cid_hex)
         .map_err(|_| ApiError::bad_request("Invalid CID"))?;
     crate::api::auth::enforce_file_action(&auth.claims, &cid, memvault_auth::Action::Read)?;
     let text = state.client.read_extracted_text(&cid).await?;
-    Ok(Json(serde_json::json!({ "text": text })))
+    Ok(Json(ExtractedText { text }))
 }
 
 /// GET /api/v1/pins — list pinned files as [{ cid, name }], only those the
@@ -233,22 +255,16 @@ pub async fn extracted_text(
 pub async fn list_pinned(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<Vec<PinInfo>>, ApiError> {
     let pins = state.client.list_pinned().await?;
     let pins = crate::api::auth::filter_readable(&auth.claims, pins, |(cid, _)| {
         format!("file:{}", hex::encode(cid))
     })?;
-    let result: Vec<serde_json::Value> = pins
-        .into_iter()
-        .map(|(cid, name)| {
-            serde_json::json!({
-                "cid": memvault_core::cid_string_from_bytes(&cid)
-                    .unwrap_or_else(|_| hex::encode(&cid)),
-                "name": name,
-            })
-        })
-        .collect();
-    Ok(Json(serde_json::json!(result)))
+    Ok(Json(
+        pins.into_iter()
+            .map(|(cid, name)| PinInfo { cid, name })
+            .collect(),
+    ))
 }
 
 /// DELETE /api/v1/docs/:id/files/:name — detach file (no-op in new system)

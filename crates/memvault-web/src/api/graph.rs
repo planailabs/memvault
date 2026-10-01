@@ -1,62 +1,19 @@
 //! Knowledge graph endpoints.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use memvault_api::rest::{CreateEntityRequest, ListEntitiesParams, NodeCreated, ScopeParams};
+use memvault_api::wire::{AuditRecordWire, EntityWire};
 use memvault_core::{EntityId, NodeRef};
 use memvault_doc::Entity;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::AppState;
 use crate::api::auth::{RequireAuth, RequireWrite};
 use crate::error::ApiError;
-
-#[derive(Deserialize)]
-pub struct ListEntitiesQuery {
-    pub kind: Option<String>,
-    pub limit: Option<usize>,
-    /// Optional bucket ID (hex) to scope the listing.
-    pub bucket: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct CreateEntityRequest {
-    pub kind: String,
-    #[serde(default)]
-    pub props: BTreeMap<String, serde_json::Value>,
-    pub visibility: Option<String>,
-    /// Optional VFS path to place the new entity at.
-    #[serde(default)]
-    pub vfs_path: Option<String>,
-    /// Optional bucket ID (hex).
-    #[serde(default)]
-    pub bucket: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct EntityResponse {
-    pub id: String,
-    pub kind: String,
-    pub props: BTreeMap<String, serde_json::Value>,
-    pub edges: Vec<EdgeResponse>,
-}
-
-#[derive(Serialize)]
-pub struct EdgeResponse {
-    pub id: String,
-    pub relation: String,
-    pub target: String,
-    pub weight: Option<f32>,
-    pub props: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-pub struct UpdateEntityRequest {
-    #[serde(default)]
-    pub props: BTreeMap<String, serde_json::Value>,
-}
 
 #[derive(Deserialize)]
 pub struct TraverseQuery {
@@ -69,12 +26,12 @@ pub struct TraverseQuery {
 /// GET /api/v1/traverse?from=<label>&relation=&max_depth=
 ///
 /// Walks the graph from a node. Backs `MemvaultClient::traverse_from` and the
-/// `memvault_traverse` MCP tool over HTTP.
+/// `memvault_traverse` MCP tool over HTTP; answers `TraversalHit`s.
 pub async fn traverse(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<TraverseQuery>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+) -> Result<Json<Vec<memvault_api::TraversalHit>>, ApiError> {
     let from = NodeRef::from_tag_label(&params.from)
         .ok_or_else(|| ApiError::bad_request("Invalid from: expected 'type:hex'"))?;
     crate::api::auth::enforce_node_action(&auth.claims, &params.from, memvault_auth::Action::Read)?;
@@ -113,37 +70,27 @@ pub async fn traverse(
             queue.push_back((edge.target, depth + 1, next));
         }
     }
-    let results: Vec<serde_json::Value> = hits
-        .into_iter()
-        .map(|h| {
-            serde_json::json!({
-                "node": h.node.tag_label(),
-                "depth": h.depth,
-                "path": h
-                    .path
-                    .iter()
-                    .map(|(eid, rel)| serde_json::json!([hex::encode(eid.0), rel]))
-                    .collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    Ok(Json(results))
+    Ok(Json(hits))
 }
 
-/// GET /api/v1/entities?limit=&kind=&bucket=<hex>
+/// GET /api/v1/entities?limit=&kind=&bucket=<hex>&include_retracted=
 ///
 /// Lists entities (full `kind` + `props`), optionally scoped to a bucket and
-/// filtered by kind. Backs `MemvaultClient::list_entities` (and thus the
-/// `memvault_list_entities` MCP tool and VFS root discovery) over HTTP.
+/// filtered by kind. Backs `MemvaultClient::list_entities{,_ex}` (and thus
+/// the `memvault_list_entities` MCP tool and VFS root discovery) over HTTP.
 pub async fn list_entities(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<ListEntitiesQuery>,
-) -> Result<Json<Vec<EntityResponse>>, ApiError> {
+    Query(params): Query<ListEntitiesParams>,
+) -> Result<Json<Vec<EntityWire>>, ApiError> {
     let limit = params.limit.unwrap_or(500);
     // No bucket named: the caller's agent bucket (admins: every bucket).
     let named = crate::api::auth::parse_bucket_param(params.bucket.as_deref())?;
     let bucket = crate::api::auth::read_bucket(&state, &auth.claims, named).await?;
+    // Retracted entities only for callers who may see them (on request; by
+    // default, included).
+    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims)
+        && params.include_retracted.unwrap_or(true);
     // The generic HTTP entity list returns all kinds (it's the low-level API +
     // introspection surface). Reserved kinds (skill, vfs:dir) are hidden from
     // the graph *view* at the presentation layer instead — the web graph
@@ -155,7 +102,12 @@ pub async fn list_entities(
         |n| {
             let state = &state;
             let bucket = bucket.as_ref();
-            async move { Ok(state.client.list_entities(n, bucket).await?) }
+            async move {
+                Ok(state
+                    .client
+                    .list_entities_ex(n, bucket, include_retracted)
+                    .await?)
+            }
         },
         |e: &Entity| {
             params.kind.as_deref().is_none_or(|k| e.kind == k)
@@ -163,24 +115,15 @@ pub async fn list_entities(
         },
     )
     .await?;
-    let results: Vec<EntityResponse> = entities
-        .into_iter()
-        .map(|e| EntityResponse {
-            id: format!("entity:{}", hex::encode(e.id.0)),
-            kind: e.kind,
-            props: e.props,
-            edges: vec![],
-        })
-        .collect();
-    Ok(Json(results))
+    Ok(Json(entities.iter().map(EntityWire::summary).collect()))
 }
 
-/// POST /api/v1/entities
+/// POST /api/v1/entities — 201 with the new entity's `node_id`.
 pub async fn create_entity(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateEntityRequest>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<(StatusCode, Json<NodeCreated>), ApiError> {
     let kind = req.kind;
     let entity = Entity {
         id: EntityId::random(),
@@ -199,7 +142,7 @@ pub async fn create_entity(
         .client
         .add_entity(entity, vis, Some(&bucket_id))
         .await?;
-    let node_id = format!("entity:{}", hex::encode(id.0));
+    let node_id = NodeRef::Entity(id).tag_label();
     tracing::info!(kind = %kind, "API: entity created");
 
     if let Some(vfs_path) = &req.vfs_path {
@@ -215,56 +158,46 @@ pub async fn create_entity(
         }
     }
 
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(serde_json::json!({ "id": node_id })),
-    ))
+    Ok((StatusCode::CREATED, Json(NodeCreated { node_id })))
 }
 
-/// GET /api/v1/entities/:id
+/// GET /api/v1/entities/:id — the entity with its out-edges, in the scope
+/// asked for ([`ScopeParams`]).
 pub async fn get_entity(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<EntityResponse>, ApiError> {
+    Query(scope): Query<ScopeParams>,
+) -> Result<Json<EntityWire>, ApiError> {
     let entity_id = parse_entity_id(&id)?;
     crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Read)?;
-    let include_retracted = crate::api::auth::caller_sees_retracted(&state, &auth.claims);
+    let scope = crate::api::auth::scope_from_params(&state, &auth.claims, &scope, false).await?;
     let entity = state
         .client
-        .get_entity_scoped(
-            &entity_id,
-            &memvault_core::QueryScope::all().with_include_retracted(include_retracted),
-        )
+        .get_entity_scoped(&entity_id, &scope)
         .await?
         .ok_or_else(|| ApiError::not_found("Entity not found"))?;
-
-    let edges = entity
-        .edges_out
-        .iter()
-        .map(|e| EdgeResponse {
-            id: hex::encode(e.id.0),
-            relation: e.relation.clone(),
-            target: e.target.tag_label(),
-            weight: e.weight,
-            props: e.props.clone(),
-        })
-        .collect();
-
-    Ok(Json(EntityResponse {
-        id: format!("entity:{}", hex::encode(entity.id.0)),
-        kind: entity.kind,
-        props: entity.props,
-        edges,
-    }))
+    Ok(Json(EntityWire::with_edges(&entity)))
 }
 
-/// DELETE /api/v1/entities/:id
+/// GET /api/v1/entities/:id/history — the entity's audit records.
+pub async fn entity_history(
+    auth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AuditRecordWire>>, ApiError> {
+    let entity_id = parse_entity_id(&id)?;
+    crate::api::auth::enforce_entity_action(&auth.claims, &entity_id, memvault_auth::Action::Read)?;
+    let records = state.client.entity_history(&entity_id).await?;
+    Ok(Json(records.iter().map(AuditRecordWire::from).collect()))
+}
+
+/// DELETE /api/v1/entities/:id — retract; 204.
 pub async fn delete_entity(
     auth: RequireWrite,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let entity_id = parse_entity_id(&id)?;
     crate::api::auth::enforce_entity_action(
         &auth.claims,
@@ -273,14 +206,12 @@ pub async fn delete_entity(
     )?;
     // External (validated) node retract: refuses reserved kinds (skill,
     // vfs:dir), which must be removed via their dedicated API.
-    let node_id = format!("entity:{}", hex::encode(entity_id.0));
+    let node_id = NodeRef::Entity(entity_id).tag_label();
     state
         .client
         .retract_node(&node_id, "deleted via API")
         .await?;
-    Ok(Json(
-        serde_json::json!({ "status": "retracted", "node_id": node_id }),
-    ))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Parse an entity ID from either "entity:<hex>" or raw "<hex>" format.

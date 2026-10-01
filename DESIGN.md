@@ -264,12 +264,21 @@ bucket; frontends default to the caller's agent bucket.
 **Wire format.** One serde shape per type, IDs as strings, built with the
 helpers in `memvault_api::wire`
 ([api-wire-conventions](standards/api-wire-conventions.md),
-[wire-dtos](standards/wire-dtos.md)).
+[wire-dtos](standards/wire-dtos.md)). Domain return types (`BucketInfo`,
+`NodeSummary`, `TraversalHit`, `GrantInfo`, `View`, …) carry the helpers on
+their fields; block types go through `*Wire` DTOs (`EntityWire`, `LinkWire`,
+`AuditRecordWire`, `GrantAudienceWire`); request and response bodies with no
+domain type live in `memvault_api::rest`, shared by the axum handlers and
+`HttpApiClient`. The scoped reads send their `QueryScope` as query
+parameters (`rest::ScopeParams`); the server checks every bucket named and
+clamps the retraction mode to what the caller may see.
 
 **Frontends.**
 - REST: axum under `/api/v1` in `memvault-web`, bound to 127.0.0.1, served by
   the daemon (port 8401). Also `/api/v1/events` (SSE from the in-process
-  `EventBus`), metrics and health.
+  `EventBus`, data as JSON with hex ids and CID strings), metrics and health.
+  Share proposals (`/share/inbox`, `/share/outbox`, `/share/proposals/{cid}`)
+  and bucket binding (`/buckets/{id}/bind`) are admin-scoped.
 - MCP: `memvault-mcp`, stdio transport, backed by either client.
 - CLI: `memctl` (with no arguments it runs a full node: swarm + web/API).
 - Web UI: Dioxus, compiled to WASM and embedded in `memctl`; pages for notes,

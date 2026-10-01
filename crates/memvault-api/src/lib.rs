@@ -21,6 +21,7 @@ pub mod node_key;
 pub mod office_convert;
 pub mod otel;
 pub mod rebuild;
+pub mod rest;
 pub mod rotation;
 pub mod sigchain;
 // JSON-RPC over a Unix domain socket — Unix-only transport. (Windows would use

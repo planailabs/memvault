@@ -3465,7 +3465,12 @@ impl LocalClient {
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|v| (hex::decode(&v.cid).unwrap_or_default(), v.tags))
+                .map(|v| {
+                    (
+                        memvault_core::cid_bytes_lenient(&v.cid).unwrap_or_default(),
+                        v.tags,
+                    )
+                })
                 .collect();
             for node_id in &pending {
                 self.sync_node_scopes_with(node_id, &views).await;
@@ -3681,7 +3686,7 @@ impl LocalClient {
     ) -> Result<Option<(Vec<u8>, Vec<(String, String)>)>> {
         for v in self.list_views().await? {
             if v.name == name {
-                let cid = hex::decode(&v.cid).unwrap_or_default();
+                let cid = memvault_core::cid_bytes_lenient(&v.cid).unwrap_or_default();
                 return Ok(Some((cid, v.tags)));
             }
         }
@@ -4665,7 +4670,12 @@ impl LocalClient {
         let views = self.list_views().await.unwrap_or_default();
         let views: Vec<(Vec<u8>, Vec<(String, String)>)> = views
             .into_iter()
-            .map(|v| (hex::decode(&v.cid).unwrap_or_default(), v.tags))
+            .map(|v| {
+                (
+                    memvault_core::cid_bytes_lenient(&v.cid).unwrap_or_default(),
+                    v.tags,
+                )
+            })
             .collect();
         self.sync_node_scopes_with(node_id, &views).await;
     }
@@ -4701,7 +4711,12 @@ impl LocalClient {
         let views = self.list_views().await.unwrap_or_default();
         let views: Vec<(Vec<u8>, Vec<(String, String)>)> = views
             .into_iter()
-            .map(|v| (hex::decode(&v.cid).unwrap_or_default(), v.tags))
+            .map(|v| {
+                (
+                    memvault_core::cid_bytes_lenient(&v.cid).unwrap_or_default(),
+                    v.tags,
+                )
+            })
             .collect();
         self.update_view_partitions(node_id, tags, false, &views);
     }
@@ -7659,7 +7674,7 @@ impl MemvaultClient for LocalClient {
             }
             if let Some(data) = self.store.get_block(&cid_bytes)? {
                 if let Some(mut view) = Self::parse_view_block(&data) {
-                    view.cid = hex::encode(&cid_bytes);
+                    view.cid = crate::wire::cid_string(&cid_bytes);
                     views.push(view);
                 }
             }
@@ -7704,7 +7719,7 @@ impl MemvaultClient for LocalClient {
         let views = self.list_views().await?;
         for view in &views {
             if view.name == name {
-                let cid_bytes = hex::decode(&view.cid).unwrap_or_default();
+                let cid_bytes = memvault_core::cid_bytes_lenient(&view.cid).unwrap_or_default();
                 self.retract(&cid_bytes, "view deleted").await?;
             }
         }

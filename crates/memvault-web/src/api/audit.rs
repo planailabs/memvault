@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use serde::{Deserialize, Serialize};
+use memvault_api::wire::AuditRecordWire;
+use serde::Deserialize;
 
 use crate::AppState;
 use crate::api::auth::RequireAuth;
@@ -23,37 +24,14 @@ pub struct AuditQueryParams {
     pub bucket: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct AuditRecordResponse {
-    pub cid: String,
-    pub op_kind: String,
-    pub author: String,
-    /// Hex-encoded `agent_attestation` CID when the envelope was
-    /// written through the Signed<T> path with an agent identity
-    /// bound. `None` for legacy / pure-node writes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_attestation: Option<String>,
-    pub wall_ns: u64,
-    pub doc_id: Option<String>,
-    /// Hex entity id, for entity operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity_id: Option<String>,
-    /// The file manifest's CID, for file attachments.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachment_cid: Option<String>,
-    pub tags: Vec<(String, String)>,
-}
-
 /// The node a record is about, for the bucket check.
-fn node_of(r: &AuditRecordResponse) -> String {
+fn node_of(r: &memvault_query::AuditRecord) -> String {
     if let Some(d) = &r.doc_id {
-        format!("doc:{d}")
+        format!("doc:{}", hex::encode(d.0))
     } else if let Some(e) = &r.entity_id {
-        format!("entity:{e}")
+        format!("entity:{}", hex::encode(e))
     } else if let Some(a) = &r.attachment_cid {
-        memvault_core::cid_bytes_lenient(a)
-            .map(|b| format!("file:{}", hex::encode(b)))
-            .unwrap_or_default()
+        format!("file:{}", hex::encode(a))
     } else {
         String::new()
     }
@@ -64,7 +42,7 @@ pub async fn query_audit(
     auth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
-) -> Result<Json<Vec<AuditRecordResponse>>, ApiError> {
+) -> Result<Json<Vec<AuditRecordWire>>, ApiError> {
     use memvault_core::DocId;
     use memvault_query::AuditQuery;
 
@@ -110,35 +88,8 @@ pub async fn query_audit(
 
     let records = state.client.audit(query).await?;
 
-    let results: Vec<AuditRecordResponse> = records
-        .into_iter()
-        .map(|r| AuditRecordResponse {
-            // cid + agent_attestation are CIDs → canonical CID string (standards/).
-            cid: memvault_core::cid_string_from_bytes(&r.cid)
-                .unwrap_or_else(|_| hex::encode(&r.cid)),
-            // Canonical serde form (snake_case, e.g. "doc_create") so the HTTP
-            // client can round-trip it back into an OpKind — the old Debug
-            // form ("DocCreate") was not deserializable.
-            op_kind: serde_json::to_value(&r.op_kind)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_default(),
-            author: hex::encode(&r.author),
-            agent_attestation: r.agent_attestation.as_ref().map(|c| {
-                memvault_core::cid_string_from_bytes(c).unwrap_or_else(|_| hex::encode(c))
-            }),
-            wall_ns: r.wall_ns,
-            doc_id: r.doc_id.map(|d| hex::encode(d.0)),
-            entity_id: r.entity_id.as_ref().map(hex::encode),
-            attachment_cid: r.attachment_cid.as_ref().map(|c| {
-                memvault_core::cid_string_from_bytes(c).unwrap_or_else(|_| hex::encode(c))
-            }),
-            tags: r.tags,
-        })
-        .collect();
-
     // Only records about what the caller may read (records about no node pass).
     // ponytail: `limit` applies before this filter, so a caller may get fewer.
-    let results = crate::api::auth::filter_readable(&auth.claims, results, node_of)?;
-    Ok(Json(results))
+    let records = crate::api::auth::filter_readable(&auth.claims, records, node_of)?;
+    Ok(Json(records.iter().map(AuditRecordWire::from).collect()))
 }

@@ -722,6 +722,53 @@ pub async fn read_bucket(
     }
 }
 
+/// The retraction mode a caller gets (standards/query-scope.md): what it
+/// asked for when it may see retracted nodes (by default, active and
+/// retracted), active nodes only otherwise — whatever it asked for.
+pub fn retraction_for(
+    state: &Arc<AppState>,
+    claims: &AgentTokenClaims,
+    requested: Option<memvault_core::RetractionMode>,
+) -> memvault_core::RetractionMode {
+    use memvault_core::RetractionMode;
+    if caller_sees_retracted(state, claims) {
+        requested.unwrap_or(RetractionMode::IncludeRetracted)
+    } else {
+        RetractionMode::ActiveOnly
+    }
+}
+
+/// The [`QueryScope`](memvault_core::QueryScope) of a scoped read from its
+/// request parameters, never wider than the caller may read: every bucket
+/// named must be readable (else 404), and the retraction mode is
+/// [`retraction_for`]. With no bucket named, `listing` reads (lists, counts,
+/// searches) take the caller's agent bucket ([`read_bucket`]); by-id reads
+/// span the accessible buckets, their node's own ACL check having passed.
+pub async fn scope_from_params(
+    state: &Arc<AppState>,
+    claims: &AgentTokenClaims,
+    params: &memvault_api::rest::ScopeParams,
+    listing: bool,
+) -> Result<memvault_core::QueryScope, crate::error::ApiError> {
+    let bad = crate::error::ApiError::bad_request;
+    let named = params.buckets().map_err(bad)?;
+    let requested = params.retraction().map_err(bad)?;
+    let scope = params
+        .base_scope()
+        .map_err(bad)?
+        .with_retraction(retraction_for(state, claims, requested));
+    Ok(match named.as_slice() {
+        [] if listing => scope.with_bucket(read_bucket(state, claims, None).await?),
+        [] => scope,
+        buckets => {
+            for b in buckets {
+                enforce_bucket_action(claims, b, memvault_auth::Action::Read)?;
+            }
+            scope.with_buckets(named)
+        }
+    })
+}
+
 /// Strip the trailing slash from a configured allowed origin. Browsers
 /// always serialise `Origin` without a trailing slash, but operators
 /// often paste `https://memvault.example.com/` from a URL bar.
