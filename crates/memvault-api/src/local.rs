@@ -3869,14 +3869,33 @@ impl LocalClient {
             // Parity: every node the authoritative index scan returns for this
             // scope must be reachable via the member-set enumeration. Catches a
             // bucket set that drifted out of sync with the index.
+            //
+            // The scan runs after the enumeration, so a node written in
+            // between (a concurrent request) is in the scan only: re-read the
+            // member-sets once before calling it drift.
             let scan = self.scoped_list_scan(scope, usize::MAX).await?;
-            let member_ids: std::collections::HashSet<&str> =
-                node_ids.iter().map(|s| s.as_str()).collect();
-            let missing: Vec<&String> = scan
+            let mut member_ids = node_ids.clone();
+            let mut missing: Vec<&String> = scan
                 .iter()
                 .map(|n| &n.node_id)
                 .filter(|id| !member_ids.contains(id.as_str()))
                 .collect();
+            if !missing.is_empty() {
+                for b in set {
+                    // A concurrent merge may have cleared the set meanwhile.
+                    self.ensure_bucket_partition(&BucketId(*b)).await?;
+                    let bsid = memvault_core::bucket_scope_id(&BucketId(*b));
+                    for (nid, _) in self.store.scope_members(
+                        &bsid,
+                        scope.retraction.includes_active(),
+                        scope.retraction.includes_retracted(),
+                        0,
+                    )? {
+                        member_ids.insert(nid);
+                    }
+                }
+                missing.retain(|id| !member_ids.contains(id.as_str()));
+            }
             debug_assert!(
                 missing.is_empty(),
                 "scoped_list member-set is missing nodes the authoritative scan \
@@ -4215,12 +4234,45 @@ impl LocalClient {
     /// inference the scan-based listings use), so the set is a faithful cache
     /// over the store (see `standards/derived-indexes.md`). Read paths filter
     /// by node-id prefix and page at their own limit.
+    ///
+    /// The scan is a snapshot: a node written while it runs is in neither the
+    /// snapshot nor (the partition not yet registered) live maintenance. So
+    /// the build scans, registers, and scans once more, adding what the first
+    /// pass missed — a write after registration is maintained live. (After a
+    /// merge clears every set, concurrent writers otherwise drifted out of
+    /// the rebuilt sets.)
     pub(crate) async fn ensure_bucket_partition(&self, bucket: &BucketId) -> Result<()> {
         let bsid = memvault_core::bucket_scope_id(bucket);
         if self.store.scope_is_registered(&bsid).unwrap_or(false) {
             return Ok(());
         }
         self.flush_index().await;
+        let first = self.bucket_member_flags(bucket).await?;
+        for (nid, retracted) in &first {
+            let _ = self.store.scope_member_upsert(&bsid, nid, *retracted, 0);
+        }
+        self.store.scope_register(
+            &bsid,
+            memvault_store::scope_members::ScopeKind::Bucket,
+            &[],
+            &bucket.0,
+            0,
+        )?;
+        // Catch-up pass for writes that raced the first scan.
+        self.flush_index().await;
+        let seen: std::collections::HashSet<&String> = first.iter().map(|(n, _)| n).collect();
+        for (nid, retracted) in self.bucket_member_flags(bucket).await? {
+            if !seen.contains(&nid) {
+                let _ = self.store.scope_member_upsert(&bsid, &nid, retracted, 0);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every node (doc, entity, file) with a block in `bucket`, with its
+    /// retracted flag — the authoritative, uncapped scan behind
+    /// [`Self::ensure_bucket_partition`].
+    async fn bucket_member_flags(&self, bucket: &BucketId) -> Result<Vec<(String, bool)>> {
         // Authoritative membership universe: every CID bound to the bucket.
         // Uncapped — a recent node whose CIDs fall outside a capped window must
         // not be dropped (see `standards/exhaustive-lookups.md`).
@@ -4259,17 +4311,7 @@ impl LocalClient {
                 })
                 .collect()
         };
-        for (nid, retracted) in &flags {
-            let _ = self.store.scope_member_upsert(&bsid, nid, *retracted, 0);
-        }
-        self.store.scope_register(
-            &bsid,
-            memvault_store::scope_members::ScopeKind::Bucket,
-            &[],
-            &bucket.0,
-            0,
-        )?;
-        Ok(())
+        Ok(flags)
     }
 
     /// Build a [`DocSummary`] for a document from its creation envelope.
@@ -4603,6 +4645,9 @@ impl LocalClient {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             self.flush_index().await;
+            // A concurrent merge clears every member-set
+            // (`bump_alias_generation`); the next read rebuilds it.
+            let _ = self.ensure_bucket_partition(bucket).await;
             members = read_members();
         }
         let missing: Vec<&String> = scan.difference(&members).collect();
