@@ -71,6 +71,14 @@ pub fn cid_bytes_lenient(s: &str) -> Result<Vec<u8>> {
 pub fn verify_cid(cid_bytes: &[u8], data: &[u8]) -> Result<bool> {
     let cid = Cid::read_bytes(std::io::Cursor::new(cid_bytes))
         .map_err(|e| Error::Cid(format!("cannot parse CID: {e}")))?;
+    // The key must be exactly one CID: trailing bytes would let two
+    // different keys alias the same content address.
+    if cid.encoded_len() != cid_bytes.len() {
+        return Err(Error::Cid(format!(
+            "CID has {} trailing byte(s)",
+            cid_bytes.len().saturating_sub(cid.encoded_len())
+        )));
+    }
     let hash_code = cid.hash().code();
     let code = Code::try_from(hash_code)
         .map_err(|_| Error::Cid(format!("unsupported hash algorithm: 0x{hash_code:x}")))?;

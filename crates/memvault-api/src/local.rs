@@ -6531,13 +6531,7 @@ impl MemvaultClient for LocalClient {
     }
 
     async fn list_pinned(&self) -> Result<Vec<(Vec<u8>, String)>> {
-        // We need to scan known attachment CIDs. For now, query by the "attachment" tag.
-        // This is a simplified implementation.
-        let cids = self
-            .store
-            .query_by_tag("attachment", "", 0, 1000)
-            .unwrap_or_default();
-        let pinned = memvault_attach::pin::list_pinned(&self.store, &cids)?;
+        let pinned = memvault_attach::pin::list_pinned(&self.store)?;
         let result = pinned
             .into_iter()
             .map(|(cid, reason)| {

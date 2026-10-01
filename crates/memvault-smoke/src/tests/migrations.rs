@@ -58,7 +58,7 @@ fn old_envelope_without_bucket_indexes_correctly() {
         ..Default::default()
     };
     store
-        .insert_envelope(b"old-cid-001", b"old data", &meta)
+        .insert_envelope(&cid_from_bytes(b"old data").to_bytes(), b"old data", &meta)
         .unwrap();
 
     // Should be queryable by tag
@@ -86,10 +86,11 @@ fn old_envelope_reindexes_without_bucket() {
         "wall_ns": 2000,
     });
     let block_bytes = serde_json::to_vec(&old_block).unwrap();
-    store.put_block(b"reindex-cid", &block_bytes).unwrap();
+    let reindex_cid = cid_from_bytes(&block_bytes).to_bytes();
+    store.put_block(&reindex_cid, &block_bytes).unwrap();
 
     // Reindex should work and NOT crash on missing bucket_id
-    let indexed = store.reindex_block(b"reindex-cid", &block_bytes).unwrap();
+    let indexed = store.reindex_block(&reindex_cid, &block_bytes).unwrap();
     assert!(indexed);
 }
 
@@ -525,7 +526,7 @@ fn reindex_mixed_v1_v2_envelopes() {
         ..Default::default()
     };
     store
-        .insert_envelope(b"cid-v1", b"v1-data", &meta_v1)
+        .insert_envelope(&cid_from_bytes(b"v1-data").to_bytes(), b"v1-data", &meta_v1)
         .unwrap();
 
     // v2 envelope (with bucket_id)
@@ -541,7 +542,7 @@ fn reindex_mixed_v1_v2_envelopes() {
         ..Default::default()
     };
     store
-        .insert_envelope(b"cid-v2", b"v2-data", &meta_v2)
+        .insert_envelope(&cid_from_bytes(b"v2-data").to_bytes(), b"v2-data", &meta_v2)
         .unwrap();
 
     // Both should be queryable by tag
@@ -553,7 +554,7 @@ fn reindex_mixed_v1_v2_envelopes() {
     // Only v2 should be in bucket index
     let bucket_results = store.query_by_bucket(&bucket, 0, 100).unwrap();
     assert_eq!(bucket_results.len(), 1);
-    assert_eq!(bucket_results[0], b"cid-v2");
+    assert_eq!(bucket_results[0], cid_from_bytes(b"v2-data").to_bytes());
 }
 
 // ── Bucket binding migration (unbound → bound on cluster-join) ──────

@@ -258,7 +258,8 @@ fn retraction_basic() {
     let (_dir, store) = temp_store();
 
     // Store a block
-    let target_cid = b"block-to-retract";
+    let target_cid_v = memvault_core::cid_from_bytes(b"some data").to_bytes();
+    let target_cid = target_cid_v.as_slice();
     store.put_block(target_cid, b"some data").unwrap();
 
     // Not retracted initially
@@ -276,7 +277,8 @@ fn retraction_basic() {
 fn retraction_double_retract_errors() {
     let (_dir, store) = temp_store();
 
-    let target_cid = b"block-double";
+    let target_cid_v = memvault_core::cid_from_bytes(b"data").to_bytes();
+    let target_cid = target_cid_v.as_slice();
     store.put_block(target_cid, b"data").unwrap();
 
     let tombstone = b"tomb-1";
@@ -500,21 +502,23 @@ fn trace_provenance_with_linked_blocks() {
         "provenance": []
     });
     let parent_bytes = serde_json::to_vec(&parent_data).unwrap();
-    store.put_block(b"parent-cid", &parent_bytes).unwrap();
+    let parent_cid = memvault_core::cid_from_bytes(&parent_bytes).to_bytes();
+    store.put_block(&parent_cid, &parent_bytes).unwrap();
 
     // Create a child block that references parent in provenance
     let child_data = serde_json::json!({
         "author": "bob",
         "wall_ns": 2000,
         "tags": [["kind", "update"]],
-        "provenance": ["parent-cid"]
+        "provenance": [parent_cid]
     });
     let child_bytes = serde_json::to_vec(&child_data).unwrap();
-    store.put_block(b"child-cid", &child_bytes).unwrap();
+    let child_cid = memvault_core::cid_from_bytes(&child_bytes).to_bytes();
+    store.put_block(&child_cid, &child_bytes).unwrap();
 
-    let trace = trace_provenance(&store, b"child-cid", 5).unwrap();
+    let trace = trace_provenance(&store, &child_cid, 5).unwrap();
     assert_eq!(trace.len(), 1);
-    assert_eq!(trace[0].cid, b"parent-cid");
+    assert_eq!(trace[0].cid, parent_cid);
     assert_eq!(trace[0].depth, 1);
     assert_eq!(trace[0].wall_ns, 1000);
 }
@@ -530,37 +534,37 @@ fn trace_provenance_respects_max_depth() {
         "tags": [],
         "provenance": []
     });
-    store
-        .put_block(b"a", &serde_json::to_vec(&a_data).unwrap())
-        .unwrap();
+    let put = |v: &serde_json::Value| {
+        let bytes = serde_json::to_vec(v).unwrap();
+        let cid = memvault_core::cid_from_bytes(&bytes).to_bytes();
+        store.put_block(&cid, &bytes).unwrap();
+        cid
+    };
+    let a = put(&a_data);
 
     let b_data = serde_json::json!({
         "author": "b",
         "wall_ns": 200,
         "tags": [],
-        "provenance": ["a"]
+        "provenance": [a]
     });
-    store
-        .put_block(b"b", &serde_json::to_vec(&b_data).unwrap())
-        .unwrap();
+    let b = put(&b_data);
 
     let c_data = serde_json::json!({
         "author": "c",
         "wall_ns": 300,
         "tags": [],
-        "provenance": ["b"]
+        "provenance": [b]
     });
-    store
-        .put_block(b"c", &serde_json::to_vec(&c_data).unwrap())
-        .unwrap();
+    let c = put(&c_data);
 
     // max_depth=1: only finds b, not a
-    let trace = trace_provenance(&store, b"c", 1).unwrap();
+    let trace = trace_provenance(&store, &c, 1).unwrap();
     assert_eq!(trace.len(), 1);
-    assert_eq!(trace[0].cid, b"b");
+    assert_eq!(trace[0].cid, b);
 
     // max_depth=5: finds both b and a
-    let trace = trace_provenance(&store, b"c", 5).unwrap();
+    let trace = trace_provenance(&store, &c, 5).unwrap();
     assert_eq!(trace.len(), 2);
 }
 
@@ -574,11 +578,11 @@ fn trace_provenance_empty_for_root() {
         "tags": [],
         "provenance": []
     });
-    store
-        .put_block(b"root", &serde_json::to_vec(&root_data).unwrap())
-        .unwrap();
+    let root_bytes = serde_json::to_vec(&root_data).unwrap();
+    let root = memvault_core::cid_from_bytes(&root_bytes).to_bytes();
+    store.put_block(&root, &root_bytes).unwrap();
 
-    let trace = trace_provenance(&store, b"root", 10).unwrap();
+    let trace = trace_provenance(&store, &root, 10).unwrap();
     assert!(trace.is_empty());
 }
 
@@ -598,7 +602,8 @@ fn audit_query_by_time_range() {
             "tags": [["system", "event"]],
             "payload": { "DocCreate": { "doc_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], "initial_body": "test" } }
         });
-        let cid = format!("audit-cid-{i}");
+        let data_bytes = serde_json::to_vec(&data).unwrap();
+        let cid = memvault_core::cid_from_bytes(&data_bytes).to_bytes();
         let meta = EnvelopeMeta {
             author: vec![1, 2, 3],
             tags: vec![("system".into(), "event".into())],
@@ -609,9 +614,7 @@ fn audit_query_by_time_range() {
             bucket_id: None,
             ..Default::default()
         };
-        store
-            .insert_envelope(cid.as_bytes(), &serde_json::to_vec(&data).unwrap(), &meta)
-            .unwrap();
+        store.insert_envelope(&cid, &data_bytes, &meta).unwrap();
     }
 
     let query = AuditQuery {

@@ -28,6 +28,7 @@ mod tests {
     pub mod p2p;
     pub mod sharing;
     pub mod signed_envelope_indexing;
+    pub mod store_integrity;
     pub mod tokens;
     pub mod views;
 }

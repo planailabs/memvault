@@ -87,6 +87,14 @@ pub const SCOPE_MEMBERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("s
 /// built already.
 pub const SCOPE_REGISTRY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("scope_registry");
 
+/// Attachment pins (local replication policy): manifest_cid -> JSON
+/// `PinReason`. Older builds kept these in BLOCKS under `__pin:<cid>`;
+/// `MemvaultStore::open` moves them here.
+pub const PINS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pins");
+
+/// Scratch rows for the health probe. Never holds data.
+pub const SCRATCH: TableDefinition<&[u8], &[u8]> = TableDefinition::new("scratch");
+
 /// VFS root derived index: key = bucket_id (32 bytes), value = the bucket's
 /// VFS root entity id (32 bytes). A cache over the blockstore so `ensure_root`
 /// is O(1) instead of scanning every entity in the bucket. Populated/repaired

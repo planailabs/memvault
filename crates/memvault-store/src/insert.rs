@@ -409,6 +409,9 @@ impl MemvaultStore {
         block_bytes: &[u8],
         extra: &IngestMeta,
     ) -> Result<(), StoreError> {
+        // Content addressing is the invariant sync, verification and dedup
+        // rest on: never admit bytes under a CID they don't hash to.
+        crate::blockstore::check_cid(cid_bytes, block_bytes)?;
         let (meta, raw, _) = Self::extract_meta(block_bytes, extra);
 
         let txn = self.db.begin_write()?;
