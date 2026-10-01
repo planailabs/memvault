@@ -4573,11 +4573,6 @@ impl LocalClient {
         vec![]
     }
 
-    /// Resolve a bucket_id: explicit only, no fallback.
-    fn resolve_bucket(&self, explicit: Option<&BucketId>) -> Option<Vec<u8>> {
-        explicit.map(|b| b.0.to_vec())
-    }
-
     /// Require an explicit bucket for write operations.
     ///
     /// Returns the bucket bytes or an error.  Pre-genesis (no buckets in
@@ -6195,6 +6190,9 @@ impl MemvaultClient for LocalClient {
         visibility: &str,
         bucket: Option<&BucketId>,
     ) -> Result<Vec<u8>> {
+        // A file needs a bucket like any other write (`store_op`); checked
+        // before any chunk is stored.
+        let bucket_id = self.require_bucket(bucket)?;
         // Chunk file into blocks using memvault-attach
         let (root_cid, blocks) = memvault_attach::chunk_file(data)?;
 
@@ -6234,7 +6232,6 @@ impl MemvaultClient for LocalClient {
         // index so `get_file_manifest` and `inferred_attachment_bucket` work
         // immediately on fresh uploads — not only after a reindex/sync. The
         // envelope's own display tags (below, via `&tags`) stay unchanged.
-        let bucket_id = self.resolve_bucket(bucket);
         let mut meta = EnvelopeMeta {
             author: self.effective_author(),
             tags: tags.clone(),
