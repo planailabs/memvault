@@ -39,6 +39,10 @@ use serde::Deserialize;
 
 /// How long a sign-in may take between leaving and coming back.
 const PENDING_TTL: Duration = Duration::from_secs(600);
+/// Sign-ins in progress kept at once; past it the oldest is dropped (each
+/// unauthenticated `/auth/oidc/login` adds one, so the map needs a ceiling
+/// besides the TTL).
+const PENDING_MAX: usize = 1024;
 /// How long a session lasts (the agent JWT in the cookie).
 const SESSION_TTL: u64 = 8 * 3600;
 
@@ -141,6 +145,27 @@ fn agents(v: &str, dir: &std::path::Path) -> Result<HashMap<String, PathBuf>, St
 /// A sign-in in progress: its PKCE verifier and nonce, by CSRF state.
 type Pending = Mutex<HashMap<String, (PkceCodeVerifier, Nonce, Instant)>>;
 
+/// Remember a sign-in: expired ones go first, then the oldest while the map
+/// is at [`PENDING_MAX`].
+fn admit_pending<V>(
+    pending: &mut HashMap<String, (V, Nonce, Instant)>,
+    state: String,
+    entry: (V, Nonce, Instant),
+) {
+    pending.retain(|_, (_, _, at)| at.elapsed() < PENDING_TTL);
+    while pending.len() >= PENDING_MAX {
+        let Some(oldest) = pending
+            .iter()
+            .min_by_key(|(_, (_, _, at))| *at)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        pending.remove(&oldest);
+    }
+    pending.insert(state, entry);
+}
+
 struct Oidc {
     cfg: OidcConfig,
     meta: CoreProviderMetadata,
@@ -209,8 +234,11 @@ async fn login() -> Response {
         .url();
     {
         let mut pending = o.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.retain(|_, (_, _, at)| at.elapsed() < PENDING_TTL);
-        pending.insert(csrf.secret().clone(), (verifier, nonce, Instant::now()));
+        admit_pending(
+            &mut pending,
+            csrf.secret().clone(),
+            (verifier, nonce, Instant::now()),
+        );
     }
     Redirect::to(url.as_str()).into_response()
 }
@@ -329,6 +357,23 @@ pub fn routes() -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_sign_ins_are_capped_oldest_first() {
+        let mut pending: HashMap<String, ((), Nonce, Instant)> = HashMap::new();
+        let start = Instant::now();
+        for i in 0..(PENDING_MAX + 5) {
+            let at = start + Duration::from_millis(i as u64);
+            admit_pending(
+                &mut pending,
+                format!("s{i}"),
+                ((), Nonce::new(String::new()), at),
+            );
+        }
+        assert_eq!(pending.len(), PENDING_MAX);
+        assert!(!pending.contains_key("s0"), "the oldest sign-in is evicted");
+        assert!(pending.contains_key(&format!("s{}", PENDING_MAX + 4)));
+    }
 
     fn cfg(extra: &[(&str, &str)]) -> Result<OidcConfig, String> {
         let mut vars: HashMap<&str, &str> = HashMap::from([

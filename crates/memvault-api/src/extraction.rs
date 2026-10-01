@@ -102,6 +102,20 @@ pub struct ExtractionPipeline {
     media_registry: OnceLock<Arc<ExtractionRegistry>>,
     /// Ops queued or running on this node, keyed by (manifest CID, op).
     jobs: Mutex<HashMap<(Vec<u8>, ExtractOp), ()>>,
+    /// Jobs allowed to run at once ([`extract_jobs`]). Each running job
+    /// holds a whole file in memory, so the rest wait here — before the
+    /// file is read.
+    running: Arc<tokio::sync::Semaphore>,
+}
+
+/// Background extraction jobs that may run at once:
+/// `MEMVAULT_EXTRACT_JOBS` (default 2, at least 1).
+fn extract_jobs() -> usize {
+    std::env::var("MEMVAULT_EXTRACT_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(2)
+        .max(1)
 }
 
 impl ExtractionPipeline {
@@ -112,6 +126,7 @@ impl ExtractionPipeline {
             text_registry: OnceLock::new(),
             media_registry: OnceLock::new(),
             jobs: Mutex::new(HashMap::new()),
+            running: Arc::new(tokio::sync::Semaphore::new(extract_jobs())),
         }
     }
 
@@ -220,7 +235,13 @@ impl ExtractionPipeline {
         let cid = manifest_cid.to_vec();
         let mime = mime.to_string();
         tokio::spawn(async move {
-            pipeline.run_job(op, &cid, &mime).await;
+            // Wait for a slot before anything is read: a queued job holds
+            // only its CID, a running one the whole file.
+            let permit = Arc::clone(&pipeline.running).acquire_owned().await;
+            if permit.is_ok() {
+                pipeline.run_job(op, &cid, &mime).await;
+            }
+            drop(permit);
             pipeline
                 .jobs
                 .lock()
