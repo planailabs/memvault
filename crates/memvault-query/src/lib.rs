@@ -12,7 +12,9 @@ pub use history::diff::{DiffEntry, diff_doc};
 pub use history::time_travel::doc_at_time;
 pub use history::trace::{ProvenanceEntry, trace_provenance};
 
-pub use audit::query::{AuditQuery, AuditRecord, OpKind, parse_audit_record, query_audit};
+pub use audit::query::{
+    AuditQuery, AuditRecord, OpKind, parse_audit_block, parse_audit_record, query_audit,
+};
 pub use audit::retraction::{is_retracted, retract};
 
 pub use index::effective_tags::effective_tags;

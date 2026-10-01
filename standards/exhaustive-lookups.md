@@ -59,9 +59,20 @@ A `limit` caps the *filtered* result. Taking the newest N records and then
 filtering them (by kind, bucket, doc) returns fewer than N, or none, once other
 records outnumber the wanted ones — and nothing says so.
 
-`query_audit` still works this way (the time scan takes `limit`, then `op_kind`
-and `doc_id` filter): a caller wanting every upload can't rely on it. The
-Files page lists files from the index instead and uses the audit log only for
-upload times it can find. Fixing it means filtering inside the scan (or an
-index by op kind) without decoding every block whole (see
-[listings-without-bodies.md](listings-without-bodies.md)).
+`query_audit` used to work this way (the time scan took `limit`, then
+`op_kind` and `doc_id` filtered): an upload behind `limit` newer operations
+was missing. It now filters while it walks the index newest first
+(`MemvaultStore::scan_time_desc` / `scan_author_desc` / `scan_tag_desc`, a
+callback that stops when enough records matched), reading each block's head
+only (`AuditHead`, see [listings-without-bodies.md](listings-without-bodies.md)).
+Do the same elsewhere:
+
+- **Push the filter into the query** when the index has the field (Tantivy
+  `node_type`, `entity_kind`, or a must-not on the reserved kinds:
+  `QueryScope::without_reserved`, `list_visible_entities`).
+- **Otherwise filter while scanning** and stop at `limit` matches — or, when
+  the source only returns pages (a search engine's top-N), grow the window
+  until `limit` pass or the source is exhausted.
+- **Membership is a lookup, not a set.** "Is this CID in bucket B" is
+  `MemvaultStore::bucket_contains(B, wall_ns, cid)` (a point get), never a
+  `HashSet` of a bucket's every CID.

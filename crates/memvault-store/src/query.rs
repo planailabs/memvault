@@ -165,14 +165,12 @@ impl MemvaultStore {
         let start = keys::pack_time_key(after_ns, &[]);
         let end = keys::pack_time_key(before_ns, &[]);
 
+        // redb ranges iterate backwards too: walk from the newest end and
+        // stop at `limit` (collecting the whole range first held the entire
+        // time index in memory).
         let mut results = Vec::new();
         let range = table.range(start.as_slice()..end.as_slice())?;
-        // Collect then reverse — redb ranges are always ascending.
-        // For bounded limits this is fine; for very large tables we'd
-        // want a proper reverse iterator but redb doesn't support that
-        // on ranges easily.
-        let entries: Vec<_> = range.collect();
-        for entry in entries.into_iter().rev() {
+        for entry in range.rev() {
             let (key, _) = entry?;
             let cid = keys::unpack_time_cid(key.value())?;
             results.push(cid.to_vec());
@@ -181,6 +179,87 @@ impl MemvaultStore {
             }
         }
         Ok(results)
+    }
+
+    /// Walk the time index newest first over `[after_ns, before_ns)`,
+    /// calling `visit(wall_ns, cid)` until it returns `false`. Nothing is
+    /// collected: a caller that filters while it walks (e.g. the audit log)
+    /// stops as soon as it has enough matches.
+    pub fn scan_time_desc(
+        &self,
+        after_ns: u64,
+        before_ns: u64,
+        mut visit: impl FnMut(u64, &[u8]) -> bool,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TIME)?;
+        let start = keys::pack_time_key(after_ns, &[]);
+        let end = keys::pack_time_key(before_ns, &[]);
+        for entry in table.range(start.as_slice()..end.as_slice())?.rev() {
+            let (key, _) = entry?;
+            let key = key.value();
+            let cid = keys::unpack_time_cid(key)?;
+            let mut ts = [0u8; 8];
+            ts.copy_from_slice(&key[..8]);
+            if !visit(u64::from_be_bytes(ts), cid) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk one author's index entries newest first over
+    /// `[after_ns, before_ns)`, calling `visit(wall_ns, cid)` until it
+    /// returns `false`.
+    pub fn scan_author_desc(
+        &self,
+        author: &[u8],
+        after_ns: u64,
+        before_ns: u64,
+        mut visit: impl FnMut(u64, &[u8]) -> bool,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_AUTHOR)?;
+        let start = keys::pack_author_prefix(author, after_ns);
+        let end = keys::pack_author_prefix(author, before_ns);
+        let ts_start = 2 + author.len();
+        for entry in table.range(start.as_slice()..end.as_slice())?.rev() {
+            let (key, _) = entry?;
+            let key = key.value();
+            let cid = keys::unpack_author_cid(key)?;
+            let mut ts = [0u8; 8];
+            ts.copy_from_slice(&key[ts_start..ts_start + 8]);
+            if !visit(u64::from_be_bytes(ts), cid) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk one tag's index entries newest first over `[after_ns,
+    /// before_ns)`, calling `visit(wall_ns, cid)` until it returns `false`.
+    pub fn scan_tag_desc(
+        &self,
+        scope: &str,
+        label: &str,
+        after_ns: u64,
+        before_ns: u64,
+        mut visit: impl FnMut(u64, &[u8]) -> bool,
+    ) -> Result<(), StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_TAG)?;
+        let start = keys::pack_tag_prefix(scope, label, after_ns);
+        let end = keys::pack_tag_prefix(scope, label, before_ns);
+        for entry in table.range(start.as_slice()..end.as_slice())?.rev() {
+            let (key, _) = entry?;
+            let key = key.value();
+            let ts = keys::unpack_tag_ts(key)?;
+            let cid = keys::unpack_tag_cid(key)?;
+            if !visit(ts, cid) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Compute a fingerprint over all CIDs in a time range.
@@ -239,6 +318,21 @@ impl MemvaultStore {
             }
         }
         Ok(results)
+    }
+
+    /// Whether `cid`, indexed at `wall_ns` (the time its tag/time index
+    /// entries carry), is in `bucket_id`'s index. One point lookup: a
+    /// membership test that needs neither a scan nor a cap.
+    pub fn bucket_contains(
+        &self,
+        bucket_id: &[u8],
+        wall_ns: u64,
+        cid: &[u8],
+    ) -> Result<bool, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BY_BUCKET)?;
+        let key = keys::pack_bucket_key(bucket_id, wall_ns, cid);
+        Ok(table.get(key.as_slice())?.is_some())
     }
 
     /// List all buckets (returns bucket_id → decl_cid pairs from the BUCKETS table).

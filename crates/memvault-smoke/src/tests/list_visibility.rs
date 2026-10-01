@@ -243,3 +243,130 @@ async fn audit_distinguishes_extraction_annotation_from_unknown() {
         unknowns.len()
     );
 }
+
+/// `limit` caps the *matching* records: an upload older than `limit` other
+/// operations is still found by an `op_kind` query (the scan used to take
+/// the newest `limit` records and filter those).
+#[tokio::test]
+async fn audit_kind_filter_applies_before_limit() {
+    let node = TestNode::new();
+    let cid = node
+        .client
+        .upload_file(
+            b"old upload",
+            Some("old.txt"),
+            "text/plain",
+            vec![],
+            "internal",
+            None,
+        )
+        .await
+        .unwrap();
+    for i in 0..10 {
+        let doc = Document::new(DocId::random(), format!("newer {i}"), Default::default());
+        node.client
+            .put_doc(doc, vec![], Visibility::Internal, None)
+            .await
+            .unwrap();
+    }
+
+    let records = node
+        .client
+        .audit(AuditQuery {
+            op_kind: Some(OpKind::AttachFile),
+            limit: Some(5),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|r| r.attachment_cid.as_deref() == Some(&cid[..])),
+        "AttachFile query (limit 5) missed the upload behind 10 newer docs: {records:?}"
+    );
+    assert!(records.iter().all(|r| r.op_kind == OpKind::AttachFile));
+}
+
+/// An author-filtered audit query is newest first like every other one
+/// (it returned the author's *oldest* records and ignored `before_ns`).
+#[tokio::test]
+async fn audit_by_author_returns_newest_first() {
+    let node = TestNode::new();
+    let mut doc_ids = Vec::new();
+    for i in 0..6 {
+        let doc = Document::new(DocId::random(), format!("doc {i}"), Default::default());
+        doc_ids.push(doc.id.clone());
+        node.client
+            .put_doc(doc, vec![], Visibility::Internal, None)
+            .await
+            .unwrap();
+    }
+    let newest = node
+        .client
+        .audit(AuditQuery {
+            op_kind: Some(OpKind::DocCreate),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let newest = newest.first().expect("a DocCreate record");
+    assert_eq!(newest.doc_id.as_ref(), doc_ids.last());
+
+    let by_author = node
+        .client
+        .audit(AuditQuery {
+            author: Some(newest.author.clone()),
+            op_kind: Some(OpKind::DocCreate),
+            limit: Some(2),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let got: Vec<_> = by_author.iter().filter_map(|r| r.doc_id.clone()).collect();
+    assert_eq!(got, vec![doc_ids[5].clone(), doc_ids[4].clone()]);
+
+    // `before_ns` bounds the author scan too.
+    let older = node
+        .client
+        .audit(AuditQuery {
+            author: Some(newest.author.clone()),
+            op_kind: Some(OpKind::DocCreate),
+            before_ns: Some(newest.wall_ns),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        older.first().and_then(|r| r.doc_id.clone()),
+        Some(doc_ids[4].clone())
+    );
+}
+
+/// A document's history is found however many operations came after it
+/// (it used to look only among the newest 100 operations of the vault).
+#[tokio::test]
+async fn history_of_finds_doc_behind_many_newer_ops() {
+    let node = TestNode::new();
+    let doc = Document::new(DocId::random(), "x".repeat(50_000), Default::default());
+    node.client
+        .put_doc(doc.clone(), vec![], Visibility::Internal, None)
+        .await
+        .unwrap();
+    for i in 0..60 {
+        let other = Document::new(DocId::random(), format!("later {i}"), Default::default());
+        node.client
+            .put_doc(other, vec![], Visibility::Internal, None)
+            .await
+            .unwrap();
+    }
+    let history = node.client.history_of(&doc.id).await.unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|r| r.op_kind == OpKind::DocCreate && r.doc_id.as_ref() == Some(&doc.id)),
+        "history_of missed the DocCreate: {history:?}"
+    );
+}
