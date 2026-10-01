@@ -1956,12 +1956,14 @@ mod native {
 
                 // Phase 0: Validate block CID integrity.
                 println!("Phase 0: Validating block CIDs...");
-                let blocks = store.iter_blocks()?;
                 let mut cid_ok = 0usize;
                 let mut cid_envelope = 0usize;
                 let mut cid_mismatch = 0usize;
                 let mut cid_unchecked = 0usize;
-                for (cid, data) in &blocks {
+                // One block at a time (never the whole store in memory).
+                for block in store.blocks() {
+                    let (cid, data) = block?;
+                    let (cid, data) = (&cid, &data);
                     match memvault_core::verify_cid(cid, data) {
                         Ok(true) => {
                             cid_ok += 1;
@@ -1988,9 +1990,11 @@ mod native {
                 if cid_mismatch > 0 {
                     // Remove previously synthesized manifests (CID doesn't match content).
                     // These were created by an older Phase 1c and break sync.
-                    let blocks_cleanup = store.iter_blocks()?;
                     let mut cleaned = 0usize;
-                    for (cid, data) in &blocks_cleanup {
+                    // One block at a time (never the whole store in memory).
+                    for block in store.blocks() {
+                        let (cid, data) = block?;
+                        let (cid, data) = (&cid, &data);
                         if let Ok(true) = memvault_core::verify_cid(cid, data) {
                             continue;
                         }
@@ -2019,9 +2023,11 @@ mod native {
                 // Phase 0b: Migrate legacy envelopes
                 if cid_envelope > 0 {
                     println!("Phase 0b: Migrating {cid_envelope} legacy envelope CIDs...");
-                    let blocks = store.iter_blocks()?;
                     let mut migrated = 0usize;
-                    for (old_cid, data) in &blocks {
+                    // One block at a time (never the whole store in memory).
+                    for block in store.blocks() {
+                        let (old_cid, data) = block?;
+                        let (old_cid, data) = (&old_cid, &data);
                         if let Ok(true) = memvault_core::verify_cid(old_cid, data) {
                             continue;
                         }
@@ -2100,9 +2106,11 @@ mod native {
                     // Drop the now-dangling sigchain index entries and rebuild
                     // the secondary indexes from the remaining blocks.
                     store.clear_secondary_indexes()?;
-                    let blocks = store.iter_blocks()?;
                     let mut reindexed = 0usize;
-                    for (cid, data) in &blocks {
+                    // One block at a time (never the whole store in memory).
+                    for block in store.blocks() {
+                        let (cid, data) = block?;
+                        let (cid, data) = (&cid, &data);
                         if store.reindex_block(cid, data).unwrap_or(false) {
                             reindexed += 1;
                         }
@@ -3920,23 +3928,35 @@ mod native {
     }
 
     fn diff_blocks(db_a: &Path, db_b: &Path) -> Result<()> {
-        use std::collections::{BTreeMap, HashSet};
+        use std::collections::HashSet;
 
         let store_a = Arc::new(MemvaultStore::open(db_a)?);
         let store_b = Arc::new(MemvaultStore::open(db_b)?);
 
-        let blocks_a = store_a.iter_blocks()?;
-        let blocks_b = store_b.iter_blocks()?;
-
-        let cids_a: HashSet<Vec<u8>> = blocks_a.iter().map(|(c, _)| c.clone()).collect();
-        let cids_b: HashSet<Vec<u8>> = blocks_b.iter().map(|(c, _)| c.clone()).collect();
+        // CIDs only (keys, no block data); the differing blocks are read
+        // one by one below.
+        let all_cids = |store: &MemvaultStore| -> Result<HashSet<Vec<u8>>> {
+            let mut cids = HashSet::new();
+            let mut after: Option<Vec<u8>> = None;
+            loop {
+                let page = store.block_cids_after(after.as_deref(), 4096)?;
+                let Some(last) = page.last().cloned() else {
+                    break;
+                };
+                cids.extend(page);
+                after = Some(last);
+            }
+            Ok(cids)
+        };
+        let cids_a = all_cids(&store_a)?;
+        let cids_b = all_cids(&store_b)?;
 
         let only_a: Vec<&Vec<u8>> = cids_a.difference(&cids_b).collect();
         let only_b: Vec<&Vec<u8>> = cids_b.difference(&cids_a).collect();
         let common = cids_a.intersection(&cids_b).count();
 
-        println!("Node A: {} blocks  ({})", blocks_a.len(), db_a.display());
-        println!("Node B: {} blocks  ({})", blocks_b.len(), db_b.display());
+        println!("Node A: {} blocks  ({})", cids_a.len(), db_a.display());
+        println!("Node B: {} blocks  ({})", cids_b.len(), db_b.display());
         println!("Common: {common}");
         println!("Only A: {}", only_a.len());
         println!("Only B: {}", only_b.len());
@@ -3946,14 +3966,11 @@ mod native {
             return Ok(());
         }
 
-        let map_a: BTreeMap<Vec<u8>, Vec<u8>> = blocks_a.into_iter().collect();
-        let map_b: BTreeMap<Vec<u8>, Vec<u8>> = blocks_b.into_iter().collect();
-
         if !only_a.is_empty() {
             println!("\n=== Only on Node A ({}) ===\n", only_a.len());
             for cid in &only_a {
-                if let Some(data) = map_a.get(*cid) {
-                    print_block_summary(cid, data);
+                if let Some(data) = store_a.get_block(cid)? {
+                    print_block_summary(cid, &data);
                 }
             }
         }
@@ -3961,8 +3978,8 @@ mod native {
         if !only_b.is_empty() {
             println!("\n=== Only on Node B ({}) ===\n", only_b.len());
             for cid in &only_b {
-                if let Some(data) = map_b.get(*cid) {
-                    print_block_summary(cid, data);
+                if let Some(data) = store_b.get_block(cid)? {
+                    print_block_summary(cid, &data);
                 }
             }
         }

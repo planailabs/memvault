@@ -322,9 +322,19 @@ struct OutboundGate {
     active: HashMap<PeerId, BlockRequest>,
     /// Peers whose current active request has already consumed its retry.
     retried: HashSet<PeerId>,
-    /// Per-peer backlog of requests waiting for the in-flight one to finish.
+    /// Per-peer backlog of requests waiting for the in-flight one to finish
+    /// (at most [`MAX_QUEUED_PER_PEER`] each).
     queue: HashMap<PeerId, VecDeque<BlockRequest>>,
+    /// Per-peer CIDs already asked for (in flight or queued), so a CID is
+    /// never queued twice for the same peer.
+    pending_cids: HashMap<PeerId, HashSet<Vec<u8>>>,
 }
+
+/// Queued block requests per peer. A full backlog drops new requests: the
+/// CIDs they name are found missing again by the next resync's completeness
+/// walk / RBSR round, so nothing is lost for good, while a slow peer can no
+/// longer make the queue grow without bound.
+const MAX_QUEUED_PER_PEER: usize = 256;
 
 impl OutboundGate {
     /// Returns true if `req` is a redundant RBSR (range-fingerprint) probe:
@@ -335,8 +345,18 @@ impl OutboundGate {
     }
 
     /// Send `req` now if the peer has nothing in flight, else enqueue it.
-    fn send(&mut self, host: &mut impl MemvaultHost, peer: PeerId, req: BlockRequest) {
+    /// CIDs already requested from this peer (in flight or queued) are
+    /// dropped from `req`; a fetch left with none is not sent at all.
+    fn send(&mut self, host: &mut impl MemvaultHost, peer: PeerId, mut req: BlockRequest) {
+        if !req.cids.is_empty() {
+            let pending = self.pending_cids.entry(peer).or_default();
+            req.cids.retain(|cid| !pending.contains(cid));
+            if req.cids.is_empty() {
+                return;
+            }
+        }
         if self.inflight.insert(peer) {
+            self.track(peer, &req);
             self.active.insert(peer, req.clone());
             self.retried.remove(&peer);
             host.send_block_request(&peer, req);
@@ -348,14 +368,44 @@ impl OutboundGate {
         if Self::is_rbsr(&req) && q.iter().any(Self::is_rbsr) {
             return;
         }
-        q.push_back(req);
+        if q.len() >= MAX_QUEUED_PER_PEER {
+            tracing::debug!(%peer, "block request dropped (peer backlog full)");
+            return;
+        }
+        q.push_back(req.clone());
         tracing::debug!(%peer, depth = q.len(), "block request queued (peer busy)");
+        self.track(peer, &req);
+    }
+
+    /// Remember `req`'s CIDs as asked of `peer`.
+    fn track(&mut self, peer: PeerId, req: &BlockRequest) {
+        if !req.cids.is_empty() {
+            self.pending_cids
+                .entry(peer)
+                .or_default()
+                .extend(req.cids.iter().cloned());
+        }
+    }
+
+    /// `req` left `peer`'s books (answered or given up): its CIDs may be
+    /// asked for again.
+    fn untrack(&mut self, peer: PeerId, req: &BlockRequest) {
+        if let Some(pending) = self.pending_cids.get_mut(&peer) {
+            for cid in &req.cids {
+                pending.remove(cid);
+            }
+            if pending.is_empty() {
+                self.pending_cids.remove(&peer);
+            }
+        }
     }
 
     /// The in-flight request for `peer` finished: send the next queued request,
     /// or clear the in-flight marker when the backlog is empty.
     fn complete(&mut self, host: &mut impl MemvaultHost, peer: PeerId) {
-        self.active.remove(&peer);
+        if let Some(done) = self.active.remove(&peer) {
+            self.untrack(peer, &done);
+        }
         self.retried.remove(&peer);
         if let Some(q) = self.queue.get_mut(&peer) {
             if let Some(next) = q.pop_front() {
@@ -371,9 +421,8 @@ impl OutboundGate {
     /// The in-flight request failed before a response arrived. Retry concrete
     /// fetches once before draining queued work; periodic RBSR heals broad sync.
     fn fail(&mut self, host: &mut impl MemvaultHost, peer: PeerId) {
-        if let Some(req) = self.active.remove(&peer) {
+        if let Some(req) = self.active.get(&peer).cloned() {
             if !req.cids.is_empty() && self.retried.insert(peer) {
-                self.active.insert(peer, req.clone());
                 host.send_block_request(&peer, req);
                 return;
             }
@@ -387,6 +436,7 @@ impl OutboundGate {
         self.active.remove(peer);
         self.retried.remove(peer);
         self.queue.remove(peer);
+        self.pending_cids.remove(peer);
     }
 
     /// Total requests waiting across all peers (for the resync gauge).
@@ -1960,22 +2010,24 @@ fn extract_dependent_cids(block_data: &[u8]) -> Vec<Vec<u8>> {
 /// Walk every stored block, extract its dependencies, and return CIDs that
 /// are referenced but missing from the store.  This catches incomplete file
 /// DAGs (envelope present but some chunks missing due to interrupted sync).
+///
+/// The store is walked one block at a time (never collected), presence is
+/// checked without reading the dependency, and only the missing CIDs are
+/// remembered (deduplicated).
 fn collect_incomplete_cids(store: &MemvaultStore) -> Vec<Vec<u8>> {
-    let blocks = match store.iter_blocks() {
-        Ok(b) => b,
-        Err(_) => return vec![],
-    };
-
     let mut missing: Vec<Vec<u8>> = Vec::new();
-    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut missing_set: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
-    for (_cid, data) in &blocks {
-        for dep in extract_dependent_cids(data) {
-            if seen.insert(dep.clone()) {
-                if store.get_block(&dep).ok().flatten().is_none() {
-                    missing.push(dep);
-                }
+    for block in store.blocks() {
+        let Ok((_cid, data)) = block else {
+            break;
+        };
+        for dep in extract_dependent_cids(&data) {
+            if missing_set.contains(&dep) || store.has_block(&dep).unwrap_or(false) {
+                continue;
             }
+            missing_set.insert(dep.clone());
+            missing.push(dep);
         }
     }
 
@@ -2729,6 +2781,46 @@ mod outbound_gate_tests {
         gate.forget(&peer);
         assert!(gate.inflight.is_empty());
         assert_eq!(gate.queued_total(), 0);
+    }
+
+    #[test]
+    fn dedups_cids_already_requested_from_the_peer() {
+        let mut host = RecordingHost::default();
+        let mut gate = OutboundGate::default();
+        let peer = PeerId::random();
+
+        gate.send(&mut host, peer, fetch(1)); // in flight
+        gate.send(&mut host, peer, fetch(1)); // already in flight: dropped
+        gate.send(&mut host, peer, fetch(2)); // queued
+        gate.send(&mut host, peer, fetch(2)); // already queued: dropped
+        assert_eq!(host.sent.len(), 1);
+        assert_eq!(gate.queued_total(), 1);
+
+        // Once answered, a CID may be asked for again.
+        gate.complete(&mut host, peer); // sends 2
+        gate.complete(&mut host, peer); // idle
+        gate.send(&mut host, peer, fetch(1));
+        assert_eq!(host.sent.len(), 3);
+        assert_eq!(host.sent[2].1.cids, vec![vec![1]]);
+    }
+
+    #[test]
+    fn backlog_is_capped_per_peer() {
+        let mut host = RecordingHost::default();
+        let mut gate = OutboundGate::default();
+        let peer = PeerId::random();
+        for i in 0..(MAX_QUEUED_PER_PEER + 10) {
+            let mut req = fetch(0);
+            req.cids = vec![(i as u32).to_be_bytes().to_vec()];
+            gate.send(&mut host, peer, req);
+        }
+        assert_eq!(host.sent.len(), 1);
+        assert_eq!(gate.queued_total(), MAX_QUEUED_PER_PEER);
+        // Dropped requests' CIDs aren't remembered as pending.
+        assert_eq!(
+            gate.pending_cids.get(&peer).map(HashSet::len),
+            Some(MAX_QUEUED_PER_PEER + 1)
+        );
     }
 
     #[test]

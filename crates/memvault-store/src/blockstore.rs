@@ -51,7 +51,10 @@ impl MemvaultStore {
         Ok(table.get(cid)?.is_some())
     }
 
-    /// Iterate all blocks, returning (cid_bytes, block_bytes) pairs.
+    /// Every block as (cid_bytes, block_bytes) pairs, **all in memory at
+    /// once**. For tests and tiny stores only; walk a real store with
+    /// [`MemvaultStore::blocks`] and count it with
+    /// [`MemvaultStore::block_count`] (standards/bounded-memory.md).
     pub fn iter_blocks(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
