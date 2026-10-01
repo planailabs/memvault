@@ -46,41 +46,23 @@ async fn search_docs(
         // file CID). Unknown node types are skipped.
         let (node_type, id) = match h.node_type.as_str() {
             "doc" => ("doc", h.node_id.strip_prefix("doc:").unwrap_or(&h.node_id)),
-            "entity" => ("entity", h.node_id.strip_prefix("entity:").unwrap_or(&h.node_id)),
-            "file" => ("file", h.node_id.strip_prefix("file:").unwrap_or(&h.node_id)),
+            "entity" => (
+                "entity",
+                h.node_id.strip_prefix("entity:").unwrap_or(&h.node_id),
+            ),
+            "file" => (
+                "file",
+                h.node_id.strip_prefix("file:").unwrap_or(&h.node_id),
+            ),
             _ => continue,
         };
         let id = id.to_string();
 
-        // Title: docs carry it in frontmatter; entities and files surface the
-        // index label (entity name / filename). Fall back to the label, then
-        // to nothing (the snippet still shows).
-        let label = (!h.label.is_empty()).then(|| h.label.clone());
-        let title = if node_type == "doc" {
-            match hex::decode(&id) {
-                Ok(bytes) if bytes.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    let scope = memvault_core::QueryScope::all()
-                        .with_include_retracted(show_retracted);
-                    client
-                        .get_doc_scoped(&memvault_core::DocId(arr), &scope)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|doc| {
-                            doc.frontmatter
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                        })
-                        .or(label)
-                }
-                _ => label,
-            }
-        } else {
-            label
-        };
+        // Title: the hit's index label (a doc's frontmatter title, an
+        // entity's name, a file's name) — never the document itself, which
+        // would decode its whole body per hit. No label: no title (the
+        // snippet still shows).
+        let title = (!h.label.is_empty()).then(|| h.label.clone());
 
         // Highlight matching terms in snippet.
         let snippet_html = highlight_snippet(&h.snippet, &q_lower);

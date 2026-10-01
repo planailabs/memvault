@@ -77,8 +77,51 @@ async fn get_note(id: String, show_retracted: bool) -> Result<NoteData, ServerFn
     // rewritten to the matching in-app routes by `notes::render`.
     let body_html = crate::ui::pages::notes::render::render_doc_body(&doc.body);
 
-    // Fetch attachments from audit log for this document.
-    let mut attachments = Vec::new();
+    // Fetch linked items via edges_of.
+    let doc_node = memvault_core::NodeRef::Doc(doc_id.clone());
+    let edges = client.edges_of(&doc_node).await.unwrap_or_default();
+    let mut linked_items = Vec::new();
+    for (source, edge) in edges.iter().cloned() {
+        let (direction, other_node) = if source == doc_node {
+            ("outgoing".to_string(), edge.target.tag_label())
+        } else {
+            ("incoming".to_string(), source.tag_label())
+        };
+        let other_label = client.resolve_label(&other_node).await.unwrap_or(None);
+        let provenance = edge
+            .props
+            .get("provenance")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let pending_alias = edge
+            .props
+            .get("pending_alias")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        linked_items.push(LinkedItem {
+            edge_id: hex::encode(edge.id.0),
+            direction,
+            relation: edge.relation.clone(),
+            other_node,
+            other_label,
+            provenance,
+            pending_alias,
+        });
+    }
+
+    // Attachments: the files linked to or from this document (its edges),
+    // plus legacy `AttachFile` ops that name it (the audit log filters by
+    // doc before its limit, through the doc's own tag index).
+    let mut manifest_cids: Vec<Vec<u8>> = Vec::new();
+    for (source, edge) in &edges {
+        for node in [source, &edge.target] {
+            if let memvault_core::NodeRef::Attachment(cid) = node {
+                if !manifest_cids.contains(cid) {
+                    manifest_cids.push(cid.clone());
+                }
+            }
+        }
+    }
     if let Ok(records) = client
         .audit(memvault_query::AuditQuery {
             doc_id: Some(doc_id.clone()),
@@ -90,69 +133,52 @@ async fn get_note(id: String, show_retracted: bool) -> Result<NoteData, ServerFn
     {
         for record in records {
             // record.cid is the AttachFile envelope CID — the manifest
-            // sits at record.attachment_cid. Skip records without one.
-            let Some(manifest_cid) = record.attachment_cid.clone() else {
-                continue;
-            };
-            if let Ok(Some(manifest_bytes)) = client.get_file_manifest(&manifest_cid).await {
-                // DAG-CBOR via the canonical helper — plain
-                // serde_json::from_slice would silently drop every
-                // field and produce blank "unnamed" rows.
-                if let Some(manifest) = memvault_store::deserialize_block(&manifest_bytes) {
-                    attachments.push(AttachmentInfo {
-                        cid: hex::encode(&manifest_cid),
-                        filename: manifest
-                            .get("filename")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unnamed")
-                            .to_string(),
-                        mime_type: manifest
-                            .get("mime_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("application/octet-stream")
-                            .to_string(),
-                        size: manifest
-                            .get("content_size")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                    });
+            // sits at record.attachment_cid.
+            if let Some(cid) = record.attachment_cid {
+                if !manifest_cids.contains(&cid) {
+                    manifest_cids.push(cid);
                 }
             }
         }
     }
 
-    // Fetch linked items via edges_of.
-    let doc_node = memvault_core::NodeRef::Doc(doc_id.clone());
-    let mut linked_items = Vec::new();
-    if let Ok(edges) = client.edges_of(&doc_node).await {
-        for (source, edge) in edges {
-            let (direction, other_node) = if source == doc_node {
-                ("outgoing".to_string(), edge.target.tag_label())
-            } else {
-                ("incoming".to_string(), source.tag_label())
-            };
-            let other_label = client.resolve_label(&other_node).await.unwrap_or(None);
-            let provenance = edge
-                .props
-                .get("provenance")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let pending_alias = edge
-                .props
-                .get("pending_alias")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            linked_items.push(LinkedItem {
-                edge_id: hex::encode(edge.id.0),
-                direction,
-                relation: edge.relation.clone(),
-                other_node,
-                other_label,
-                provenance,
-                pending_alias,
-            });
-        }
+    // Manifests (name, type, size), a few at a time.
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (pos, manifest_cid) in manifest_cids.into_iter().enumerate() {
+        let (client, permits) = (client.clone(), permits.clone());
+        tasks.spawn(async move {
+            let _permit = permits.acquire_owned().await;
+            let bytes = client.get_file_manifest(&manifest_cid).await.ok()??;
+            // DAG-CBOR locally, JSON over HTTP: deserialize_block reads
+            // both (plain serde_json::from_slice would blank every row).
+            let manifest = memvault_store::deserialize_block(&bytes)?;
+            Some((
+                pos,
+                AttachmentInfo {
+                    cid: hex::encode(&manifest_cid),
+                    filename: manifest
+                        .get("filename")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                    mime_type: manifest
+                        .get("mime_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("application/octet-stream")
+                        .to_string(),
+                    size: manifest
+                        .get("content_size")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                },
+            ))
+        });
     }
+    let mut attachments: Vec<(usize, AttachmentInfo)> =
+        tasks.join_all().await.into_iter().flatten().collect();
+    attachments.sort_by_key(|(pos, _)| *pos);
+    let attachments: Vec<AttachmentInfo> = attachments.into_iter().map(|(_, a)| a).collect();
 
     Ok(NoteData {
         id: hex::encode(doc.id.0),
