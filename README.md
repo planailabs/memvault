@@ -159,7 +159,7 @@ Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent m
 |------|-------------|
 | `memvault_put` | Store a document with optional title and tags |
 | `memvault_get` | Retrieve a document by hex-encoded doc ID |
-| `memvault_search` | Full-text search across docs, entities, and files |
+| `memvault_search` | Full-text search of the documents in one bucket (`bucket`, else the agent's) |
 | `memvault_list` | List recent documents, optionally filtered by tag |
 | `memvault_list_all` | List all nodes (docs, entities, files), optionally filtered by view |
 | `memvault_doc_history` | Operation history for a document |
@@ -197,7 +197,7 @@ Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent m
 
 **VFS** (`memvault_vfs_*`): `ls`, `tree`, `resolve`, `find`, `mkdir`, `link`, `unlink`, `mv` — organise nodes into a per-bucket directory hierarchy; a node can be mounted at multiple paths, and unlinking never deletes the underlying node.
 
-**Skills** (`memvault_skill_*`): `publish`, `list`, `get`, `rename`, `delete`, `link_resource`, `unlink_resource`, `hydrate` — bundle instruction docs and resources as a skill entity and materialize it to disk as a `SKILL.md` bundle.
+**Skills** (`memvault_skill_*`): `publish`, `list`, `get`, `rename`, `delete`, `link_resource`, `unlink_resource`, `hydrate` — bundle instruction docs and resources as a skill entity and materialize it to disk as a `SKILL.md` bundle. `list` reads one bucket (`bucket`, else the agent's).
 
 **Buckets & agents** (`memvault_bucket_*`, `memvault_agent_rename`): `list`, `create`, `get`, `rename`, `archive`, `merge`, `unmerge`, `merges`, `grants_list` — manage bucket scoping, merge overlays, and capability grants.
 
@@ -212,7 +212,7 @@ Agent roles: `agent-host`, `auditor`, `service`, `admin`. Every write an agent m
 | `memvault_export` | Export a single node to a temp file |
 | `memvault_export_vault` | Export the whole vault (or a filtered subset) to a directory or tar |
 | `memvault_status` | Block count, doc count, peer count, uptime |
-| `memvault_audit` | Query the audit log, optionally by op kind |
+| `memvault_audit` | Query one bucket's audit log (`bucket`, else the agent's), optionally by op kind |
 
 ### Adding to Claude Code
 

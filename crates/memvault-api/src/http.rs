@@ -1151,6 +1151,9 @@ impl MemvaultClient for HttpApiClient {
         if let Some(n) = query.limit {
             params.push(format!("limit={n}"));
         }
+        if let Some(b) = &query.bucket {
+            params.push(format!("bucket={}", hex::encode(b.0)));
+        }
         let url = if params.is_empty() {
             self.url("/audit")
         } else {

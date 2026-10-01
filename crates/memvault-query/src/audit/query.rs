@@ -77,6 +77,11 @@ pub struct AuditQuery {
     pub after_ns: Option<u64>,
     pub before_ns: Option<u64>,
     pub limit: Option<usize>,
+    /// Only records in this bucket. The other filters and the limit then
+    /// apply to the bucket's records (filters before limits); cluster
+    /// sigchain events, which belong to no bucket, are left out.
+    #[serde(default)]
+    pub bucket: Option<memvault_core::BucketId>,
 }
 
 /// Query the audit log.
@@ -99,7 +104,13 @@ pub fn query_audit(
     let sigchain_cids: std::collections::HashSet<Vec<u8>> =
         sigchain_records.keys().cloned().collect();
 
-    let cids = if let Some(author) = &query.author {
+    let cids = if let Some(bucket) = &query.bucket {
+        // The bucket's index runs oldest first; read it newest first, and
+        // stop once `limit` records pass the filters (below).
+        let mut cids = store.query_by_bucket(&bucket.0, after, usize::MAX)?;
+        cids.reverse();
+        cids
+    } else if let Some(author) = &query.author {
         store.query_by_author(author, after, limit)?
     } else {
         // Newest first so recent operations show up even when there are
@@ -129,6 +140,18 @@ pub fn query_audit(
                         continue;
                     }
                 }
+                if query.bucket.is_some() {
+                    if record.wall_ns > before
+                        || query.author.as_ref().is_some_and(|a| &record.author != a)
+                    {
+                        continue;
+                    }
+                    records.push(record);
+                    if records.len() >= limit {
+                        break;
+                    }
+                    continue;
+                }
                 records.push(record);
             }
         }
@@ -137,7 +160,7 @@ pub fn query_audit(
     // Merge in the typed sigchain records, honouring the op_kind / author /
     // time filters (doc_id never matches these). Then sort newest-first and
     // cap to limit so the merged set stays consistent with the scan ordering.
-    if query.doc_id.is_none() {
+    if query.doc_id.is_none() && query.bucket.is_none() {
         for (_cid, rec) in sigchain_records {
             if rec.wall_ns < after || rec.wall_ns > before {
                 continue;

@@ -101,15 +101,6 @@ impl MemvaultServer {
         })
     }
 
-    /// Resolve bucket for query-style operations. None is fine — reads
-    /// degrade to "all accessible buckets".
-    fn resolve_bucket_query(&self, explicit: Option<&str>) -> Result<Option<BucketId>> {
-        if let Some(s) = explicit.filter(|s| !s.is_empty()) {
-            return BucketId::from_hex(s).map(Some).map_err(Into::into);
-        }
-        Ok(None)
-    }
-
     /// Bucket used for VFS operations. VFS is per-bucket — every call needs
     /// either an explicit bucket from the tool params or the startup-resolved
     /// agent bucket. Errors when neither is available.
@@ -230,9 +221,12 @@ impl MemvaultServer {
     )]
     async fn search(&self, Parameters(params): Parameters<SearchParams>) -> String {
         let limit = params.limit.unwrap_or(10);
-        if params.bucket.is_some() {
-            return "error: search can't be limited to a bucket yet; leave bucket out".to_string();
-        }
+        // One bucket (standards/bucket-scoping.md): the named one, else the
+        // agent's — it searched every bucket.
+        let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("error: {e}"),
+        };
         let tag = match params
             .tag_filter
             .as_deref()
@@ -248,11 +242,18 @@ impl MemvaultServer {
         // the tagged hits; a rare tag among many matches can fall outside
         // the first 20 × limit. Push the filter into the index if that bites.
         let fetch = if tag.is_some() {
-            (limit * 20).max(200)
+            limit.saturating_mul(20).max(200)
         } else {
             limit
         };
-        let hits = match self.client.search(&params.query, fetch).await {
+        let scope = memvault_core::QueryScope::all()
+            .with_bucket(Some(bucket))
+            .with_kind(Some(memvault_core::NodeKind::Document));
+        let hits: Vec<memvault_query::UnifiedHit> = match self
+            .client
+            .search_scoped(&scope, &params.query, fetch)
+            .await
+        {
             Ok(hits) => hits,
             Err(e) => return format!("error: {e}"),
         };
@@ -264,11 +265,7 @@ impl MemvaultServer {
                     if kept.len() == limit {
                         break;
                     }
-                    match self
-                        .client
-                        .get_tags(&format!("doc:{}", hex::encode(h.doc_id.0)))
-                        .await
-                    {
+                    match self.client.get_tags(&h.node_id).await {
                         Ok(tags) if tags.contains(tag) => kept.push(h),
                         Ok(_) => {}
                         Err(e) => return format!("error: {e}"),
@@ -280,7 +277,7 @@ impl MemvaultServer {
         serde_json::json!(
             hits.iter()
                 .map(|h| serde_json::json!({
-                    "doc_id": hex::encode(h.doc_id.0),
+                    "doc_id": h.node_id.strip_prefix("doc:").unwrap_or(&h.node_id),
                     "score": h.score,
                     "snippet": h.snippet,
                 }))
@@ -631,12 +628,13 @@ impl MemvaultServer {
         description = "List skills (manifest summaries: id, name, description, trigger). Cheap discovery — does not traverse resources."
     )]
     async fn skill_list(&self, Parameters(params): Parameters<SkillListParams>) -> String {
-        let bucket = match self.resolve_bucket_query(params.bucket.as_deref()) {
+        // The agent's bucket unless one is named — it listed every bucket.
+        let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
             Ok(b) => b,
             Err(e) => return format!("error: {e}"),
         };
         let limit = params.limit.unwrap_or(100);
-        match self.client.skill_list(limit, bucket.as_ref()).await {
+        match self.client.skill_list(limit, Some(&bucket)).await {
             Ok(skills) => serde_json::to_string(&skills).unwrap_or_else(|e| format!("error: {e}")),
             Err(e) => format!("error: {e}"),
         }
@@ -1419,8 +1417,13 @@ impl MemvaultServer {
         description = "Query audit log. Optionally filter by op_kind (DocCreate, EntityCreate, AttachFile, EdgeAdd, Retract)."
     )]
     async fn audit(&self, Parameters(params): Parameters<AuditParams>) -> String {
-        let _ = self.resolve_bucket_query(params.bucket.as_deref());
+        // The agent's bucket unless one is named (it ignored `bucket`).
+        let bucket = match self.resolve_bucket(params.bucket.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("error: {e}"),
+        };
         let query = AuditQuery {
+            bucket: Some(bucket),
             op_kind: params.op_kind.as_deref().map(|k| match k {
                 "DocCreate" => memvault_query::OpKind::DocCreate,
                 "DocEdit" => memvault_query::OpKind::DocEdit,
@@ -2528,5 +2531,105 @@ mod tool_tests {
             .await;
         assert_eq!(jget(&r, "node_id"), node, "{r}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Search, skill listing and the audit log read one bucket — the named
+    /// one, else the agent's — like `memvault_list` (standards/bucket-scoping.md).
+    #[tokio::test]
+    async fn search_skills_and_audit_read_one_bucket() {
+        let srv = test_server().await;
+        let other = srv
+            .client
+            .bucket_create(
+                "elsewhere",
+                None,
+                Visibility::Internal,
+                memvault_core::classification::Classification::Internal,
+                memvault_core::BucketRole::Standard,
+            )
+            .await
+            .unwrap();
+        let other_hex = hex::encode(other.0);
+        let put = |text: &str, bucket: Option<String>| {
+            srv.put(Parameters(crate::types::PutParams {
+                text: text.to_string(),
+                title: None,
+                tags: vec![],
+                visibility: None,
+                vfs_path: None,
+                bucket,
+            }))
+        };
+        let home = put("the wombat ledger at home", None).await;
+        assert_ok(&home);
+        let away = put("the wombat ledger elsewhere", Some(other_hex.clone())).await;
+        assert_ok(&away);
+        let (home_id, away_id) = (jget(&home, "node_id"), jget(&away, "node_id"));
+        let (home_id, away_id) = (
+            home_id.trim_start_matches("doc:").to_string(),
+            away_id.trim_start_matches("doc:").to_string(),
+        );
+
+        let search = |bucket: Option<String>| {
+            srv.search(Parameters(crate::types::SearchParams {
+                query: "wombat".into(),
+                limit: Some(10),
+                tag_filter: None,
+                bucket,
+            }))
+        };
+        let mut hits = String::new();
+        for _ in 0..50 {
+            hits = search(None).await;
+            if hits.contains(&home_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(hits.contains(&home_id), "{hits}");
+        assert!(!hits.contains(&away_id), "another bucket stays out: {hits}");
+        let named = search(Some(other_hex.clone())).await;
+        assert_ok(&named);
+        assert!(
+            named.contains(&away_id),
+            "a named bucket is searched: {named}"
+        );
+        assert!(!named.contains(&home_id), "{named}");
+
+        let publish = |name: &str, bucket: Option<String>| {
+            srv.skill_publish(Parameters(crate::types::SkillPublishParams {
+                name: name.to_string(),
+                description: None,
+                trigger: None,
+                instruction_body: None,
+                visibility: None,
+                bucket,
+            }))
+        };
+        assert_ok(&publish("home-skill", None).await);
+        assert_ok(&publish("away-skill", Some(other_hex.clone())).await);
+        let skills = srv
+            .skill_list(Parameters(crate::types::SkillListParams {
+                limit: None,
+                bucket: None,
+            }))
+            .await;
+        assert!(skills.contains("home-skill"), "{skills}");
+        assert!(!skills.contains("away-skill"), "{skills}");
+
+        let audit = |bucket: Option<String>| {
+            srv.audit(Parameters(crate::types::AuditParams {
+                limit: Some(500),
+                op_kind: None,
+                bucket,
+            }))
+        };
+        let (home_cid, away_cid) = (jget(&home, "cid"), jget(&away, "cid"));
+        let log = audit(None).await;
+        assert!(log.contains(&home_cid), "{log}");
+        assert!(!log.contains(&away_cid), "another bucket stays out: {log}");
+        let log = audit(Some(other_hex)).await;
+        assert!(log.contains(&away_cid), "a named bucket is audited: {log}");
+        assert!(!log.contains(&home_cid), "{log}");
     }
 }
