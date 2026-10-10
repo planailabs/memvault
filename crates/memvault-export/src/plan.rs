@@ -40,11 +40,19 @@ pub async fn build_plan(client: &dyn MemvaultClient, opts: &ExportOptions) -> Re
     let mut entities = Vec::new();
 
     // Use list_all for a unified listing, filtered by view if specified.
-    // Vault export is cross-bucket by design → no bucket scope. Every node
-    // (no cap: an export that silently stops at N nodes loses data), so the
-    // tag filter below sees them all (see standards/exhaustive-lookups.md).
+    // Bucket scoping (standards/bucket-scoping.md): reads default to a single
+    // concrete bucket — the caller's explicit `--bucket-id`, else their agent
+    // bucket (admins get the cross-bucket listing). We forward `opts.bucket`
+    // verbatim; `None` keeps that "explicit, else agent bucket" default so a
+    // reader granted access to another bucket can export it by naming it.
+    // Every node (no cap: an export that silently stops at N nodes loses data),
+    // so the tag filter below sees them all (see standards/exhaustive-lookups.md).
     let all_nodes = client
-        .list_all(opts.view_filter.as_deref(), usize::MAX, None)
+        .list_all(
+            opts.view_filter.as_deref(),
+            usize::MAX,
+            opts.bucket.as_ref(),
+        )
         .await?;
 
     for (node_id, node_type, label, tags) in &all_nodes {

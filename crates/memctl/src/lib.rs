@@ -2186,6 +2186,11 @@ mod native {
                     include_vfs: !no_vfs,
                     tag_filter,
                     view_filter: view,
+                    // Honour the global `--bucket-id` (standards/bucket-scoping.md):
+                    // a scoped export reads exactly that bucket, so a reader
+                    // granted access to another bucket can export it. Unset →
+                    // `None` → the agent bucket (admins: cross-bucket).
+                    bucket: explicit_bucket()?,
                 };
                 let sink = memvault_export::create_sink(&output, tar, gzip)?;
                 let stats = memvault_export::run_export(&*client, sink, opts).await?;

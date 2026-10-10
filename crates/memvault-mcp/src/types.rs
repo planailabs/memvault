@@ -595,8 +595,9 @@ pub struct ExportVaultParams {
     /// Filter by view name.
     #[serde(default)]
     pub view: Option<String>,
-    // bucket: intentionally absent — `ExportOptions` doesn't carry a
-    // bucket filter today. See ExportNodeParams for the same note.
+    // bucket: intentionally absent — the MCP vault-export tool exports the
+    // caller's agent bucket (the server passes `bucket: None`). See
+    // ExportNodeParams for the same note.
 }
 
 // -- memvault_skill_publish --

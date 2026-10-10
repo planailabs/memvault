@@ -28,4 +28,9 @@ pub struct ExportOptions {
     pub tag_filter: Option<(String, String)>,
     /// Filter by view name.
     pub view_filter: Option<String>,
+    /// Scope the export to a single bucket (standards/bucket-scoping.md): the
+    /// explicit bucket when set, else the caller's agent bucket (admins get the
+    /// cross-bucket listing). Without this, `memctl export --bucket-id <hex>`
+    /// silently listed the caller's agent bucket instead of the named one.
+    pub bucket: Option<memvault_core::BucketId>,
 }

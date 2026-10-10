@@ -43,6 +43,12 @@ struct Cli {
     /// Filter by view name
     #[arg(long)]
     view: Option<String>,
+
+    /// Target a specific bucket (hex-encoded 32-byte BucketId). When unset,
+    /// the export falls back to the caller's agent bucket
+    /// (standards/bucket-scoping.md).
+    #[arg(long, env = "MEMVAULT_BUCKET_ID")]
+    bucket_id: Option<String>,
 }
 
 #[tokio::main]
@@ -61,11 +67,24 @@ async fn main() -> Result<()> {
         .as_deref()
         .and_then(memvault_api::docs::parse_tag_filter);
 
+    let bucket = match cli.bucket_id.as_deref() {
+        Some(s) if !s.is_empty() => {
+            let bytes = hex::decode(s.trim())
+                .map_err(|e| anyhow::anyhow!("--bucket-id is not valid hex: {e}"))?;
+            let arr: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("--bucket-id must decode to 32 bytes"))?;
+            Some(memvault_core::BucketId(arr))
+        }
+        _ => None,
+    };
+
     let opts = ExportOptions {
         history: cli.history,
         include_vfs: !cli.no_vfs,
         tag_filter,
         view_filter: cli.view,
+        bucket,
     };
 
     let client = cli.client.connect().await?;

@@ -17,6 +17,7 @@ mod tests {
     pub mod buckets;
     pub mod docs;
     pub mod entities;
+    pub mod export;
     pub mod files;
     pub mod graph;
     pub mod identity;

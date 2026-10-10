@@ -50,10 +50,15 @@ bucket and cap the filtered result; the `memvault_list` and
 
 Also applied: `list_all` (`memvault_list_all`) now threads a bucket through
 `MemvaultClient::list_all`, the HTTP client, `ListNodesQuery` + `list_nodes`
-(`QueryScope::all().with_bucket(..)`), `LocalClient::list_all`, and back-fills
-the export caller with `None` (vault export is cross-bucket by design). The
-scoped paths (`list_all`, `scoped_list`) scan all index rows when bucketed and
-cap the *filtered* result.
+(`QueryScope::all().with_bucket(..)`), and `LocalClient::list_all`. The vault
+export (`memctl export`, `memvault-export`, MCP `memvault_export_vault`) forwards
+its bucket to `list_all`: the explicit `--bucket-id` when set (so a reader
+granted access to another bucket can export exactly that bucket), else `None`
+— the agent bucket (admins: their cross-bucket aggregation). A scoped export
+once silently dropped the bucket and listed the caller's agent bucket instead
+of the named one (this broke the cross-bucket grant sync VM check).
+The scoped paths (`list_all`, `scoped_list`) scan all index rows when bucketed
+and cap the *filtered* result.
 
 Also applied: `GET /api/v1/docs` without `bucket=` lists the caller's agent
 bucket (it listed every bucket's documents to any agent, so a team's memvault

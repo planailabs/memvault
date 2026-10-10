@@ -1632,6 +1632,9 @@ impl MemvaultServer {
             include_vfs: true,
             tag_filter,
             view_filter: params.view,
+            // The MCP tool has no bucket parameter; `None` keeps the vault
+            // export on the caller's agent bucket (admins: cross-bucket).
+            bucket: None,
         };
         let output = std::path::PathBuf::from(&params.output_path);
         let force_tar = params.tar.unwrap_or(false);

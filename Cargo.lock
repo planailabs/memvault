@@ -6283,6 +6283,7 @@ dependencies = [
  "memvault-auth",
  "memvault-core",
  "memvault-doc",
+ "memvault-export",
  "memvault-net",
  "memvault-query",
  "memvault-store",
