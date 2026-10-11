@@ -151,6 +151,7 @@
           memctl-slim = pkgs.memctl-slim;
           memvault-mcp = memvault-mcp;
           dioxus-cli-patched = dioxus-cli-patched;
+          cargo-zigbuild = pkgs.cargo-zigbuild;
           macosx-sdk = macosx-sdk;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           docker-memctl = import ./nix/docker.nix {
