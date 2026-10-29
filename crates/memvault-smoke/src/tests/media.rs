@@ -40,17 +40,50 @@ fn install_default_pipeline(client: &Arc<LocalClient>) {
     client.install_extraction_pipeline(ExtractionConfig::default());
 }
 
+/// How long to wait for a background page render before failing the test.
+///
+/// The pipeline enforces its own wall-clock cap per plugin invocation
+/// (`limits.pdfrender_timeout_ms`, 5 min by default) and records a `failed`
+/// annotation when it trips. Waiting at least that long means a slow render
+/// surfaces the recorded failure — with an error message — instead of a blind
+/// `Pending` panic at a shorter, arbitrary budget. `MEMVAULT_SMOKE_RENDER_TIMEOUT_MS`
+/// overrides it for deliberately starved runs.
+fn render_readiness_budget() -> std::time::Duration {
+    let pipeline_ms = ExtractionConfig::default().limits.pdfrender_timeout_ms;
+    let override_ms = std::env::var("MEMVAULT_SMOKE_RENDER_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    std::time::Duration::from_millis(override_ms.unwrap_or(pipeline_ms + 60_000))
+}
+
 async fn wait_for_render_done(
     client: &Arc<LocalClient>,
     cid: &[u8],
 ) -> memvault_api::types::PageRenderInfo {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let budget = render_readiness_budget();
+    let started = std::time::Instant::now();
+    let deadline = started + budget;
     let mut polls = 0u32;
     let mut last_info = None;
+    let mut next_report = std::time::Duration::from_secs(10);
 
     while std::time::Instant::now() < deadline {
         let info = client.read_page_render(cid).await.unwrap();
         polls += 1;
+        let elapsed = started.elapsed();
+        // libtest captures this and prints it in the failures section, so a CI
+        // timeout shows whether the job is progressing or stalled from the start.
+        if elapsed >= next_report {
+            eprintln!(
+                "page render still pending after {:.0}s ({polls} polls, budget {:.0}s): status={:?} page_count={} error={:?}",
+                elapsed.as_secs_f64(),
+                budget.as_secs_f64(),
+                info.status,
+                info.page_count,
+                info.error,
+            );
+            next_report += std::time::Duration::from_secs(10);
+        }
         match info.status {
             MediaJobStatus::Pending => {
                 last_info = Some(info);
@@ -60,7 +93,8 @@ async fn wait_for_render_done(
         }
     }
     panic!(
-        "page render did not finish within 120s after {polls} polls; last info: {:?}",
+        "page render did not finish within {:.0}s after {polls} polls; last info: {:?}",
+        budget.as_secs_f64(),
         last_info
     );
 }
