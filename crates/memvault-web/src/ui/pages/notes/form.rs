@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use plan_ai_design::{Button, ButtonVariant, Card, FormField};
+use plan_ai_design::{Button, ButtonKind, ButtonVariant, Card, FormField};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::app::Route;
@@ -296,6 +296,7 @@ fn NoteFormInner(
                     div { class: "flex gap-2 pt-2",
                         Button {
                             variant: ButtonVariant::Primary,
+                            kind: ButtonKind::Submit,
                             disabled: *saving.read(),
                             {t!("save")}
                         }

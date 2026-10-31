@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use plan_ai_design::{
-    Button, ButtonVariant, Card, FormField, PageHeader, Pill, PillVariant, Td, TdMuted,
+    Button, ButtonKind, ButtonVariant, Card, FormField, PageHeader, Pill, PillVariant, Td, TdMuted,
 };
 use serde::{Deserialize, Serialize};
 
@@ -204,7 +204,7 @@ pub fn TokenManagement() -> Element {
                                 }
                             }
                         }
-                        Button { variant: ButtonVariant::Primary, {t!("tokens-issue-button")} }
+                        Button { variant: ButtonVariant::Primary, kind: ButtonKind::Submit, {t!("tokens-issue-button")} }
                     }
                 }
             }
