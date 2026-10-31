@@ -19,7 +19,7 @@ webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:serd
 embed = ["dioxus?/embed"]
 server = [
     "webui", "dioxus/server",
-    "dep:memvault-api", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth", "dep:memvault-store",
+    "dep:memvault-api", "memvault-api/http-client", "dep:memvault-doc", "dep:memvault-query", "dep:memvault-auth", "dep:memvault-store",
     "dep:memvault-extract-abi",
     "dep:axum", "dep:axum-extra", "dep:time", "dep:tokio", "dep:tokio-stream",
     "dep:tower", "dep:tower-http", "dep:thiserror",
