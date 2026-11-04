@@ -7594,10 +7594,27 @@ impl MemvaultClient for LocalClient {
         label: Option<String>,
         issuer_addrs: Vec<String>,
     ) -> Result<String> {
-        let admin_key = self.admin_signing_key().ok_or_else(|| {
-            ApiError::Other("no admin signing key configured — cannot issue tokens".into())
-        })?;
         let peer_id = memvault_core::PeerId(self.peer_id.clone());
+        let Some(admin_key) = self.admin_signing_key() else {
+            if self.cluster_id.as_slice() == crate::tokens::NO_CLUSTER.0.as_slice() {
+                let node_key = self.node_signing_key().ok_or_else(|| {
+                    ApiError::Other("no node signing key configured — cannot issue tokens".into())
+                })?;
+                return crate::tokens::issue_unclustered_token(
+                    &peer_id,
+                    node_key,
+                    role,
+                    ttl_secs,
+                    max_uses,
+                    label,
+                    issuer_addrs,
+                    &self.keystore,
+                );
+            }
+            return Err(ApiError::Other(
+                "no admin signing key configured — cannot issue tokens".into(),
+            ));
+        };
         let cluster_id_arr: [u8; 32] = self
             .cluster_id
             .clone()

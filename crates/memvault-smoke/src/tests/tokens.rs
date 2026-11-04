@@ -139,3 +139,95 @@ async fn issued_token_tolerates_reader_clock_skew() {
         .verify_time_bounds(issued_after_ns.saturating_sub(60_000_000_000))
         .unwrap();
 }
+
+/// A node that never founded or joined a cluster: no admin key, the all-zero
+/// cluster id, only its own node key.
+fn unclustered(cluster_id: [u8; 32]) -> (tempfile::TempDir, std::sync::Arc<memvault_api::LocalClient>) {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(memvault_store::MemvaultStore::open(dir.path().join("blocks.redb")).unwrap());
+    let node_sk = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let client = Arc::new(memvault_api::LocalClient::new(
+        store,
+        Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
+        Arc::new(memvault_api::EventBus::new(64)),
+        node_sk.verifying_key().to_bytes().to_vec(),
+        cluster_id.to_vec(),
+    ));
+    client.set_node_signing_key(node_sk);
+    (dir, client)
+}
+
+#[tokio::test]
+async fn a_node_in_no_cluster_issues_and_redeems_agent_tokens() {
+    let (_dir, client) = unclustered([0; 32]);
+    let trust = memvault_api::bootstrap::bootstrap_cluster_trust(&client).unwrap();
+    assert!(trust.admin_pubkey.is_none(), "pre-genesis");
+
+    for role in [AgentRole::AgentHost, AgentRole::Auditor, AgentRole::Service] {
+        let token = client
+            .issue_token(TokenRole::Agent(role), 3600, 1, None)
+            .await
+            .unwrap();
+        let agent_pk = ed25519_dalek::SigningKey::from_bytes(&[role as u8 + 1; 32])
+            .verifying_key()
+            .to_bytes();
+        let enrolled = memvault_api::agent_identity::enroll_remote_agent(
+            &client, &token, "agent", agent_pk, u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(enrolled.attestation.role, role);
+    }
+    assert_eq!(client.list_tokens().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn node_and_admin_tokens_still_need_a_cluster() {
+    let (_dir, client) = unclustered([0; 32]);
+    for role in [
+        TokenRole::Agent(AgentRole::Admin),
+        TokenRole::Node(memvault_auth::NodeRole::Node),
+        TokenRole::Node(memvault_auth::NodeRole::Admin),
+    ] {
+        let err = client.issue_token(role, 3600, 1, None).await.unwrap_err();
+        assert!(err.to_string().contains("need a cluster"), "{role:?}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn a_node_that_joined_a_cluster_does_not_sign_its_own_tokens() {
+    // Joined: a real cluster id, but the admin key is the cluster's, not ours.
+    let (_dir, client) = unclustered([7; 32]);
+    let err = client
+        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no admin signing key"), "{err}");
+}
+
+#[tokio::test]
+async fn an_unclustered_token_is_redeemed_only_by_the_node_that_signed_it() {
+    let (_a, issuer) = unclustered([0; 32]);
+    let token = issuer
+        .issue_token(TokenRole::Agent(AgentRole::AgentHost), 3600, 1, None)
+        .await
+        .unwrap();
+    // Another node in no cluster, with a different key.
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(
+        memvault_store::MemvaultStore::open(dir.path().join("blocks.redb")).unwrap(),
+    );
+    let other = memvault_api::LocalClient::new(
+        store,
+        std::sync::Arc::new(tokio::sync::RwLock::new(memvault_query::QuotaManager::default())),
+        std::sync::Arc::new(memvault_api::EventBus::new(64)),
+        vec![9; 32],
+        vec![0; 32],
+    );
+    other.set_node_signing_key(ed25519_dalek::SigningKey::from_bytes(&[0x43; 32]));
+    let err = memvault_api::agent_identity::enroll_remote_agent(
+        &other, &token, "agent", [5; 32], u64::MAX,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("this node's key"), "{err}");
+}

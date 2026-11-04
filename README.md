@@ -135,7 +135,10 @@ memvault-mcp --url http://127.0.0.1:8401 --identity-dir ~/.local/share/memvault/
 
 ### Agent enrollment (HTTP mode)
 
-An agent identity is created by redeeming a join token against a running daemon:
+An agent identity is created by redeeming a join token against a running daemon.
+A node in no cluster yet signs `agent-host`, `auditor` and `service` tokens with
+its own key, redeemable only on that node, until it founds or joins a cluster.
+Node tokens and `admin` agent tokens need a cluster.
 
 ```bash
 # On the cluster: issue an agent token

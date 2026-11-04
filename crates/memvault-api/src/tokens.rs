@@ -187,6 +187,56 @@ pub fn issue_token(
     Ok(encoded)
 }
 
+/// The cluster id a node in no cluster runs with (and binds its tokens to).
+pub const NO_CLUSTER: ClusterId = ClusterId([0u8; 32]);
+
+/// Whether an agent role is good for a node in no cluster. `Admin` is not: an
+/// API admin bypasses every ACL, which is the cluster admin's to hand out.
+pub fn role_needs_no_cluster(role: &TokenRole) -> bool {
+    matches!(
+        role,
+        TokenRole::Agent(
+            memvault_auth::AgentRole::AgentHost
+                | memvault_auth::AgentRole::Auditor
+                | memvault_auth::AgentRole::Service
+        )
+    )
+}
+
+/// Issue an agent token on a node that is in no cluster. There is no admin
+/// key to sign with yet, so the node signs with its own key; the token is
+/// bound to [`NO_CLUSTER`] and only this node can redeem it. It stops being
+/// redeemable once the node founds or joins a cluster (the cluster id
+/// changes); agents already enrolled with it stay enrolled.
+pub fn issue_unclustered_token(
+    node_peer_id: &PeerId,
+    node_key: &SigningKey,
+    role: TokenRole,
+    ttl_secs: u64,
+    max_uses: u32,
+    label: Option<String>,
+    issuer_addrs: Vec<String>,
+    keystore: &KeyStore,
+) -> Result<String> {
+    if !role_needs_no_cluster(&role) {
+        return Err(ApiError::Other(
+            "node and admin tokens need a cluster (run genesis or join one first)".into(),
+        ));
+    }
+    issue_token(
+        node_peer_id,
+        &NO_CLUSTER,
+        node_key,
+        role,
+        ttl_secs,
+        max_uses,
+        label,
+        None,
+        issuer_addrs,
+        keystore,
+    )
+}
+
 /// Whether a token CID is revoked. The keystore is authoritative (redb
 /// data is considered migrated).
 pub(crate) fn token_revoked(keystore: &KeyStore, cid: &[u8]) -> bool {

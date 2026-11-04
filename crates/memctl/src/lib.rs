@@ -1532,12 +1532,7 @@ mod native {
                         let mut a = [0u8; 32];
                         a.copy_from_slice(&s);
                         ed25519_dalek::SigningKey::from_bytes(&a)
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no admin key in keystore — run `memctl genesis` or start the daemon once"
-                        )
-                    })?;
+                    });
                 let peer_id = memvault_core::PeerId(ks.get(b"peerid").ok_or_else(|| {
                     anyhow::anyhow!("no node peer_id in keystore — start the daemon once")
                 })?);
@@ -1545,9 +1540,35 @@ mod native {
                     .get(b"clusterid")
                     .and_then(|v| <[u8; 32]>::try_from(v).ok())
                     .map(ClusterId)
+                    .filter(|c| *c != memvault_api::tokens::NO_CLUSTER);
+                // A node in no cluster signs host/auditor/service tokens with
+                // its own key; node and admin tokens need the cluster's admin.
+                let (Some(admin_key), Some(cluster_id)) = (admin_key, cluster_id.clone()) else {
+                    if cluster_id.is_some() {
+                        anyhow::bail!(
+                            "this node joined a cluster and holds no admin key — issue tokens on the cluster's admin node"
+                        );
+                    }
+                    let seed = memvault_api::node_key::node_seed_from_keystore_or_file(
+                        &ks,
+                        &cli_data_dir().join("identity"),
+                    )
                     .ok_or_else(|| {
-                        anyhow::anyhow!("no cluster_id in keystore — run genesis/join first")
+                        anyhow::anyhow!("no node key in keystore — start the daemon once")
                     })?;
+                    let token_str = memvault_api::tokens::issue_unclustered_token(
+                        &peer_id,
+                        &ed25519_dalek::SigningKey::from_bytes(&seed),
+                        role,
+                        ttl,
+                        max_uses,
+                        label,
+                        addrs,
+                        &ks,
+                    )?;
+                    println!("{token_str}");
+                    return Ok(());
+                };
                 let genesis = ks.get(b"genesis").and_then(|b| {
                     serde_ipld_dagcbor::from_slice::<memvault_auth::AdminGenesis>(&b).ok()
                 });

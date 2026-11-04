@@ -444,16 +444,29 @@ pub fn enroll_remote_agent(
     // exactly the pinned anchor we need to verify the token against.
     let admin_keys = client.admin_verifying_keys();
     if admin_keys.is_empty() {
-        return Err(ApiError::Other("no admin pubkey on this node".into()));
-    }
-    let mut signature_verified = false;
-    for vk in &admin_keys {
-        if token.verify_signature(vk).is_ok() {
-            signature_verified = true;
-            break;
+        // A node in no cluster signs its own agent tokens
+        // (`tokens::issue_unclustered_token`) — only those, and only its own.
+        if client.cluster_id() != crate::tokens::NO_CLUSTER.0.as_slice() {
+            return Err(ApiError::Other("no admin pubkey on this node".into()));
         }
-    }
-    if !signature_verified {
+        let node_vk = client
+            .node_signing_key()
+            .ok_or_else(|| ApiError::Other("no node signing key configured".into()))?
+            .verifying_key();
+        if token.verify_signature(&node_vk).is_err() {
+            return Err(ApiError::Other(
+                "token signature does not verify against this node's key".into(),
+            ));
+        }
+        if !crate::tokens::role_needs_no_cluster(&token.role) {
+            return Err(ApiError::Other(
+                "a node in no cluster only enrols host, auditor and service agents".into(),
+            ));
+        }
+    } else if !admin_keys
+        .iter()
+        .any(|vk| token.verify_signature(vk).is_ok())
+    {
         return Err(ApiError::Other(
             "token signature does not verify against any known admin key".into(),
         ));
