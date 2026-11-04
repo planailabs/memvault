@@ -32,6 +32,7 @@ mod tests {
     pub mod sharing;
     pub mod signed_envelope_indexing;
     pub mod store_integrity;
+    pub mod sync_failed_retry;
     pub mod tokens;
     pub mod views;
 }

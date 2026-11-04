@@ -236,7 +236,11 @@ CIDs over `BY_TIME`). The peer returns the CIDs of windows that differ;
 matching windows cost nothing, so bandwidth tracks the difference. Missing
 blocks are fetched in batches of 50, with one outstanding request per peer;
 file manifests and chunks are chased explicitly because chunks have no time
-index entry.
+index entry. A peer whose block exchange fails is re-probed every 10 s
+instead of waiting for the next 5-minute round: a fetch lost with its
+substream (the one retry hit the same dead stream) would otherwise strand
+every CID it named — a lost grant block makes every bucket-scoped read on
+that peer answer 404.
 
 **Serving.** A node serves blocks only to attested nodes of its cluster (when
 an admin key is pinned) on the same `BLOCKSTORE_VERSION`; private buckets are

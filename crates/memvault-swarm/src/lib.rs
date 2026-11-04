@@ -741,6 +741,40 @@ impl MemvaultDriver {
         self.mark_sync_failed(peer);
     }
 
+    /// Re-request heads from peers whose last block exchange failed.
+    ///
+    /// A fetch lost with its substream (the gate retries once, so this is the
+    /// second failure) leaves the peer holding only part of what it was told
+    /// about: e.g. the doc block lands but the queued grant block does not, and
+    /// every bucket-scoped read on that peer answers 404 until the missing
+    /// block arrives. Peer reconnect and local writes already re-request heads,
+    /// but neither happens when the peer stayed connected and the local node is
+    /// idle, so [`RESYNC_INTERVAL`] (5 min) would be the only heal. Drive this
+    /// from a short timer instead.
+    ///
+    /// Each peer is retried once per failure: the mark is cleared before the
+    /// probe and re-armed by the next outbound failure, so a broken peer cannot
+    /// hot-loop RBSR rounds and a healed peer stops retrying immediately.
+    pub fn tick_failed_resync(&mut self, host: &mut impl MemvaultHost) {
+        let peers: Vec<PeerId> = self
+            .synced_peers
+            .iter()
+            .filter(|p| self.failed_sync_peers.contains(p))
+            .copied()
+            .collect();
+        if peers.is_empty() {
+            return;
+        }
+        tracing::info!(
+            peers = peers.len(),
+            "retrying peers with a failed block exchange"
+        );
+        for peer in peers {
+            self.failed_sync_peers.remove(&peer);
+            request_remote_heads(host, &mut self.outbound, &self.store, &self.config, peer);
+        }
+    }
+
     /// We failed to serve an inbound block request from `peer`. Does not touch
     /// the outbound gate (that tracks our own requests, not theirs).
     pub fn on_block_inbound_failure(&mut self, peer: PeerId) {
@@ -979,6 +1013,11 @@ pub async fn run_sync_loop(
     let mut join_retry_timer = tokio::time::interval(Duration::from_secs(15));
     join_retry_timer.tick().await; // skip immediate fire
     resync_timer.tick().await; // consume the immediate first tick
+    // Retry timer for peers whose block exchange failed: a request lost with
+    // its substream must be re-issued in seconds, not at the next 5-minute
+    // RBSR round (see `MemvaultDriver::tick_failed_resync`).
+    let mut failed_retry_timer = tokio::time::interval(FAILED_RESYNC_INTERVAL);
+    failed_retry_timer.tick().await; // skip immediate fire
 
     driver.on_start(&mut StandaloneHost(swarm));
 
@@ -1035,6 +1074,10 @@ pub async fn run_sync_loop(
 
             _ = resync_timer.tick() => driver.tick_resync(&mut StandaloneHost(swarm)),
 
+            _ = failed_retry_timer.tick() => {
+                driver.tick_failed_resync(&mut StandaloneHost(swarm))
+            }
+
             _ = join_retry_timer.tick() => driver.tick_join_retry(&mut StandaloneHost(swarm)),
 
             _ = async {
@@ -1063,14 +1106,15 @@ pub async fn run_sync_loop(
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, "no SIGTERM handler; stopping on Ctrl-C only");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(error = %e, "no SIGTERM handler; stopping on Ctrl-C only");
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                }
+            };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
@@ -1150,6 +1194,16 @@ const FETCH_CHUNK_SIZE: usize = 50;
 
 /// How often to re-run RBSR for connected peers to heal partial sync.
 const RESYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How often to re-request heads from peers whose last block exchange failed.
+///
+/// Deliberately far shorter than [`RESYNC_INTERVAL`]: a request lost with its
+/// substream strands everything it named (a single block can be the grant that
+/// unlocks every bucket-scoped read on the peer), and waiting five minutes for
+/// the next full round turns a transient stream failure into a multi-minute
+/// outage. RBSR probes are a few dozen fingerprints, so retrying a failed peer
+/// every few seconds is cheap.
+const FAILED_RESYNC_INTERVAL: Duration = Duration::from_secs(10);
 
 /// On new peer connect, send range fingerprints covering the FULL store
 /// (not just recent data). RBSR makes this efficient: matching windows
