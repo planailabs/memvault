@@ -94,8 +94,11 @@ rp.buildRustPackage ({
     runHook preBuild
 
     # Preflight Cargo metadata so dx's short cargo-metadata watchdog can't
-    # mask the underlying Cargo failure on busy CI runners.
-    timeout 180 cargo metadata --format-version=1 --locked --no-deps >/dev/null
+    # mask the underlying Cargo failure on busy CI runners. Keep the budget as
+    # high as dx's own (patches/dioxus-cli-all.patch: 30 min): on a loaded
+    # builder this workspace's ~1250 crates take many minutes, and a 180 s bound
+    # aborted the nix build with dx reporting "cargo metadata took too long".
+    timeout 1800 cargo metadata --format-version=1 --locked >/dev/null
 
     # Tailwind CSS for memvault-web
     (cd crates/memvault-web && npm run tailwind:build)
