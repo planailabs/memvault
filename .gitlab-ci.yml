@@ -67,7 +67,7 @@ deploy:
   script:
     # VM-backed flake checks are resource-heavy; run them serially so one
     # test container cannot starve another.
-    - nix flake check -L --max-jobs 1
+    - nix flake check -L --max-jobs 1 --cores 4
     - ./docker-push.sh
   timeout: 3h
   environment: production
