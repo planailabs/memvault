@@ -26,7 +26,8 @@ upload memvault/image result-image
 rm -f result-image
 
 # ── Build all exposed packages & push to xzar cache ────────────────
-for pkg in default memctl dioxus-cli-patched docker-memctl; do
+# memctl-slim is what the flake check boots; memvault-mcp is the MCP server.
+for pkg in default memctl memctl-slim memvault-mcp dioxus-cli-patched docker-memctl; do
   nix build ".#${pkg}" -o "result-${pkg}" -L
   upload "memvault/${pkg}" "result-${pkg}"
   rm -f "result-${pkg}"
