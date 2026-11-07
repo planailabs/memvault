@@ -60,7 +60,7 @@ echo "▸ Building Dioxus fullstack (client + server)…"
 # dx and tee both create temporary files during bundling, and failures there used
 # to surface as opaque rustc/dx errors plus "tee: ... Operation not permitted".
 # Force a repository-local writable temp/log directory before invoking dx.
-BUILD_TMPDIR="${MEMVAULT_BUILD_TMPDIR:-$SCRIPT_DIR/target/build-memvault-tmp}"
+BUILD_TMPDIR="${MEMVAULT_BUILD_TMPDIR:-${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}/build-memvault-tmp}"
 mkdir -p "$BUILD_TMPDIR"
 if ! tmp_probe="$(mktemp "$BUILD_TMPDIR/write-test.XXXXXX")"; then
   echo "✗ Cannot create temporary files in $BUILD_TMPDIR" >&2
@@ -107,4 +107,4 @@ fi
 rm -f "$DX_LOG"
 
 echo "✓ memctl built (assets embedded in server binary)"
-echo "  Binary: $SCRIPT_DIR/target/dx/memctl/release/web/server"
+echo "  Binary: ${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}/dx/memctl/release/web/server"

@@ -14,6 +14,9 @@ before_script:
   - rm -rf ~/.cargo
   - ln -s /cache/cargo ~/.cargo
   - export CARGO_HOME="$HOME/.cargo"
+  # Cargo outside Nix builds into the job's cache volume, so it rebuilds only
+  # what changed since the last pipeline on this runner slot.
+  - export CARGO_TARGET_DIR=/cache/target
 
 variables:
   GIT_SUBMODULE_STRATEGY: recursive

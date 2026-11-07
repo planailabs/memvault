@@ -41,7 +41,7 @@ stage_binary() {
 
 stage_memctl_binary() {
   local rust_target="$1"
-  local src="$SCRIPT_DIR/target/dx/memctl/release/web/server"
+  local src="${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}/dx/memctl/release/web/server"
   local name=memctl
   if [ "$rust_target" = "x86_64-pc-windows-gnu" ]; then
     [ -f "$src.exe" ] && src="$src.exe"
@@ -112,7 +112,7 @@ dx build --package memctl --release --embed \
 # while that environment is still in effect.
 cargo build --release --package memvault-mcp --target x86_64-unknown-linux-musl
 stage_binary x86_64-unknown-linux-musl \
-  "$SCRIPT_DIR/target/x86_64-unknown-linux-musl/release/memvault-mcp" memvault-mcp
+  "${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}/x86_64-unknown-linux-musl/release/memvault-mcp" memvault-mcp
 
 rm -rf "$DL_STUB"
 unset RUSTFLAGS
@@ -173,7 +173,7 @@ stage_memctl_binary aarch64-apple-darwin
 
 cargo zigbuild --release --package memvault-mcp --target aarch64-apple-darwin
 stage_binary aarch64-apple-darwin \
-  "$SCRIPT_DIR/target/aarch64-apple-darwin/release/memvault-mcp" memvault-mcp
+  "${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}/aarch64-apple-darwin/release/memvault-mcp" memvault-mcp
 
 # ── Windows (x86_64) ────────────────────────────────────────────────────
 # Cross-compiled via the same zigbuild shim as macOS; zig provides the
@@ -186,7 +186,7 @@ stage_memctl_binary x86_64-pc-windows-gnu
 
 cargo zigbuild --release --package memvault-mcp --target x86_64-pc-windows-gnu
 stage_binary x86_64-pc-windows-gnu \
-  "$SCRIPT_DIR/target/x86_64-pc-windows-gnu/release/memvault-mcp.exe" memvault-mcp.exe
+  "${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}/x86_64-pc-windows-gnu/release/memvault-mcp.exe" memvault-mcp.exe
 
 export PATH="${PATH#"$CARGO_SHIM:"}"
 rm -rf "$CARGO_SHIM"
