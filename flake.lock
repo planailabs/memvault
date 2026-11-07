@@ -51,6 +51,29 @@
         "url": "https://git.mkg20001.io/mkg20001/gitlab-incus-image.git"
       }
     },
+    "gitlab-nix-ci": {
+      "inputs": {
+        "gitlab-incus-image": [
+          "gitlab-incus-image"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794051945,
+        "narHash": "sha256-YIbo0CcEStYYS2awFom2w3UxFzpqP3Jkfzwl2yeIcAo=",
+        "ref": "refs/heads/master",
+        "rev": "db0cb52a8cb2cb9526c11373479028afb7f3b910",
+        "revCount": 44,
+        "type": "git",
+        "url": "https://git.mkg20001.io/mkg20001/gitlab-nix-ci.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://git.mkg20001.io/mkg20001/gitlab-nix-ci.git"
+      }
+    },
     "nixos2docker": {
       "inputs": {
         "nixpkgs": [
@@ -91,6 +114,7 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "gitlab-incus-image": "gitlab-incus-image",
+        "gitlab-nix-ci": "gitlab-nix-ci",
         "nixos2docker": "nixos2docker",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",
