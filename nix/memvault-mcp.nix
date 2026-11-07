@@ -25,7 +25,11 @@ in
 rp.buildRustPackage {
   pname = "memvault-mcp";
   version = "0.1.0";
-  src = ./..;
+  # Only what the build reads (see package.nix).
+  src = lib.fileset.toSource {
+    root = ./..;
+    fileset = lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../crates ../plan-ai-design ];
+  };
   cargoLock = {
     lockFile = ../Cargo.lock;
     outputHashes = import ../extra-hashes.nix;

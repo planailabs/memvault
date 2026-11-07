@@ -42,7 +42,12 @@ in
 rp.buildRustPackage ({
   pname = "memctl";
   version = "0.1.0";
-  src = ./.;
+  # Only what the build reads, so a commit to CI, docs, tests or nix does not
+  # rebuild memctl.
+  src = lib.fileset.toSource {
+    root = ./.;
+    fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./crates ./plan-ai-design ];
+  };
   cargoLock = {
     lockFile = ./Cargo.lock;
     outputHashes = import ./extra-hashes.nix;
