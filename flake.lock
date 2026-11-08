@@ -61,11 +61,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794091993,
-        "narHash": "sha256-kRqDM8EN7XT29yX+hZCJs4ewUTZFH24E7lf3IYPusEc=",
+        "lastModified": 1794118770,
+        "narHash": "sha256-oE9rlbimiInRd+NzeLIkSupIcNVd0sBI09p7f1TuOZY=",
         "ref": "refs/heads/master",
-        "rev": "2b1c07fe34fab48bb7f5283c8d860f494f92a597",
-        "revCount": 50,
+        "rev": "37f638003a536d428dc2f0a8ab492429234917ab",
+        "revCount": 51,
         "type": "git",
         "url": "https://git.mkg20001.io/mkg20001/gitlab-nix-ci.git"
       },
