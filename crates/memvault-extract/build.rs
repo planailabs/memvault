@@ -58,22 +58,19 @@ fn main() {
     // memvault ships in:
     //   - standalone memvault repo: `<workspace>/crates/memvault-extract`
     //   - mac-mgmt monorepo:        `<workspace>/memvault/crates/memvault-extract`
-    // Use the parent of the manifest dir (`crates/`) as the anchor and
-    // resolve the workspace root by walking up to the nearest Cargo.toml
-    // that declares a `[workspace]`, which gives the right target dir in
-    // both cases.
+    // Use the parent of the manifest dir (`crates/`) as the anchor.
     let crates_dir = manifest_dir
         .parent()
         .expect("memvault-extract should live under <workspace>/crates")
         .to_path_buf();
-    let workspace_root = find_workspace_root(&crates_dir);
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
 
     for guest in GUESTS {
-        build_guest(guest, &crates_dir, &workspace_root);
+        build_guest(guest, &crates_dir, &out_dir);
     }
 }
 
-fn build_guest(guest: &GuestSpec, crates_dir: &Path, workspace_root: &Path) {
+fn build_guest(guest: &GuestSpec, crates_dir: &Path, out_dir: &Path) {
     if let Some(feature) = guest.feature {
         if env::var_os(format!("CARGO_FEATURE_{feature}")).is_none() {
             return;
@@ -109,15 +106,17 @@ fn build_guest(guest: &GuestSpec, crates_dir: &Path, workspace_root: &Path) {
         emit_rerun_if_changed(input);
     }
 
-    // Build the guest WASM in its OWN target directory under
-    // `<workspace>/target/<crate_dir>/`, NOT the workspace-root `target/`.
-    // Using the same target dir as the outer build deadlocks when this
-    // build.rs runs while that outer build is still holding its `target/`
-    // lock — the nested `cargo build` blocks on the same lock forever
-    // (observed in NixOS sandbox builds; see the sync NixOS test). A
-    // dedicated sub-target per guest sidesteps the race (and per-guest
-    // dirs avoid lock contention between the nested builds themselves).
-    let target_dir = workspace_root.join("target").join(guest.crate_dir);
+    // Build the guest WASM in its OWN target and build directory under this
+    // build script's OUT_DIR, NOT the outer build's `target/` or build dir.
+    // Sharing either deadlocks: the nested `cargo build` blocks forever on
+    // the lock the outer build holds (observed in NixOS sandbox builds; see
+    // the sync NixOS test), and a build dir set in a cargo config (CI's
+    // cargo-target-cache) is inherited unless overridden here. OUT_DIR, not
+    // `<workspace>/target`: when cargo reuses this script's cached output
+    // (a shared build dir in CI), the path it printed must still exist, and
+    // only OUT_DIR lives where that output does. Per-guest dirs avoid lock
+    // contention between the nested builds themselves.
+    let target_dir = out_dir.join(guest.crate_dir);
     let artifact = format!("{}.wasm", guest.crate_dir.replace('-', "_"));
     let wasm_path = target_dir.join(guest.target).join("release").join(artifact);
 
@@ -132,6 +131,7 @@ fn build_guest(guest: &GuestSpec, crates_dir: &Path, workspace_root: &Path) {
             .arg(guest.target)
             .arg("--release")
             .env("CARGO_TARGET_DIR", &target_dir)
+            .env("CARGO_BUILD_BUILD_DIR", &target_dir)
             .status()
             .unwrap_or_else(|e| {
                 panic!(
@@ -151,26 +151,6 @@ fn build_guest(guest: &GuestSpec, crates_dir: &Path, workspace_root: &Path) {
 
     assert_wasm_exists(guest, &wasm_path);
     println!("cargo:rustc-env={}={}", guest.env_var, wasm_path.display());
-}
-
-/// Walk upward from `start` until we find a Cargo.toml containing
-/// `[workspace]`. Falls back to `start` if nothing is found (e.g. when
-/// build.rs runs from an exotic CARGO_MANIFEST_DIR with no workspace).
-fn find_workspace_root(start: &Path) -> PathBuf {
-    let mut current = start.to_path_buf();
-    loop {
-        let manifest = current.join("Cargo.toml");
-        if manifest.is_file() {
-            if let Ok(content) = fs::read_to_string(&manifest) {
-                if content.contains("[workspace]") {
-                    return current;
-                }
-            }
-        }
-        if !current.pop() {
-            return start.to_path_buf();
-        }
-    }
 }
 
 fn assert_wasm_exists(guest: &GuestSpec, path: &Path) {
