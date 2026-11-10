@@ -178,32 +178,55 @@ pkgs.testers.nixosTest {
                 )
                 break
         if attempt % 30 == 29:
-            node_b.log(f"export attempt {attempt + 1} rc={rc}:\n{export_out}")
+            # stderr goes to /tmp/export.log, so the command's own output is
+            # empty — read the log to see the actual reason for rc != 0.
+            _, why = node_b.execute("tail -n 3 /tmp/export.log")
+            node_b.log(f"export attempt {attempt + 1} rc={rc}: {why.strip()}")
         time.sleep(1)
 
     if not synced:
-        node_a.log("--- node_a daemon log (tail) ---")
-        node_a.log(node_a.succeed("tail -200 /tmp/daemon.log"))
-        node_b.log("--- node_b daemon log (tail) ---")
-        node_b.log(node_b.succeed("tail -200 /tmp/daemon.log"))
-        node_b.log("--- node_b last export log ---")
-        node_b.log(node_b.succeed("cat /tmp/export.log || true"))
-        node_b.log("--- node_b grants on writer's bucket (via reader's JWT) ---")
-        rc, out = node_b.execute(
+        # A 404 from the bucket-scoped endpoints means "no read access", which
+        # does not say *why*: the bucket declaration may not have synced, the
+        # grant block may not have synced, or the grant may be present but not
+        # usable for this agent. Dump what each node actually knows so a
+        # failure is diagnosable instead of a bare 180 s timeout.
+        as_reader = (
             "memctl --url http://localhost:8401 "
-            "--identity-dir /var/lib/memvault/agents/reader "
-            f"grant list {writer_bucket} 2>&1"
+            "--identity-dir /var/lib/memvault/agents/reader"
         )
-        node_b.log(f"(rc={rc})\n{out}")
-        node_b.log("--- node_a grants on writer's bucket (via writer's JWT) ---")
-        rc, out = node_a.execute(
+        as_writer = (
             "memctl --url http://localhost:8401 "
-            "--identity-dir /var/lib/memvault/agents/writer "
-            f"grant list {writer_bucket} 2>&1"
+            "--identity-dir /var/lib/memvault/agents/writer"
         )
-        node_a.log(f"(rc={rc})\n{out}")
+
+        def dump(m, label, cmd):
+            rc, out = m.execute(f"{cmd} 2>&1")
+            m.log(f"--- {label} (rc={rc}) ---\n{out.strip()}")
+
+        dump(node_b, "node_b buckets known to the reader", f"{as_reader} bucket list")
+        dump(node_b, "node_b bucket show", f"{as_reader} bucket show {writer_bucket}")
+        dump(node_b, "node_b doc get", f"{as_reader} get {node_id}")
+        dump(
+            node_b,
+            "node_b grants on the writer's bucket",
+            f"{as_reader} grant list {writer_bucket}",
+        )
+        dump(node_a, "node_a bucket show", f"{as_writer} bucket show {writer_bucket}")
+        dump(
+            node_a,
+            "node_a grants on the writer's bucket",
+            f"{as_writer} grant list {writer_bucket}",
+        )
+        dump(node_b, "node_b last export log", "cat /tmp/export.log")
+
+        for m, name in [(node_a, "node_a"), (node_b, "node_b")]:
+            lines = m.succeed("wc -l < /tmp/daemon.log").strip()
+            m.log(f"--- {name} daemon log ({lines} lines, tail 400) ---")
+            m.log(m.succeed("tail -400 /tmp/daemon.log"))
+
         raise Exception(
-            "node_b's reader agent never observed the doc within 180s"
+            "node_b's reader agent never observed the doc within 180s "
+            f"(doc {node_id}, bucket {writer_bucket}, grant {grant_cid})"
         )
 
     # Daemons are still running — the entire test stayed on the HTTP path.
