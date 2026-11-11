@@ -242,6 +242,15 @@ substream (the one retry hit the same dead stream) would otherwise strand
 every CID it named — a lost grant block makes every bucket-scoped read on
 that peer answer 404.
 
+**Reconnecting.** mDNS reports a peer only when its records appear, the
+Kademlia bootstrap list is empty on a two-node cluster, and the 5-minute
+round only covers *connected* peers, so a pair whose connection drops after
+the initial exchange stays partitioned: both nodes go quiet, and a doc
+written on one never reaches the other. The driver therefore remembers each
+peer's dialable address (mDNS, or identify's concrete listen address as a
+fallback) and re-dials peers it is not connected to every 30 s, throttled per
+peer so an offline node costs one attempt per interval.
+
 **Serving.** A node serves blocks only to attested nodes of its cluster (when
 an admin key is pinned) on the same `BLOCKSTORE_VERSION`; private buckets are
 withheld from remote peers.

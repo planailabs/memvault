@@ -33,6 +33,7 @@ mod tests {
     pub mod signed_envelope_indexing;
     pub mod store_integrity;
     pub mod sync_failed_retry;
+    pub mod sync_reconnect;
     pub mod tokens;
     pub mod views;
 }

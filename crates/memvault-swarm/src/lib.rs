@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
@@ -465,6 +465,15 @@ pub struct MemvaultDriver {
     failed_sync_peers: HashSet<PeerId>,
     /// peer → cluster_id, learned from identify, for visibility enforcement.
     peer_clusters: HashMap<PeerId, Vec<u8>>,
+    /// Last dialable address learned for each peer (mDNS discovery, identify as
+    /// a fallback). Kept after the connection closes so a dropped connection
+    /// can be re-dialed: mDNS only reports a peer when its records appear, so
+    /// without this a peer pair that both drop their connection stays
+    /// partitioned until something else redials.
+    known_addrs: HashMap<PeerId, Multiaddr>,
+    /// When we last dialed a peer, so the reconnect tick throttles itself
+    /// instead of dialing a dead address every tick.
+    last_dial: HashMap<PeerId, Instant>,
     /// Caps outbound block requests to one in-flight per peer (see
     /// [`OutboundGate`]).
     outbound: OutboundGate,
@@ -481,6 +490,8 @@ impl MemvaultDriver {
             initial_sync_complete: HashSet::new(),
             failed_sync_peers: HashSet::new(),
             peer_clusters: HashMap::new(),
+            known_addrs: HashMap::new(),
+            last_dial: HashMap::new(),
             outbound: OutboundGate::default(),
         }
     }
@@ -632,6 +643,44 @@ impl MemvaultDriver {
         self.initial_sync_complete.remove(&peer);
         self.failed_sync_peers.remove(&peer);
         self.outbound.forget(&peer);
+        // Drop the dial throttle so the next reconnect tick re-dials promptly.
+        // `known_addrs` keeps the address: mDNS only reports a peer when its
+        // records appear, so a pair that both drop their connection would
+        // otherwise stay partitioned.
+        self.last_dial.remove(&peer);
+    }
+
+    /// Re-dial known peers we are no longer connected to.
+    ///
+    /// mDNS reports a peer only when its records appear, so two nodes that
+    /// lose their connection to each other after the initial exchange — the
+    /// common case when a stream dies or the swarm drops connections — never
+    /// talk again: neither side redials, and the periodic RBSR round only
+    /// covers *connected* peers.
+    /// Observed in `checks.x86_64-linux.sync` (both nodes stop logging right
+    /// after "peer disconnected" and the synced doc never reaches node_b for
+    /// the rest of the 180 s poll).
+    ///
+    /// Each peer is dialed at most once per [`RECONNECT_INTERVAL`] so a peer
+    /// that is really gone costs one dial per interval rather than a hot loop.
+    pub fn tick_reconnect(&mut self, host: &mut impl MemvaultHost) {
+        let now = Instant::now();
+        let stale: Vec<(PeerId, Multiaddr)> = self
+            .known_addrs
+            .iter()
+            .filter(|(peer, _)| !self.synced_peers.contains(*peer))
+            .filter(|(peer, _)| {
+                self.last_dial
+                    .get(*peer)
+                    .is_none_or(|at| now.duration_since(*at) >= RECONNECT_INTERVAL)
+            })
+            .map(|(peer, addr)| (*peer, addr.clone()))
+            .collect();
+        for (peer, addr) in stale {
+            tracing::info!(%peer, %addr, "re-dialing peer whose connection dropped");
+            host.dial(addr);
+            self.last_dial.insert(peer, now);
+        }
     }
 
     /// mDNS discovered peers: register in Kademlia and dial.
@@ -642,6 +691,9 @@ impl MemvaultDriver {
     ) {
         for (peer, addr) in peers {
             tracing::info!(%peer, %addr, "mDNS discovered peer");
+            // Keep the address so the reconnect tick can re-dial this peer
+            // after the connection drops (mDNS will not report it again).
+            self.known_addrs.insert(peer, addr.clone());
             host.kad_add_address(&peer, addr.clone());
             host.dial(addr);
         }
@@ -658,6 +710,14 @@ impl MemvaultDriver {
     ) {
         for addr in listen_addrs {
             host.kad_add_address(&peer, addr.clone());
+        }
+        // Fallback for peers we never saw via mDNS (a direct dial): remember a
+        // concrete listen address so the reconnect tick can re-dial. Keep the
+        // mDNS address when we already have one — it is the one that worked.
+        if let Some(addr) = listen_addrs.iter().find(|a| is_dialable_addr(a)) {
+            self.known_addrs
+                .entry(peer)
+                .or_insert_with(|| addr.clone());
         }
         if let Some(cluster_hex) = agent_version.strip_prefix("memvault/") {
             if let Ok(cid_bytes) = hex::decode(cluster_hex) {
@@ -1018,6 +1078,10 @@ pub async fn run_sync_loop(
     // RBSR round (see `MemvaultDriver::tick_failed_resync`).
     let mut failed_retry_timer = tokio::time::interval(FAILED_RESYNC_INTERVAL);
     failed_retry_timer.tick().await; // skip immediate fire
+    // Reconnect timer: mDNS reports a peer only once, so a peer whose
+    // connection dropped must be re-dialed from the addresses we remember.
+    let mut reconnect_timer = tokio::time::interval(RECONNECT_INTERVAL);
+    reconnect_timer.tick().await; // skip immediate fire
 
     driver.on_start(&mut StandaloneHost(swarm));
 
@@ -1077,6 +1141,8 @@ pub async fn run_sync_loop(
             _ = failed_retry_timer.tick() => {
                 driver.tick_failed_resync(&mut StandaloneHost(swarm))
             }
+
+            _ = reconnect_timer.tick() => driver.tick_reconnect(&mut StandaloneHost(swarm)),
 
             _ = join_retry_timer.tick() => driver.tick_join_retry(&mut StandaloneHost(swarm)),
 
@@ -1204,6 +1270,25 @@ const RESYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// outage. RBSR probes are a few dozen fingerprints, so retrying a failed peer
 /// every few seconds is cheap.
 const FAILED_RESYNC_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How often to re-dial a known peer we are not connected to.
+///
+/// Long enough that a peer that is genuinely offline costs one dial attempt per
+/// interval, short enough that a dropped connection heals well inside the
+/// minutes-long window a sync consumer waits for (the `checks.*.sync` test
+/// polls for 180 s, and a real peer's reads are blocked for the same span).
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Reject wildcard listen addresses (`/ip4/0.0.0.0`, `/ip6/::`) that arrive via
+/// identify: they cannot be dialed.
+fn is_dialable_addr(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    !addr.iter().any(|protocol| match protocol {
+        Protocol::Ip4(ip) => ip.is_unspecified(),
+        Protocol::Ip6(ip) => ip.is_unspecified(),
+        _ => false,
+    })
+}
 
 /// On new peer connect, send range fingerprints covering the FULL store
 /// (not just recent data). RBSR makes this efficient: matching windows
