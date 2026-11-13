@@ -5,6 +5,7 @@
   makeRustPlatform,
   pkg-config,
   openssl,
+  zstd,
   libiconv,
 }:
 
@@ -38,7 +39,7 @@ rp.buildRustPackage {
   doCheck = false;
 
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ openssl ]
+  buildInputs = [ openssl zstd ]  # zstd: see the ZSTD_SYS_USE_PKG_CONFIG note in ../package.nix
     ++ lib.optionals stdenv.isDarwin [ libiconv ];
 
   meta = {

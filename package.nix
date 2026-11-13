@@ -5,6 +5,7 @@
   makeRustPlatform,
   pkg-config,
   openssl,
+  zstd,
   dioxus-cli-patched,
   nodejs,
   wasm-bindgen-cli_0_2_121,
@@ -65,8 +66,16 @@ rp.buildRustPackage ({
     rcodesign
   ];
 
-  buildInputs = [ openssl ]
-    ++ lib.optionals stdenv.isDarwin [ libiconv ];
+  buildInputs = [
+    openssl
+    # nixpkgs' cargo-setup-hook exports ZSTD_SYS_USE_PKG_CONFIG=1 for every
+    # cargo build, so zstd-sys (pulled in by tantivy-sstable /
+    # wasmtime-internal-cache) resolves libzstd through pkg-config instead of
+    # compiling its vendored copy. Without zstd on the pkg-config path the
+    # build script panics with "Can't probe for zstd in pkg-config" before any
+    # crate is compiled.
+    zstd
+  ] ++ lib.optionals stdenv.isDarwin [ libiconv ];
 
   env.GIT_SHA = gitSha;
 
