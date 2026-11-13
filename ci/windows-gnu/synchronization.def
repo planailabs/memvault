@@ -1,0 +1,21 @@
+; Import library definition for Rust std's `-lsynchronization` on mingw targets.
+;
+; Rust's std links `synchronization` for its WaitOnAddress-based thread parking
+; (library/std/src/sys/sync/futex/windows.rs). Upstream rust-mingw ships
+; `libsynchronization.a`, but rust-overlay's toolchain does not include that
+; self-contained component, and Zig's bundled mingw-w64 only carries the
+; `api-ms-win-core-synch-l1-2-0` apiset definition — so every link fails with:
+;
+;   error: unable to find dynamic system library "synchronization" using
+;          strategy paths_first. searched paths: none
+;
+; WaitOnAddress/WakeByAddress{Single,All} are exported by
+; api-ms-win-core-synch-l1-2-0.dll (Windows 8+, resolved through the API set
+; schema), so generating the missing import library from that apiset is
+; equivalent to the upstream one. xzar.sh turns this file into
+; `libsynchronization.a` with `zig dlltool` before cross-building for Windows.
+LIBRARY api-ms-win-core-synch-l1-2-0.dll
+EXPORTS
+WaitOnAddress
+WakeByAddressAll
+WakeByAddressSingle

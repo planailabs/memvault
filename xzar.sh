@@ -178,6 +178,23 @@ stage_binary aarch64-apple-darwin \
 # ── Windows (x86_64) ────────────────────────────────────────────────────
 # Cross-compiled via the same zigbuild shim as macOS; zig provides the
 # mingw CRT, so no separate Windows SDK is needed.
+#
+# Rust's std links `synchronization` for WaitOnAddress-based thread parking
+# (library/std/src/sys/sync/futex/windows.rs). The rust-mingw component that
+# ships that import library is not part of rust-overlay's toolchain, and zig's
+# bundled mingw-w64 only carries the `api-ms-win-core-synch-l1-2-0` apiset
+# definition, so both the dx server build (redb's declared cdylib) and
+# memvault-mcp fail to link with:
+#   error: unable to find dynamic system library "synchronization" ...
+# Generate the missing import library from the apiset def and hand it to
+# rustc; the symbols are exported by api-ms-win-core-synch-l1-2-0.dll on
+# Windows 8+, which is exactly what the upstream import library forwards to.
+WIN_SYNCH_DIR="$(mktemp -d)"
+zig dlltool -m i386:x86-64 \
+  -d "$SCRIPT_DIR/ci/windows-gnu/synchronization.def" \
+  -l "$WIN_SYNCH_DIR/libsynchronization.a"
+export RUSTFLAGS="${RUSTFLAGS:-} -L $WIN_SYNCH_DIR"
+
 dx build --package memctl --release --embed \
   @client --platform web --no-default-features --features web \
   @server --platform server --features embed --target x86_64-pc-windows-gnu
@@ -187,6 +204,9 @@ stage_memctl_binary x86_64-pc-windows-gnu
 cargo zigbuild --release --package memvault-mcp --target x86_64-pc-windows-gnu
 stage_binary x86_64-pc-windows-gnu \
   "${CARGO_TARGET_DIR:-$SCRIPT_DIR/target}/x86_64-pc-windows-gnu/release/memvault-mcp.exe" memvault-mcp.exe
+
+unset RUSTFLAGS
+rm -rf "$WIN_SYNCH_DIR"
 
 export PATH="${PATH#"$CARGO_SHIM:"}"
 rm -rf "$CARGO_SHIM"
